@@ -1,3 +1,12 @@
+metadata:
+  kind: kaizen
+  version: "1.0.0"
+  created: "2026-04-03"
+  author: "PAIML Engineering"
+  description: "Gradient Accumulation Canary for Constrained VRAM Training"
+  references:
+    - "KAIZEN-069"
+
 contract: gradient-accumulation-canary-v1
 title: Gradient Accumulation Canary for Constrained VRAM Training
 kaizen: KAIZEN-069
@@ -43,7 +52,7 @@ invariants:
       - Same data samples in same order
       - Loss scaled by 1/accumulation_steps
     postconditions:
-      - |sum of micro-batch gradients - single-batch gradient| < epsilon
+      - "|sum of micro-batch gradients - single-batch gradient| < epsilon"
       - Final loss within 1% of non-accumulated baseline
 
   - id: C-GRADACC-003
@@ -89,7 +98,7 @@ falsification_tests:
 
   - id: FALSIFY-GRADACC-002
     rule: C-GRADACC-002 (gradient equivalence)
-    prediction: |final_loss(accum) - final_loss(no_accum)| / final_loss(no_accum) < 0.05
+    prediction: "|final_loss(accum) - final_loss(no_accum)| / final_loss(no_accum) < 0.05"
     test: |
       def test_loss_equivalent():
           r_accum = run_pytorch_canary(batch_size=1, accum=4)
@@ -109,15 +118,18 @@ falsification_tests:
     if_fails: batch=1 still OOMs — gradient checkpointing + 8-bit opt required
 
 proof_obligations:
-  - type: equivalence
+  - id: GAC-EQ-001
+    type: equivalence
     property: Accumulated gradients match single-batch gradients
     formal: "|sum(grad_micro[i]) / N - grad_batch| < eps element-wise"
     applies_to: all
-  - type: invariant
+  - id: GAC-INV-002
+    type: invariant
     property: Optimizer step only after accumulation_steps micro-batches
     formal: "optimizer.step() called iff step % accumulation_steps == 0"
     applies_to: all
-  - type: bound
+  - id: GAC-BND-003
+    type: bound
     property: VRAM proportional to physical batch
     formal: "peak_vram(bs=1, accum=N) < peak_vram(bs=N) * 0.6"
     applies_to: all

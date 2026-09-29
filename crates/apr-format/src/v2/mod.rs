@@ -262,7 +262,7 @@ pub use header_impl::{
     AprV2Metadata, ChatSpecialTokens, QuantizationMetadata, ShardingMetadata, TensorIndexEntry,
 };
 pub use reader_impl::{
-    AprV2Reader, AprV2ReaderRef, ShardInfo, ShardManifest, MIN_INDEX_ENTRY_BYTES,
+    required_file_len, AprV2Reader, AprV2ReaderRef, ShardInfo, ShardManifest, MIN_INDEX_ENTRY_BYTES,
 };
 pub use streaming_writer::AprV2StreamingWriter;
 pub use tensor_index_impl::{align_64, align_up, is_aligned_64, padding_to_align, TensorDType};
@@ -277,3 +277,7 @@ pub use stamp::{stamp_provenance_bytes, ProvenancePatch};
 
 #[cfg(test)]
 mod tests;
+
+// Issue #2612: the data-extent invariant falsifiers.
+#[cfg(test)]
+mod tests_truncation_2612;

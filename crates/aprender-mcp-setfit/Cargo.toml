@@ -26,7 +26,7 @@ path = "src/main.rs"
 # The verified SetFit inference path (D-09): loader + VerifiedSetFitModel::classify.
 # This server is a TRANSPORT over core's one implementation — it re-implements
 # nothing (OPS-03). `setfit` gates the whole inference module.
-aprender = { path = "../aprender-core", version = "0.63.0", package = "aprender-core", features = ["setfit"] }
+aprender = { path = "../aprender-core", version = "0.69.3", package = "aprender-core", features = ["setfit"] }
 # PAIML's Rust MCP SDK. The same `2.x` line the workspace already resolves for
 # aprender-mcp's dispatcher scaffold (2.9.0 in Cargo.lock — no new duplicate).
 # `streamable-http` is what the pmcp.run Lambda loopback serves; on stdio it is

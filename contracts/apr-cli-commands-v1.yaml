@@ -18,7 +18,6 @@ metadata:
 # FALSIFY-CLI-003: If any command exits with code other than 0/1/2
 # FALSIFY-CLI-004: If any command panics on --help
 
-kind: CLICommandContract
 name: apr-cli-commands
 version: "1.1.0"
 scope: |
@@ -306,7 +305,7 @@ commands:
     description: "Tokenizer training pipeline (plan/apply)"
     requires_model: false
     side_effects: [filesystem]
-    subcommands: [apply, encode-corpus, import-hf, plan, repair-manifest, train]
+    subcommands: [apply, encode, encode-corpus, import-hf, plan, repair-manifest, train]
 
   - name: tune
     category: training
@@ -370,6 +369,17 @@ commands:
     description: "GPU status and VRAM reservation management"
     requires_model: false
     side_effects: [gpu]
+
+  - name: capability
+    category: inspection
+    description: What this build can and cannot do, and why (from apr-model-capability-v1)
+    requires_model: false
+    side_effects: []
+  - name: devices
+    category: hardware
+    description: "Backend discovery: probe, enumerate, print (PP-066 R-0)"
+    requires_model: false
+    side_effects: []
 
   - name: profile
     category: hardware
@@ -452,11 +462,7 @@ commands:
       CRUX-K-11: parse Ollama-style Modelfile DSL into apr config JSON.
     requires_model: false
     side_effects: []
-    subcommands:
-      - name: parse
-        description: "Parse a Modelfile and emit config as JSON or human-readable text"
-        requires_model: false
-        side_effects: []
+    # parse — parse a Modelfile and emit config as JSON or human-readable text
     subcommands: [parse]
 
   - name: test
@@ -478,16 +484,16 @@ commands:
         media   rendered output vs ground truth (av-sync, audio, video, animation)
         replay  the runner itself             (record, playbook, coverage, report)
 
-      Only `tensor` is routed today (PMAT-481 visual regression); the rest land
-      as they are delegated to the probador library.
+      Routed today: `tensor` (PMAT-481 visual regression) and `llm bench`
+      (GH-876 Milestone 2). The rest land as they are delegated to the probador
+      library.
     requires_model: false
-    side_effects: [filesystem]
-    subcommands:
-      - name: tensor
-        description: "Export tensor activations for visual regression testing (PMAT-481)"
-        requires_model: true
-        side_effects: [filesystem]
-    subcommands: [tensor]
+    side_effects: [filesystem, network]
+    # tensor — export tensor activations for visual regression testing (PMAT-481)
+    # llm    — benchmark an OpenAI-compatible endpoint (GH-876 Milestone 2);
+    #          `network` because it drives an HTTP endpoint, and may spawn the
+    #          runtime under test via --start
+    subcommands: [tensor, llm]
 
   - name: diagnose
     category: misc
@@ -786,7 +792,7 @@ commands:
     description: "Provable-contracts CLI (also ships as the standalone pv binary)"
     requires_model: false
     side_effects: [filesystem]
-    subcommands: [audit, book, certify, check-parity, codegen, coq, coverage, diff, equations, explain, extract-pytorch, flux, fuzz, generate, graph, infer, invariants, kaizen, kani, lean, lean-status, lint, migrate, mirai, pipeline, probar, proof-status, query, roofline, scaffold, score, status, tla, unlock, validate, verify-bindings, verify-pipeline, verify-structure]
+    subcommands: [audit, book, census, certify, check-parity, codegen, coq, coverage, diff, equations, explain, extract, extract-pytorch, flux, fuzz, generate, graph, infer, invariants, kaizen, kani, lean, lean-status, lint, migrate, mirai, pipeline, probar, proof-status, query, roofline, scaffold, score, status, tla, unlock, validate, verify-bindings, verify-pipeline, verify-structure]
 
 # ── Falsification Conditions ──
 

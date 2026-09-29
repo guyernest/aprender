@@ -79,23 +79,28 @@ equations:
     preconditions:
     - params.len() > 0
 proof_obligations:
-- type: invariant
+- id: LB-INV-001
+  type: invariant
   property: Descent direction
   formal: g_k^T * H_k * g_k > 0 (direction has negative dot with gradient)
   applies_to: all
-- type: invariant
+- id: LB-INV-002
+  type: invariant
   property: Curvature condition
   formal: y_k^T * s_k > 0 for all stored pairs
   applies_to: all
-- type: bound
+- id: LB-BND-003
+  type: bound
   property: History buffer bounded
   formal: Number of stored (s, y) pairs <= m
   applies_to: all
-- type: monotonicity
+- id: LB-MON-004
+  type: monotonicity
   property: Objective decrease
   formal: f(x_{k+1}) < f(x_k) when Wolfe conditions satisfied
   applies_to: all
-- type: equivalence
+- id: LB-EQ-005
+  type: equivalence
   property: SIMD matches scalar within ULP
   tolerance: 8.0
   applies_to: simd
@@ -164,7 +169,7 @@ falsification_tests:
     width, LbfgsF64 converges with gradient norm < 1e-10 while LBFGS (f32) cannot reach
     1e-10 at all. Measured on this host - f32 MaxIterations at grad_norm 6.12e-9, f64
     Converged at grad_norm 2.73e-11 in 14 iterations.
-  test: cargo test -p aprender-core --lib falsify_lbfgs_001_f64_1e10_width_is_real
+  test: cargo test -p aprender-core --features setfit --lib falsify_lbfgs_001_f64_1e10_width_is_real
   if_fails: LbfgsF64 is f32 arithmetic behind an f64 signature, i.e. the widening is a
     cast rather than a real precision change
 - id: FALSIFY-LB-008
@@ -172,7 +177,7 @@ falsification_tests:
   prediction: At an f32-REACHABLE tolerance (1e-6) BOTH widths converge on the same
     problem, so a 1e-6 assertion demonstrates nothing about precision. This entry exists
     so FALSIFY-LB-007 cannot silently be loosened back into vacuity.
-  test: cargo test -p aprender-core --lib falsify_lbfgs_001_f64_tolerance_1e6_cannot_distinguish_widths
+  test: cargo test -p aprender-core --features setfit --lib falsify_lbfgs_001_f64_tolerance_1e6_cannot_distinguish_widths
   if_fails: The tolerance chosen for the width claim no longer separates the widths
 - id: FALSIFY-LB-009
   rule: Non-finite input status (equation nonfinite_input_status)
@@ -180,7 +185,7 @@ falsification_tests:
     line-search trial point) in each of the two widths, minimize returns
     ConvergenceStatus::NumericalError and does not panic. Ten runnable cases named
     falsify_lbfgs_003_nonfinite_CHANNEL_WIDTH.
-  test: cargo test -p aprender-core --lib nonfinite
+  test: cargo test -p aprender-core --features setfit --lib nonfinite
   if_fails: A poisoned input is reported as Converged or Stalled. Both were observed on
     the pre-1.1.0 implementation - a NaN objective at x0 reported Converged, and a
     non-finite gradient reported Stalled.
@@ -242,5 +247,5 @@ qa_gate:
   - curvature_condition
   - history_bound
   - objective_decrease
-  pass_criteria: All 6 falsification tests pass + Kani harnesses verify
+  pass_criteria: All 9 falsification tests pass + Kani harnesses verify
   falsification: Reverse loop order in two-loop recursion

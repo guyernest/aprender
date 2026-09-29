@@ -1,3 +1,29 @@
+// #3981: where generation BEGAN, marked by the backend on the dispatch thread after
+// its setup (weight upload, F2 validation). `inference_ms` wrapped the whole dispatch,
+// so `apr run --format json` reported 0.2 tok/s for a Qwen3-30B-A3B run that
+// generated at tens of tok/s: it divided by load + a 5.2 s F2 check. Thread-local
+// because generation is dispatched and returns on this thread; a mark left by an
+// earlier run is cleared before each dispatch.
+std::thread_local! {
+    static GENERATION_START: std::cell::Cell<Option<std::time::Instant>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Mark that generation starts now (call after setup, right before the first forward).
+pub(crate) fn mark_generation_start() {
+    GENERATION_START.with(|c| c.set(Some(std::time::Instant::now())));
+}
+
+fn take_generation_start() -> Option<std::time::Instant> {
+    GENERATION_START.with(std::cell::Cell::take)
+}
+
+/// #3981: tokens per second over generation when it was measured, else over the whole
+/// inference window. Pure, so the rule is tested without a model.
+#[must_use]
+pub(crate) fn throughput(generated: usize, inference_ms: f64, generation_ms: Option<f64>) -> f64 {
+    tok_per_sec(generated, generation_ms.unwrap_or(inference_ms))
+}
 
 /// Result from inference
 #[derive(Debug, Clone)]
@@ -12,14 +38,43 @@ pub struct InferenceResult {
     pub generated_token_count: usize,
     /// Inference time in milliseconds
     pub inference_ms: f64,
-    /// Tokens per second
+    /// Tokens per second. #3981: over GENERATION time when the backend marked where
+    /// generation began (see `generation_ms`); otherwise over `inference_ms`, which
+    /// includes weight upload and the F2 check.
     pub tok_per_sec: f64,
+    /// #3981: wall time from the moment the backend started generating (after weight
+    /// upload and F2 validation) to the end of generation: prefill plus decode.
+    /// `None` when the path that ran does not mark it, and then `tok_per_sec` still
+    /// includes setup, so a consumer must not read it as a generation rate.
+    pub generation_ms: Option<f64>,
     /// Model load time in milliseconds
     pub load_ms: f64,
     /// Model format that was loaded
     pub format: String,
     /// Whether GPU was used
     pub used_gpu: bool,
+    /// #3826: whether a GPU backend was ATTEMPTED, whatever the outcome.
+    ///
+    /// `used_gpu` records whether the GPU produced the tokens, so it collapses
+    /// two different runs into one `false`: "no accelerator was asked for or
+    /// tried" and "one was tried and its result was REFUSED". A consumer
+    /// counting fallbacks cannot tell them apart, which is why
+    /// `apr run --format json` reported `"fell_back": false` on a run whose own
+    /// stderr said `attempting fallback`.
+    ///
+    /// Set by whichever path ENTERS a GPU backend, before its result is judged.
+    ///
+    /// The consumer-facing `fell_back` (apr-cli's `build_final_json`) is
+    /// `used_gpu == Some(false) && (accel_forced || gpu_attempted)`. Asking for
+    /// the GPU is SUFFICIENT for a fallback and this field is the second,
+    /// independent way to earn one — it is not a replacement for `accel_forced`,
+    /// which still carries #3602's "a requested GPU that never ran".
+    ///
+    /// INVARIANT: `used_gpu` implies `gpu_attempted`. A backend cannot produce
+    /// tokens without having been entered. Every construction site honours it;
+    /// it is documented here rather than enforced structurally, because the
+    /// struct is built by literal at ~70 sites. See the receipt's open item.
+    pub gpu_attempted: bool,
 }
 
 // ============================================================================
@@ -109,9 +164,26 @@ pub(crate) fn validate_model_path(path: &std::path::Path) -> Result<()> {
 /// - Model format is unsupported
 /// - Generation fails
 pub fn run_inference(config: &InferenceConfig) -> Result<InferenceResult> {
+    run_inference_report(config).map(|(result, _)| result)
+}
+
+/// [`run_inference`], plus what only the decode path knows (#3718): why
+/// generation ended and the model's context window.
+///
+/// A separate entry point rather than new `InferenceResult` fields, so the
+/// dozens of places that build an `InferenceResult` literal are untouched.
+///
+/// # Errors
+///
+/// Exactly those of [`run_inference`].
+pub fn run_inference_report(
+    config: &InferenceConfig,
+) -> Result<(InferenceResult, run_report::RunReport)> {
     // PMAT-COV-95: Mock backend for testing without disk I/O
     if config.use_mock_backend {
-        return run_mock_inference(config);
+        let result = run_mock_inference(config)?;
+        let report = mock_run_report(config, &result);
+        return Ok((result, report));
     }
 
     // GH-213: Detect sharded SafeTensors index.json BEFORE reading the file.
@@ -124,7 +196,8 @@ pub fn run_inference(config: &InferenceConfig) -> Result<InferenceResult> {
 
         let format = ModelFormat::SafeTensors;
         let prepared = prepare_tokens(config, &format)?;
-        return run_sharded_safetensors_inference(config, &prepared);
+        return run_sharded_safetensors_inference(config, &prepared)
+            .map(|r| (r, run_report::RunReport::default()));
     }
 
     // Validate path to prevent traversal attacks (F-SEC-222)
@@ -133,9 +206,10 @@ pub fn run_inference(config: &InferenceConfig) -> Result<InferenceResult> {
     // ALB-099: Read only 8 bytes for format detection (was reading entire file)
     let magic = {
         use std::io::Read;
-        let mut file = std::fs::File::open(&config.model_path).map_err(|e| RealizarError::IoError {
-            message: format!("Failed to read model: {}", e),
-        })?;
+        let mut file =
+            std::fs::File::open(&config.model_path).map_err(|e| RealizarError::IoError {
+                message: format!("Failed to read model: {}", e),
+            })?;
         let mut buf = [0u8; 8];
         file.read_exact(&mut buf).map_err(|e| {
             if e.kind() == std::io::ErrorKind::UnexpectedEof {
@@ -163,8 +237,27 @@ pub fn run_inference(config: &InferenceConfig) -> Result<InferenceResult> {
 
     match format {
         ModelFormat::Gguf => run_gguf_inference(config, &prepared),
-        ModelFormat::Apr => run_apr_inference(config, &prepared),
-        ModelFormat::SafeTensors => run_safetensors_inference(config, &prepared),
+        // Not reported on these paths yet: `None`, never a guess.
+        ModelFormat::Apr => {
+            run_apr_inference(config, &prepared).map(|r| (r, run_report::RunReport::default()))
+        },
+        ModelFormat::SafeTensors => run_safetensors_inference(config, &prepared)
+            .map(|r| (r, run_report::RunReport::default())),
+    }
+}
+
+/// The report for the mock backend: it generates `min(max_tokens, 32)` tokens
+/// and no stop token, so a budget of 32 or less is spent and anything larger
+/// ended as if on a stop.
+fn mock_run_report(config: &InferenceConfig, result: &InferenceResult) -> run_report::RunReport {
+    let generated = result.tokens.get(result.input_token_count..).unwrap_or(&[]);
+    run_report::RunReport {
+        finish_reason: Some(run_report::FinishReason::from_decode(
+            generated,
+            &config.stop_tokens,
+            config.max_tokens,
+        )),
+        context_length: None,
     }
 }
 
@@ -174,7 +267,7 @@ pub fn run_inference(config: &InferenceConfig) -> Result<InferenceResult> {
 fn run_gguf_inference(
     config: &InferenceConfig,
     prepared: &PreparedTokens,
-) -> Result<InferenceResult> {
+) -> Result<(InferenceResult, run_report::RunReport)> {
     use crate::gguf::{MappedGGUFModel, OwnedQuantizedModel, QuantizedGenerateConfig};
 
     if config.verbose {
@@ -184,14 +277,35 @@ fn run_gguf_inference(
     let load_start = Instant::now();
     let mapped = MappedGGUFModel::from_path(&config.model_path)?;
     prefault_mmap(mapped.data());
-    let model = OwnedQuantizedModel::from_mapped(&mapped)?;
+    // #3091: Qwen3.5/Qwen3.8 hybrids (Gated DeltaNet) are refused by the dense
+    // loader. Their host model (base + hybrid layers) is built once per file and
+    // generation goes through the one engine, `realizar::session` (#4263).
+    let is_qwen35 = mapped.model.architecture() == Some("qwen35");
+    let qwen35_host = if is_qwen35 {
+        Some(crate::gguf::qwen35_session::Qwen35Forward::cached_host(
+            &config.model_path,
+            &mapped,
+        )?)
+    } else {
+        None
+    };
+    let owned = match qwen35_host {
+        Some(_) => None,
+        None => Some(OwnedQuantizedModel::from_mapped(&mapped)?),
+    };
+    let model: &OwnedQuantizedModel = owned
+        .as_ref()
+        .or(qwen35_host.map(|q| q.base))
+        .ok_or_else(|| RealizarError::InvalidShape {
+            reason: "no model was loaded".to_string(),
+        })?;
     let load_ms = load_start.elapsed().as_secs_f64() * 1000.0;
 
     // PMAT-109: Architecture from GGUF metadata (not filename)
     let gguf_arch = mapped.model.architecture().unwrap_or("transformer");
 
     if config.verbose {
-        print_gguf_verbose_info(gguf_arch, &model, load_ms);
+        print_gguf_verbose_info(gguf_arch, model, &body_qtypes(&mapped.model), load_ms);
     }
 
     // PMAT-236: Use PreparedTokens (chat template already applied by prepare_tokens)
@@ -224,30 +338,82 @@ fn run_gguf_inference(
     // run_gguf_generate as before. This replaces M32c.2.1's
     // gguf_gpu_generate.rs short-circuit with an actual forward pass.
     let infer_start = Instant::now();
+    let _ = take_generation_start(); // #3981: never inherit a mark from an earlier run
     let canonical_arch = crate::tensor_names::normalize_architecture(&model.config.architecture);
-    let (tokens, used_gpu) = if canonical_arch == "qwen3_moe" {
-        let tokens = crate::infer::qwen3_moe_generate::run_qwen3_moe_generate(
+    // #3714 R2: `moe_forward_handles` is the one dispatch predicate — `apr
+    // parity` and `apr qa` ask the same function, so no tool can route this
+    // architecture differently from `apr run`. (It is exactly
+    // `canonical_arch == "qwen3_moe"`, so taking it changes no routing.)
+    //
+    // #3826: `gpu_attempted` is part of the envelope, so a GPU that was tried and
+    // refused reads as `fell_back: true` rather than as a CPU run nobody asked for.
+    // The MoE dispatch now TRIES CUDA (#3714): it attempts exactly when this is a
+    // cuda build and `--no-gpu` was not given, and on failure prints its reason and
+    // runs the CPU chain. So its attempt is derived from those same two facts here,
+    // which is what makes #3817 (a silent `--gpu` fallback to CPU) visible as
+    // attempted && !used_gpu. The qwen35 dispatch still does not report its attempt
+    // separately; that obligation is unchanged.
+    let (tokens, used_gpu, gpu_attempted) = if crate::gguf::moe_forward_handles(&model.config.architecture) {
+        let (tokens, used_gpu) = crate::infer::qwen3_moe_dispatch::run_qwen3_moe_generate_dispatch(
             &mapped,
-            &model,
+            model,
             &input_tokens,
             &gen_config,
+            config.no_gpu,
         )?;
-        (tokens, false) // CPU-only path; GPU MoE wiring is M32d follow-up
-    } else {
+        (tokens, used_gpu, cfg!(feature = "cuda") && !config.no_gpu)
+    } else if let Some(qwen) = qwen35_host {
+        // #3477/#4263: the one engine. The GPU forward (#3090) when this is a
+        // cuda build and `--no-gpu` was not given; the CPU forward (#3091)
+        // otherwise, and after any GPU failure — printed, never silent. A
+        // context the device cannot hold is refused before upload (#3596).
+        crate::gguf::forward_qwen35::qwen35_check_context(
+            input_tokens.len(),
+            model_config.context_length,
+        )?;
+        let positions =
+            (input_tokens.len() + gen_config.max_tokens).min(model_config.context_length);
+        let mut session = crate::gguf::qwen35_session::Qwen35Session::load_for_run(
+            qwen,
+            &mapped,
+            config.no_gpu,
+            positions,
+        )?;
+        mark_generation_start(); // #3981: host + device load end here
+        let turn = session.generate(&input_tokens, &gen_config, &mut |_| true)?;
+        // #3826: attempted is the same two facts as the MoE dispatch's.
+        (turn.tokens, turn.used_gpu, cfg!(feature = "cuda") && !config.no_gpu)
+    } else if let Some(model) = owned {
         run_gguf_generate(model, &input_tokens, &gen_config, config)?
+    } else {
+        return Err(RealizarError::InvalidShape {
+            reason: "no model was loaded".to_string(),
+        });
     };
     let inference_ms = infer_start.elapsed().as_secs_f64() * 1000.0;
+    let generation_ms = take_generation_start().map(|t| t.elapsed().as_secs_f64() * 1000.0);
 
     let generated_tokens = &tokens[input_token_count..];
     let raw_text = mapped.model.decode(generated_tokens);
     if config.verbose {
-        eprintln!("[DEBUG] input_count={}, total_tokens={}, generated_count={}", input_token_count, tokens.len(), generated_tokens.len());
-        eprintln!("[DEBUG] generated token ids: {:?}", &generated_tokens[..generated_tokens.len().min(20)]);
-        eprintln!("[DEBUG] raw decoded: {:?}", &raw_text[..raw_text.len().min(200)]);
+        eprintln!(
+            "[DEBUG] input_count={}, total_tokens={}, generated_count={}",
+            input_token_count,
+            tokens.len(),
+            generated_tokens.len()
+        );
+        eprintln!(
+            "[DEBUG] generated token ids: {:?}",
+            &generated_tokens[..generated_tokens.len().min(20)]
+        );
+        eprintln!(
+            "[DEBUG] raw decoded: {:?}",
+            log_head(&raw_text, 200)
+        );
     }
     let text = clean_model_output(&raw_text);
     let generated_token_count = generated_tokens.len();
-    let tps = tok_per_sec(generated_token_count, inference_ms);
+    let tps = throughput(generated_token_count, inference_ms, generation_ms);
 
     write_gguf_trace(
         config,
@@ -260,23 +426,48 @@ fn run_gguf_inference(
         used_gpu,
     );
 
-    Ok(InferenceResult {
-        text,
-        tokens,
+    // #3718: the dense CPU loop (`generate_with_cache`) and the one engine
+    // (#4263, every qwen35 run) shrink the budget to the context room; the MoE,
+    // CUDA and wgpu loops run `max_tokens`.
+    let clamps_to_context = is_qwen35 || (canonical_arch != "qwen3_moe" && !used_gpu);
+    let budget = run_report::decode_budget(
+        gen_config.max_tokens,
         input_token_count,
-        generated_token_count,
-        inference_ms,
-        tok_per_sec: tps,
-        load_ms,
-        format: "GGUF".to_string(),
-        used_gpu,
-    })
+        model_config.context_length,
+        clamps_to_context,
+    );
+    let report = run_report::RunReport {
+        finish_reason: Some(run_report::FinishReason::from_decode(
+            generated_tokens,
+            &gen_config.stop_tokens,
+            budget,
+        )),
+        context_length: Some(model_config.context_length),
+    };
+
+    Ok((
+        InferenceResult {
+            text,
+            tokens,
+            input_token_count,
+            generated_token_count,
+            inference_ms,
+            tok_per_sec: tps,
+            generation_ms,
+            load_ms,
+            format: "GGUF".to_string(),
+            used_gpu,
+            gpu_attempted,
+        },
+        report,
+    ))
 }
 
 /// Print verbose model info for GGUF inference
 fn print_gguf_verbose_info(
     gguf_arch: &str,
     model: &crate::gguf::OwnedQuantizedModel,
+    body: &[u32],
     load_ms: f64,
 ) {
     let arch = match gguf_arch.to_lowercase().as_str() {
@@ -286,7 +477,8 @@ fn print_gguf_verbose_info(
         "phi" | "phi3" => "Phi",
         _ => "Transformer",
     };
-    let quant_type = qtype_to_dtype_str(model.lm_head_weight.qtype);
+    // #4006: the body's quantization, not the (possibly tied, higher-precision) head.
+    let quant_type = body_quant_label(body, model.lm_head_weight.qtype);
     let thread_count = rayon::current_num_threads();
     eprintln!(
         "Architecture: {} [GGUF: {}] ({} layers, vocab_size={})",
@@ -562,7 +754,11 @@ fn log_cpu_backend(verbose: bool, is_legacy: bool) {
 /// FALSIFY-CUDA-SILENT-FALLBACK-001 asserts this names the failing position and
 /// carries the underlying error, so the user is never left inferring a silent 20x
 /// backend downgrade from a throughput number alone.
-pub(crate) fn gpu_forward_failure_msg(pos: usize, probe_len: usize, err: &dyn std::fmt::Display) -> String {
+pub(crate) fn gpu_forward_failure_msg(
+    pos: usize,
+    probe_len: usize,
+    err: &dyn std::fmt::Display,
+) -> String {
     format!(
         "warning: GPU forward failed at probe position {pos}/{probe_len}: {err} \
 — rejecting the CUDA path and falling back (fail-closed). This is NOT a decode \
@@ -571,133 +767,628 @@ not CUDA."
     )
 }
 
+/// The F2 probe: the real prompt context (a peaked distribution) when there is one, else the
+/// BOS token (batch model-init has no prompt yet), capped to bound the one-time CPU/GPU
+/// prefill cost. BOS flows from GGUF metadata. Returns `(kv_dim, num_layers, probe)`, or
+/// `None` when there is neither context nor a known BOS, so nothing to validate against.
 #[cfg(feature = "cuda")]
-fn validate_gpu_first_token(
-    cuda_model: &mut crate::gguf::OwnedQuantizedModelCuda,
-    _gen_config: &crate::gguf::QuantizedGenerateConfig,
+fn gpu_probe(
+    model: &crate::gguf::OwnedQuantizedModel,
     probe_context: &[u32],
-) -> bool {
+) -> Option<(usize, usize, Vec<u32>)> {
+    const PROBE_MAX_CTX: usize = 64;
+    let kv_dim = model.config.num_kv_heads * (model.config.hidden_dim / model.config.num_heads);
+    let probe = if probe_context.is_empty() {
+        let Some(id) = model.config.bos_token_id else {
+            eprintln!("warning: no prompt context and no BOS token — skipping the GPU-vs-CPU output check");
+            return None;
+        };
+        vec![id]
+    } else {
+        probe_context[probe_context.len().saturating_sub(PROBE_MAX_CTX)..].to_vec()
+    };
+    Some((kv_dim, model.config.num_layers, probe))
+}
+
+/// Which GPU probe the F2 gate runs — i.e. which prefill KERNELS it judges.
+///
+/// #3413 C. The gate used to ALWAYS replay the probe token-by-token through
+/// `forward_gpu_resident`, which is the decode / single-token path. But when
+/// `GpuProfile::prefill_path()` resolves to `Batched` — the default on every GPU
+/// below the sm_12x line, including the RTX 4090 — generation prefills the
+/// prompt through `prefill_all_layers_gpu` → `batched_qkv_rope_phase`, kernels
+/// the probe never executed. Measured on a 4090 at 4a538ddef with
+/// `SKIP_CUDA_GRAPH=1`: this guard PASSED and `apr run --gpu` then printed
+/// `adies――dart,`, because batched prefill cached un-normed K (#3413 B, fixed by
+/// e296147d8). A guard that never runs the kernels the run uses cannot fail
+/// closed on them, so the probe now follows the resolved path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum F2ProbePath {
+    /// One `forward_gpu_resident` per probe token (what the gate always did).
+    Serial,
+    /// One packed batched prefill over the whole probe, then one decode step —
+    /// exactly what `run_prefill` + the first decode do for a real prompt.
+    Batched,
+}
+
+impl F2ProbePath {
+    /// How the path reads in a log line.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Serial => "serial prefill",
+            Self::Batched => "batched prefill",
+        }
+    }
+}
+
+/// Pure: which probe the F2 gate must run, from the prefill path the engine
+/// resolved for this process and the probe length.
+///
+/// `Batched` requires BOTH: the engine will prefill batched (otherwise the
+/// batched kernels are dead code for this run and judging them would reject a
+/// model on a path it never takes), AND the probe has more than one token — a
+/// 1-token prompt runs no prefill PHASE at all (`run_prefill` returns early),
+/// so there is nothing batched to exercise.
+///
+/// Pure + GPU-free so the routing itself is falsifiable without a device.
+pub(crate) fn f2_select_probe_path(
+    engine_prefill_is_batched: bool,
+    probe_len: usize,
+) -> F2ProbePath {
+    if engine_prefill_is_batched && probe_len > 1 {
+        F2ProbePath::Batched
+    } else {
+        F2ProbePath::Serial
+    }
+}
+
+/// The rejection line, naming the path that was actually judged.
+///
+/// Without the path, a log cannot distinguish "the batched prefill diverged"
+/// from "the decode path diverged" — the exact ambiguity that let #3413 B ship
+/// behind a green guard. Pure + string-returning so it is unit-testable.
+pub(crate) fn f2_divergence_msg(report: &F2PositionReport, via: F2ProbePath) -> String {
+    format!(
+        "warning: GPU output diverges from CPU at position {} (argmax {} != {}, cosine {:.4}); \
+min cosine {:.4}, validated via {} — falling back to CPU",
+        report.first_bad_pos,
+        report.first_bad_gpu_argmax,
+        report.first_bad_cpu_argmax,
+        report.first_bad_cosine,
+        report.min_cosine_real,
+        via.as_str(),
+    )
+}
+
+/// CPU reference logits for every probe position, forwarded one token at a time
+/// through `forward_single_with_cache` (unchanged from before #3413 C — the
+/// reference side is the same on both paths). `None` when the CPU forward
+/// itself failed, in which case nothing can be validated.
+#[cfg(feature = "cuda")]
+fn f2_cpu_reference_logits(
+    model: &crate::gguf::OwnedQuantizedModel,
+    probe: &[u32],
+    kv_dim: usize,
+    num_layers: usize,
+) -> Option<Vec<Vec<f32>>> {
+    use crate::gguf::OwnedQuantizedKVCache;
+    #[cfg(test)]
+    if F2_FAIL_CPU_REFERENCE.with(std::cell::Cell::get) {
+        return None;
+    }
+    let mut per_pos: Vec<Vec<f32>> = Vec::with_capacity(probe.len() + 1);
+    let mut cpu_cache = OwnedQuantizedKVCache::new(num_layers, kv_dim, probe.len().max(2) + 1);
+    for (pos, &tok) in probe.iter().enumerate() {
+        match model.forward_single_with_cache(tok, &mut cpu_cache, pos) {
+            Ok(logits) => per_pos.push(logits),
+            Err(_) => return None,
+        }
+    }
+    // One CPU decode step, so the batched probe's decode step has a reference.
+    // Greedy: the token CPU itself would emit after the probe.
+    if let Some(last) = per_pos.last() {
+        let next = argmax_u32(last);
+        match model.forward_single_with_cache(next, &mut cpu_cache, probe.len()) {
+            Ok(logits) => per_pos.push(logits),
+            Err(_) => return None,
+        }
+    }
+    Some(per_pos)
+}
+
+/// The GPU probe as it has always run: `forward_gpu_resident` once per probe
+/// token, plus the one decode step the CPU reference now also takes.
+#[cfg(feature = "cuda")]
+fn f2_gpu_serial_logits(
+    cuda_model: &mut crate::gguf::OwnedQuantizedModelCuda,
+    probe: &[u32],
+    decode_token: u32,
+    kv_dim: usize,
+    num_layers: usize,
+) -> std::result::Result<Vec<Vec<f32>>, String> {
+    use crate::gguf::OwnedQuantizedKVCache;
+    let mut per_pos: Vec<Vec<f32>> = Vec::with_capacity(probe.len() + 1);
+    let mut gpu_cache = OwnedQuantizedKVCache::new(num_layers, kv_dim, probe.len().max(2) + 1);
+    let steps = probe.len() + 1;
+    for (pos, tok) in probe
+        .iter()
+        .copied()
+        .chain(std::iter::once(decode_token))
+        .enumerate()
+    {
+        match cuda_model.forward_gpu_resident(tok, &mut gpu_cache, pos) {
+            Ok(logits) => per_pos.push(logits),
+            Err(e) => return Err(gpu_forward_failure_msg(pos, steps, &e)),
+        }
+    }
+    Ok(per_pos)
+}
+
+/// The GPU probe through the BATCHED prefill (#3413 C).
+///
+/// This is the sequence `run_prefill`'s batched branch runs for a real prompt —
+/// `init_prefill_workspace` → `prefill_all_layers_gpu` (→ `batched_qkv_rope_phase`,
+/// the packed KV scatter) → workspace restore — followed by the per-position LM
+/// head (`hidden_to_logits`, as `perplexity_gpu_batched` extracts it) and ONE
+/// decode step at position `probe.len()`. The decode step is what makes a
+/// KV-cache defect visible: a prefill that computes correct hidden states but
+/// scatters poisoned K/V shows up only when a later token attends to them.
+///
+/// `run_prefill` itself is private to `gguf/cuda/generate_2.rs`; this calls the
+/// same executor entry point it calls, so the kernels under judgement are the
+/// kernels that serve the prompt.
+#[cfg(feature = "cuda")]
+fn f2_gpu_batched_logits(
+    cuda_model: &mut crate::gguf::OwnedQuantizedModelCuda,
+    probe: &[u32],
+    decode_token: u32,
+    kv_dim: usize,
+    num_layers: usize,
+) -> std::result::Result<Vec<Vec<f32>>, String> {
     use crate::gguf::OwnedQuantizedKVCache;
 
-    // SKIP_PARITY_GATE=1 bypasses both this F2 check and the cosine parity gate.
+    let hidden_dim = cuda_model.model.config.hidden_dim;
+    let vocab_size = cuda_model.model.config.vocab_size;
+    let eps = cuda_model.model.config.eps;
+    let Some(layer0) = cuda_model.model.layers.first() else {
+        return Err("F2 batched probe: model has no layers".to_string());
+    };
+    let intermediate_dim = layer0.ffn_up_weight.out_dim;
+    let s = probe.len();
+
+    let embeddings = cuda_model.model.embed(probe);
+    let positions: Vec<u32> = (0..s as u32).collect();
+
+    cuda_model.executor.reset_kv_cache_gpu();
+    cuda_model
+        .executor
+        .init_prefill_workspace(s, hidden_dim, intermediate_dim)
+        .map_err(|e| format!("F2 batched probe: init_prefill_workspace failed: {e}"))?;
+    cuda_model
+        .executor
+        .prefill_all_layers_gpu(
+            &embeddings,
+            &positions,
+            num_layers,
+            hidden_dim as u32,
+            intermediate_dim as u32,
+            eps,
+        )
+        .map_err(|e| format!("F2 batched probe: prefill_all_layers_gpu failed: {e}"))?;
+    cuda_model
+        .executor
+        .sync_stream()
+        .map_err(|e| format!("F2 batched probe: stream sync failed: {e}"))?;
+
+    let mut all_hidden = vec![0.0f32; s * hidden_dim];
+    cuda_model
+        .executor
+        .download_hidden_buf2(&mut all_hidden)
+        .map_err(|e| format!("F2 batched probe: hidden download failed: {e}"))?;
+
+    let mut per_pos: Vec<Vec<f32>> = Vec::with_capacity(s + 1);
+    for i in 0..s {
+        let mut logits = vec![0.0f32; vocab_size];
+        cuda_model
+            .executor
+            .hidden_to_logits(
+                &all_hidden[i * hidden_dim..(i + 1) * hidden_dim],
+                &mut logits,
+                hidden_dim as u32,
+                vocab_size as u32,
+                eps,
+            )
+            .map_err(|e| format!("F2 batched probe: hidden_to_logits failed at {i}: {e}"))?;
+        if let Some(bias) = cuda_model.model.lm_head_bias.as_ref() {
+            crate::gguf::ops::add_bias(&mut logits, bias);
+        }
+        per_pos.push(logits);
+    }
+
+    // Restore the decode workspace exactly as `run_prefill` does before the
+    // first decode step, then take that step against the prefilled KV cache.
+    cuda_model
+        .executor
+        .init_workspace(hidden_dim, intermediate_dim)
+        .map_err(|e| format!("F2 batched probe: workspace restore failed: {e}"))?;
+    let mut gpu_cache = OwnedQuantizedKVCache::new(num_layers, kv_dim, s.max(2) + 1);
+    match cuda_model.forward_gpu_resident(decode_token, &mut gpu_cache, s) {
+        Ok(logits) => per_pos.push(logits),
+        Err(e) => return Err(gpu_forward_failure_msg(s, s + 1, &e)),
+    }
+    Ok(per_pos)
+}
+
+/// #3973: what the F2 check actually established. It returned a `bool`, and two
+/// branches returned `true` ("assume GPU is fine") when nothing was measured. A
+/// caller printed "F2 validation PASSED" for both, so a receipt citing that line could
+/// be citing a check that never ran. `batch` called it with an empty probe, which
+/// ALWAYS takes a not-measured branch, so batch serving was gated on a check that
+/// could not fail.
+///
+/// Three states, and only one of them is a validation:
+///   `Validated` a probe ran on both CPU and GPU and every real position agreed
+///   `Mismatch`  it ran and the GPU disagreed, or the GPU forward failed (fail closed)
+///   `NotMeasured` nothing was compared, and `reason` says why. It must never be
+///               reported as a pass. Whether a caller may still use the GPU is the
+///               caller's decision, made explicitly at the call site.
+#[cfg(feature = "cuda")]
+#[derive(Debug, Clone, PartialEq)]
+pub enum F2Outcome {
+    /// Compared and accepted.
+    Validated {
+        /// Worst cosine over the real positions.
+        min_cosine: f32,
+    },
+    /// Compared and rejected, or the GPU forward failed.
+    Mismatch,
+    /// Nothing was compared.
+    NotMeasured {
+        /// Why nothing was compared.
+        reason: String,
+    },
+}
+
+// #3973: test-only fault hook for the CPU-reference branch. No INPUT reaches it: an
+// out-of-vocabulary token embeds as zeros by contract (N-09, embedding-lookup-v1.yaml),
+// so the CPU forward does not fail. Thread-local, so it cannot leak across tests.
+#[cfg(all(test, feature = "cuda"))]
+thread_local! {
+    static F2_FAIL_CPU_REFERENCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// #3973: the ONE line the run path prints for an F2 outcome. Only `Validated` may say
+/// PASSED, and it carries the measured cosine; `NotMeasured` names its reason and says
+/// the output is unvalidated. Pure, so that rule is tested without a GPU.
+#[cfg(feature = "cuda")]
+#[must_use]
+pub(crate) fn f2_status_line(outcome: &F2Outcome) -> String {
+    match outcome {
+        F2Outcome::Validated { min_cosine } => {
+            format!("[GH-480] F2 validation PASSED (min cosine {min_cosine:.4}) — launching GPU generation")
+        },
+        F2Outcome::Mismatch => "[GH-480] F2 validation FAILED — falling back to CPU".to_string(),
+        F2Outcome::NotMeasured { reason } => format!(
+            "[GH-480] F2 validation NOT MEASURED — {reason}. Launching GPU generation UNVALIDATED (#3973)"
+        ),
+    }
+}
+
+/// The three ways the F2 check declines to judge at all, in one place. `Err(reason)`
+/// means nothing will be validated, and says why (#3973: it was `None`, read as
+/// "assume the GPU is fine"); `Ok((kv_dim, num_layers, probe))` is a probe with at
+/// least one REAL position (≥1) in it.
+///
+/// `SKIP_PARITY_GATE=1` bypasses both this F2 check and the cosine parity gate. A
+/// single-token probe (context-less BOS) has NO real position to validate — the pos0
+/// distribution is a benign near-tie, and the load-time parity gate is the primary
+/// defense there.
+#[cfg(feature = "cuda")]
+fn f2_probe_to_judge(
+    cuda_model: &crate::gguf::OwnedQuantizedModelCuda,
+    probe_context: &[u32],
+) -> std::result::Result<(usize, usize, Vec<u32>), String> {
     if std::env::var("SKIP_PARITY_GATE")
         .map(|v| v == "1")
         .unwrap_or(false)
     {
-        return true;
+        return Err("SKIP_PARITY_GATE=1 bypasses the check".to_string());
     }
+    let Some((kv_dim, num_layers, probe)) = gpu_probe(cuda_model.model(), probe_context) else {
+        return Err("no probe could be built for this model".to_string());
+    };
+    if probe.len() < 2 {
+        return Err(format!(
+            "the probe has {} token(s) and no REAL position to compare: a context-less BOS \
+             probe cannot validate anything (pos0 is a benign near-tie)",
+            probe.len()
+        ));
+    }
+    Ok((kv_dim, num_layers, probe))
+}
 
-    // Build the probe: real prompt context (peaked distribution) when available,
-    // else the BOS token (batch model-init has no prompt yet). Cap the context to
-    // bound the one-time CPU/GPU prefill cost. BOS flows from GGUF metadata; if it
-    // is unknown for a context-less probe there is nothing to validate against.
-    const PROBE_MAX_CTX: usize = 64;
-    let (kv_dim, num_layers, probe): (usize, usize, Vec<u32>) = {
-        let model = cuda_model.model();
-        let kv_dim =
-            model.config.num_kv_heads * (model.config.hidden_dim / model.config.num_heads);
-        let num_layers = model.config.num_layers;
-        let probe: Vec<u32> = if probe_context.is_empty() {
-            match model.config.bos_token_id {
-                Some(id) => vec![id],
-                None => {
-                    eprintln!("warning: no prompt context and no BOS token — skipping the GPU-vs-CPU output check");
-                    return true;
-                },
+/// Run the probe through whichever prefill path the engine resolved (#3413 C).
+#[cfg(feature = "cuda")]
+fn f2_gpu_logits_via(
+    cuda_model: &mut crate::gguf::OwnedQuantizedModelCuda,
+    via: F2ProbePath,
+    probe: &[u32],
+    decode_token: u32,
+    kv_dim: usize,
+    num_layers: usize,
+) -> std::result::Result<Vec<Vec<f32>>, String> {
+    match via {
+        F2ProbePath::Batched => {
+            f2_gpu_batched_logits(cuda_model, probe, decode_token, kv_dim, num_layers)
+        },
+        F2ProbePath::Serial => {
+            f2_gpu_serial_logits(cuda_model, probe, decode_token, kv_dim, num_layers)
+        },
+    }
+}
+
+/// FALSIFY-CUDA-SILENT-FALLBACK-001: never discard this error.
+///
+/// Every OTHER rejection in this validator explains itself (see the
+/// F2 divergence branch, and the BOS-unknown skip), but this one used
+/// `Err(_)` and returned a bare `false`. The caller
+/// (gguf_gpu_generate.rs:303) can only turn that into
+/// `Err(Box::new(model))` for CPU fallback — the reason has nowhere
+/// to go and is lost.
+///
+/// Observed 2026-07-27 on an RTX 4090: CUDA initialises fine and the
+/// run still ends on CPU, with the only clue being the backend
+/// cascade —
+///     Backend: GPU (NVIDIA GeForce RTX 4090, 24045 MB VRAM)
+///     Backend: wgpu (Vulkan)
+///     Backend: CPU (wgpu unavailable: cosine 0.884 < 0.99)
+/// with no stated cause even under --verbose. A silent downgrade is
+/// indistinguishable from a decode regression, and it makes any
+/// throughput measured through it a fabrication (the Pillar-4 beat
+/// raises BEAT-REGRESSION off exactly this state).
+///
+/// Unconditional, not verbose-gated: the user is about to silently
+/// receive the fallback backend, which they need to know regardless
+/// of verbosity.
+///
+/// #3413 C: the message now carries the path that failed, because a
+/// batched-prefill failure and a decode failure are different faults.
+#[cfg(feature = "cuda")]
+fn f2_report_forward_failure(msg: &str, via: F2ProbePath) {
+    eprintln!("{msg} [{}]", via.as_str());
+}
+
+/// #3413 C: re-measure the probe on the FP16 HGEMM prefill with FP8 turned OFF.
+/// A precision fallback, not a backend fallback — printed, never silent. `None`
+/// when the FP16 forward itself failed, in which case the FP8 report stands.
+#[cfg(feature = "cuda")]
+fn f2_remeasure_without_fp8(
+    cuda_model: &mut crate::gguf::OwnedQuantizedModelCuda,
+    probe: &[u32],
+    decode_token: u32,
+    kv_dim: usize,
+    num_layers: usize,
+    cpu_logits_per_pos: &[Vec<f32>],
+    via: F2ProbePath,
+) -> Option<F2PositionReport> {
+    cuda_model.executor.gpu_profile.fp8_prefill = false;
+    cuda_model.executor.gpu_profile.fp8_decode = false;
+    // #3807: FP8 stays off for this model from here on, so its weight cache is dead
+    // weight. Free it first: the FP16 path caches its own weights (2 B/elem) and on a
+    // 7B model the two together exceed a 24 GB card.
+    cuda_model.executor.clear_fp8_weight_cache();
+    cuda_model.executor.reset_kv_cache_gpu();
+    let out = match f2_gpu_batched_logits(cuda_model, probe, decode_token, kv_dim, num_layers) {
+        Ok(v) => {
+            let report = f2_multi_position_report(cpu_logits_per_pos, &v);
+            if report.accepted {
+                eprintln!(
+                    "note: FP16 prefill passes (min cosine {:.4}); FP8 stays OFF for this model",
+                    report.min_cosine_real,
+                );
             }
-        } else {
-            let start = probe_context.len().saturating_sub(PROBE_MAX_CTX);
-            probe_context[start..].to_vec()
-        };
-        (kv_dim, num_layers, probe)
+            Some(report)
+        },
+        Err(msg) => {
+            eprintln!("{msg} [{} retry without FP8]", via.as_str());
+            None
+        },
+    };
+    cuda_model.executor.reset_kv_cache_gpu();
+    out
+}
+
+/// The F2 verdict itself, once a report exists.
+#[cfg(feature = "cuda")]
+fn f2_accept_or_reject(
+    report: &F2PositionReport,
+    via: F2ProbePath,
+    real_positions: usize,
+) -> bool {
+    if !report.accepted {
+        eprintln!("{}", f2_divergence_msg(report, via));
+        return false;
+    }
+    // #2405: the GPU was ACCEPTED — this line reports a benign near-tie on a
+    // successful run and says nothing the user can act on, so it is a
+    // developer trace, not user output.
+    if report.pos0_argmax_flip && crate::dev_trace::dev_trace_enabled() {
+        eprintln!(
+            "pos0 argmax flip (benign BOS near-tie) ignored; all {real_positions} real positions match (min cosine {:.4} >= {F2_GATE_COSINE_MIN}) via {} — accepting GPU path",
+            report.min_cosine_real,
+            via.as_str(),
+        );
+    }
+    true
+}
+
+/// #3922: `pub` so `apr chat` can gate its GPU path on the same check `apr run`
+/// uses. It was private, which is part of why `chat` had no F2 gate: the check
+/// existed and could not be reached from the only other verb that needed it.
+#[cfg(feature = "cuda")]
+pub fn validate_gpu_first_token(
+    cuda_model: &mut crate::gguf::OwnedQuantizedModelCuda,
+    _gen_config: &crate::gguf::QuantizedGenerateConfig,
+    probe_context: &[u32],
+) -> F2Outcome {
+    let (kv_dim, num_layers, probe) = match f2_probe_to_judge(cuda_model, probe_context) {
+        Ok(p) => p,
+        Err(reason) => return F2Outcome::NotMeasured { reason },
     };
 
-    // A single-token probe (context-less BOS) has NO real position (≥1) to validate
-    // — the pos0 distribution is a benign near-tie. The load-time parity gate is the
-    // primary defense there; skip the per-position F2 check.
-    if probe.len() < 2 {
-        return true;
-    }
+    // CPU reference: forward the whole probe (plus one greedy decode step),
+    // KEEPING THE LOGITS AT EVERY POSITION.
+    let Some(cpu_logits_per_pos) =
+        f2_cpu_reference_logits(cuda_model.model(), &probe, kv_dim, num_layers)
+    else {
+        // #3973: this returned `true`, "assume GPU is fine". Nothing was compared.
+        return F2Outcome::NotMeasured {
+            reason: "the CPU reference forward failed, so there is nothing to compare the GPU against"
+                .to_string(),
+        };
+    };
+    // The decode token both sides take after the probe: CPU's own greedy choice,
+    // so the GPU is measured on the continuation a real run would generate.
+    let decode_token = cpu_logits_per_pos
+        .get(probe.len().saturating_sub(1))
+        .map_or(0, |l| argmax_u32(l));
 
-    // CPU reference: forward the whole probe, KEEP THE LOGITS AT EVERY POSITION.
-    let mut cpu_logits_per_pos: Vec<Vec<f32>> = Vec::with_capacity(probe.len());
-    {
-        let model = cuda_model.model();
-        let mut cpu_cache = OwnedQuantizedKVCache::new(num_layers, kv_dim, probe.len().max(2));
-        for (pos, &tok) in probe.iter().enumerate() {
-            match model.forward_single_with_cache(tok, &mut cpu_cache, pos) {
-                Ok(logits) => cpu_logits_per_pos.push(logits),
-                Err(_) => return true, // CPU forward failed — can't validate, assume GPU is fine
-            }
-        }
-    }
+    // #3413 C: judge the prefill path the ENGINE resolved for this process. On a
+    // batched-prefill GPU the prompt is served by `prefill_all_layers_gpu` /
+    // `batched_qkv_rope_phase`, which the old token-by-token probe never ran.
+    let via = f2_select_probe_path(
+        cuda_model.executor.gpu_profile.prefill_path().path
+            == crate::cuda::gpu_profile::PrefillPath::Batched,
+        probe.len(),
+    );
 
-    // GPU reference: forward the SAME probe on the GPU-resident path (the same
-    // `forward_gpu_resident` the load-time `parity_gate` compares), keeping the full
-    // logit vector at EVERY position so we can catch a mid-context divergence.
     cuda_model.executor.reset_kv_cache_gpu();
-    let mut gpu_logits_per_pos: Vec<Vec<f32>> = Vec::with_capacity(probe.len());
-    let mut gpu_cache = OwnedQuantizedKVCache::new(num_layers, kv_dim, probe.len().max(2));
-    for (pos, &tok) in probe.iter().enumerate() {
-        match cuda_model.forward_gpu_resident(tok, &mut gpu_cache, pos) {
-            Ok(logits) => gpu_logits_per_pos.push(logits),
-            Err(e) => {
-                cuda_model.executor.reset_kv_cache_gpu();
-                // FALSIFY-CUDA-SILENT-FALLBACK-001: never discard this error.
-                //
-                // Every OTHER rejection in this validator explains itself (see the
-                // F2 divergence branch below, and the BOS-unknown skip above), but
-                // this one used `Err(_)` and returned a bare `false`. The caller
-                // (gguf_gpu_generate.rs:303) can only turn that into
-                // `Err(Box::new(model))` for CPU fallback — the reason has nowhere
-                // to go and is lost.
-                //
-                // Observed 2026-07-27 on an RTX 4090: CUDA initialises fine and the
-                // run still ends on CPU, with the only clue being the backend
-                // cascade —
-                //     Backend: GPU (NVIDIA GeForce RTX 4090, 24045 MB VRAM)
-                //     Backend: wgpu (Vulkan)
-                //     Backend: CPU (wgpu unavailable: cosine 0.884 < 0.99)
-                // ~20 tok/s instead of ~400, with no stated cause even under
-                // --verbose. A silent 20x downgrade is indistinguishable from a
-                // decode regression, and it makes any throughput measured through
-                // it a fabrication (the Pillar-4 beat reports 0.070x and a
-                // BEAT-REGRESSION panic off exactly this state).
-                //
-                // Unconditional, not verbose-gated: the user is about to silently
-                // receive a 20x slower backend, which they need to know regardless
-                // of verbosity.
-                eprintln!("{}", gpu_forward_failure_msg(pos, probe.len(), &e));
-                return false; // GPU forward failed — fail closed.
-            },
-        }
-    }
+    let gpu_result =
+        f2_gpu_logits_via(cuda_model, via, &probe, decode_token, kv_dim, num_layers);
+    let gpu_logits_per_pos = match gpu_result {
+        Ok(v) => v,
+        Err(msg) => {
+            cuda_model.executor.reset_kv_cache_gpu();
+            f2_report_forward_failure(&msg, via);
+            return F2Outcome::Mismatch; // GPU forward failed — fail closed.
+        },
+    };
     cuda_model.executor.reset_kv_cache_gpu();
 
     // Per-position decision over REAL positions (≥1). Excludes pos0 (BOS near-tie).
-    let report = f2_multi_position_report(&cpu_logits_per_pos, &gpu_logits_per_pos);
-    if report.accepted {
-        // #2405: the GPU was ACCEPTED — this line reports a benign near-tie on a
-        // successful run and says nothing the user can act on, so it is a
-        // developer trace, not user output.
-        if report.pos0_argmax_flip && crate::dev_trace::dev_trace_enabled() {
-            eprintln!(
-                "pos0 argmax flip (benign BOS near-tie) ignored; all {} real positions match (min cosine {:.4} >= {F2_GATE_COSINE_MIN}) — accepting GPU path",
-                probe.len() - 1,
-                report.min_cosine_real,
-            );
-        }
-        true
-    } else {
+    let mut report = f2_multi_position_report(&cpu_logits_per_pos, &gpu_logits_per_pos);
+
+    // #3413 C / PMAT-798 pattern: the FP8 batched prefill's precision shows at the
+    // decode step AFTER the prompt (the K/V it attends to were produced by FP8
+    // GEMMs) and sits at the floor run-to-run: qwen2.5-1.5b "Write one sentence
+    // about the ocean." → pos 27, cosine 0.9187 with the SAME argmax on one run,
+    // ≥ 0.95 on another (RTX 4090, 2026-09-18). A miss on an FP8 path is re-measured
+    // on the FP16 HGEMM prefill before the model is pushed off the GPU — a precision
+    // fallback, not a backend fallback, printed, never silent; the floors themselves
+    // do not move. #3807: this used to skip misses below 0.90 as "catastrophic", but
+    // the re-measure is a different precision path, not a second sample: E4M3 prefill
+    // put qwen2.5-coder-7b at 0.8134 and qwen2.5-coder-0.5b at 0.894, and FP16 passes
+    // both. A defect outside FP8 still fails the FP16 re-measure and still rejects.
+    if f2_should_retry_without_fp8(&report, via, cuda_model.executor.gpu_profile.fp8_prefill) {
         eprintln!(
-            "warning: GPU output diverges from CPU at position {} (argmax {} != {}, cosine {:.4}); min cosine {:.4} — falling back to CPU",
-            report.first_bad_pos,
-            report.first_bad_gpu_argmax,
-            report.first_bad_cpu_argmax,
-            report.first_bad_cosine,
+            "note: FP8 batched prefill scored min cosine {:.4} vs CPU (floor {F2_GATE_COSINE_MIN}) — re-measuring on the FP16 prefill path",
             report.min_cosine_real,
         );
-        false
+        if let Some(fp16) = f2_remeasure_without_fp8(
+            cuda_model,
+            &probe,
+            decode_token,
+            kv_dim,
+            num_layers,
+            &cpu_logits_per_pos,
+            via,
+        ) {
+            report = fp16;
+        }
+    }
+
+    if f2_accept_or_reject(&report, via, cpu_logits_per_pos.len().saturating_sub(1)) {
+        F2Outcome::Validated { min_cosine: report.min_cosine_real }
+    } else {
+        F2Outcome::Mismatch
+    }
+}
+
+/// #3413 C: retry the batched probe with FP8 prefill off iff the report was a miss,
+/// the path judged was the batched prefill, and FP8 was actually on — otherwise the
+/// retry would measure the same kernels again. Any cosine qualifies (#3807): the
+/// retry changes the precision, so it can tell an FP8 precision loss from a real
+/// divergence, and the FP16 report must still pass every floor. Pure + GPU-free.
+#[cfg(feature = "cuda")]
+pub(crate) fn f2_should_retry_without_fp8(
+    report: &F2PositionReport,
+    via: F2ProbePath,
+    fp8_prefill_on: bool,
+) -> bool {
+    !report.accepted && via == F2ProbePath::Batched && fp8_prefill_on
+}
+
+#[cfg(all(test, feature = "cuda"))]
+mod pmat3477_f2_fp8_retry_tests {
+    use super::{f2_should_retry_without_fp8, F2PositionReport, F2ProbePath};
+
+    fn miss(cos: f32) -> F2PositionReport {
+        F2PositionReport {
+            accepted: false,
+            pos0_argmax_flip: false,
+            min_cosine_real: cos,
+            first_bad_pos: 27,
+            first_bad_cpu_argmax: 29,
+            first_bad_gpu_argmax: 29,
+            first_bad_cosine: cos,
+        }
+    }
+
+    // The measured case: FP8 batched prefill on the qwen2.5 control, pos 27,
+    // cosine 0.9187, same argmax → re-measure on FP16.
+    #[test]
+    fn fp8_batched_miss_in_band_is_retried() {
+        assert!(f2_should_retry_without_fp8(
+            &miss(0.9187),
+            F2ProbePath::Batched,
+            true
+        ));
+    }
+
+    // #3807: a deep miss is retried too. The re-measure runs FP16, a different
+    // precision path, and it is what separates E4M3 precision loss (qwen2.5-coder-7b
+    // at 0.8134, qwen2.5-coder-0.5b at 0.894: FP16 passes both) from a real defect
+    // (FP16 fails as well, and the gate still rejects).
+    #[test]
+    fn a_deep_fp8_miss_is_retried_on_fp16() {
+        for cos in [0.894, 0.8134, 0.40, -0.0972] {
+            assert!(
+                f2_should_retry_without_fp8(&miss(cos), F2ProbePath::Batched, true),
+                "cos {cos}"
+            );
+        }
+    }
+
+    // FP8 already off, or the serial path: nothing to switch, no retry.
+    #[test]
+    fn retry_needs_fp8_on_and_the_batched_path() {
+        assert!(!f2_should_retry_without_fp8(
+            &miss(0.9187),
+            F2ProbePath::Batched,
+            false
+        ));
+        assert!(!f2_should_retry_without_fp8(
+            &miss(0.9187),
+            F2ProbePath::Serial,
+            true
+        ));
+    }
+
+    #[test]
+    fn an_accepted_report_is_not_retried() {
+        let mut r = miss(0.99);
+        r.accepted = true;
+        assert!(!f2_should_retry_without_fp8(&r, F2ProbePath::Batched, true));
     }
 }
 
@@ -718,8 +1409,11 @@ pub(crate) const F2_GATE_COSINE_MIN: f32 = 0.95;
 /// "argmax flip below 0.98" reject window is exactly the degraded-cosine band.
 pub(crate) const F2_ARGMAX_MISMATCH_COSINE: f32 = 0.98;
 
-/// Catastrophic cosine floor (orthogonal garbage / NaN). Anything below this is a
-/// hard reject regardless of argmax, matching the `apr parity` catastrophic floor.
+/// Catastrophic cosine floor (orthogonal garbage / NaN), matching the `apr parity`
+/// catastrophic floor. Anything below it is already below `F2_GATE_COSINE_MIN`, so the
+/// gate rejects it regardless of argmax. The FP16 retry no longer consults it (#3807);
+/// it remains the band marker the PMAT-919 gate tests are written against.
+#[cfg(test)]
 pub(crate) const F2_CATASTROPHIC_COSINE: f32 = 0.90;
 
 /// Per-position F2 decision report. Pure + GPU-free → unit-testable without CUDA.
@@ -789,8 +1483,8 @@ pub(crate) fn f2_multi_position_report(
         // cosine (< 0.98 — degraded HwDp4a 1.5B). A high-cosine (≥0.98) argmax flip
         // is a benign FP/quant near-tie → NOT a reject (correct fp32-Mwv flips a
         // late argmax at cosine 0.9995).
-        let bad = cosine < F2_GATE_COSINE_MIN
-            || (argmax_mismatch && cosine < F2_ARGMAX_MISMATCH_COSINE);
+        let bad =
+            cosine < F2_GATE_COSINE_MIN || (argmax_mismatch && cosine < F2_ARGMAX_MISMATCH_COSINE);
         if bad {
             return F2PositionReport {
                 accepted: false,
@@ -872,7 +1566,11 @@ pub(crate) fn cpu_logit_rel_gap(cpu_logits: &[f32], cpu_argmax: u32, token: u32)
 /// (GPU token within [`GPU_PROBE_NEAR_TIE_REL_GAP`] of the top of CPU's logit
 /// range); false for real divergence (GPU token deep in CPU's tail — PMAT-216
 /// garbage). Pure + GPU-free so the gate's logic is unit-testable without CUDA.
-pub(crate) fn gpu_probe_token_acceptable(cpu_logits: &[f32], cpu_argmax: u32, gpu_first: u32) -> bool {
+pub(crate) fn gpu_probe_token_acceptable(
+    cpu_logits: &[f32],
+    cpu_argmax: u32,
+    gpu_first: u32,
+) -> bool {
     gpu_first == cpu_argmax
         || cpu_logit_rel_gap(cpu_logits, cpu_argmax, gpu_first) <= GPU_PROBE_NEAR_TIE_REL_GAP
 }
@@ -923,7 +1621,10 @@ mod pmat919_cosine_gate_tests {
         gpu[0][6] = 20.01;
 
         let report = f2_multi_position_report(&cpu, &gpu);
-        assert!(report.pos0_argmax_flip, "test must reproduce the benign pos0 flip");
+        assert!(
+            report.pos0_argmax_flip,
+            "test must reproduce the benign pos0 flip"
+        );
         // All REAL positions match.
         for pos in 1..4 {
             assert_eq!(
@@ -965,8 +1666,8 @@ mod pmat919_cosine_gate_tests {
             .iter()
             .enumerate()
             .map(|(i, &c)| match i {
-                33 => 16.0,        // demote CPU's leader
-                40 => 21.0,        // GPU now argmaxes a *different* token
+                33 => 16.0,                                                  // demote CPU's leader
+                40 => 21.0, // GPU now argmaxes a *different* token
                 _ => c + ((i as f32 * 1.7).sin() * 0.30 * c.abs().max(2.0)), // ~cosine 0.96
             })
             .collect();
@@ -987,7 +1688,10 @@ mod pmat919_cosine_gate_tests {
             !report.accepted,
             "the F2 gate MUST REJECT the degraded HwDp4a path (mid-position argmax mismatch at degraded cosine)"
         );
-        assert_eq!(report.first_bad_pos, 2, "the reject must be attributed to pos2");
+        assert_eq!(
+            report.first_bad_pos, 2,
+            "the reject must be attributed to pos2"
+        );
     }
 
     /// CRITICAL FALSIFIER (ii-b) ACCEPT — a HIGH-cosine late-position argmax flip is a
@@ -1062,7 +1766,10 @@ mod pmat919_cosine_gate_tests {
         }
 
         let report = f2_multi_position_report(&cpu, &gpu);
-        assert!(report.pos0_argmax_flip, "test must reproduce the pos0 argmax flip");
+        assert!(
+            report.pos0_argmax_flip,
+            "test must reproduce the pos0 argmax flip"
+        );
         assert!(
             report.accepted,
             "pos0-only BOS near-tie must NOT be false-rejected (all real positions match)"
@@ -1109,7 +1816,11 @@ mod pmat919_cosine_gate_tests {
     /// Identical logits across all positions → accepted (sanity).
     #[test]
     fn identical_multi_position_logits_are_accepted() {
-        let cpu: Vec<Vec<f32>> = vec![vocab_logits(5, 0.0), vocab_logits(12, 1.0), vocab_logits(33, 2.0)];
+        let cpu: Vec<Vec<f32>> = vec![
+            vocab_logits(5, 0.0),
+            vocab_logits(12, 1.0),
+            vocab_logits(33, 2.0),
+        ];
         let report = f2_multi_position_report(&cpu, &cpu.clone());
         assert!(report.accepted);
         assert!((report.min_cosine_real - 1.0).abs() < 1e-5);
@@ -1141,7 +1852,10 @@ mod pmat742_parity_gate_tests {
     fn near_tie_argmax_flip_is_accepted() {
         // CPU argmax = 0; GPU picked token 1 (the next-highest, essentially tied).
         let rel_gap = cpu_logit_rel_gap(&NEAR_FLAT, 0, 1);
-        assert!(rel_gap <= GPU_PROBE_NEAR_TIE_REL_GAP, "rel_gap {rel_gap} should be a near-tie");
+        assert!(
+            rel_gap <= GPU_PROBE_NEAR_TIE_REL_GAP,
+            "rel_gap {rel_gap} should be a near-tie"
+        );
         assert!(gpu_probe_token_acceptable(&NEAR_FLAT, 0, 1));
         // token 3 is also within the near-tied cluster → accepted.
         assert!(gpu_probe_token_acceptable(&NEAR_FLAT, 0, 3));
@@ -1161,7 +1875,10 @@ mod pmat742_parity_gate_tests {
         // On a PEAKED distribution this lands deep in the tail → rejected.
         let peaked = [20.0_f32, 5.0, 0.5, 0.0];
         let rel_gap = cpu_logit_rel_gap(&peaked, 0, 3); // token 3 = CPU min
-        assert!(rel_gap > GPU_PROBE_NEAR_TIE_REL_GAP, "tail token rel_gap {rel_gap} must exceed tolerance");
+        assert!(
+            rel_gap > GPU_PROBE_NEAR_TIE_REL_GAP,
+            "tail token rel_gap {rel_gap} must exceed tolerance"
+        );
         assert!(!gpu_probe_token_acceptable(&peaked, 0, 3));
     }
 
@@ -1189,7 +1906,7 @@ mod cuda_silent_fallback_tests {
     /// The rejection used `Err(_)` and returned a bare `false`. Its caller
     /// (gguf_gpu_generate.rs:303) can only convert that into `Err(Box::new(model))`
     /// for CPU fallback, so the reason had nowhere to go. Observed on an RTX 4090:
-    /// CUDA initialises, the run silently ends on CPU at ~20 tok/s instead of ~400,
+    /// CUDA initialises, the run silently ends on CPU far below the GPU decode rate,
     /// and nothing says why even under --verbose.
     ///
     /// That matters beyond ergonomics: throughput measured after a silent fallback
@@ -1316,3 +2033,292 @@ mod trace_output_events_tests {
         assert_eq!(round["model"]["path"], r#"/models/we"ird\path.gguf"#);
     }
 }
+
+/// #3413 C — the F2 GPU guard must judge the prefill path generation will USE.
+#[cfg(test)]
+mod pmat3477_f2_prefill_path_tests {
+    use super::{f2_divergence_msg, f2_select_probe_path, F2PositionReport, F2ProbePath};
+
+    /// The probe follows the ENGINE's resolved prefill path, not a constant.
+    ///
+    /// Before #3413 C the gate always replayed the probe token-by-token through
+    /// `forward_gpu_resident`, so on every GPU below the sm_12x line (where
+    /// `select_prefill_path` returns `Batched`) it validated kernels the run
+    /// does not use for the prompt, and was blind to `batched_qkv_rope_phase`.
+    #[test]
+    fn f2_probe_path_follows_the_engine_prefill_path() {
+        let cases: [(bool, usize, F2ProbePath); 5] = [
+            (true, 8, F2ProbePath::Batched),
+            (true, 2, F2ProbePath::Batched),
+            (false, 8, F2ProbePath::Serial),
+            // A 1-token probe runs no prefill PHASE at all (`run_prefill`
+            // returns early), so there are no batched kernels to judge.
+            (true, 1, F2ProbePath::Serial),
+            (false, 1, F2ProbePath::Serial),
+        ];
+        for (engine_batched, probe_len, expected) in cases {
+            assert_eq!(
+                f2_select_probe_path(engine_batched, probe_len),
+                expected,
+                "engine_batched={engine_batched} probe_len={probe_len}"
+            );
+        }
+    }
+
+    /// A log line that does not name the path it judged cannot tell a future
+    /// reader whether the batched prefill was ever exercised.
+    #[test]
+    fn f2_divergence_message_names_the_path_that_was_judged() {
+        let report = F2PositionReport {
+            accepted: false,
+            pos0_argmax_flip: false,
+            min_cosine_real: 0.9186,
+            first_bad_pos: 1,
+            first_bad_cpu_argmax: 40,
+            first_bad_gpu_argmax: 198,
+            first_bad_cosine: 0.9186,
+        };
+        let batched = f2_divergence_msg(&report, F2ProbePath::Batched);
+        assert!(
+            batched.contains("via batched prefill"),
+            "a batched-prefill rejection must say so: {batched}"
+        );
+        let serial = f2_divergence_msg(&report, F2ProbePath::Serial);
+        assert!(
+            serial.contains("via serial prefill"),
+            "a serial rejection must say so: {serial}"
+        );
+        assert!(
+            !serial.contains("batched"),
+            "a serial rejection must not claim the batched path: {serial}"
+        );
+        // The measured facts survive into both.
+        for msg in [&batched, &serial] {
+            assert!(msg.contains("position 1"), "{msg}");
+            assert!(msg.contains("198"), "{msg}");
+            assert!(msg.contains("0.9186"), "{msg}");
+        }
+    }
+}
+
+/// #3413 C, on-device: the F2 guard must EXERCISE the batched prefill.
+///
+/// `cuda_executor_or_skip!` returns early on a GPU-less host, so this passes
+/// vacuously there; it is a device test, run on the 4090 lane.
+#[cfg(all(test, feature = "cuda"))]
+mod pmat3477_f2_batched_probe_cuda_tests {
+    use super::{
+        argmax_u32, f2_cpu_reference_logits, f2_gpu_batched_logits, f2_multi_position_report,
+        f2_select_probe_path, F2ProbePath, F2_GATE_COSINE_MIN,
+    };
+
+    fn model_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("HOME")).join(".apr/models/Qwen3-1.7B-Q4_K_M.gguf")
+    }
+
+    /// The batched probe's logits must agree with the per-position CPU
+    /// reference, on a real Qwen3 model, with `BATCHED_PREFILL` forced on.
+    ///
+    /// This is the falsifier for #3413 C: before e296147d8 the batched prefill
+    /// cached un-normed K, and the ONLY reason the guard stayed green was that
+    /// it never ran these kernels. Reverting that fix must turn this RED.
+    #[test]
+    #[serial_test::serial]
+    fn f2_batched_probe_agrees_with_the_cpu_reference() {
+        let path = model_path();
+        if !path.exists() {
+            eprintln!("SKIP: no model at {}", path.display());
+            return;
+        }
+        let _skip_probe = crate::cuda_executor_or_skip!(0);
+        drop(_skip_probe);
+
+        // Force the batched path so the routing under test is the one taken,
+        // regardless of this box's compute capability.
+        // SAFETY: `#[serial]` keeps this the only test mutating the environment.
+        std::env::set_var("BATCHED_PREFILL", "1");
+
+        let mapped = match crate::gguf::MappedGGUFModel::from_path(&path) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("SKIP: cannot map {}: {e}", path.display());
+                return;
+            },
+        };
+        let cpu_model = crate::gguf::OwnedQuantizedModel::from_mapped(&mapped)
+            .expect("Qwen3-1.7B Q4_K_M must load on CPU");
+        let mut cuda_model = match crate::gguf::OwnedQuantizedModelCuda::new(cpu_model, 0) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("SKIP: CUDA model init failed: {e}");
+                return;
+            },
+        };
+
+        // The engine must have resolved BATCHED — otherwise this test would be
+        // measuring the serial path and claiming the batched one.
+        let choice = cuda_model.executor.gpu_profile.prefill_path();
+        assert_eq!(
+            choice.path,
+            crate::cuda::gpu_profile::PrefillPath::Batched,
+            "BATCHED_PREFILL=1 must resolve to the batched prefill (reason {})",
+            choice.reason
+        );
+
+        let probe: Vec<u32> = vec![9707, 11, 1246, 525, 498, 30, 358, 1079];
+        assert_eq!(
+            f2_select_probe_path(true, probe.len()),
+            F2ProbePath::Batched,
+            "the guard must route this probe through the batched prefill"
+        );
+
+        let kv_dim = cuda_model.model().config.num_kv_heads
+            * (cuda_model.model().config.hidden_dim / cuda_model.model().config.num_heads);
+        let num_layers = cuda_model.model().config.num_layers;
+
+        let cpu = f2_cpu_reference_logits(cuda_model.model(), &probe, kv_dim, num_layers)
+            .expect("CPU reference must forward");
+        let decode_token = argmax_u32(&cpu[probe.len() - 1]);
+
+        cuda_model.executor.reset_kv_cache_gpu();
+        let gpu = f2_gpu_batched_logits(&mut cuda_model, &probe, decode_token, kv_dim, num_layers)
+            .expect("the batched prefill probe must run on the device");
+        cuda_model.executor.reset_kv_cache_gpu();
+
+        assert_eq!(
+            gpu.len(),
+            probe.len() + 1,
+            "the batched probe must cover every prompt position AND one decode step"
+        );
+        assert_eq!(cpu.len(), gpu.len(), "both sides must cover the same steps");
+
+        let report = f2_multi_position_report(&cpu, &gpu);
+        assert!(
+            report.accepted,
+            "batched prefill must agree with CPU: first bad pos {} (argmax {} != {}, cosine {:.4}), min cosine {:.4}",
+            report.first_bad_pos,
+            report.first_bad_gpu_argmax,
+            report.first_bad_cpu_argmax,
+            report.first_bad_cosine,
+            report.min_cosine_real,
+        );
+        assert!(
+            report.min_cosine_real >= F2_GATE_COSINE_MIN,
+            "min real-position cosine {} must clear the F2 floor",
+            report.min_cosine_real
+        );
+    }
+}
+
+// ============================================================================
+// #3973: F2 must never report a validation it did not perform.
+#[cfg(all(test, feature = "cuda"))]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod f2_outcome_3973_tests {
+    use super::*;
+
+    fn model_path() -> Option<std::path::PathBuf> {
+        [
+            "/home/noah/.apr/models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf",
+            "/mnt/nvme-raid0/cache/apr-home/models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf",
+        ]
+        .into_iter()
+        .map(std::path::PathBuf::from)
+        .find(|p| p.exists())
+    }
+
+    /// The reporting rule, no GPU needed: only a comparison that ran and agreed may
+    /// print PASSED.
+    #[test]
+    fn only_a_validated_outcome_prints_passed() {
+        let v = f2_status_line(&F2Outcome::Validated { min_cosine: 0.9987 });
+        assert!(v.contains("PASSED") && v.contains("0.9987"), "{v}");
+        let m = f2_status_line(&F2Outcome::Mismatch);
+        assert!(m.contains("FAILED") && !m.contains("PASSED"), "{m}");
+        let n = f2_status_line(&F2Outcome::NotMeasured { reason: "because".into() });
+        assert!(!n.contains("PASSED"), "NotMeasured must never print PASSED: {n}");
+        assert!(n.contains("because") && n.contains("UNVALIDATED"), "{n}");
+    }
+
+    /// Both fail-open branches, on the device, against a real model. Each used to
+    /// return `true`, which the run path printed as PASSED.
+    #[test]
+    fn both_fail_open_branches_report_not_measured_and_a_real_probe_validates() {
+        use crate::gguf::{MappedGGUFModel, OwnedQuantizedModel, OwnedQuantizedModelCuda};
+        let Some(path) = model_path() else {
+            eprintln!("SKIP: tinyllama not present");
+            return;
+        };
+        let mapped = MappedGGUFModel::from_path(&path).expect("map tinyllama");
+        let Ok(mut cuda) =
+            OwnedQuantizedModelCuda::new(OwnedQuantizedModel::from_mapped(&mapped).expect("model"), 0)
+        else {
+            eprintln!("SKIP: no CUDA device");
+            return;
+        };
+        let cfg = crate::gguf::QuantizedGenerateConfig::default();
+
+        // Branch 1: no real position (the BOS-only probe batch.rs always uses).
+        match validate_gpu_first_token(&mut cuda, &cfg, &[]) {
+            F2Outcome::NotMeasured { reason } => {
+                assert!(reason.contains("no REAL position"), "wrong reason: {reason}");
+            },
+            other => panic!("an empty probe compares nothing; got {other:?}"),
+        }
+
+        // Branch 2: the CPU reference forward fails, on a REAL prompt. No input can
+        // make it fail (an OOV token embeds as zeros by contract), so the test-only
+        // hook forces it. The same prompt validates below, so this NotMeasured is
+        // about the missing reference, not about the prompt.
+        let prompt = mapped.model.encode("The capital of France is").expect("encode");
+        F2_FAIL_CPU_REFERENCE.with(|c| c.set(true));
+        let forced = validate_gpu_first_token(&mut cuda, &cfg, &prompt);
+        F2_FAIL_CPU_REFERENCE.with(|c| c.set(false));
+        match forced {
+            F2Outcome::NotMeasured { reason } => {
+                assert!(reason.contains("CPU reference"), "wrong reason: {reason}");
+            },
+            other => panic!("a CPU reference that could not run compares nothing; got {other:?}"),
+        }
+
+        // Positive control: the same real prompt, reference intact, IS compared, so
+        // the two NotMeasured results above are about their branches.
+        match validate_gpu_first_token(&mut cuda, &cfg, &prompt) {
+            F2Outcome::Validated { min_cosine } => {
+                assert!(min_cosine >= F2_GATE_COSINE_MIN, "validated below the floor: {min_cosine}");
+                eprintln!("#3973 positive control: Validated, min cosine {min_cosine:.4}");
+            },
+            other => panic!("a real prompt on a sound model must validate; got {other:?}"),
+        }
+    }
+}
+
+// ============================================================================
+// #3981: tok_per_sec must be a GENERATION rate, not diluted by setup.
+#[cfg(test)]
+mod throughput_3981_tests {
+    use super::*;
+
+    /// The ticket's must-RED shape: 5 s of setup (load/upload + F2) around 1 s of
+    /// generating N tokens. The rate is N per the 1 s of generation, not N per the
+    /// 6 s wall clock (#3981).
+    #[test]
+    fn a_five_second_setup_does_not_dilute_the_generation_rate() {
+        let rate = throughput(100, 6_000.0, Some(1_000.0));
+        assert!((rate - 100.0).abs() < 1e-9, "setup must not dilute tok/s: got {rate}");
+        let diluted = throughput(100, 6_000.0, None);
+        assert!(diluted < 17.0, "with no generation mark the old window is all there is: {diluted}");
+    }
+
+    /// The mark is consumed once, so a stale mark from an earlier run cannot be
+    /// read as this run's generation start.
+    #[test]
+    fn the_generation_mark_is_taken_once() {
+        let _ = take_generation_start();
+        assert!(take_generation_start().is_none(), "no mark yet");
+        mark_generation_start();
+        assert!(take_generation_start().is_some(), "the mark must be readable once");
+        assert!(take_generation_start().is_none(), "and then gone");
+    }
+}
+

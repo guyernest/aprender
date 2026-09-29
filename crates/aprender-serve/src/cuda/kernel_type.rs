@@ -16,6 +16,15 @@ pub enum KernelType {
         k: u32,
         tile_size: u32,
     },
+    /// Tiled C[m, n] = A[m, k] @ B^T with B row-major `[n, k]` — a weight in the
+    /// `[out, in]` layout, used as-is (#3975). Emitted by trueno's
+    /// `GemmBackwardAKernel` bound as (M, N, K) = (m, k, n).
+    GemmBtTiled {
+        m: u32,
+        n: u32,
+        k: u32,
+        tile_size: u32,
+    },
     /// Tensor Core GEMM (fp16)
     GemmTensorCore {
         m: u32,
@@ -179,7 +188,8 @@ pub enum KernelType {
         k: u32,
         n: u32,
     },
-    /// PAR-063-V2: DP4A SIMD Q4_K GEMV with true integer accumulation
+    /// PAR-063-V2: generates the SAME PTX as `Dp4aQ4KGemv` (`Dp4aQ4KGemvKernel`),
+    /// so its entry is `dp4a_q4k_gemv` (#3976). No executor path launches it.
     Dp4aSIMDQ4KGemv {
         k: u32,
         n: u32,
@@ -233,7 +243,7 @@ pub enum KernelType {
         n: u32,
         k: u32,
     },
-    /// PAR-108: Batched Q4_K GEMV for 2x Ollama via shared dequantization
+    /// PAR-108: Batched Q4_K GEMV via shared dequantization (the throughput target is PAR-108's)
     BatchedQ4KGemv {
         m: u32,
         k: u32,
@@ -344,6 +354,56 @@ pub enum KernelType {
         k: u32,
         n: u32,
     },
+    /// F16 GEMV (converting load, no dequantization) - #3477
+    F16Gemv {
+        k: u32,
+        n: u32,
+    },
+    /// BF16 GEMV (exact widening load, no dequantization) - #3908
+    Bf16Gemv {
+        k: u32,
+        n: u32,
+    },
+    /// IQ4_XS GEMV (codebook + split 6-bit scales) - #3477
+    Iq4XsGemv {
+        k: u32,
+        n: u32,
+    },
+    /// IQ4_NL GEMV (same codebook, one f16 scale per 32-element block) - #3869
+    Iq4NlGemv {
+        k: u32,
+        n: u32,
+    },
+    /// IQ3_S GEMV (9-bit grid indices, sign bytes, paired 4-bit scales) - #3884
+    Iq3SGemv {
+        k: u32,
+        n: u32,
+    },
+    /// Q2_K GEMV (affine 2-bit K-quant: 4-bit scale + 4-bit min per 16 values) - #3960
+    Q2KGemv {
+        k: u32,
+        n: u32,
+    },
+    /// IQ2_XXS GEMV (8-bit grid indices, 7-bit sign codes, 4-bit scale) - #3950
+    Iq2XxsGemv {
+        k: u32,
+        n: u32,
+    },
+    /// IQ2_S GEMV (10-bit grid indices, sign bytes, two 4-bit scales per sub-block) - #3953
+    Iq2SGemv {
+        k: u32,
+        n: u32,
+    },
+    /// IQ3_XXS GEMV (8-bit indices into a 4-magnitude grid, 7-bit sign codes) - #3963
+    Iq3XxsGemv {
+        k: u32,
+        n: u32,
+    },
+    /// Q5_1 GEMV (affine 32-element block: w = q*d + m, 5th bit in qh) - #3885
+    Q5_1Gemv {
+        k: u32,
+        n: u32,
+    },
     /// Incremental attention for M=1 autoregressive decoding (PAR-020 + PAR-021)
     IncrementalAttention {
         max_seq_len: u32,
@@ -411,6 +471,17 @@ pub enum KernelType {
         num_heads: u32,
         epsilon: f32,
     },
+    /// #3413 B: Batched per-head QK RMSNorm (Qwen3 prefill).
+    ///
+    /// Grid (num_heads, batch, 1): block (seq_idx, head_idx) normalizes
+    /// `input[(seq_idx * num_heads + head_idx) * head_dim ..][..head_dim]`.
+    /// `batch` is a grid dimension only — the PTX does not depend on it.
+    BatchedPerHeadRmsNorm {
+        head_dim: u32,
+        num_heads: u32,
+        batch: u32,
+        epsilon: f32,
+    },
     /// PAR-114: Batched RoPE kernel
     BatchedRope {
         num_heads: u32,
@@ -453,12 +524,6 @@ pub enum KernelType {
     /// PMAT-034: Fused gate + up + SwiGLU HW DP4A Q4K GEMV kernel
     /// Eliminates 2 kernel launches + 4 intermediate buffer passes
     FusedGateUpSwigluHwDp4aQ4KGemv {
-        k: u32,
-        n: u32,
-    },
-
-    /// trueno#237: Fused K+V HW DP4A Q4K GEMV — 2 projections in 1 launch
-    FusedKVHwDp4aQ4KGemv {
         k: u32,
         n: u32,
     },
@@ -561,5 +626,46 @@ pub enum KernelType {
     Q4KDequantFp16 {
         k: u32,
         n: u32,
+    },
+    /// PMAT-3477 (#3090): fused causal depthwise conv1d + SiLU, one decode step.
+    GdnCausalConv1dSilu { channels: u32, kernel_size: u32 },
+    /// PMAT-3477 (#3090): per-head L2 normalisation of Gated `DeltaNet` q/k, in place.
+    GdnPerHeadL2Norm {
+        head_dim: u32,
+        num_heads: u32,
+        epsilon: f32,
+    },
+    /// PMAT-3477 (#3090): the Gated `DeltaNet` per-head `dt`/`beta` gates.
+    GdnGates { num_heads: u32 },
+    /// PMAT-3477 (#3090, #3346/#3510): the gated delta-rule recurrence, one token.
+    /// `num_k_heads`/`head_k_dim` are APPENDED (never reordered — a line-keyed guard
+    /// baseline points into this file); value head `h` reads key head `h % num_k_heads`.
+    GdnDeltaRule {
+        num_v_heads: u32,
+        head_v_dim: u32,
+        num_k_heads: u32,
+        head_k_dim: u32,
+    },
+    /// PMAT-3477 (#3090): gated RMSNorm — the Gated `DeltaNet` output norm.
+    GdnGatedRmsNorm {
+        head_dim: u32,
+        num_heads: u32,
+        epsilon: f32,
+    },
+    /// PMAT-3477 (#3090): `x *= sigmoid(gate)`, the full-attention output gate.
+    GdnSigmoidGate { n: u32 },
+    /// PMAT-3477 (#3090): de-interleave the joint `[q | gate]` Q projection.
+    GdnSplitInterleaved { num_heads: u32, head_dim: u32 },
+    /// PMAT-3477 (#3090): partial NEOX RoPE over the first `n_rot` dimensions.
+    GdnPartialNeoxRope {
+        num_heads: u32,
+        head_dim: u32,
+        n_rot: u32,
+    },
+    /// PMAT-3477 (#3090): single-query decode attention, `head_dim <= 256`.
+    GdnDecodeAttention {
+        num_heads: u32,
+        num_kv_heads: u32,
+        head_dim: u32,
     },
 }

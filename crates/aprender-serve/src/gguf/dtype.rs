@@ -1,4 +1,3 @@
-
 /// GH-321: Convert GGML qtype to APR dtype string using unified enum.
 ///
 /// FAILS on an unrecognized qtype. This used to be
@@ -14,7 +13,7 @@
 /// policy this now follows: an unsupported quant must fail loudly rather than be
 /// silently decoded as something else.
 fn apr_qtype_to_dtype(qtype: u32) -> Result<&'static str> {
-    crate::gguf::GgmlQuantType::from_id(qtype)
+    crate::gguf::admitted_from_id(qtype)
         .map(crate::gguf::GgmlQuantType::as_str)
         .ok_or_else(|| RealizarError::FormatError {
             reason: format!(
@@ -34,9 +33,41 @@ fn apr_qtype_to_dtype(qtype: u32) -> Result<&'static str> {
 /// this whitelist is SILENTLY decoded as Q4_K → garbage logits.
 ///
 /// The whitelist of GPU-eligible types is exactly:
-///   0=F32, 2=Q4_0, 3=Q4_1, 6=Q5_0, 8=Q8_0, 12=Q4_K, 13=Q5_K, 14=Q6_K.
-/// Everything else — F16(1), Q5_1(7), Q8_1(9), Q2_K(10), Q3_K(11), Q8_K(15),
-/// the IQ* families, BF16(30), unknown — is gated to CPU.
+///   0=F32, 1=F16, 2=Q4_0, 3=Q4_1, 6=Q5_0, 7=Q5_1, 8=Q8_0, 10=Q2_K, 12=Q4_K,
+///   13=Q5_K, 14=Q6_K, 16=IQ2_XXS, 18=IQ3_XXS, 20=IQ4_NL, 21=IQ3_S, 22=IQ2_S,
+///   23=IQ4_XS, 30=BF16.
+/// Everything else — Q8_1(9), Q3_K(11), Q8_K(15), the rest of the IQ*
+/// families, unknown — is gated to CPU.
+///
+/// #3931: this list is PARSED by `the_prose_whitelist_equals_the_expression`
+/// and compared against the `matches!` below, so the two cannot drift again.
+/// It had drifted: the prose named ten types and declared `Q5_1(7)` gated,
+/// while the expression permitted thirteen including 7, 20 and 21 — so a
+/// reader of the file that calls itself the single source of truth would have
+/// concluded both that IQ3_S still needed a kernel (it does not, #3884) and
+/// that Q5_1 was unsupported (it is permitted). Add a type here and to the
+/// `matches!` together, or the test fails naming the difference.
+///
+/// #3477: each of these was admitted only once its GEMV kernel existed AND had
+/// been measured against the CPU decoder on real model bytes. Never on the
+/// kernel's existence alone — a whitelist entry without a working kernel is
+/// what `resolve_qtype` used to turn into a silent Q4_K decode (#3850).
+///
+///   F16(1)     217/217 tensors exact, worst cosine 1.00000000, measured at
+///              `88d25d265` — 169 in Qwen2.5-0.5B-Instruct-f16, 48 in
+///              Qwen3.5-4B-UD-Q4_K_XL, enumerated from the files.
+///   IQ4_XS(23) 10/10 tensors exact, cosine 1.00000000, measured at
+///              `b782b4257` — every IQ4_XS tensor in Qwen3.5-4B-UD-Q4_K_XL,
+///              `[2560, 9216]` each.
+///   BF16(30)   0 ULP — BIT-EXACT, 64 rows, RTX 4090 sm_89 (#3908). The only
+///              entry here that is exact rather than within a tolerance, because
+///              bf16 decoding is `bits << 16` reinterpreted and rounds nothing.
+///              Held well-posed by integer-exact data so summation order cannot
+///              matter; ordinary values measured separately at 1.468e-5.
+///
+/// Both families carry their own planted-fault control that goes RED on a
+/// tensor OF THAT TYPE, so the greens are licensed rather than merely
+/// reported: a harness returning MATCH for everything would look identical.
 ///
 /// `inference_result::is_legacy_gguf_quant` (the primary `apr run`/`apr serve`
 /// path gate) and `OwnedQuantizedModel::has_gpu_unsupported_quant` (the
@@ -45,13 +76,161 @@ fn apr_qtype_to_dtype(qtype: u32) -> Result<&'static str> {
 #[inline]
 #[must_use]
 pub(crate) fn gpu_unsupported_quant_qtype(qtype: u32) -> bool {
-    !matches!(qtype, 0 | 2 | 3 | 6 | 8 | 12 | 13 | 14)
+    !matches!(
+        qtype,
+        0 | 1 | 2 | 3 | 6 | 7 | 8 | 10 | 12 | 13 | 14 | 16 | 18 | 20 | 21 | 22 | 23 | 30
+    )
+}
+
+/// #3477 / PMAT-781/783/785: the quantized projections the Qwen3.5 hybrid
+/// (Gated `DeltaNet` + gated attention) forward uploads, by tensor-name stem.
+///
+/// The first five are the Gated `DeltaNet` weights `Qwen35CudaModel::new`
+/// uploads (`attn_qkv`, `ssm_alpha`, `ssm_beta`, `attn_gate`, `ssm_out`); the
+/// rest are the attention-layer and FFN projections the same forward reaches.
+/// `ssm_conv1d` / `ssm_a` / `ssm_dt_bias` / the norms are NOT here: they are
+/// loaded as f32 vectors, never through a GEMV kernel.
+pub(crate) const HYBRID_GPU_PROJECTIONS: [&str; 12] = [
+    "attn_qkv",
+    "ssm_alpha",
+    "ssm_beta",
+    "attn_gate",
+    "ssm_out",
+    "attn_q",
+    "attn_k",
+    "attn_v",
+    "attn_output",
+    "ffn_gate",
+    "ffn_up",
+    "ffn_down",
+];
+
+/// Is this tensor one of the hybrid forward's quantized projections?
+///
+/// Matched on the dot-delimited stem (`blk.0.ssm_alpha.weight` → `ssm_alpha`)
+/// so `attn_q` cannot swallow `attn_q_norm` and `ssm_out` cannot swallow
+/// `ssm_out_something`: a substring test over these names is wrong in both
+/// directions (`attn_q` ⊂ `attn_qkv`).
+fn is_hybrid_gpu_projection(name: &str) -> bool {
+    name.split('.')
+        .any(|part| HYBRID_GPU_PROJECTIONS.contains(&part))
+}
+
+/// The first hybrid projection whose GGML type has no verified GPU GEMV kernel.
+///
+/// The dense gate [`OwnedQuantizedModel::has_gpu_unsupported_quant`] CANNOT see
+/// these tensors: for `qwen35` the `OwnedQuantizedModel` it inspects is the base
+/// built by `Qwen35Model::create_base_model`, whose `layers` is deliberately
+/// EMPTY (the hybrid weights live in `Qwen35Model::layers`), so the dense gate
+/// judges the lm_head and nothing else. Answering from `(name, GGML type)`
+/// pairs makes this gate runnable straight off the GGUF header — before a byte
+/// is uploaded — and testable without a model.
+///
+/// Same policy as the dense gate: anything outside
+/// [`gpu_unsupported_quant_qtype`]'s whitelist would hit the GPU upload's
+/// `resolve_qtype().unwrap_or(Q4K)` and be silently decoded as Q4_K
+/// (PMAT-781/783). `transformer::hybrid_gpu_quant_refusal` is the public
+/// wording of this verdict.
+pub(crate) fn hybrid_gpu_unsupported_quant_tensor<'n>(
+    tensors: impl IntoIterator<Item = (&'n str, u32)>,
+) -> Option<(String, u32)> {
+    tensors
+        .into_iter()
+        .find(|&(name, qtype)| is_hybrid_gpu_projection(name) && gpu_unsupported_quant_qtype(qtype))
+        .map(|(name, qtype)| (name.to_string(), qtype))
+}
+
+#[cfg(test)]
+mod hybrid_gpu_unsupported_quant_tests {
+    use super::{hybrid_gpu_unsupported_quant_tensor, is_hybrid_gpu_projection};
+
+    /// Every Gated `DeltaNet` projection is judged, not just the dense ones.
+    /// Before #3477 the only quant gate was `has_gpu_unsupported_quant`, which
+    /// for qwen35 inspects an EMPTY layer list — so a Q3_K `ssm_alpha` reached
+    /// the GPU upload and was decoded as Q4_K (PMAT-781/783).
+    #[test]
+    fn every_deltanet_projection_is_gpu_unsupported_quant_checked() {
+        for stem in ["attn_qkv", "ssm_alpha", "ssm_beta", "attn_gate", "ssm_out"] {
+            let name = format!("blk.7.{stem}.weight");
+            // Was Q2_K(10) until #3960 measured Q2_K's kernel; IQ1_S(19) has none.
+            assert_eq!(
+                hybrid_gpu_unsupported_quant_tensor([(name.as_str(), 19u32)]),
+                Some((name.clone(), 19)),
+                "{stem}: IQ1_S has no GPU GEMV kernel"
+            );
+            assert_eq!(
+                hybrid_gpu_unsupported_quant_tensor([(name.as_str(), 12u32)]),
+                None,
+                "{stem}: Q4_K does have one"
+            );
+        }
+    }
+
+    /// A tensor the hybrid forward never sends through a GEMV kernel must not
+    /// veto the GPU: `ssm_conv1d` / `ssm_a` / the norms are f32 vectors, and an
+    /// f32 tensor is whitelisted anyway — but a name-keyed gate that matched
+    /// them would refuse on any future non-f32 storage for no reason.
+    #[test]
+    fn non_projection_tensors_are_not_gpu_unsupported_quant_vetoes() {
+        for name in [
+            "blk.0.ssm_conv1d.weight",
+            "blk.0.ssm_a",
+            "blk.0.ssm_dt_bias",
+            "blk.0.ssm_norm.weight",
+            "blk.0.attn_norm.weight",
+            "token_embd.weight",
+        ] {
+            assert!(
+                !is_hybrid_gpu_projection(name),
+                "{name} is not a GEMV projection"
+            );
+            assert_eq!(hybrid_gpu_unsupported_quant_tensor([(name, 11u32)]), None);
+        }
+    }
+
+    /// The stem match is exact per dot-delimited part: `attn_q` is a PREFIX of
+    /// `attn_qkv` and `attn_q_norm`, so a `contains` test would both mis-name
+    /// the offending tensor and drag a per-head norm into the projection set.
+    #[test]
+    fn gpu_unsupported_quant_stems_match_whole_name_parts_only() {
+        assert!(is_hybrid_gpu_projection("blk.0.attn_qkv.weight"));
+        assert!(is_hybrid_gpu_projection("blk.0.attn_q.weight"));
+        assert!(!is_hybrid_gpu_projection("blk.0.attn_q_norm.weight"));
+        assert!(!is_hybrid_gpu_projection("blk.0.ssm_outer.weight"));
+    }
+
+    /// The FIRST offending tensor is reported, and a clean model returns None.
+    #[test]
+    fn gpu_unsupported_quant_reports_the_first_offender() {
+        assert_eq!(
+            hybrid_gpu_unsupported_quant_tensor([
+                ("blk.0.attn_qkv.weight", 8u32),
+                ("blk.0.ssm_beta.weight", 15),
+                ("blk.1.ssm_out.weight", 7),
+            ]),
+            Some(("blk.0.ssm_beta.weight".to_string(), 15)),
+            "Q8_K (15) is the first tensor without a kernel"
+        );
+        assert_eq!(
+            hybrid_gpu_unsupported_quant_tensor([
+                ("blk.0.attn_qkv.weight", 8u32),
+                ("blk.0.ssm_beta.weight", 13),
+                ("blk.0.ffn_down.weight", 14),
+                ("output.weight", 12),
+            ]),
+            None
+        );
+        assert_eq!(
+            hybrid_gpu_unsupported_quant_tensor(Vec::<(&str, u32)>::new()),
+            None
+        );
+    }
 }
 
 /// GH-321: Convert APR dtype string to byte using unified enum.
 /// GH-191 FIX: Use GGML dtype values directly so they match TensorEntry::from_binary reader.
 fn apr_dtype_to_byte(dtype: &str) -> u8 {
-    crate::gguf::GgmlQuantType::from_str_lossy(dtype).map_or_else(
+    crate::gguf::admitted_from_name(dtype).map_or_else(
         || {
             eprintln!(
                 "WARN: Unknown dtype '{}' in dtype_to_byte, writing as F32",
@@ -109,27 +288,43 @@ impl OwnedQuantizedModel {
     /// (`OwnedQuantizedModelCuda::with_max_seq_len` → `check_quant_gpu_capability`)
     /// is protected by this single check, so an unsupported-quant model routes
     /// to CPU (loud) or errors rather than shipping GPU garbage.
+    ///
+    /// #3477 — what this gate CANNOT see: the Qwen3.5 hybrid. Its
+    /// `OwnedQuantizedModel` is the base built by
+    /// `Qwen35Model::create_base_model`, whose `layers` is deliberately empty
+    /// (the Gated DeltaNet weights live in `Qwen35Model::layers`), so the loop
+    /// below inspects the lm_head alone. The hybrid tensors are judged by the
+    /// header-level [`hybrid_gpu_unsupported_quant_tensor`] against the same
+    /// whitelist; do not read a `false` here as "this hybrid model is GPU-safe".
     #[must_use]
     pub(crate) fn has_gpu_unsupported_quant(&self) -> bool {
-        if gpu_unsupported_quant_qtype(self.lm_head_weight.qtype) {
-            return true;
+        self.first_gpu_unsupported_quant().is_some()
+    }
+
+    /// #3685: the first GGML quant type, among the tensors the GPU-resident forward reads,
+    /// that has no verified GPU GEMV kernel, or `None` when every one is GPU-eligible.
+    ///
+    /// The same tensors, order and whitelist as [`Self::has_gpu_unsupported_quant`], which
+    /// is defined through this, so the two cannot drift. It exists so that a caller refused
+    /// by the PMAT-785 capability gate can NAME the type (`apr parity` reports
+    /// `quant=F16`) instead of re-deriving the whitelist.
+    #[must_use]
+    pub fn first_gpu_unsupported_quant(&self) -> Option<u32> {
+        let bad = |q: u32| gpu_unsupported_quant_qtype(q).then_some(q);
+        if let Some(q) = bad(self.lm_head_weight.qtype) {
+            return Some(q);
         }
-        self.layers.iter().any(|l| {
-            let qkv_bad = match &l.qkv_weight {
-                OwnedQKVWeights::Fused(t) => gpu_unsupported_quant_qtype(t.qtype),
+        self.layers.iter().find_map(|l| {
+            let qkv = match &l.qkv_weight {
+                OwnedQKVWeights::Fused(t) => bad(t.qtype),
                 OwnedQKVWeights::Separate { q, k, v } => {
-                    gpu_unsupported_quant_qtype(q.qtype)
-                        || gpu_unsupported_quant_qtype(k.qtype)
-                        || gpu_unsupported_quant_qtype(v.qtype)
+                    bad(q.qtype).or_else(|| bad(k.qtype)).or_else(|| bad(v.qtype))
                 },
             };
-            qkv_bad
-                || gpu_unsupported_quant_qtype(l.attn_output_weight.qtype)
-                || gpu_unsupported_quant_qtype(l.ffn_up_weight.qtype)
-                || gpu_unsupported_quant_qtype(l.ffn_down_weight.qtype)
-                || l.ffn_gate_weight
-                    .as_ref()
-                    .is_some_and(|g| gpu_unsupported_quant_qtype(g.qtype))
+            qkv.or_else(|| bad(l.attn_output_weight.qtype))
+                .or_else(|| bad(l.ffn_up_weight.qtype))
+                .or_else(|| bad(l.ffn_down_weight.qtype))
+                .or_else(|| l.ffn_gate_weight.as_ref().and_then(|g| bad(g.qtype)))
         })
     }
 
@@ -186,9 +381,7 @@ impl OwnedQuantizedModel {
             let offset = tensor_data_bytes.len() as u64;
             let size = data.len() as u64;
 
-            tensor_index_bytes.extend(write_apr_tensor_entry(
-                name, dtype, shape, offset, size,
-            ));
+            tensor_index_bytes.extend(write_apr_tensor_entry(name, dtype, shape, offset, size));
 
             tensor_data_bytes.extend_from_slice(data);
         }
@@ -377,3 +570,87 @@ impl OwnedQuantizedModel {
 
 include!("embedding.rs");
 include!("loader_apr_quantized.rs");
+
+// PMAT-3430 Q1-c: the characterization snapshot for this module's two admission
+// boundaries. A child module, so it reaches the private fns without widening
+// anything. This `mod` line is the only non-test edit Phase 1 makes here.
+#[cfg(test)]
+#[path = "dtype_characterization_tests.rs"]
+mod dtype_characterization_tests;
+
+// #3931: the prose whitelist above and the `matches!` below are two recordings of
+// one fact, and they had drifted. This is the third instance of that class in the
+// tree (#3894 is the first two). A comment cannot be compiled, so it is parsed.
+#[cfg(test)]
+mod prose_whitelist_tests_3931 {
+    use super::gpu_unsupported_quant_qtype;
+
+    /// Every `N=NAME` pair in the doc comment's "whitelist of GPU-eligible types
+    /// is exactly:" sentence, as a set of type numbers.
+    fn prose_whitelist() -> std::collections::BTreeSet<u32> {
+        let src = include_str!("dtype.rs");
+        let after = src
+            .split("The whitelist of GPU-eligible types is exactly:")
+            .nth(1)
+            .expect("the doc comment's whitelist sentence must exist — if it was \
+                     renamed, rename it here too rather than deleting this test");
+        // The list runs to the sentence that follows it.
+        let list = after
+            .split("Everything else")
+            .next()
+            .expect("the list is terminated by the 'Everything else' sentence");
+        let mut out = std::collections::BTreeSet::new();
+        for tok in list.split(|c: char| c == ',' || c == '.' || c.is_whitespace()) {
+            if let Some((n, name)) = tok.split_once('=') {
+                if let Ok(n) = n.trim().parse::<u32>() {
+                    assert!(!name.is_empty(), "type {n} in the prose has no name");
+                    out.insert(n);
+                }
+            }
+        }
+        assert!(
+            out.len() >= 5,
+            "parsed only {} entries from the prose — the format changed and this \
+             test would have passed vacuously",
+            out.len()
+        );
+        out
+    }
+
+    /// The set the CODE permits, over every type id ggml defines.
+    fn expression_whitelist() -> std::collections::BTreeSet<u32> {
+        (0..=39u32).filter(|&q| !gpu_unsupported_quant_qtype(q)).collect()
+    }
+
+    #[test]
+    fn the_prose_whitelist_equals_the_expression() {
+        let prose = prose_whitelist();
+        let code = expression_whitelist();
+        let prose_only: Vec<_> = prose.difference(&code).copied().collect();
+        let code_only: Vec<_> = code.difference(&prose).copied().collect();
+        assert!(
+            prose_only.is_empty() && code_only.is_empty(),
+            "the doc comment and the `matches!` disagree.\n  \
+             named in the prose but NOT permitted by the code: {prose_only:?}\n  \
+             permitted by the code but NOT named in the prose: {code_only:?}\n\
+             Update both together — this file calls itself the single source of truth."
+        );
+    }
+
+    /// The parser must be able to SEE a difference, or the test above is a
+    /// count of nothing. Feeding it a set that differs by one must fail.
+    #[test]
+    fn the_comparison_can_detect_a_difference() {
+        let mut tampered = expression_whitelist();
+        tampered.insert(99);
+        assert_ne!(
+            tampered,
+            expression_whitelist(),
+            "the set comparison cannot distinguish two different sets"
+        );
+        let real = expression_whitelist();
+        assert!(!real.contains(&99), "99 is not a real ggml type");
+        assert!(real.contains(&21), "IQ3_S(21) is permitted — #3884 admitted it");
+        assert!(!real.contains(&17), "IQ2_XS(17) is NOT permitted — no kernel");
+    }
+}

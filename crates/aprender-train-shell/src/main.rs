@@ -7,7 +7,7 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(name = "entrenar-shell")]
 #[command(about = "Interactive REPL for HuggingFace model exploration and distillation")]
-#[command(version)]
+#[command(version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("APR_GIT_SHA"), ")"))]
 struct Cli {
     /// Load session from file
     #[arg(short, long)]
@@ -29,8 +29,14 @@ fn main() {
                 s
             }
             Err(e) => {
-                eprintln!("Failed to load session: {e}");
-                SessionState::new()
+                // #2519: this used to `eprintln!` and fall through to
+                // `SessionState::new()`, so `--session <garbage>` exited 0 and
+                // the user got a silently different session from the one they
+                // named. Now that `load` also REJECTS unprovenanced models, a
+                // fail-open here would hand the rejected session straight back
+                // as "success with no models". Fail closed.
+                eprintln!("Failed to load session from {}: {e}", path.display());
+                std::process::exit(1);
             }
         }
     } else {

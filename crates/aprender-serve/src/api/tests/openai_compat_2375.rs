@@ -141,6 +141,7 @@ async fn completion_sse_frames_reassemble_to_the_completion_text() {
 
     let text = "The quick brown fox\njumps over the lazy dog.";
     let response = CompletionResponse {
+        used_gpu: None,
         id: "cmpl-test".to_string(),
         object: "text_completion".to_string(),
         created: 1,
@@ -320,6 +321,10 @@ async fn true_streaming_terminal_chunk_distinguishes_length_from_stop() {
             Arc::new(crate::metrics::MetricsCollector::new()),
             std::time::Instant::now(),
             max_tokens,
+            // No prompt was tokenized in this fixture; the terminal chunk's
+            // usage reports the truth (0 prompt tokens), not a guess.
+            0,
+            None,
         );
         let body = body_text(response).await;
         sse_payloads(&body)

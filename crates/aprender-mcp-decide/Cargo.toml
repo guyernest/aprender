@@ -27,7 +27,7 @@ path = "src/main.rs"
 # The verified decision path: Decider (minted only by the decide-apr-v1 load ladder),
 # prepare / classify_prepared and the model identity. This server is a TRANSPORT over
 # that one implementation — it re-implements nothing (OPS-03).
-aprender-decide = { path = "../aprender-decide", version = "0.63.0" }
+aprender-decide = { path = "../aprender-decide", version = "0.69.3" }
 # PAIML's Rust MCP SDK, on the line the workspace already resolves (2.19.3 in
 # Cargo.lock, the version decide-tool-boundary-v1 cites for its transport ceilings).
 # `schema-generation` powers `tool_typed_with_description`; `streamable-http` is what

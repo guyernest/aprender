@@ -2,6 +2,7 @@
 #[test]
 fn test_chat_completion_response_serialize_cov() {
     let resp = ChatCompletionResponse {
+        used_gpu: None,
         id: "chatcmpl-123".to_string(),
         object: "chat.completion".to_string(),
         created: 1677652288,
@@ -25,6 +26,7 @@ fn test_chat_completion_response_serialize_cov() {
         brick_trace: None,
         step_trace: None,
         layer_trace: None,
+    timings: None,
     };
     let json = serde_json::to_string(&resp).expect("serialize");
     assert!(json.contains("chatcmpl-123"));
@@ -46,6 +48,9 @@ fn test_chat_completion_chunk_serialize_cov() {
             },
             finish_reason: None,
         }],
+    stream_mode: None,
+    usage: None,
+    timings: None,
     };
     let json = serde_json::to_string(&chunk).expect("serialize");
     assert!(json.contains("chunk"));

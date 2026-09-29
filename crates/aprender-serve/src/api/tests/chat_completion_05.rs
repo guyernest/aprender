@@ -29,6 +29,7 @@ fn test_chat_completion_request_debug() {
 #[test]
 fn test_chat_completion_response_debug() {
     let resp = ChatCompletionResponse {
+        used_gpu: None,
         id: "id".to_string(),
         object: "chat.completion".to_string(),
         created: 0,
@@ -42,6 +43,7 @@ fn test_chat_completion_response_debug() {
         brick_trace: None,
         step_trace: None,
         layer_trace: None,
+    timings: None,
     };
     let debug = format!("{:?}", resp);
     assert!(debug.contains("ChatCompletionResponse"));
@@ -50,6 +52,7 @@ fn test_chat_completion_response_debug() {
 #[test]
 fn test_chat_completion_response_with_traces() {
     let resp = ChatCompletionResponse {
+        used_gpu: None,
         id: "id".to_string(),
         object: "chat.completion".to_string(),
         created: 123,
@@ -69,6 +72,7 @@ fn test_chat_completion_response_with_traces() {
         }),
         step_trace: None,
         layer_trace: None,
+    timings: None,
     };
     let json = serde_json::to_string(&resp).expect("JSON serialization failed");
     assert!(json.contains("brick"));

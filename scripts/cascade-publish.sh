@@ -32,8 +32,8 @@ REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
 # Tier definitions per SPEC-HF-PUBLISH-001 § crates.io release cascade.
 declare -A TIERS
-TIERS[1]="apr-format aprender-contracts-macros aprender-quant aprender-gemm-codegen aprender-sparse aprender-solve aprender-rand aprender-fft aprender-image aprender-tensor aprender-cupti"
-TIERS[2]="aprender-contracts aprender-core aprender-profile-core aprender-graph"
+TIERS[1]="aprender-update apr-format aprender-build-sha aprender-contracts-macros aprender-quant aprender-gemm-codegen aprender-sparse aprender-solve aprender-rand aprender-fft aprender-image aprender-tensor aprender-cupti"
+TIERS[2]="aprender-contracts aprender-core aprender-profile-core aprender-graph aprender-contrastive-data"
 TIERS[3]="aprender-profile"
 TIERS[4]="aprender-gpu"
 TIERS[5]="aprender-cuda-edge aprender-cgp"
@@ -138,10 +138,11 @@ version_live() {
   elif [ "$n" -eq 3 ]; then p="3/${crate:0:1}/${crate}"
   else p="${crate:0:2}/${crate:2:2}/${crate}"
   fi
-  curl -s --retry 3 --retry-delay 2 \
+  local idx
+  idx=$(curl -s --retry 3 --retry-delay 2 \
     -H "User-Agent: aprender-cascade-publish (release automation)" \
-    "https://index.crates.io/${p}" 2>/dev/null \
-    | grep -qF "\"vers\":\"${want}\""
+    "https://index.crates.io/${p}" 2>/dev/null) || idx=''
+  grep -qF "\"vers\":\"${want}\"" <<< "$idx"
 }
 
 # PUBLISH ORDER AS A PRECONDITION, NOT AS A COMMENT.
@@ -159,13 +160,86 @@ version_live() {
 # A crate with no `upstream =` line (the lib-only signpost facade, which has no
 # dependencies at all) is ready by construction — that independence is stated in
 # its manifest and is what makes it publishable at any point in the cascade.
+# WHICH FACADES MUST HAVE AN UPSTREAM (aprender#2628).
+#
+# The previous implementation read the requirement with a line-shaped `sed` and
+# treated "I could not parse one" as "there is none to order against" -- it
+# returned READY. MEASURED: `cargo` accepts the inline and the multi-line
+# dependency table as IDENTICAL (`cargo metadata` returns the same
+# `('aprender-contracts','upstream','^0.63.0')` for both), while the sed parses
+# only the inline spelling. So rewriting
+#
+#   upstream = { path = "...", version = "0.63.0", package = "aprender-contracts" }
+# as
+#   [dependencies.upstream]
+#   path = "..."
+#   version = "0.63.0"
+#   package = "aprender-contracts"
+#
+# -- a semantically null edit that `cargo add` itself can produce and that no
+# reviewer would flag -- silently DISARMED this gate, and the cascade would
+# upload a facade before its upstream: a crate nobody can compile, on an
+# append-only registry.
+#
+# Two changes close it, and the second matters more than the first:
+#   1. Resolve the requirement with `cargo metadata`, the authority on what a
+#      manifest MEANS, instead of a regex over one of its spellings.
+#   2. Assert POSITIVELY. Absence of evidence must not read as evidence of
+#      absence: a facade named here that resolves to no upstream is a FAILURE,
+#      not a pass. `provable-contracts-cli` is deliberately absent from the list
+#      -- it is the lib-only signpost facade with no [dependencies] at all, which
+#      check_facade_compat.sh row R3 enforces from the other direction.
+FACADE_EXPECTS_UPSTREAM="provable-contracts provable-contracts-macros"
+
+# Resolve a facade's upstream (name and required version) from cargo itself.
+# Echoes "<name> <version>" or nothing. The dependency is identified by its
+# RENAME (`upstream`), which is how the manifest refers to it, so this does not
+# depend on the dependency's spelling or position in the file.
+facade_upstream_of() {
+  local manifest=$1 pkg=$2
+  cargo metadata --format-version 1 --no-deps --manifest-path "$manifest" 2>/dev/null \
+    | PKG="$pkg" python3 -c '
+import json, os, sys
+try:
+    meta = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+want = os.environ["PKG"]
+for p in meta.get("packages", []):
+    if p.get("name") != want:
+        continue
+    for d in p.get("dependencies", []):
+        if d.get("rename") == "upstream":
+            req = (d.get("req") or "").lstrip("^~=v ").strip()
+            if d.get("name") and req:
+                print(d["name"], req)
+            sys.exit(0)
+' 2>/dev/null
+}
+
 facade_upstream_ready() {
-  local crate=$1 manifest=${MANIFEST[$1]:-} up_name up_ver
+  local crate=$1 manifest=${MANIFEST[$1]:-} resolved up_name up_ver expected=0
   [ -n "$manifest" ] || return 0
-  up_name=$(sed -n 's/^upstream *=.*package *= *"\([^"]*\)".*/\1/p' "$manifest" 2>/dev/null | head -1)
-  up_ver=$(sed -n 's/^upstream *=.*version *= *"\([^"]*\)".*/\1/p' "$manifest" 2>/dev/null | head -1)
-  # No upstream requirement -> nothing to order against.
-  [ -n "$up_name" ] && [ -n "$up_ver" ] || return 0
+
+  case " $FACADE_EXPECTS_UPSTREAM " in *" $crate "*) expected=1 ;; esac
+
+  resolved=$(facade_upstream_of "$manifest" "$crate")
+  up_name=${resolved%% *}
+  up_ver=${resolved##* }
+
+  if [ -z "$resolved" ] || [ -z "$up_name" ] || [ -z "$up_ver" ]; then
+    if [ "$expected" -eq 1 ]; then
+      # The gate could not answer the question it exists to answer. Refuse.
+      echo "ORDER-FAIL ($crate is declared to require an upstream, but cargo"
+      echo "            resolved none from $manifest -- refusing to publish"
+      echo "            rather than assuming there is nothing to order against;"
+      echo "            see aprender#2628)"
+      return 1
+    fi
+    # Not expected to have one (the lib-only signpost facade): ready by design.
+    return 0
+  fi
+
   if version_live "$up_name" "$up_ver"; then
     return 0
   fi
@@ -197,14 +271,27 @@ publish_crate() {
     sel=(--manifest-path "${MANIFEST[$crate]}")
   fi
   local out
-  out=$(cargo publish "${sel[@]}" --allow-dirty --locked 2>&1 | tail -6)
-  if echo "$out" | grep -q "Published $crate"; then
+  # No dirty-tree override here: scripts/check_publish_preflight.sh proved the tree
+  # clean before the first upload (F-9, PMAT-745); a dirty tree stops the cascade there.
+  # cargo's OWN exit status, read from the command: `cmd | tail -6` handed back
+  # tail's status, so the verdict below came from six lines of text alone. Two
+  # independent review lanes on #2859 reached this line. A zero exit without the
+  # `Published` line is not counted as published either -- it is deferred and
+  # named, so a drain pass asks again.
+  local log rc
+  log=$(mktemp "${TMPDIR:-/tmp}/cascade-publish.XXXXXX") || { echo "FATAL-ENV (mktemp failed; nothing uploaded for $crate)"; return 1; }
+  cargo publish "${sel[@]}" --locked > "$log" 2>&1; rc=$?
+  out=$(tail -6 "$log"); rm -f "$log"
+  if [ "$rc" -eq 0 ] && grep -q "Published $crate" <<< "$out" ; then
     echo "✓ PUBLISHED"
     sleep 10  # let crates.io index settle before dependents try to fetch
     return 0
-  elif echo "$out" | grep -qE "already.*upload|already exists"; then
+  elif grep -qE "already.*upload|already exists" <<< "$out" ; then
     echo "(already on registry)"
     return 0
+  elif [ "$rc" -eq 0 ]; then
+    echo "DEFER (cargo publish exited 0 but printed no 'Published $crate' line — not counted as published)"
+    return 1
   # Surface the two FATAL classes that are NOT dep-ordering deferrals — a bare
   # "Caused by:" truncation hid both for ~2h in the v0.60.0 cascade:
   #   1. 403 authentication failed — a STALE $CARGO_REGISTRY_TOKEN env var
@@ -214,10 +301,10 @@ publish_crate() {
   #      [patch.crates-io] in .cargo/config.toml points at ../<repo> paths that
   #      don't exist in a worktree. Fix: remove .cargo/config.toml before publish
   #      (the consolidated monorepo resolves siblings via in-tree path deps).
-  elif echo "$out" | grep -qiE "403|authentication failed"; then
+  elif grep -qiE "403|authentication failed" <<< "$out" ; then
     echo "FATAL-AUTH (403 — unset stale \$CARGO_REGISTRY_TOKEN; use ~/.cargo/credentials.toml)"
     return 1
-  elif echo "$out" | grep -qiE "failed to load source|no such file or directory"; then
+  elif grep -qiE "failed to load source|no such file or directory" <<< "$out" ; then
     echo "FATAL-CONFIG (dev [patch.crates-io] in .cargo/config.toml — remove it before publish)"
     return 1
   else
@@ -230,12 +317,333 @@ publish_crate() {
   fi
 }
 
-# Backup .cargo/config.toml once (publish needs a clean one without [patch.crates-io])
+# ==========================================================================
+# THE CLEAN-ROOM GATE (PMAT-3318). The cascade refuses to start unless
+# `clean-room.yml` is green on EXACTLY the tag's commit. Fail-closed, no flag,
+# no environment bypass.
+#
+# WHY: clean-room was the first gate named in the release doctrine and was
+# enforced nowhere -- none of the publish/cascade scripts referenced it. It ran
+# red 8/8 from 2026-09-08 to 2026-09-15 and v0.66.0 and v0.67.0 both shipped
+# over it.
+#
+# WHAT A RUN ACTUALLY TESTED. The workflow lives in paiml/infra, and the job
+# does `git clone --depth 1 git@github.com:paiml/aprender.git`: it tests
+# aprender's main HEAD AT CLONE TIME. A run's `headSha` is an INFRA commit, so
+# comparing it to an aprender tag would compare two repositories. MEASURED
+# (infra run 34915682258, job 104212693804): the only record of the aprender
+# commit is one line printed by infra's Makefile `_copy-source`,
+#
+#     2026-09-15T01:06:22.6420228Z     commit:  030d9b14
+#
+# (`git rev-parse --short HEAD` of the clone). The result CSV has no sha column
+# and no per-repo artifact is uploaded. So the gate reads that line from the
+# job log, and it reads it STRICTLY: exactly one such line, 7-40 hex chars,
+# which must resolve in THIS repository to exactly the tag commit
+# (`git rev-parse --verify <abbrev>^{commit}` refuses an ambiguous prefix).
+# Zero lines, two different lines, or a changed format all REFUSE -- if infra
+# rewords the line, the release stops; it never silently passes.
+#
+# THE STRUCTURED RECORD (infra#621/#622, PMAT-3318) is that durable fix, and it
+# is PREFERRED over the log line wherever it exists. infra's clean-room job now
+# runs `Assert the commit under test` immediately after the clone: it refuses to
+# build anything that is not the dispatched ref, and it records the tested
+# commit as a full 40-char sha in three places -- the results.csv `tested_sha`
+# column, the step summary, and the line
+#
+#     2026-09-16T00:52:43.0000000Z     tested-sha: <40 hex>
+#
+# in the JOB LOG. The gate reads the log copy, and only that copy, because it is
+# the one that is BOTH per-run and reachable: results.csv holds one row per
+# repo (the latest run, not this run) and the step summary text is not exposed
+# by any REST endpoint. Reading it costs no new API surface -- it is the same
+# `actions/jobs/<id>/logs` response the abbreviation is parsed from.
+#
+# PRECEDENCE, and what each path still has to prove:
+#   structured present -> it must be a full 40-char LOWERCASE sha (an
+#     abbreviation in that field is a refusal: being unabbreviated is the whole
+#     point of the column), the `Assert the commit under test` step must itself
+#     have concluded success (a recorded sha whose assertion did not pass is
+#     not evidence), and if the old log line is there too the two must agree --
+#     a disagreement REFUSES and prints both.
+#   structured absent -> the strict log-line parse above, unchanged.
+#   neither -> REFUSE, exactly as before.
+# No path is looser than the one it replaces: all of them still require exactly
+# one `clean-room (aprender)` job, conclusion `success`, and a tested commit
+# EQUAL to the tag commit.
+#
+# Everything the gate cannot prove is a refusal: no run, a run still queued or
+# in progress, cancelled or failed, a different sha, gh unauthenticated or
+# erroring, any output it cannot parse. The repository, workflow and job name
+# are literals, not parameters: an override would be a bypass.
+# ==========================================================================
+
+# stdin: `gh run list --json databaseId,status,conclusion,createdAt`.
+# $1: the tag commit's committer time (epoch). A run CREATED before the commit
+# existed cannot have cloned it. Prints one TSV row per run:
+#   <id> <status> <conclusion|none> <createdAt> <after|before>
+# Exits 3 on anything that is not that shape.
+clean_room_parse_runs() {
+  python3 -c '
+import json, sys
+from datetime import datetime, timezone
+try:
+    since = int(sys.argv[1])
+    runs = json.load(sys.stdin)
+    if not isinstance(runs, list):
+        raise ValueError("run list is not a JSON array")
+    rows = []
+    for r in runs:
+        rid = r["databaseId"]
+        if isinstance(rid, bool) or not isinstance(rid, int):
+            raise ValueError("databaseId is not an integer")
+        created = datetime.strptime(r["createdAt"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        side = "after" if created.timestamp() >= since else "before"
+        rows.append("%d\t%s\t%s\t%s\t%s" % (rid, str(r["status"]), r.get("conclusion") or "none", r["createdAt"], side))
+except Exception as e:
+    print("clean-room: unparseable run list: %s" % e, file=sys.stderr)
+    sys.exit(3)
+for row in rows:
+    print(row)
+' "$1"
+}
+
+# stdin: `gh run view <id> --json jobs`. $1: the exact job name, $2: the exact
+# name of the step that asserts the tested commit.
+# Prints "<job id> <status> <conclusion|none> <assert state>" for that job, or
+# NONE. The assert state is "<status>/<conclusion>", or `absent` when the job
+# has no such step (every run before infra#622), or `ambiguous` when it has
+# more than one -- both of which the gate refuses to read a structured sha
+# through. Exits 3 on malformed input or on more than one job of that name.
+clean_room_parse_job() {
+  python3 -c '
+import json, sys
+try:
+    jobs = json.load(sys.stdin)["jobs"]
+    if not isinstance(jobs, list):
+        raise ValueError("jobs is not a JSON array")
+    hits = [j for j in jobs if j.get("name") == sys.argv[1]]
+    if len(hits) > 1:
+        raise ValueError("%d jobs named %r" % (len(hits), sys.argv[1]))
+    row = None
+    if hits:
+        jid = hits[0]["databaseId"]
+        if isinstance(jid, bool) or not isinstance(jid, int):
+            raise ValueError("job databaseId is not an integer")
+        steps = hits[0].get("steps")
+        if steps is None:
+            state = "absent"
+        elif not isinstance(steps, list):
+            raise ValueError("steps is not a JSON array")
+        else:
+            hit = [st for st in steps if st.get("name") == sys.argv[2]]
+            if len(hit) > 1:
+                state = "ambiguous"
+            elif not hit:
+                state = "absent"
+            else:
+                state = "%s/%s" % (str(hit[0].get("status")), hit[0].get("conclusion") or "none")
+        row = "%d\t%s\t%s\t%s" % (jid, str(hits[0]["status"]), hits[0].get("conclusion") or "none", state)
+except Exception as e:
+    print("clean-room: unparseable jobs: %s" % e, file=sys.stderr)
+    sys.exit(3)
+print(row if row else "NONE")
+' "$1" "$2"
+}
+
+# stdin: a clean-room job log. Prints the DISTINCT aprender commits the log
+# says it copied into the container -- the `_copy-source` line, optionally
+# preceded by the Actions timestamp. Nothing else in the log is trusted.
+clean_room_tested_abbrevs() {
+  tr -d '\r' \
+    | { grep -E '^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z )?    commit:  [0-9a-f]{7,40}$' || true; } \
+    | sed -E 's/^.*    commit:  //' \
+    | sort -u
+}
+
+# stdin: a clean-room job log. Prints the DISTINCT values infra's
+# `Assert the commit under test` step recorded as the tested commit -- the
+# structured `tested-sha:` field (infra#621/#622), whatever it says. The value
+# is captured LOOSELY and validated by the caller ON PURPOSE: a truncated or
+# uppercased field has to reach the gate as a malformed record it can refuse by
+# name, not vanish and read as "this run predates the structured record".
+clean_room_tested_shas() {
+  tr -d '\r' \
+    | { grep -E '^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z )?[[:space:]]*tested-sha: .+$' || true; } \
+    | sed -E 's/^.*tested-sha: //' \
+    | sed -E 's/[[:space:]]+$//' \
+    | sort -u
+}
+
+# clean_room_gate ROOT TAG -- 0 only when a completed `clean-room (aprender)`
+# job, whose log records exactly one tested commit resolving to TAG's commit,
+# concluded `success`. Every other outcome prints a REFUSE line and returns 1.
+clean_room_gate() {
+  local root=$1 tag=$2
+  local repo="paiml/infra" workflow="clean-room.yml" job_name="clean-room (aprender)"
+  local assert_step="Assert the commit under test"
+  local want epoch runs_json runs examined=0 seen=""
+  local rid rstatus rconcl rcreated side jobs_json job jid jstatus jconcl jassert
+  local log abbrevs n shas ns malformed agrees tested tdisp tsource resolved
+
+  want=$(git -C "$root" rev-parse --verify --quiet "refs/tags/${tag}^{commit}" 2>/dev/null) || want=""
+  if [ -z "$want" ]; then
+    echo "CLEAN-ROOM REFUSE: tag $tag does not resolve to a commit in $root -- cannot prove clean-room ran on it"
+    return 1
+  fi
+  epoch=$(git -C "$root" log -1 --format=%ct "$want" 2>/dev/null) || epoch=""
+  case "$epoch" in
+    ''|*[!0-9]*) echo "CLEAN-ROOM REFUSE: looked for $want (tag $tag); could not read its commit time"; return 1 ;;
+  esac
+  if ! gh auth status >/dev/null 2>&1; then
+    echo "CLEAN-ROOM REFUSE: looked for $want (tag $tag); gh is unauthenticated or erroring -- cannot prove clean-room ran on it"
+    return 1
+  fi
+  if ! runs_json=$(gh run list --repo "$repo" --workflow "$workflow" --limit 30 \
+        --json databaseId,status,conclusion,createdAt 2>/dev/null); then
+    echo "CLEAN-ROOM REFUSE: looked for $want (tag $tag); gh run list --repo $repo --workflow $workflow failed"
+    return 1
+  fi
+  if ! runs=$(clean_room_parse_runs "$epoch" <<< "$runs_json" 2>/dev/null); then
+    echo "CLEAN-ROOM REFUSE: looked for $want (tag $tag); the $workflow run list could not be parsed"
+    return 1
+  fi
+
+  while IFS=$'\t' read -r rid rstatus rconcl rcreated side; do
+    [ -n "$rid" ] || continue
+    [ "$side" = "after" ] || continue
+    examined=$((examined + 1))
+    if ! jobs_json=$(gh run view "$rid" --repo "$repo" --json jobs 2>/dev/null); then
+      echo "CLEAN-ROOM REFUSE: looked for $want (tag $tag); gh run view $rid failed"
+      return 1
+    fi
+    if ! job=$(clean_room_parse_job "$job_name" "$assert_step" <<< "$jobs_json" 2>/dev/null); then
+      echo "CLEAN-ROOM REFUSE: looked for $want (tag $tag); the jobs of run $rid could not be parsed"
+      return 1
+    fi
+    if [ "$job" = "NONE" ]; then
+      seen="$seen"$'\n'"  - run $rid ($rstatus/$rconcl, $rcreated): no '$job_name' job"
+      continue
+    fi
+    IFS=$'\t' read -r jid jstatus jconcl jassert <<< "$job"
+    if [ "$jstatus" != "completed" ]; then
+      seen="$seen"$'\n'"  - run $rid job $jid: $jstatus -- tested sha unknown, conclusion=$jconcl"
+      continue
+    fi
+    if ! log=$(gh api "repos/$repo/actions/jobs/$jid/logs" 2>/dev/null); then
+      echo "CLEAN-ROOM REFUSE: looked for $want (tag $tag); could not read the log of run $rid job $jid"
+      return 1
+    fi
+    shas=$(clean_room_tested_shas <<< "$log")
+    ns=$(grep -c . <<< "$shas" || true); ns=${ns:-0}
+    abbrevs=$(clean_room_tested_abbrevs <<< "$log")
+    n=$(grep -c . <<< "$abbrevs" || true); n=${n:-0}
+    tested=""; tdisp=""; tsource=""; resolved=""
+
+    if [ "$ns" -gt 1 ]; then
+      seen="$seen"$'\n'"  - run $rid job $jid: $ns structured tested-sha record(s) in the log (need exactly 1), conclusion=$jconcl"
+      continue
+    fi
+    if [ "$ns" -eq 1 ]; then
+      # The structured record wins -- after it proves it is what it claims.
+      malformed=0
+      case "${#shas}" in 40) : ;; *) malformed=1 ;; esac
+      case "$shas" in *[!0-9a-f]*) malformed=1 ;; esac
+      if [ "$malformed" -ne 0 ]; then
+        seen="$seen"$'\n'"  - run $rid job $jid: structured tested-sha '$shas' is not a full 40-char lowercase sha, conclusion=$jconcl"
+        continue
+      fi
+      if [ "$jassert" != "completed/success" ]; then
+        seen="$seen"$'\n'"  - run $rid job $jid: structured tested-sha $shas but the '$assert_step' step is $jassert (need completed/success), conclusion=$jconcl"
+        continue
+      fi
+      if [ "$n" -gt 1 ]; then
+        seen="$seen"$'\n'"  - run $rid job $jid: $n tested-commit record(s) in the log beside structured tested-sha $shas, conclusion=$jconcl"
+        continue
+      fi
+      # The abbreviation is `git rev-parse --short HEAD` of the SAME clone, so
+      # agreement is exactly "the log line is a prefix of the structured sha".
+      # A quoted glob, not a substring expansion: the latter is SC2299.
+      agrees=0
+      case "$shas" in "$abbrevs"*) agrees=1 ;; esac
+      if [ "$n" -eq 1 ] && [ "$agrees" -ne 1 ]; then
+        seen="$seen"$'\n'"  - run $rid job $jid: the two records disagree -- structured tested-sha says $shas, the log line says $abbrevs, conclusion=$jconcl"
+        continue
+      fi
+      tested=$shas; tdisp=$shas; resolved=$shas; tsource="structured"
+    else
+      if [ "$n" -ne 1 ]; then
+        seen="$seen"$'\n'"  - run $rid job $jid: $n tested-commit record(s) in the log (need exactly 1), conclusion=$jconcl"
+        continue
+      fi
+      resolved=$(git -C "$root" rev-parse --verify --quiet "${abbrevs}^{commit}" 2>/dev/null) || resolved=""
+      tested=$abbrevs; tdisp="$abbrevs${resolved:+ ($resolved)}"; tsource="log-line"
+    fi
+
+    if [ "$resolved" != "$want" ]; then
+      seen="$seen"$'\n'"  - run $rid job $jid: tested $tdisp, conclusion=$jconcl [$tsource]"
+      continue
+    fi
+    if [ "$jconcl" = "success" ]; then
+      echo "CLEAN-ROOM PROCEED: run $rid job $jid '$job_name' tested $tested = $want (tag $tag), conclusion=success [tested-sha source: $tsource]"
+      return 0
+    fi
+    seen="$seen"$'\n'"  - run $rid job $jid: tested $tested = the tag commit, conclusion=$jconcl [$tsource]"
+  done <<< "$runs"
+
+  echo "CLEAN-ROOM REFUSE: looked for $want (tag $tag); no green '$job_name' run tested it ($examined $workflow run(s) created after that commit examined)${seen:- -- found none}"
+  return 1
+}
+
+# THE GATE (F-9, PMAT-745). Every mode that uploads passes through
+# scripts/check_publish_preflight.sh first: clean tree, version from cargo
+# metadata, tag at HEAD, HEAD on origin/main, dogfood receipt GO for this commit
+# and version. --check and --order-check upload nothing and are not gated. The
+# drain re-runs this script per pass, so the gate is re-asked before every pass.
+#
+# The clean-room gate runs FIRST, before the preflight and before any upload.
+# There is no mode, flag or variable that skips it for a publishing run;
+# --check REPORTS its verdict (it uploads nothing, so there is nothing to bypass).
+case "$MODE" in
+  --check|--order-check) : ;;
+  *)
+    if ! clean_room_gate "$REPO_ROOT" "v$TARGET_VERSION"; then
+      echo "⛔ clean-room gate refused (clean-room.yml is not green on exactly the v$TARGET_VERSION commit); nothing was published." >&2
+      exit 1
+    fi
+    if ! bash "$REPO_ROOT/scripts/check_publish_preflight.sh"; then
+      echo "⛔ check_publish_preflight.sh refused; nothing was published." >&2
+      exit 1
+    fi
+    ;;
+esac
+
+# Backup .cargo/config.toml once (publish needs a clean one without [patch.crates-io]).
+# The backup lives OUTSIDE the tree. Beside the config it was an untracked file
+# inside the root crate's package directory -- `.cargo/config.toml` is ignored,
+# `.cargo/config.toml.cascade-backup` was not -- and with the dirty-tree override
+# gone (F-9) `cargo publish` of the root crate would have refused on the file this
+# script itself created, after the preflight had already passed R1. Found by the
+# cross-vendor review of #2859. Measured: with the backup beside the config,
+# `git status --porcelain --untracked-files=all` lists it; with mktemp, nothing.
+# A backup that cannot be created is a refusal, not an empty string: with
+# CASCADE_CONFIG_BACKUP="" the config would be overwritten and never restored
+# (second review of #2859, mktemp-data-loss).
+CASCADE_CONFIG_BACKUP=""
 if [ -f .cargo/config.toml ]; then
-  cp .cargo/config.toml .cargo/config.toml.cascade-backup
+  CASCADE_CONFIG_BACKUP=$(mktemp "${TMPDIR:-/tmp}/cascade-config-backup.XXXXXX") || CASCADE_CONFIG_BACKUP=""
+  if [ -z "$CASCADE_CONFIG_BACKUP" ] || [ ! -f "$CASCADE_CONFIG_BACKUP" ]; then
+    echo "⛔ could not create a backup of .cargo/config.toml (mktemp failed under ${TMPDIR:-/tmp}); nothing was published." >&2
+    exit 2
+  fi
+  # A failed copy leaves a partial backup that must not be restored later and
+  # must not be left behind: it is removed before the refusal.
+  cp .cargo/config.toml "$CASCADE_CONFIG_BACKUP" || { rm -f "$CASCADE_CONFIG_BACKUP"; echo "⛔ could not back up .cargo/config.toml; nothing was published." >&2; exit 2; }
+  # The restore trap is armed BEFORE the overwrite: between the two there was a
+  # window in which an interrupt lost the config (sixth review of #2859).
+  trap 'if [ -n "$CASCADE_CONFIG_BACKUP" ] && [ -f "$CASCADE_CONFIG_BACKUP" ]; then cp "$CASCADE_CONFIG_BACKUP" .cargo/config.toml && rm -f "$CASCADE_CONFIG_BACKUP"; fi' EXIT
   echo "# Clean config for cascade publishing" > .cargo/config.toml
 fi
-trap 'if [ -f .cargo/config.toml.cascade-backup ]; then cp .cargo/config.toml.cascade-backup .cargo/config.toml && rm -f .cargo/config.toml.cascade-backup; fi' EXIT
 
 # --order-check: run ONLY the publish-order precondition, against the live
 # registry, and publish nothing. Two reasons this mode exists rather than the
@@ -271,6 +679,9 @@ fi
 
 if [ "$MODE" = "--check" ]; then
   echo ""
+  echo "=== CLEAN-ROOM GATE (verdict reported; a publishing run refuses unless PROCEED) ==="
+  clean_room_gate "$REPO_ROOT" "v$TARGET_VERSION" | sed 's/^/  /'
+  echo ""
   echo "=== STATUS REPORT (not publishing) ==="
   any_behind=0
   for tier in $(echo "${!TIERS[@]}" | tr ' ' '\n' | sort -n); do
@@ -300,18 +711,70 @@ for tier in $(echo "${!TIERS[@]}" | tr ' ' '\n' | sort -n); do
   done
 done
 
+# DRAIN UNTIL NO FORWARD PROGRESS, not once (#3892).
+#
+# This was ONE retry round, so the cascade had exactly TWO passes: the tier walk
+# plus one retry. MEASURED by aprender-45 against the real dependency graph at
+# 014f93bdc, simulating each pass:
+#
+#   PASS 1 (tier order)   published 34   deferred 37
+#   DRAIN pass 1          published 49   deferred 22   <- the script stopped HERE, exit 1
+#   DRAIN pass 2          published 54   deferred 17
+#   DRAIN pass 3          published 59   deferred 12
+#   DRAIN pass 4          published 71   deferred  0
+#
+# needs 5 passes, had 2. And the failure was not a clean abort: 49 crates would be
+# PERMANENTLY on crates.io at the new version (you cannot unpublish), with
+# `aprender` and `apr-cli` -- the two crates `cargo install aprender` pulls --
+# among the 22 that never publish. So `cargo install aprender` would still resolve
+# the OLD version while half its dependency set had moved. That is worse than not
+# starting, and it is reached through a loud, correct-looking failure.
+#
+# WHY IT NEEDS MORE THAN ONE ROUND. The TIERS[] numbers do not describe the real
+# order: aprender-core is T2 and has non-optional workspace deps on aprender-common
+# (T8) and aprender-compute (T6), so T2 cannot publish until T8 has, and everything
+# downstream inherits it. 44 strictly-later-tier deps and 30 same-tier deps, 74
+# total. Fixing the tiers is the better fix and is 0.70.0 work (#3892); draining
+# correctly makes the cascade complete regardless of the tier order.
+#
+# THE PER-CRATE SAFETY IS UNCHANGED and was verified sound on four independent
+# grounds before this loop was written: `cargo publish --locked` with no
+# --no-verify builds against the registry so a missing dep version fails the
+# verification build; the DEFER branch greps cargo's own
+# `candidate versions found which didn't match`; rc=0 WITHOUT a `Published` line
+# is also deferred rather than counted as success; and crates.io independently
+# rejects an upload whose deps do not resolve. So a wrong order can never leave an
+# unresolvable crate on the registry -- the defect was only ever that the cascade
+# gave up before finishing.
+#
+# NO-FORWARD-PROGRESS is the failure condition, not a round count: a round that
+# publishes nothing means the remainder can never publish, and THAT is the real
+# error. A round cap alone would reintroduce this defect at a larger number.
 if [ -n "$DEFERRED" ]; then
-  echo ""
-  echo "=== RETRY ROUND ==="
-  STILL_DEFERRED=""
-  for crate in $DEFERRED; do
-    publish_crate "$crate" || STILL_DEFERRED="$STILL_DEFERRED $crate"
-  done
-  if [ -n "$STILL_DEFERRED" ]; then
+  round=0
+  while [ -n "$DEFERRED" ]; do
+    round=$((round + 1))
     echo ""
-    echo "❌ FAILED to publish:$STILL_DEFERRED"
-    exit 1
-  fi
+    echo "=== DRAIN ROUND $round ==="
+    STILL_DEFERRED=""
+    for crate in $DEFERRED; do
+      publish_crate "$crate" || STILL_DEFERRED="$STILL_DEFERRED $crate"
+    done
+    # Compare by content, not by count: two crates swapping places is not progress.
+    if [ "$(echo $STILL_DEFERRED | tr ' ' '\n' | sort | tr '\n' ' ')" = \
+         "$(echo $DEFERRED       | tr ' ' '\n' | sort | tr '\n' ' ')" ]; then
+      echo ""
+      echo "❌ STUCK after $round drain round(s): no crate published in the last round."
+      echo "   The remaining crates can never publish -- each is waiting on another"
+      echo "   member of this same set, or on a dependency that is not in TIERS[]."
+      echo "   Still deferred:$STILL_DEFERRED"
+      echo "   This is a dependency-order defect, not a transient registry delay (#3892)."
+      exit 1
+    fi
+    DEFERRED="$STILL_DEFERRED"
+  done
+  echo ""
+  echo "✅ drained in $round round(s)"
 fi
 
 echo ""

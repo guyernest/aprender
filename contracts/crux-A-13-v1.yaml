@@ -148,7 +148,7 @@ falsification_tests:
   prediction: "apr stop and ollama stop yield the same post-state"
   test: |
     # TODO: record evidence/crux/ollama/stop-golden.json with (pre,post) ps+vram
-    GOLD=/home/noah/src/aprender-worktrees/crux-spec/evidence/crux/ollama/stop-golden.json
+    GOLD=${APR_CRUX_GOLDENS:-evidence/crux}/ollama/stop-golden.json
     [ -f "$GOLD" ] || { echo "golden absent"; exit 2; }
     apr serve --daemon & PID=$!; sleep 1
     apr run hf://unsloth/Qwen2.5-Coder-7B-Instruct-GGUF --prompt "hi" --max-tokens 2 >/dev/null
@@ -164,13 +164,17 @@ falsification_tests:
   if_fails: "apr stop post-state diverges from ollama stop golden"
 
 proof_obligations:
-- type: invariant
+- id: CA1301A-INV-001
+  type: invariant
   property: "After apr stop m (exit 0), m ∉ resident_set within grace_ms"
-- type: invariant
+- id: CA1301A-INV-002
+  type: invariant
   property: "apr stop is idempotent (second call on same target exits 0)"
-- type: invariant
+- id: CA1301A-INV-003
+  type: invariant
   property: "VRAM freed ≥ 95% of pre-stop model footprint"
-- type: equivalence
+- id: CA1301A-EQ-004
+  type: equivalence
   property: "apr stop end-state ≡ ollama stop end-state on golden"
 
 verification_summary:

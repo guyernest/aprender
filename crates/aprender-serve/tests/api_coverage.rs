@@ -363,6 +363,7 @@ fn test_chat_completion_request_full() {
 #[test]
 fn test_chat_completion_response_serialization() {
     let response = ChatCompletionResponse {
+        used_gpu: None,
         id: "chatcmpl-123".to_string(),
         object: "chat.completion".to_string(),
         created: 1234567890,
@@ -386,6 +387,7 @@ fn test_chat_completion_response_serialization() {
         brick_trace: None,
         layer_trace: None,
         step_trace: None,
+        timings: None,
     };
 
     let json = serde_json::to_string(&response).expect("should serialize");
@@ -835,6 +837,7 @@ fn test_completion_request_serialization() {
 #[test]
 fn test_completion_response_serialization() {
     let response = CompletionResponse {
+        used_gpu: None,
         id: "cmpl-123".to_string(),
         object: "text_completion".to_string(),
         created: 1234567890,
@@ -1169,6 +1172,9 @@ fn test_chat_completion_chunk_serialization() {
             },
             finish_reason: None,
         }],
+        stream_mode: None,
+        usage: None,
+        timings: None,
     };
 
     let json = serde_json::to_string(&chunk).expect("should serialize");
@@ -1441,6 +1447,7 @@ fn test_completion_request_minimal() {
 #[test]
 fn test_completion_response_multiple_choices() {
     let response = CompletionResponse {
+        used_gpu: None,
         id: "cmpl-multi".to_string(),
         object: "text_completion".to_string(),
         created: 1700000000,
@@ -1844,6 +1851,7 @@ fn test_chat_completion_request_with_user() {
 #[test]
 fn test_chat_completion_response_multiple_choices() {
     let response = ChatCompletionResponse {
+        used_gpu: None,
         id: "chatcmpl-multi".to_string(),
         object: "chat.completion".to_string(),
         created: 1700000000,
@@ -1880,6 +1888,7 @@ fn test_chat_completion_response_multiple_choices() {
         brick_trace: None,
         layer_trace: None,
         step_trace: None,
+        timings: None,
     };
 
     let json = serde_json::to_string(&response).expect("should serialize");
@@ -1943,6 +1952,7 @@ fn test_very_long_content() {
 fn test_negative_timestamp_handling() {
     // Test that timestamps serialize correctly (though negative is unusual)
     let response = ChatCompletionResponse {
+        used_gpu: None,
         id: "test".to_string(),
         object: "chat.completion".to_string(),
         created: -1, // Edge case
@@ -1956,6 +1966,7 @@ fn test_negative_timestamp_handling() {
         brick_trace: None,
         layer_trace: None,
         step_trace: None,
+        timings: None,
     };
 
     let json = serde_json::to_string(&response).expect("should serialize");
@@ -2219,6 +2230,9 @@ fn test_chat_completion_chunk_serialization_full() {
                 finish_reason: Some("length".to_string()),
             },
         ],
+        stream_mode: None,
+        usage: None,
+        timings: None,
     };
 
     let json = serde_json::to_string(&chunk).expect("should serialize");
@@ -2241,6 +2255,9 @@ fn test_chat_completion_chunk_empty_choices() {
         created: 0,
         model: "test".to_string(),
         choices: vec![],
+        stream_mode: None,
+        usage: None,
+        timings: None,
     };
 
     let json = serde_json::to_string(&chunk).expect("should serialize");
@@ -2829,33 +2846,34 @@ fn test_stream_token_event_special_chars() {
 // ============================================================================
 
 #[test]
-fn test_chat_completion_request_n_multiple() {
+fn test_chat_completion_request_n_multiple_is_refused() {
+    // ChoiceCount admits exactly ONE: this server returns one choice per request and the
+    // deserializer refuses anything else with a client-visible message (types.rs). This
+    // row used to set ONE and assert `"n":5` — impossible, and dark until the quick tier
+    // ran aprender-serve's integration targets (#3130, train #3127). Now it asserts the
+    // contract in both directions: ONE serialises as 1, and n=5 is refused, not clamped.
     let request = ChatCompletionRequest {
         model: "gpt-4".to_string(),
         messages: vec![ChatMessage {
             role: "user".to_string(),
             content: "Hello".to_string(),
-            name: None,
-
             ..Default::default()
         }],
-        max_tokens: Some(100),
-        temperature: Some(0.9),
-        top_p: None,
-        top_k: None,
-        repeat_penalty: None,
-        repeat_last_n: None,
-        seed: None,
-        n: realizar::api::ChoiceCount::ONE, // Request 5 completions
-        stream: false,
-        stop: None,
-        user: None,
-
+        n: realizar::api::ChoiceCount::ONE,
         ..Default::default()
     };
-
     let json = serde_json::to_string(&request).expect("should serialize");
-    assert!(json.contains(r#""n":5"#));
+    assert!(
+        json.contains(r#""n":1"#),
+        "ONE must serialise as n=1, got {json}"
+    );
+
+    let refused = serde_json::from_value::<realizar::api::ChoiceCount>(serde_json::json!(5));
+    let err = refused.expect_err("n=5 must be refused, never clamped to 1");
+    assert!(
+        err.to_string().contains("n must be 1"),
+        "the refusal must name the contract, got: {err}"
+    );
 }
 
 #[test]
@@ -2899,6 +2917,7 @@ fn test_chat_completion_response_long_conversation() {
         .collect();
 
     let response = ChatCompletionResponse {
+        used_gpu: None,
         id: "multi-choice".to_string(),
         object: "chat.completion".to_string(),
         created: 1700000000,
@@ -2912,6 +2931,7 @@ fn test_chat_completion_response_long_conversation() {
         brick_trace: None,
         layer_trace: None,
         step_trace: None,
+        timings: None,
     };
 
     let json = serde_json::to_string(&response).expect("should serialize");
@@ -3323,6 +3343,7 @@ fn test_openai_models_response_many_models() {
 #[test]
 fn test_completion_response_fields() {
     let response = CompletionResponse {
+        used_gpu: None,
         id: "cmpl-test".to_string(),
         object: "text_completion".to_string(),
         created: 1700000000,
@@ -3771,13 +3792,19 @@ fn test_completion_request_with_all_params() {
     let deserialized: CompletionRequest = serde_json::from_str(&json).expect("should deserialize");
 
     assert_eq!(deserialized.max_tokens, Some(256));
-    assert_eq!(deserialized.temperature, Some(0.7));
+    // The temperature deserializer narrows through f32 on purpose (types.rs
+    // deserialize_temperature_f64: "the value still narrows to f32 before it reaches a
+    // sampler, so the narrowing is checked here too"), so a round trip of 0.7 yields
+    // f64::from(0.7f32), never 0.7 exactly. Asserting the narrowed value is asserting
+    // the contract; asserting 0.7 was a dark row that could never pass (#3130, train #3127).
+    assert_eq!(deserialized.temperature, Some(f64::from(0.7_f32)));
 }
 
 #[test]
 fn test_chat_completion_response_all_finish_reasons() {
     // Test "length" finish reason
     let response = ChatCompletionResponse {
+        used_gpu: None,
         id: "chatcmpl-test".to_string(),
         object: "chat.completion".to_string(),
         created: 1700000000,
@@ -3801,6 +3828,7 @@ fn test_chat_completion_response_all_finish_reasons() {
         brick_trace: None,
         layer_trace: None,
         step_trace: None,
+        timings: None,
     };
 
     let json = serde_json::to_string(&response).expect("should serialize");
@@ -4054,6 +4082,9 @@ fn test_chat_completion_chunk_construction_patterns() {
             },
             finish_reason: None,
         }],
+        stream_mode: None,
+        usage: None,
+        timings: None,
     };
     let json1 = serde_json::to_string(&chunk1).expect("serialize");
     assert!(json1.contains("assistant"));
@@ -4073,6 +4104,9 @@ fn test_chat_completion_chunk_construction_patterns() {
             },
             finish_reason: None,
         }],
+        stream_mode: None,
+        usage: None,
+        timings: None,
     };
     let json2 = serde_json::to_string(&chunk2).expect("serialize");
     assert!(json2.contains("Hello"));
@@ -4091,6 +4125,9 @@ fn test_chat_completion_chunk_construction_patterns() {
             },
             finish_reason: Some("stop".to_string()),
         }],
+        stream_mode: None,
+        usage: None,
+        timings: None,
     };
     let json3 = serde_json::to_string(&chunk3).expect("serialize");
     assert!(json3.contains(r#""finish_reason":"stop""#));
@@ -4405,6 +4442,7 @@ fn test_chat_completion_response_with_all_finish_reasons() {
 
     for reason in finish_reasons {
         let response = ChatCompletionResponse {
+            used_gpu: None,
             id: "test".to_string(),
             object: "chat.completion".to_string(),
             created: 0,
@@ -4428,6 +4466,7 @@ fn test_chat_completion_response_with_all_finish_reasons() {
             brick_trace: None,
             layer_trace: None,
             step_trace: None,
+            timings: None,
         };
 
         let json = serde_json::to_string(&response).expect("serialize");
@@ -4570,6 +4609,7 @@ fn test_embedding_response_with_multiple_embeddings() {
 #[test]
 fn test_completion_response_with_logprobs() {
     let response = CompletionResponse {
+        used_gpu: None,
         id: "cmpl-with-logprobs".to_string(),
         object: "text_completion".to_string(),
         created: 1700000000,
@@ -4761,6 +4801,7 @@ fn test_chat_completion_request_clone() {
 #[test]
 fn test_chat_completion_response_clone() {
     let original = ChatCompletionResponse {
+        used_gpu: None,
         id: "test".to_string(),
         object: "chat.completion".to_string(),
         created: 1700000000,
@@ -4784,6 +4825,7 @@ fn test_chat_completion_response_clone() {
         brick_trace: None,
         layer_trace: None,
         step_trace: None,
+        timings: None,
     };
     let cloned = original.clone();
     assert_eq!(original.id, cloned.id);

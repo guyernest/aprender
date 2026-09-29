@@ -6,6 +6,20 @@
 mod server_commands {
     use super::Result;
 
+    /// #3609: the refusal every serve path gives for a model with no vocabulary.
+    ///
+    /// These paths used to substitute `token0..tokenN` and serve that. Placeholder tokens are
+    /// not a tokenizer: a model with no vocabulary refuses by name, it does not load.
+    fn no_vocabulary(what: &str) -> crate::error::RealizarError {
+        crate::error::RealizarError::UnsupportedOperation {
+            operation: "load_vocabulary".to_string(),
+            reason: format!(
+                "{what} has no vocabulary to tokenize with, so there is nothing to serve; \
+                 refusing to substitute placeholder tokens (#3609)"
+            ),
+        }
+    }
+
     /// Result of preparing server state (returned by `prepare_serve_state`)
     pub struct PreparedServer {
         /// The prepared AppState for the server
@@ -95,12 +109,10 @@ mod server_commands {
         println!("  Layers: {}", quantized_model.layers.len());
 
         // Extract vocabulary from GGUF for proper token decoding
-        let vocab = mapped.model.vocabulary().unwrap_or_else(|| {
-            eprintln!("  Warning: No vocabulary in GGUF, using placeholder tokens");
-            (0..quantized_model.config.vocab_size)
-                .map(|i| format!("token{i}"))
-                .collect()
-        });
+        let vocab = mapped
+            .model
+            .vocabulary()
+            .ok_or_else(|| no_vocabulary("the GGUF (no tokenizer.ggml.tokens)"))?;
         println!("  Vocab loaded: {} tokens", vocab.len());
         println!();
 
@@ -199,31 +211,49 @@ mod server_commands {
             let use_iteration_scheduler =
                 std::env::var("ITERATION_SCHEDULER").as_deref() == Ok("1");
 
-            let batch_tx = if use_iteration_scheduler {
+            // PP-13/PP-24: the identity and the admission ceiling are no longer
+            // only printed. They are RETAINED on the state, so a harness can ask
+            // the running server which scheduler it got and how many slots it
+            // will admit — the number the concurrency ladder is derived from.
+            let admission_reason = crate::api::admission_ceiling_reason(
+                state
+                    .cuda_model()
+                    .and_then(|m| m.read().ok().and_then(|m| m.max_batch_sizing()))
+                    .map(|s| s.source),
+            );
+            let in_flight = crate::api::InFlightCounter::new();
+            let (batch_tx, report, counter) = if use_iteration_scheduler {
                 let iter_config =
                     crate::api::iteration_scheduler::IterationSchedulerConfig::default();
                 println!(
                     "  ITERATION SCHEDULER: max_slots={}, prefill_chunk={} (PMAT-088)",
                     iter_config.max_slots, iter_config.prefill_chunk_size,
                 );
-                crate::api::iteration_scheduler::spawn_iteration_scheduler(
+                let report = iter_config.report(admission_reason);
+                let tx = crate::api::iteration_scheduler::spawn_iteration_scheduler(
                     cuda_model_arc,
                     iter_config,
-                )
+                );
+                (tx, report, None)
             } else {
                 let batch_config = crate::api::cuda_batch_scheduler::CudaBatchConfig::default();
                 println!(
                     "  CONTINUOUS BATCHING: max_batch={}, window={}ms (PMAT-044)",
                     batch_config.max_batch, batch_config.window_ms
                 );
-                crate::api::cuda_batch_scheduler::spawn_cuda_batch_scheduler(
+                let report = batch_config.report(admission_reason);
+                let tx = crate::api::cuda_batch_scheduler::spawn_cuda_batch_scheduler(
                     cuda_model_arc,
                     batch_config,
-                )
+                    in_flight.clone(),
+                );
+                (tx, report, Some(in_flight))
             };
             println!();
 
-            Ok(state.with_cuda_batch_tx(batch_tx))
+            Ok(state
+                .with_cuda_batch_tx(batch_tx)
+                .with_scheduler_report(report, counter))
         }
 
         #[cfg(not(feature = "cuda"))]
@@ -318,14 +348,9 @@ mod server_commands {
                 }
             })?;
 
-            let vocab_size = cuda_model.config().vocab_size;
-            #[allow(clippy::map_unwrap_or)]
             let vocab = crate::apr::AprV2Model::load_tokenizer_from_sibling(model_path_obj)
                 .map(|(v, _, _)| v)
-                .unwrap_or_else(|| {
-                    println!("  Warning: No tokenizer.json found, using simple vocabulary");
-                    (0..vocab_size).map(|i| format!("token{i}")).collect()
-                });
+                .ok_or_else(|| no_vocabulary("the SafeTensors model (no sibling tokenizer.json)"))?;
 
             println!("  Vocab size: {}", vocab.len());
 
@@ -359,15 +384,9 @@ mod server_commands {
         println!("  Layers: {}", transformer.config.num_layers);
         println!("  Hidden: {}", transformer.config.hidden_dim);
 
-        #[allow(clippy::map_unwrap_or)]
         let vocab = crate::apr::AprV2Model::load_tokenizer_from_sibling(model_path_obj)
             .map(|(v, _, _)| v)
-            .unwrap_or_else(|| {
-                println!("  Warning: No tokenizer.json found, using simple vocabulary");
-                (0..transformer.config.vocab_size)
-                    .map(|i| format!("token{i}"))
-                    .collect()
-            });
+            .ok_or_else(|| no_vocabulary("the SafeTensors model (no sibling tokenizer.json)"))?;
 
         println!("  Vocab size: {}", vocab.len());
         println!("  Mode: CPU (F32 inference)");
@@ -431,12 +450,7 @@ mod server_commands {
                     .and_then(|m| m.load_embedded_tokenizer())
                     .map(|t| t.id_to_token.clone())
             })
-            .unwrap_or_else(|| {
-                println!("  Warning: No vocabulary found, using simple vocabulary");
-                (0..model.config.vocab_size)
-                    .map(|i| format!("token{i}"))
-                    .collect()
-            });
+            .ok_or_else(|| no_vocabulary("the APR model (no sibling tokenizer.json, no embedded tokenizer)"))?;
 
         println!("  Vocab size: {}", vocab.len());
         println!("  Mode: CPU (per-tensor scratch dequant)");
@@ -476,10 +490,7 @@ mod server_commands {
         let vocab = apr_v2.as_ref()
             .and_then(|m| m.metadata().get_embedded_vocabulary())
             .or_else(|| crate::apr::AprV2Model::load_tokenizer_from_sibling(path).map(|(v, _, _)| v))
-            .unwrap_or_else(|| {
-                println!("  Warning: No tokenizer found");
-                (0..model.config.vocab_size).map(|i| format!("token{i}")).collect()
-            });
+            .ok_or_else(|| no_vocabulary("the APR model (no embedded vocabulary, no sibling tokenizer.json)"))?;
         println!("  Vocab size: {}", vocab.len());
 
         // PMAT-785: fail-closed quant gate at GPU-resident construction. An APR
@@ -538,10 +549,7 @@ mod server_commands {
                     .and_then(|m| m.load_embedded_tokenizer())
                     .map(|t| (t.id_to_token.clone(), None))
             })
-            .unwrap_or_else(|| {
-                println!("  Warning: No vocabulary found, using simple vocabulary");
-                ((0..151936).map(|i| format!("token{i}")).collect(), None)
-            });
+            .ok_or_else(|| no_vocabulary("the APR model (no sibling tokenizer.json, no embedded tokenizer)"))?;
 
         println!("  Vocab: {} tokens", vocab.len());
         if let Some(eos) = eos_id {
@@ -652,6 +660,20 @@ mod server_commands {
             openai_api,
             ..crate::api::RouterConfig::default()
         };
+        // aprender#2609: the banner is read from the router's own table, not
+        // restated. What stood here was a hand-written list of three routes out of
+        // the thirty-one this very function mounts — and the one it named by name,
+        // `POST /v1/completions`, was DEAD on the `AprTransformer` state that
+        // `prepare_serve_state` builds for an f32 `.apr` / SafeTensors model. The
+        // banner therefore advertised, on that path, exactly one generation route
+        // and it was the broken one, while `/generate` — which worked — was
+        // labelled "Q4_K fused" on a server holding no Q4_K weights.
+        //
+        // `advertised_routes` derives from `route_table`, the same table
+        // `create_router_with_config` mounts two lines above, so advertising a
+        // route and mounting it are one act and `--no-metrics` / `openai_api:false`
+        // are honoured without a second `if`.
+        let endpoints = crate::api::advertised_routes(&router_config, &state);
         let app = crate::api::create_router_with_config(state, router_config);
 
         // Parse and validate address
@@ -665,18 +687,8 @@ mod server_commands {
         eprintln!("Server listening on http://{addr}");
         eprintln!();
         eprintln!("Endpoints:");
-        eprintln!("  GET  /health         - Health check");
-        if openai_api {
-            eprintln!("  POST /v1/completions - OpenAI-compatible completions");
-        }
-        if prepared.batch_mode_enabled && openai_api {
-            eprintln!("  POST /v1/batch/completions - GPU batch completions (PARITY-022)");
-            eprintln!("  POST /v1/gpu/warmup  - Warmup GPU cache");
-            eprintln!("  GET  /v1/gpu/status  - GPU status");
-        }
-        eprintln!("  POST /generate       - Generate text (Q4_K fused)");
-        if !openai_api {
-            eprintln!("  (OpenAI-compatible /v1/* routes disabled)");
+        for endpoint in &endpoints {
+            eprintln!("  {endpoint}");
         }
         eprintln!();
 
@@ -719,6 +731,10 @@ mod server_commands {
             openai_api,
             ..crate::api::RouterConfig::default()
         };
+        // aprender#2609: same table, same act — see `serve_model` above. This banner
+        // named three routes of the thirty-one it mounts and, unlike `serve_model`,
+        // did not even mention `/v1/*` unless they were DISABLED.
+        let endpoints = crate::api::advertised_routes(&router_config, &state);
         let app = crate::api::create_router_with_config(state, router_config);
 
         let addr: SocketAddr = format!("{host}:{port}").parse().map_err(|e| {
@@ -730,11 +746,8 @@ mod server_commands {
         eprintln!("Server listening on http://{addr}");
         eprintln!();
         eprintln!("Endpoints:");
-        eprintln!("  GET  /health   - Health check");
-        eprintln!("  POST /tokenize - Tokenize text");
-        eprintln!("  POST /generate - Generate text");
-        if !openai_api {
-            eprintln!("  (OpenAI-compatible /v1/* routes disabled)");
+        for endpoint in &endpoints {
+            eprintln!("  {endpoint}");
         }
         eprintln!();
         eprintln!("Example:");

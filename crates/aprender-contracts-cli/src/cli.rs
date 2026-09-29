@@ -14,7 +14,15 @@ pub enum Commands {
         binding: Option<PathBuf>,
     },
     /// Validate a YAML kernel contract
-    Validate { contract: PathBuf },
+    Validate {
+        contract: PathBuf,
+        /// Report obligation-id denominators instead of validating:
+        /// `N obligations, M with id, K referenced`. Counts come through the
+        /// same deserialization every other pv command uses, which is what
+        /// makes them evidence that a consumer reads the key (#3314).
+        #[arg(long)]
+        check_ids: bool,
+    },
     /// Execute cross_check_command per row of a parity-matrix contract (SEMANTIC gate)
     #[command(name = "check-parity")]
     CheckParity { contract: PathBuf },
@@ -75,6 +83,34 @@ pub enum Commands {
         old: PathBuf,
         /// Path to the new contract YAML file
         new: PathBuf,
+    },
+    /// Census the contract corpus: one cardinality, by_anchoring, by_entity_type (ONT-001 ONT-1)
+    Census {
+        /// Directory containing contract YAML files
+        #[arg(default_value = "contracts")]
+        contract_dir: PathBuf,
+        /// Output format. ONT-001 §5 ONT-1's probe runs `--format json`.
+        #[arg(long, value_enum, default_value_t = CensusFormat::Table)]
+        format: CensusFormat,
+        /// Deprecated alias for `--format json`, kept because
+        /// scripts/check_ont_ratchet.sh derives its consumer probe from this surface.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Extract the corpus as RDF: contracts.nt (sorted N-Triples, no blank nodes) and shapes.ttl (ONT-001 ONT-4b, R-15, R-18)
+    Extract {
+        /// Directory containing contract YAML files
+        #[arg(default_value = "contracts")]
+        contract_dir: PathBuf,
+        /// Write nothing; exit 1 if the tracked files differ from a fresh extraction (what CI runs)
+        #[arg(long)]
+        check: bool,
+        /// With `--release-*`: write the corpus graph PLUS the release evidence to this N-Triples file, and leave
+        /// the tracked contracts.nt / shapes.ttl untouched (aprender#3715)
+        #[arg(long)]
+        out: Option<PathBuf>,
+        #[command(flatten)]
+        release: Box<ReleaseArgs>,
     },
     /// Show cross-contract obligation coverage report
     Coverage {
@@ -247,6 +283,19 @@ pub enum Commands {
         /// promote to Error and fail CI. Issue #1510.
         #[arg(long)]
         strict_test_binding: bool,
+        /// Git ref whose `lint-baseline.json` is the `armed_gates` comparand (ONT-001 section 3.9). Default:
+        /// merge-base(HEAD, origin/main), else the origin/main tip; with neither, NOT CHECKED is printed.
+        #[arg(long)]
+        armed_baseline_ref: Option<String>,
+        /// Run ONE named gate and report only it (ONT-001 section 5 ONT-2b): `--gate sigma`.
+        #[arg(long)]
+        gate: Option<String>,
+        /// With `--gate shapes`: grade only this shape family (the shape and every `<id>.*` shape), armed
+        /// whatever `armed_shapes` says (aprender#3715: `--shape release-readiness-v1`).
+        #[arg(long)]
+        shape: Option<String>,
+        #[command(flatten)]
+        release: Box<ReleaseArgs>,
     },
     /// Score contracts or a codebase directory
     Score {
@@ -422,4 +471,83 @@ pub enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+}
+
+/// `pv census` output format (ONT-001 ONT-1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum CensusFormat {
+    /// Human-readable table.
+    Table,
+    /// The bytes `contracts/census.json` carries.
+    Json,
+}
+
+/// aprender#3715 — the release subject `extract:release-evidence` reads, for `pv lint --gate shapes` and
+/// `pv extract`. All absent → no release graph. `--release-version` and `--release-commit` come together; the
+/// rest need them.
+#[derive(clap::Args, Debug, Default, Clone)]
+pub struct ReleaseArgs {
+    /// The release version whose evidence `release-readiness-v1` grades
+    #[arg(long)]
+    pub release_version: Option<String>,
+    /// The release commit (MC), full 40-hex: the dogfood receipt's commit, and the receipts' unless --receipts-commit
+    #[arg(long)]
+    pub release_commit: Option<String>,
+    /// T-4 only: the sha the committed receipts were measured at, after R7 proved the tree equal modulo evidence/
+    #[arg(long)]
+    pub receipts_commit: Option<String>,
+    /// The per-host model receipts (default: evidence/dogfood/models/<version>/)
+    #[arg(long)]
+    pub receipts: Option<PathBuf>,
+    /// The per-host kernel-diff receipts (default: evidence/dogfood/kernels/<version>/)
+    #[arg(long)]
+    pub kernel_receipts: Option<PathBuf>,
+    /// The dogfood receipt R5 judged (without it the release has no dogfood receipt, which is a violation)
+    #[arg(long)]
+    pub dogfood_receipt: Option<PathBuf>,
+    /// The tokenizer-parity receipts, apr vs the pinned llama.cpp (default: evidence/dogfood/tokenizer/<version>/)
+    #[arg(long)]
+    pub tokenizer_receipts: Option<PathBuf>,
+}
+
+impl ReleaseArgs {
+    /// Did the caller pass any release flag at all?
+    #[must_use]
+    pub fn any(&self) -> bool {
+        self.release_version.is_some()
+            || self.release_commit.is_some()
+            || self.receipts_commit.is_some()
+            || self.receipts.is_some()
+            || self.kernel_receipts.is_some()
+            || self.dogfood_receipt.is_some()
+            || self.tokenizer_receipts.is_some()
+    }
+
+    /// The subject, or `None` when no flag was passed. A partial set is refused, never completed by a default.
+    pub fn subject(
+        &self,
+    ) -> Result<Option<provable_contracts::ontology::extract::release_inputs::Subject>, String>
+    {
+        use provable_contracts::ontology::extract::release_inputs::Subject;
+        if !self.any() {
+            return Ok(None);
+        }
+        let (Some(v), Some(c)) = (&self.release_version, &self.release_commit) else {
+            return Err(
+                "--release-version and --release-commit are both required with any --release-*, \
+                 --receipts*, --kernel-receipts or --dogfood-receipt flag"
+                    .into(),
+            );
+        };
+        let mut s = Subject::new(v, c).map_err(|e| e.to_string())?;
+        if let Some(rc) = &self.receipts_commit {
+            s = s.with_receipts_commit(rc).map_err(|e| e.to_string())?;
+        }
+        s.receipts_dir.clone_from(&self.receipts);
+        s.kernel_receipts_dir.clone_from(&self.kernel_receipts);
+        s.dogfood_receipt.clone_from(&self.dogfood_receipt);
+        s.tokenizer_receipts_dir
+            .clone_from(&self.tokenizer_receipts);
+        Ok(Some(s))
+    }
 }

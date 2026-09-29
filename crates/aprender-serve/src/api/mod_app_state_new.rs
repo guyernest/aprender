@@ -46,12 +46,15 @@ impl Default for AppState {
             apr_transformer: None,
             cached_architecture: None,
             mapped_gguf_model: None,
+            moe_no_gpu: true,
+            qwen35_session: None,
             cached_eos_token_id: None,
             #[cfg(feature = "setfit")]
             setfit_model: None,
             verbose: false,
             trace: false,
             model_source: None,
+            effective: EffectiveConfigState::new(),
         }
     }
 }
@@ -99,12 +102,15 @@ impl AppState {
             apr_transformer: None,
             cached_architecture: None,
             mapped_gguf_model: None,
+            moe_no_gpu: true,
+            qwen35_session: None,
             cached_eos_token_id: None,
             #[cfg(feature = "setfit")]
             setfit_model: None,
             verbose: false,
             trace: false,
             model_source: None,
+            effective: EffectiveConfigState::new(),
         }
     }
 
@@ -161,12 +167,15 @@ impl AppState {
             apr_transformer: None,
             cached_architecture: None,
             mapped_gguf_model: None,
+            moe_no_gpu: true,
+            qwen35_session: None,
             cached_eos_token_id: None,
             #[cfg(feature = "setfit")]
             setfit_model: None,
             verbose: false,
             trace: false,
             model_source: None,
+            effective: EffectiveConfigState::new(),
         })
     }
 
@@ -287,8 +296,9 @@ impl AppState {
                 }
             })
             .collect();
+        let unk = crate::tokenizer::vocabulary_unk_token(&vocab); // #3609: never a literal
         let tokenizer =
-            BPETokenizer::new(vocab, vec![], "<unk>").expect("Failed to create tokenizer");
+            BPETokenizer::new(vocab, vec![], unk).expect("Failed to create tokenizer");
 
         let (audit_logger, audit_sink) = create_audit_state();
         Self {
@@ -324,12 +334,15 @@ impl AppState {
             apr_transformer: None,
             cached_architecture: None,
             mapped_gguf_model: None,
+            moe_no_gpu: true,
+            qwen35_session: None,
             cached_eos_token_id: None,
             #[cfg(feature = "setfit")]
             setfit_model: None,
             verbose: false,
             trace: false,
             model_source: None,
+            effective: EffectiveConfigState::new(),
         }
     }
 
@@ -359,7 +372,8 @@ impl AppState {
                 }
             })
             .collect();
-        let tokenizer = BPETokenizer::new(vocab, vec![], "<unk>")?;
+        let unk = crate::tokenizer::vocabulary_unk_token(&vocab); // #3609: never a literal
+        let tokenizer = BPETokenizer::new(vocab, vec![], unk)?;
 
         // Create demo APR model (real inference, not mock)
         // Simple model: sum of inputs with bias
@@ -399,12 +413,15 @@ impl AppState {
             apr_transformer: None,
             cached_architecture: None,
             mapped_gguf_model: None,
+            moe_no_gpu: true,
+            qwen35_session: None,
             cached_eos_token_id: None,
             #[cfg(feature = "setfit")]
             setfit_model: None,
             verbose: false,
             trace: false,
             model_source: None,
+            effective: EffectiveConfigState::new(),
         })
     }
 
@@ -456,12 +473,15 @@ impl AppState {
             apr_transformer: None,
             cached_architecture: None,
             mapped_gguf_model: None,
+            moe_no_gpu: true,
+            qwen35_session: None,
             cached_eos_token_id: None,
             #[cfg(feature = "setfit")]
             setfit_model: None,
             verbose: false,
             trace: false,
             model_source: None,
+            effective: EffectiveConfigState::new(),
         })
     }
 
@@ -487,7 +507,8 @@ impl AppState {
                 }
             })
             .collect();
-        let tokenizer = BPETokenizer::new(vocab, vec![], "<unk>")?;
+        let unk = crate::tokenizer::vocabulary_unk_token(&vocab); // #3609: never a literal
+        let tokenizer = BPETokenizer::new(vocab, vec![], unk)?;
 
         let (audit_logger, audit_sink) = create_audit_state();
         Ok(Self {
@@ -518,12 +539,15 @@ impl AppState {
             apr_transformer: None,
             cached_architecture: None,
             mapped_gguf_model: None,
+            moe_no_gpu: true,
+            qwen35_session: None,
             cached_eos_token_id: None,
             #[cfg(feature = "setfit")]
             setfit_model: None,
             verbose: false,
             trace: false,
             model_source: None,
+            effective: EffectiveConfigState::new(),
         })
     }
 
@@ -544,7 +568,8 @@ impl AppState {
         gpu_model: crate::gpu::GpuModel,
         vocab: Vec<String>,
     ) -> Result<Self, RealizarError> {
-        let tokenizer = BPETokenizer::new(vocab, vec![], "<unk>")?;
+        let unk = crate::tokenizer::vocabulary_unk_token(&vocab); // #3609: never a literal
+        let tokenizer = BPETokenizer::new(vocab, vec![], unk)?;
 
         let (audit_logger, audit_sink) = create_audit_state();
         Ok(Self {
@@ -575,18 +600,22 @@ impl AppState {
             apr_transformer: None,
             cached_architecture: None,
             mapped_gguf_model: None,
+            moe_no_gpu: true,
+            qwen35_session: None,
             cached_eos_token_id: None,
             #[cfg(feature = "setfit")]
             setfit_model: None,
             verbose: false,
             trace: false,
             model_source: None,
+            effective: EffectiveConfigState::new(),
         })
     }
 
     /// Create application state with a quantized model for fused Q4_K inference (IMP-100)
     ///
-    /// This is 1.37x faster than dequantized GpuModel due to reduced memory bandwidth.
+    /// Faster than the dequantized GpuModel because it reads less memory per token
+    /// (IMP-100; the measured factor has no receipt under evidence/, so it is not stated here).
     ///
     /// # Arguments
     ///
@@ -609,7 +638,8 @@ impl AppState {
                 }
             })
             .collect();
-        let tokenizer = BPETokenizer::new(vocab, vec![], "<unk>")?;
+        let unk = crate::tokenizer::vocabulary_unk_token(&vocab); // #3609: never a literal
+        let tokenizer = BPETokenizer::new(vocab, vec![], unk)?;
 
         let (audit_logger, audit_sink) = create_audit_state();
         Ok(Self {
@@ -645,12 +675,15 @@ impl AppState {
             apr_transformer: None,
             cached_architecture: None,
             mapped_gguf_model: None,
+            moe_no_gpu: true,
+            qwen35_session: None,
             cached_eos_token_id: None,
             #[cfg(feature = "setfit")]
             setfit_model: None,
             verbose: false,
             trace: false,
             model_source: None,
+            effective: EffectiveConfigState::new(),
         })
     }
 }

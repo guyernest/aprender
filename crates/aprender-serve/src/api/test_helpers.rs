@@ -20,24 +20,53 @@ use axum::http::StatusCode;
 use axum::Router;
 use std::sync::OnceLock;
 
-/// Guard macro for mock state tests - returns early if NOT_FOUND
+/// Guard macro for mock state tests - returns early on the no-model status
 ///
-/// When using mock state (no model), endpoints return NOT_FOUND.
+/// When using mock state (no model), endpoints return 503 SERVICE_UNAVAILABLE.
 /// This macro allows tests to pass if routing worked (got any response).
 /// Usage: `guard_mock_response!(response);`
+///
+/// aprender#2609: this read `NOT_FOUND`, which is what the surface used to answer
+/// for "the server has no model" — a status that means the route does not exist.
 #[macro_export]
 macro_rules! guard_mock_response {
     ($response:expr) => {
-        if $response.status() == axum::http::StatusCode::NOT_FOUND {
-            // Mock state returns NOT_FOUND - routing worked, test passes
+        if $response.status() == axum::http::StatusCode::SERVICE_UNAVAILABLE {
+            // Mock state returns 503 - routing worked, test passes
             return;
         }
     };
 }
 
-/// Check if response indicates mock state (no model loaded)
+/// Check if response indicates mock state (no model loaded).
+///
+/// aprender#2609: `NOT_FOUND` before — see [`guard_mock_response`].
 pub fn is_mock_response(status: StatusCode) -> bool {
-    status == StatusCode::NOT_FOUND
+    status == StatusCode::SERVICE_UNAVAILABLE
+}
+
+/// The status a MOUNTED route must answer on a server with no usable model.
+///
+/// aprender#2609: forty call sites across ten test files asserted this as a
+/// disjunction over four or five statuses — `OK || NOT_FOUND || BAD_REQUEST ||
+/// INTERNAL_SERVER_ERROR || NOT_FOUND`, with `NOT_FOUND` listed twice in most of
+/// them. An assertion that admits every plausible outcome excludes none, which is
+/// how the published 0.63.0 shipped `/stream/generate` and `/v1/chat/completions`
+/// answering 404 for a condition that has nothing to do with routing, with a full
+/// green suite. There is exactly one right answer here — the route IS mounted, the
+/// server simply cannot serve it — so this asserts it.
+///
+/// # Panics
+///
+/// Panics unless `status` is 503 SERVICE_UNAVAILABLE.
+pub fn assert_no_model_status(status: StatusCode) {
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "a mounted route on a model-less server must answer 503 \
+         (404 means the route does not exist; 500 invites a retry of a request \
+         the server cannot serve) — see contracts/apr-serve-model-backend-coverage-v1.yaml"
+    );
 }
 
 /// Global shared AppState for read-only tests (Experimental Reusability)
@@ -83,6 +112,41 @@ pub fn create_test_app_shared() -> Router {
 pub fn create_test_app() -> Router {
     let state = AppState::demo().expect("test");
     create_router(state)
+}
+
+/// #3991: a state that HAS a `cached_model` — the only state that mounts
+/// `/v1/batch/completions`. On any other state the route is neither mounted nor
+/// listed, so tests of that handler's request validation are built on this.
+#[cfg(feature = "gpu")]
+pub fn create_test_cached_state() -> AppState {
+    use crate::gguf::{ArchConstraints, GGUFConfig, OwnedQuantizedModelCachedSync};
+
+    let config = GGUFConfig {
+        architecture: "llama".to_string(),
+        constraints: ArchConstraints::from_architecture("llama"),
+        hidden_dim: 64,
+        intermediate_dim: 128,
+        num_layers: 2,
+        num_heads: 4,
+        num_kv_heads: 4,
+        vocab_size: 256,
+        context_length: 128,
+        rope_theta: 10000.0,
+        eps: 1e-5,
+        rope_type: 0,
+        explicit_head_dim: None,
+        query_pre_attn_scalar: None,
+        bos_token_id: None,
+        eos_token_id: None,
+    };
+    let cached = OwnedQuantizedModelCachedSync::new(create_test_quantized_model(&config));
+    AppState::with_cached_model(cached).expect("build cached AppState")
+}
+
+/// Router over [`create_test_cached_state`].
+#[cfg(feature = "gpu")]
+pub fn create_test_cached_app() -> Router {
+    create_router(create_test_cached_state())
 }
 
 /// Helper to create test quantized model for IMP-116 tests

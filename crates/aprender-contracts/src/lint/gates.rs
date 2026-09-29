@@ -11,12 +11,12 @@ use std::time::Instant;
 use crate::audit::audit_contract;
 use crate::binding::{parse_binding, BindingRegistry};
 use crate::error::Severity;
-use crate::schema::{parse_contract, validate_contract, Contract};
+use crate::schema::{is_contract_yaml, parse_contract, validate_contract, Contract};
 use crate::scoring::{score_contract, ContractScore};
 
 use super::finding::LintFinding;
 use super::rules::RuleSeverity;
-use super::{GateDetail, GateResult};
+use super::{GateDetail, GateResult, Verdict};
 
 /// Load and parse all YAML contracts from a directory.
 ///
@@ -26,7 +26,14 @@ pub(crate) fn load_contracts(dir: &Path) -> (Vec<(String, Contract)>, Vec<(Strin
     let mut contracts = Vec::new();
     let mut parse_errors = Vec::new();
     let mut yaml_paths = Vec::new();
-    collect_yaml_files(dir, &mut yaml_paths);
+    if dir.is_file() {
+        // PVL-1 (PMAT-1099): `pv lint <file>` lints THAT file. Before this, a file
+        // path was walked with `read_dir`, found nothing, and reported PASS over
+        // 0 contracts.
+        yaml_paths.push(dir.to_path_buf());
+    } else {
+        collect_yaml_files(dir, &mut yaml_paths);
+    }
     // DETERMINISM: `read_dir` order is unspecified (on ext4 it is a filename-hash
     // order, so it changes when a DIRECTORY IS RENAMED even though no file content
     // changed). Sorting by full path imposes a total order, so everything derived
@@ -57,7 +64,7 @@ pub(crate) fn load_contracts(dir: &Path) -> (Vec<(String, Contract)>, Vec<(Strin
 ///
 /// Emits entries in `read_dir` order, which is UNSPECIFIED. Every caller must
 /// impose its own total order before deriving a verdict from the result.
-pub(super) fn collect_yaml_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+pub fn collect_yaml_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -70,17 +77,15 @@ pub(super) fn collect_yaml_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) 
             // validating them here would fail on missing `metadata.` root.
             if matches!(
                 dirname,
-                "kaizen" | "legacy" | "pipelines" | "publish-manifests"
+                // `quarantine/` holds contracts ONT-001 ONT-1 pulled OUT of the
+                // corpus precisely because they do not parse; walking them would
+                // make every gate reject on the files quarantine exists to hold.
+                "kaizen" | "legacy" | "pipelines" | "publish-manifests" | "quarantine"
             ) {
                 continue;
             }
             collect_yaml_files(&path, out);
-        } else if path.extension().and_then(|e| e.to_str()) == Some("yaml")
-            && !matches!(
-                path.file_name().and_then(|n| n.to_str()),
-                Some("binding.yaml" | "binding.yml")
-            )
-        {
+        } else if is_contract_yaml(&path) {
             out.push(path);
         }
     }
@@ -147,6 +152,7 @@ pub(crate) fn run_validate_gate(
         name: "validate".into(),
         passed: total_errors == 0,
         skipped: false,
+        verdict: Verdict::from_gate(total_errors == 0, false),
         duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
         detail: GateDetail::Validate {
             contracts: contracts.len() + parse_errors.len(),
@@ -194,6 +200,7 @@ pub(crate) fn run_audit_gate(contracts: &[(String, Contract)]) -> (GateResult, V
         name: "audit".into(),
         passed: total_findings == 0,
         skipped: false,
+        verdict: Verdict::from_gate(total_findings == 0, false),
         duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
         detail: GateDetail::Audit {
             contracts: contracts.len(),
@@ -263,6 +270,7 @@ pub(crate) fn run_score_gate(
         name: "score".into(),
         passed,
         skipped: false,
+        verdict: Verdict::from_gate(passed, false),
         duration_ms: u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
         detail: GateDetail::Score {
             contracts: contracts.len(),

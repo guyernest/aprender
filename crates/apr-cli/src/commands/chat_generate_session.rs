@@ -39,10 +39,63 @@ fn read_repl_line() -> Result<Option<String>, CliError> {
     Ok(Some(input.trim().to_string()))
 }
 
+/// Render one assistant turn from a generation result — and the ONE place a generation
+/// failure is recorded on the session.
+///
+/// #3367: `echo hey | apr chat model.gguf` hit a generate error, printed it as an
+/// assistant turn (`Assistant: [Error: GGUF generate failed: ...]`) and exited **0**, so
+/// a gate keyed on the return code read a failed generation as a pass. The error text is
+/// still returned unchanged — an interactive user must keep seeing it — but the failure
+/// is no longer invisible to the caller: `had_generate_error` is what
+/// [`session_exit_result`] turns into a non-zero exit at session end.
+///
+/// Mid-session behaviour is deliberately unchanged. The REPL's existing convention is
+/// that only I/O errors abort the loop (`read_repl_line()?`); a generation error prints
+/// and the conversation continues. This records the failure instead of aborting on it.
+#[cfg_attr(not(feature = "inference"), allow(dead_code))]
+fn render_assistant_turn(result: Result<String, String>, had_generate_error: &mut bool) -> String {
+    match result {
+        Ok(text) => text,
+        Err(e) => {
+            *had_generate_error = true;
+            format!("[Error: {}]", e)
+        }
+    }
+}
+
+/// The exit-code decision at session end (#3367).
+///
+/// A session in which any turn failed to generate exits non-zero, with
+/// [`CliError::InferenceFailed`] — exit **8** per `error.rs`, the code `main` already
+/// maps a command `Err` to. Nothing else about the session changes.
+#[cfg_attr(not(feature = "inference"), allow(dead_code))]
+fn session_exit_result(had_generate_error: bool) -> Result<(), CliError> {
+    if had_generate_error {
+        return Err(CliError::InferenceFailed(
+            "chat session ended after a failed generation (#3367); the [Error: ...] turn(s) \
+             above are not model output"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Generate a response, update history, and print (inference mode).
 #[cfg(feature = "inference")]
-fn generate_and_print(session: &mut ChatSession, input: &str, config: &ChatConfig) {
+fn generate_and_print(
+    session: &mut ChatSession,
+    input: &str,
+    config: &ChatConfig,
+) -> Result<(), CliError> {
+    let failed_before = session.had_generate_error();
     let response = session.generate(input, config);
+    let turn_failed = session.had_generate_error() && !failed_before;
+    // #4609: a --gpu turn the CPU answered is refused before its answer is printed,
+    // exactly as `apr run --gpu` refuses (R-0b): the answer is real text from the
+    // wrong backend, and printing it is what let a --gpu cell grade PASS.
+    if !turn_failed {
+        forced_gpu_turn_check(config, session.generated_on_gpu())?;
+    }
     session.add_to_history("user", input);
     session.add_to_history("assistant", &response);
     println!("{} {}", "Assistant:".blue().bold(), response);
@@ -50,6 +103,26 @@ fn generate_and_print(session: &mut ChatSession, input: &str, config: &ChatConfi
         print_inspection_info_inference(session);
     }
     println!();
+    Ok(())
+}
+
+/// #4609: the per-turn reconciliation of a FORCED accelerator with what ran.
+///
+/// `apr chat --gpu` on lambda's Qwen3.5-4B answered every turn on the CPU, said so only
+/// in the `--json` epilogue (`fell_back: true`) and exited 0, so a cell that asked for
+/// the GPU graded PASS. `apr run --gpu` refuses the same case with exit 14
+/// (`registry::after_generation`, R-0b); chat now uses that very function, so the two
+/// surfaces cannot drift. A default request (no `--gpu`) that ran on the CPU is not an
+/// error here: the epilogue still reports it as `fell_back: true`.
+///
+/// # Errors
+/// `BackendUnavailable` (exit 14) when `--gpu` was given and the turn ran on the CPU.
+#[cfg(feature = "inference")]
+fn forced_gpu_turn_check(config: &ChatConfig, generated_on_gpu: bool) -> Result<(), CliError> {
+    if config.force_cpu || !config.accel_forced {
+        return Ok(());
+    }
+    crate::registry::after_generation(true, Some("gpu"), Some(generated_on_gpu)).map(|_| ())
 }
 
 /// Process a single REPL input line. Returns `true` to quit, `false` to continue.
@@ -65,25 +138,66 @@ fn process_repl_input(
             CommandResult::Quit => return Ok(true),
         }
     }
-    generate_and_print(session, input, config);
+    generate_and_print(session, input, config)?;
     Ok(false)
 }
 
 #[cfg(feature = "inference")]
-fn run_repl(path: &Path, config: &ChatConfig) -> Result<(), CliError> {
-    let mut session = ChatSession::new(path)?;
-
+fn repl_loop(session: &mut ChatSession, config: &ChatConfig) -> Result<(), CliError> {
     while let Some(input) = read_repl_line()? {
         if input.is_empty() {
             continue;
         }
-        if process_repl_input(&input, &mut session, config)? {
+        if process_repl_input(&input, session, config)? {
             break;
         }
     }
+    Ok(())
+}
+
+#[cfg(feature = "inference")]
+fn run_repl(path: &Path, config: &ChatConfig) -> Result<(), CliError> {
+    let mut session = ChatSession::new(path, config.force_cpu)?;
+
+    // #4609: a refused --gpu turn ends the session, but the `--json` epilogue is still
+    // printed first, so a harness reads `fell_back: true` beside the exit 14.
+    let outcome = repl_loop(&mut session, config);
 
     println!("{}", "Goodbye!".cyan());
-    Ok(())
+    if config.json {
+        println!("{}", chat_backend_report(config, session.generated_on_gpu()));
+    }
+    outcome?;
+    // #3367: the session's verdict, not the loop's. Every turn was printed as it
+    // happened; this is only the exit code catching up with what was printed.
+    session_exit_result(session.had_generate_error())
+}
+
+/// #3794: the machine-readable backend line, mirroring `apr run --format json`'s
+/// `backend: {requested, ran, fell_back}`.
+///
+/// `ran` is what ACTUALLY answered — recorded by the generate branches
+/// themselves, not inferred from the flags — so a harness can hold `apr chat` to
+/// its lane the way the `run` cells already hold `apr run`. Pure and
+/// string-returning so the shape is unit-testable without a model or a GPU.
+#[cfg(feature = "inference")]
+pub(crate) fn chat_backend_report(config: &ChatConfig, generated_on_gpu: bool) -> String {
+    // #3955: `accel_forced` is `run_accelerator_forced`, the derivation `apr run`
+    // uses, so `--gpu` records "gpu" on both surfaces.
+    let requested = if config.force_cpu {
+        "cpu"
+    } else if config.accel_forced {
+        "gpu"
+    } else {
+        "default"
+    };
+    let ran = if generated_on_gpu { "gpu" } else { "cpu" };
+    // A fallback is a request for an accelerator that CPU answered. Asking for
+    // cpu and getting cpu is not a fallback, and neither is never asking.
+    let fell_back = !config.force_cpu && !generated_on_gpu;
+    format!(
+        r#"{{"backend":{{"requested":"{requested}","ran":"{ran}","fell_back":{fell_back}}}}}"#
+    )
 }
 
 #[cfg(feature = "inference")]
@@ -158,7 +272,7 @@ fn process_repl_input_fallback(
 
 #[cfg(not(feature = "inference"))]
 fn run_repl(path: &Path, config: &ChatConfig) -> Result<(), CliError> {
-    let mut session = ChatSession::new(path)?;
+    let mut session = ChatSession::new(path, config.force_cpu)?;
 
     while let Some(input) = read_repl_line()? {
         if input.is_empty() {
@@ -173,11 +287,6 @@ fn run_repl(path: &Path, config: &ChatConfig) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Generate a response, update history, and print (fallback mode).
-#[cfg(not(feature = "inference"))]
-fn generate_and_print_fallback(_session: &mut ChatSession, _input: &str, _config: &ChatConfig) {
-    unreachable!("ChatSession::new always returns Err without inference feature")
-}
 
 enum CommandResult {
     Continue,
@@ -242,5 +351,146 @@ fn format_params(count: usize) -> String {
         format!("{:.1}K", count as f64 / 1_000.0)
     } else {
         format!("{count}")
+    }
+}
+
+/// #3794: the case table for `chat_backend_report`.
+///
+/// `fell_back` is the field a harness acts on, and it is the one easiest to get
+/// backwards: asking for CPU and getting CPU is not a fallback, and neither is
+/// never asking. Only an unasked-for demotion is.
+#[cfg(all(test, feature = "inference"))]
+mod pmat3794_chat_backend_report {
+    use super::{chat_backend_report, ChatConfig};
+
+    fn report(force_cpu: bool, on_gpu: bool) -> String {
+        let config = ChatConfig {
+            force_cpu,
+            json: true,
+            ..Default::default()
+        };
+        chat_backend_report(&config, on_gpu)
+    }
+
+    /// `(force_cpu, generated_on_gpu, expected, what this invocation is)`
+    const CASES: &[(bool, bool, &str, &str)] = &[
+        (
+            true, false,
+            r#"{"backend":{"requested":"cpu","ran":"cpu","fell_back":false}}"#,
+            "`apr chat --no-gpu` — the #3794 invocation. Asked for CPU, got CPU: \
+             NOT a fallback",
+        ),
+        (
+            false, true,
+            r#"{"backend":{"requested":"default","ran":"gpu","fell_back":false}}"#,
+            "`apr chat` on a CUDA build — the accelerator answered",
+        ),
+        (
+            false, false,
+            r#"{"backend":{"requested":"default","ran":"cpu","fell_back":true}}"#,
+            "`apr chat` where the accelerator did NOT answer — the only real \
+             fallback, and the case a harness needs to see",
+        ),
+        (
+            true, true,
+            r#"{"backend":{"requested":"cpu","ran":"gpu","fell_back":false}}"#,
+            "force_cpu yet the GPU answered — impossible after #3794's gate, and \
+             reported honestly rather than smoothed over, so the contradiction is \
+             visible if the gate ever regresses",
+        ),
+    ];
+
+    /// #3955: `apr chat --gpu` recorded `requested:"default"` while `apr run --gpu`
+    /// recorded `"gpu"`. The field records the REQUEST, derived the way `run` does.
+    #[test]
+    fn a_gpu_request_is_recorded_as_gpu_like_run() {
+        let config = ChatConfig { accel_forced: true, json: true, ..Default::default() };
+        assert_eq!(
+            chat_backend_report(&config, true),
+            r#"{"backend":{"requested":"gpu","ran":"gpu","fell_back":false}}"#
+        );
+        assert_eq!(
+            chat_backend_report(&config, false),
+            r#"{"backend":{"requested":"gpu","ran":"cpu","fell_back":true}}"#
+        );
+    }
+
+    #[test]
+    fn the_whole_report_table_holds() {
+        let wrong: Vec<String> = CASES
+            .iter()
+            .filter(|(f, g, want, _)| report(*f, *g) != **want)
+            .map(|(f, g, want, why)| {
+                format!(
+                    "\n  - force_cpu={f} generated_on_gpu={g}: {why}\n      expected {want}\n      got      {}",
+                    report(*f, *g)
+                )
+            })
+            .collect();
+        assert!(
+            wrong.is_empty(),
+            "{} of {} chat backend reports are wrong:{}",
+            wrong.len(),
+            CASES.len(),
+            wrong.join("")
+        );
+    }
+
+    /// The field a harness acts on, asserted on its own so a regression in it
+    /// cannot hide inside a whole-string diff.
+    #[test]
+    fn only_an_unasked_for_demotion_is_a_fallback() {
+        assert!(
+            report(false, false).contains(r#""fell_back":true"#),
+            "#3794: a default chat answered by the CPU is a fallback and must say so"
+        );
+        for (f, g) in [(true, false), (false, true), (true, true)] {
+            assert!(
+                report(f, g).contains(r#""fell_back":false"#),
+                "#3794: force_cpu={f} generated_on_gpu={g} is not a fallback"
+            );
+        }
+    }
+}
+
+/// #4609: the case table for `forced_gpu_turn_check`, both polarities.
+///
+/// The RED row is the lambda Qwen3.5-4B cell: `--gpu`, the CPU answered. It must be
+/// exit 14, never a pass. Every other row must stay Ok, or a GPU host's normal `--gpu`
+/// turn, a `--no-gpu` turn and a plain turn would all start failing.
+#[cfg(all(test, feature = "inference"))]
+mod pmat4609_forced_gpu_turn_check {
+    use super::{forced_gpu_turn_check, ChatConfig};
+    use crate::error::CliError;
+
+    fn check(accel_forced: bool, force_cpu: bool, on_gpu: bool) -> Result<(), CliError> {
+        let config = ChatConfig {
+            accel_forced,
+            force_cpu,
+            ..Default::default()
+        };
+        forced_gpu_turn_check(&config, on_gpu)
+    }
+
+    #[test]
+    fn a_forced_gpu_turn_the_cpu_answered_is_exit_14() {
+        let err = check(true, false, false).expect_err("#4609: --gpu answered by the CPU must be refused");
+        assert!(matches!(err, CliError::BackendUnavailable(_)), "got {err:?}");
+        assert_eq!(err.exit_code_value(), 14);
+    }
+
+    #[test]
+    fn every_other_turn_is_not_refused() {
+        // (accel_forced, force_cpu, on_gpu, what this invocation is)
+        let rows = [
+            (true, false, true, "--gpu, the GPU answered: the normal GPU cell"),
+            (false, false, false, "no flag, CPU answered: reported as fell_back, not refused"),
+            (false, false, true, "no flag, GPU answered"),
+            (false, true, false, "--no-gpu, CPU answered as asked"),
+            (true, true, false, "--no-gpu wins over accel_forced: CPU was asked for"),
+        ];
+        for (forced, cpu, gpu, why) in rows {
+            assert!(check(forced, cpu, gpu).is_ok(), "#4609 refused a turn it must not: {why}");
+        }
     }
 }

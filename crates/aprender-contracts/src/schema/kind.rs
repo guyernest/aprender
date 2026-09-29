@@ -39,6 +39,14 @@ use serde::{Deserialize, Serialize};
 /// - `Schema`: a generic reference/schema document — exempt from provability,
 ///   validated only for `metadata.id`, `metadata.version`, `metadata.description`,
 ///   and `metadata.references`.
+/// - `Kaizen`: an improvement record — a dated, ticketed statement that a
+///   specific waste was removed, pinned by a `baseline:` → `target:` delta.
+///   Exempt from the kernel provability invariant (a kaizen record is a
+///   measurement, not a theorem) but held to its OWN falsifiability rules by
+///   `validate_kaizen` (KAIZEN-001..006): it must name itself, declare a
+///   status from a closed vocabulary, state something that can fail, and — if
+///   it pins a baseline/target — actually claim a movement, in a direction
+///   that does not contradict its own cost metrics.
 #[derive(
     Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
@@ -56,6 +64,9 @@ pub enum ContractKind {
     CorpusAssembly,
     Pattern,
     Schema,
+    /// A kaizen improvement record (`contracts/*/kaizen/*.yaml`). See the
+    /// module docs above and `schema::kaizen` for the KAIZEN-001..006 rules.
+    Kaizen,
     /// A head-to-head BEAT benchmark: a committed, CI-wired claim that aprender
     /// beats an incumbent (sklearn / PyTorch / Unsloth / Ollama) on a canonical
     /// task, with a pinned baseline that fails CI on regression. The measurement
@@ -77,6 +88,7 @@ impl std::fmt::Display for ContractKind {
             Self::CorpusAssembly => "corpus-assembly",
             Self::Pattern => "pattern",
             Self::Schema => "schema",
+            Self::Kaizen => "kaizen",
             Self::BeatBenchmark => "beat-benchmark",
         };
         write!(f, "{s}")
@@ -101,7 +113,13 @@ mod beat_benchmark_tests {
     /// BeatBenchmark and validates with zero Error-severity violations (PMAT-741).
     #[test]
     fn pilot_beat_contract_validates() {
-        let yaml = include_str!("../../../../contracts/beat-sklearn-iris-v1.yaml");
+        let Some(yaml_owned) = crate::schema::workspace_contract_or_skip(
+            "pilot_beat_contract_validates",
+            "beat-sklearn-iris-v1.yaml",
+        ) else {
+            return;
+        };
+        let yaml: &str = &yaml_owned;
         let contract = parse_contract_str(yaml).expect("pilot beat contract parses");
         assert_eq!(contract.kind(), ContractKind::BeatBenchmark);
         let errors: Vec<_> = validate_contract(&contract)

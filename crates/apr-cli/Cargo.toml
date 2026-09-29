@@ -85,8 +85,25 @@ xet = ["hf-hub", "aprender/xet"]
 code = []
 dev = []  # Enable `apr mono` subcommands (publish, shims, audit, archive)
 safetensors-compare = ["aprender/safetensors-compare"]
-inference = ["realizar", "trueno", "tokio", "axum", "futures-util"]
-cuda = ["inference", "realizar/cuda", "entrenar/cuda", "aprender-train-distill?/cuda"]
+inference = ["realizar", "realizar/structured-output", "trueno", "tokio", "axum", "futures-util"]
+# #3545: `trueno/cuda` is NOT optional here, and leaving it out was the defect. The inference
+# stack got CUDA through `realizar/cuda` and WORKED, while `trueno`'s backend registry — the thing
+# `apr devices` reads — was built without its cuda feature, so `default_factories()` omitted
+# `CudaFactory`, no factory produced a cuda entry, and the registry emitted `missing_entry(Cuda)` =
+# `Source::NotCompiled`. The shipped `-cuda` asset therefore ran CUDA correctly and told every new
+# user CUDA was unavailable on the first screen they saw.
+#
+# ONE FLAG NOW DECIDES BOTH: what runs and what is reported. Two flags for one fact is how a verb
+# comes to lie about its own binary.
+cuda = ["inference", "realizar/cuda", "entrenar/cuda", "trueno/cuda", "aprender-train-distill?/cuda"]
+# PP-LLAMA-001 §9 #8: a documented COMPATIBILITY ALIAS, nothing more. No
+# `#[cfg(feature = "cuda-batch")]` remains in the tree: the implication ran
+# the wrong way (`cuda-batch = ["cuda"]` means enabling it enables cuda, not
+# the reverse), so a plain `--features cuda` build compiled a stub for the
+# APR-Q4K GPU serve path and silently downgraded to the generic per-tensor
+# allocator. Kept so existing `--features cuda-batch` invocations and the
+# root passthrough keep building, and so a receipt can still record whether
+# the binary was built with it (§2.1 INVALID-BUILD reads that entry).
 cuda-batch = ["cuda"]
 # PMAT-335: WGPU backend for AMD/Intel/Apple GPU inference via Vulkan/Metal/WebGPU
 wgpu = ["inference"]
@@ -121,13 +138,20 @@ full = ["inference", "cuda", "cuda-batch", "visualization", "zram", "training", 
 libc = "0.2"
 
 [dependencies]
+# GH-876 Milestone 2 — the llm benchmark harness behind `apr test llm`.
+# The `llm` feature is enabled UNCONDITIONALLY and by the same edit that adds
+# the subcommand. #2527: `aprender-test-cli` advertised `llm` in --help while
+# gating its handler on a feature its Cargo.toml never declared, so the cfg was
+# permanently false and the error it printed named a rebuild that cannot be
+# performed. A surface and its capability must not be able to drift.
+apr-test = { workspace = true }
 # Core aprender library
-aprender = { path = "../aprender-core", version = "0.63.0", package = "aprender-core", default-features = true, features = ["format-compression"] }
+aprender = { path = "../aprender-core", version = "0.69.3", package = "aprender-core", default-features = true, features = ["format-compression"] }
 # Provable-contracts engine — `apr beat-run` parses + evaluates BeatBenchmark contracts (PMAT-741)
 aprender-contracts = { workspace = true }
 
 # MCP (Model Context Protocol) server — `apr mcp` subcommand
-aprender-mcp = { path = "../aprender-mcp", version = "0.63.0" }
+aprender-mcp = { path = "../aprender-mcp", version = "0.69.3", features = ["apr-tools"] }   # apr mcp serves apr's own tools (PMAT-3954)
 async-stream = "0.3"
 provable-contracts-macros = { workspace = true }
 
@@ -138,7 +162,7 @@ batuta-common = { workspace = true }
 # Non-optional since claude-code-parity-apr M150 (outcome-parity Phase 3
 # requires apr code in default builds). GH-344: path dep via
 # .cargo/config.toml.dev-overrides; CI uses checkout+symlink.
-batuta = { version = "0.63.0", path = "../aprender-orchestrate", package = "aprender-orchestrate", default-features = false, features = ["agents", "agents-inference", "agents-mcp", "rag"] }
+batuta = { version = "0.69.3", path = "../aprender-orchestrate", package = "aprender-orchestrate", default-features = false, features = ["agents", "agents-inference", "agents-mcp", "rag"] }
 
 # Inference engine (workspace path dep — enables cuda/gpu feature forwarding)
 # GH-573: shim (0.9.1) didn't forward cuda feature → 0.7 tok/s instead of 273 tok/s
@@ -148,6 +172,10 @@ realizar = { workspace = true, optional = true }
 # MUST use crates.io version to match aprender's trueno dependency
 # 2026-04-05 PMAT-507: bumped 0.16.0→0.17 to match aprender root Cargo.toml (was diamond dep)
 trueno = { workspace = true, optional = true }
+
+# The ggml type table (`GgmlType`: ids, names, block sizes), in-tree as crates/aprender-quant.
+# Not optional: `apr hex` and `apr validate-manifest` name GGUF dtypes in every build (#3662).
+trueno-quant = { workspace = true }
 
 # Async runtime for server
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync"], optional = true }
@@ -166,10 +194,11 @@ gag = "1.0"
 
 # Output formatting
 colored = "2.1"
-tabled = "0.16"
+tabled = "0.22"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
+aprender-update = { workspace = true }
 # HELIX-IDEA-009: constant-time SHA-256 digest comparison for `apr serve`
 # bearer-token auth. See contracts/apr-serve-api-key-auth-v1.yaml gate
 # FALSIFY-AUTH-003.
@@ -198,8 +227,8 @@ which = "7"
 # Stack v1.2 / codeparrot Python corpora ship as parquet, not JSONL; this
 # enables `apr tokenize encode-corpus --corpus <path>.parquet` end-to-end
 # without a Python shim (per `feedback_stack_tool_extension_not_cli_shim.md`).
-parquet = { version = "57", default-features = false, features = ["arrow", "snap", "zstd"] }
-arrow-array = "57"
+parquet = { version = "59", default-features = false, features = ["arrow", "snap", "zstd"] }
+arrow-array = "59"
 
 # HTTP client for downloads
 ureq = "2.10"
@@ -229,7 +258,7 @@ pacha = { workspace = true }
 # published-crate dependency cycle the APR-MONO consolidation removed, and
 # (b) was never actually linked, so every `trueno_explain::` path in
 # commands/ptx_explain.rs failed to resolve.
-trueno-explain = { path = "../aprender-explain", version = "0.63.0", package = "aprender-explain", optional = true }
+trueno-explain = { path = "../aprender-explain", version = "0.69.3", package = "aprender-explain", optional = true }
 
 # ML tuning: LoRA/QLoRA configuration and memory planning (GH-176, PMAT-184)
 entrenar-lora = { workspace = true, optional = true }
@@ -299,12 +328,15 @@ required-features = ["inference", "cuda"]
 name = "ptx_parity_validation"
 required-features = ["inference"]
 
+[build-dependencies]
+aprender-build-sha = { workspace = true }  # #4219: APR_GIT_SHA for --version
+
 [dev-dependencies]
+jsonschema = "0.28"  # apr devices --json validated against contracts/schemas/apr-devices-v1.schema.json (PP-066 R-0a)
 assert_cmd = "2.0"
 predicates = "3.1"
 tempfile = "3.14"
 proptest = "1.6"
-jugar-probar = { path = "../aprender-test-lib", package = "aprender-test-lib", features = ["tui"] }
 regex = "1.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 axum-test = "16"

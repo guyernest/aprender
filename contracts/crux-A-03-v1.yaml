@@ -167,7 +167,7 @@ falsification_tests:
   rule: parity with huggingface-cli on golden revisions
   prediction: "apr pull output sha256 == huggingface-cli download output sha256 at same REV"
   test: |
-    GOLD=/home/noah/src/aprender-worktrees/crux-spec/evidence/crux/huggingface/revision-goldens.json
+    GOLD=${APR_CRUX_GOLDENS:-evidence/crux}/huggingface/revision-goldens.json
     [ -f "$GOLD" ] || { echo "golden set absent"; exit 2; }
     python3 - "$GOLD" <<'PY'
     import json, subprocess, tempfile, hashlib, sys, pathlib
@@ -182,15 +182,20 @@ falsification_tests:
   if_fails: "apr pinned-revision bytes diverge from huggingface-cli golden sha256"
 
 proof_obligations:
-- type: equivalence
+- id: CA0F433-EQ-001
+  type: equivalence
   property: "apr pull --revision matches huggingface-cli download --revision on evidence/crux/huggingface/revision-goldens.json tuples"
-- type: invariant
+- id: CA0F433-INV-002
+  type: invariant
   property: "Resolved revision_sha is always 40-hex and recorded in local manifest"
-- type: invariant
+- id: CA0F433-INV-003
+  type: invariant
   property: "Pinning to a full SHA is immutable: byte-identical output across invocations and over time"
-- type: invariant
+- id: CA0F433-INV-004
+  type: invariant
   property: "Unknown revision exits non-zero with HTTP status surfaced in stderr"
-- type: invariant
+- id: CA0F433-INV-005
+  type: invariant
   property: "resolve_revision(REPO, REV) == HF API GET /api/models/REPO/revision/REV .sha"
 
 verification_summary:

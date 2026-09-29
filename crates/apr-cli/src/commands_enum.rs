@@ -1,4 +1,10 @@
 
+// R-0b (#3002): the backend-resolution module. Declared here (an included
+// file whose own analysis is clean) rather than in lib.rs, whose include! tree
+// pulls pre-existing over-threshold functions the complexity hook would charge.
+#[path = "registry.rs"]
+pub mod registry;
+
 /// Compute backends `--backend` accepts on `apr run` / `apr chat`.
 ///
 /// The flag used to be a free-form `String`: `--backend banana` printed
@@ -8,6 +14,83 @@
 /// caller did not ask for — so a typo must be rejected by the parser, not
 /// echoed back.
 pub const BACKEND_VALUES: [&str; 3] = ["cuda", "cpu", "wgpu"];
+
+/// The ONE `--backend` declaration, flattened into every command that offers the
+/// inference backend override (`apr run`, `apr chat`, `apr serve run`).
+///
+/// #2583: the `value_parser` above was applied by hand at each site, so
+/// `apr serve run` — added later — declared a bare
+/// `#[arg(long, value_name = "BACKEND")]` and accepted ANY string:
+/// `apr serve run --backend nonsense` parsed, `ServerConfig.backend` carried
+/// `"nonsense"`, and the server came up on whatever backend it would have picked
+/// anyway. Copying the `value_parser` to that third site would have left the same
+/// hand-copy hazard for the fourth (cf. #2585, where two `apr` bin targets were
+/// duplicated by hand and had already diverged), so the declaration itself is
+/// shared: a new consumer writes `#[command(flatten)] backend: BackendArg` and
+/// cannot express the unvalidated form.
+#[derive(clap::Args, Debug, Clone, Default, PartialEq, Eq)]
+pub struct BackendArg {
+    /// Compute backend override (cuda, cpu, wgpu)
+    #[arg(long, value_name = "BACKEND", value_parser = BACKEND_VALUES)]
+    pub backend: Option<String>,
+}
+
+/// Thinking modes `--thinking` accepts (#3723).
+pub const THINKING_VALUES: [&str; 2] = ["on", "off"];
+
+/// The ONE `--thinking` declaration, flattened into `apr run` and `apr chat` (#3723), and
+/// shared by name and values with `apr code` (#3978). One declaration for the same reason
+/// as [`BackendArg`]: a hand-copied flag drifts.
+///
+/// ABSENT renders what production always has (a Qwen3/Qwen3.5 model answers with thinking
+/// OFF). `on` removes the empty `<think>` prefill so the model reasons, and is REFUSED by name
+/// on a model whose template has no thinking mode, never silently run as OFF.
+#[derive(clap::Args, Debug, Clone, Default, PartialEq, Eq)]
+pub struct ThinkingArg {
+    /// Thinking mode for a thinking-capable model: on or off. Absent: the default (off for
+    /// Qwen3/Qwen3.5). `on` on a model with no thinking template is refused (#3723)
+    #[arg(long, value_name = "MODE", value_parser = THINKING_VALUES)]
+    pub thinking: Option<String>,
+}
+
+impl ThinkingArg {
+    /// `Some(true)` for on, `Some(false)` for off, `None` when the flag is absent.
+    #[must_use]
+    pub fn mode(&self) -> Option<bool> {
+        self.thinking.as_deref().map(|m| m == "on")
+    }
+}
+
+/// Backends `apr finetune --gpu-backend` accepts.
+///
+/// #2583 follow-up: this site is the SAME silent-wrong-backend defect as
+/// `apr serve run --backend`, one command over. It was declared
+/// `#[arg(long, default_value = "auto")] gpu_backend: String` with no
+/// `value_parser`, and `gpu_backend_notice()` (commands/finetune.rs:265)
+/// dispatches on it with a catch-all `_ =>` arm that means "auto". So
+/// `--gpu-backend cudaa` parsed, printed `auto → …`, and trained on whatever
+/// backend auto-selection picked — the typo was indistinguishable from not
+/// passing the flag at all.
+///
+/// It is deliberately NOT `BackendArg`: the domains genuinely differ. `auto` is
+/// a valid selection here and is absent from `BACKEND_VALUES`; `cpu` is not a
+/// selectable training backend and is present there. Sharing the *declaration*
+/// across two different value sets would have to widen both, re-admitting
+/// `--backend auto` on `apr run` (unvalidated again, by a different route) and
+/// `--gpu-backend cpu` on `apr finetune` (silently the `_ =>` auto arm again).
+/// What is shared instead is the *invariant*, enforced by
+/// `test_every_backend_arg_advertises_its_values_2583` over the built clap tree.
+pub const FINETUNE_GPU_BACKEND_VALUES: [&str; 3] = ["auto", "cuda", "wgpu"];
+
+/// Provider backends `apr distill --backend` accepts.
+///
+/// Unlike the two above this one was NOT silently accepted: `distill::run()`
+/// (commands/distill.rs:464-503) matches on it before any I/O and returns
+/// `ValidationFailed` naming both valid values, covered by
+/// `distill_run_unknown_backend_errors`. Wiring the same list into clap is
+/// defence in depth and makes `--help` advertise the set, but it closes a
+/// help-text gap, not a silent-wrong-backend defect. The runtime check stays.
+pub const DISTILL_BACKEND_VALUES: [&str; 2] = ["fixture", "cuda"];
 
 /// Trace detail levels `--trace-level` accepts.
 ///
@@ -79,6 +162,10 @@ pub enum Commands {
         /// Force GPU acceleration
         #[arg(long, conflicts_with = "no_gpu")]
         gpu: bool,
+        /// Re-run the GPU/CPU parity guard even if a receipt for this (model,
+        /// apr version, device) exists, and rewrite the receipt (#3604)
+        #[arg(long)]
+        revalidate: bool,
         /// Offline mode: block all network access (Sovereign AI compliance)
         #[arg(long)]
         offline: bool,
@@ -117,8 +204,9 @@ pub enum Commands {
         /// Sampling temperature (0.0 = greedy, default: 0.0)
         #[arg(long, default_value = "0.0")]
         temperature: f32,
-        /// Top-k sampling (default: 1 = greedy)
-        #[arg(long, default_value = "1")]
+        /// Top-k sampling, used when --temperature > 0. `--temperature 0` (the default)
+        /// or `--top-k 1` decodes greedily; `--top-k 0` disables the filter.
+        #[arg(long, default_value_t = crate::commands::run::DEFAULT_TOP_K)]
         top_k: usize,
         /// Top-p nucleus sampling (0.0 = disabled). When set with --top-k, applies top-k first then top-p.
         /// F-CLIPARITY-01 / PMAT-381 / paiml/aprender#569
@@ -150,9 +238,12 @@ pub enum Commands {
         /// Show verbose output (model loading, backend info)
         #[arg(short, long)]
         verbose: bool,
-        /// PMAT-488: Compute backend override (cuda, cpu, wgpu)
-        #[arg(long, value_name = "BACKEND", value_parser = BACKEND_VALUES)]
-        backend: Option<String>,
+        // PMAT-488 / #2583: shared `--backend` declaration (see `BackendArg`).
+        #[command(flatten)]
+        backend: BackendArg,
+        // #3723: shared `--thinking` declaration (see `ThinkingArg`).
+        #[command(flatten)]
+        thinking: ThinkingArg,
     },
     /// Inference server (plan/run)
     Serve {
@@ -220,7 +311,7 @@ pub enum Commands {
         /// Path to .apr model file
         #[arg(value_name = "FILE")]
         file: PathBuf,
-        /// Show 100-point quality assessment
+        /// Score the structural checks that ran
         #[arg(long)]
         quality: bool,
         /// Strict validation (fail on warnings)
@@ -792,6 +883,27 @@ pub enum Commands {
         /// as the prompt. Matches Claude Code's `claude -p --input-format json` shape.
         #[arg(long, value_enum, default_value_t = CodeInputFormat::Text)]
         input_format: CodeInputFormat,
+
+        /// Run the `apr serve` child on the CPU (`apr serve run --no-gpu`) (#3978).
+        /// The default is `--gpu`.
+        #[arg(long, alias = "cpu", conflicts_with = "gpu")]
+        no_gpu: bool,
+
+        /// Run the `apr serve` child on the GPU (`apr serve run --gpu`), the default.
+        #[arg(long, conflicts_with = "no_gpu")]
+        gpu: bool,
+
+        /// Generate exactly this many tokens per model call (#3978). Overrides the
+        /// manifest value and the APR_AGENT_MAX_TOKENS_CAP cap.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+        max_tokens: Option<u32>,
+
+        /// Thinking mode: `off` (apr serve's default) or `on`, passed to apr serve per request and
+        /// rendered by the model's own chat template; refused by name for a model whose
+        /// template has no thinking mode (#3723, #3978).
+        /// Same flag name and values as `apr run/chat --thinking` (#3723).
+        #[arg(long, value_parser = ["off", "on"])]
+        thinking: Option<String>,
     },
     /// Extended analysis, profiling, QA, and visualization commands
     #[command(flatten)]

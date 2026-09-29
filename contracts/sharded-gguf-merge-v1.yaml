@@ -28,7 +28,6 @@ metadata:
   - 'crates/apr-cli/src/commands/pull.rs — run_sharded_gguf wiring + parts cleanup'
   - 'contracts/sharded-gguf-pull-v1.yaml — the v0.37.0 pull-side this completes'
 
-kind: KernelContract
 name: sharded-gguf-merge
 version: 1.0.0
 scope: aprender-core merge_gguf_shards + GgufReader keep-all mode + apr-cli pull wiring
@@ -60,20 +59,24 @@ equations:
     lean_theorem: Theorems.Bounded_Memory
 
 proof_obligations:
-- type: invariant
+- id: SGM-INV-001
+  type: invariant
   property: tensors unioned with bytes preserved
   formal: |
     For a 2-part split, the merged file contains every source tensor with
     byte-identical data and stripped split.* metadata.
-- type: invariant
+- id: SGM-INV-002
+  type: invariant
   property: lossless metadata for non-whitelisted architectures
   formal: |
     For a gemma-arch split, the merged file retains gemma.embedding_length /
     gemma.block_count / gemma.attention.head_count.
-- type: invariant
+- id: SGM-INV-003
+  type: invariant
   property: duplicate tensor names rejected
   formal: 'A tensor name present in two parts makes merge return Err.'
-- type: classification
+- id: SGM-CLS-004
+  type: classification
   property: real-loader acceptance
   formal: 'realizar::gguf::GGUFModel::from_bytes(merged) is Ok.'
 

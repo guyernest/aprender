@@ -97,7 +97,7 @@ falsification_tests:
   rule: Q4_0 block layout matches llama.cpp (18 bytes, fp16 scale, packed nibbles)
   prediction: "apr quantize --type q4_0 output has 18-byte blocks with fp16 scale"
   test: |
-    GOLD=/home/noah/src/aprender-worktrees/crux-spec/evidence/crux/llama_cpp/q4_0-goldens.json
+    GOLD=${APR_CRUX_GOLDENS:-evidence/crux}/llama_cpp/q4_0-goldens.json
     [ -f "$GOLD" ] || { echo "golden set absent"; exit 2; }
     TMP=$(mktemp -d)
     INPUT=$(python3 -c "import json,sys; print(json.load(open('$GOLD'))[0]['input'])")
@@ -123,7 +123,7 @@ falsification_tests:
   rule: byte-for-byte parity with llama-quantize Q4_0 on golden
   prediction: "sha256 per-tensor blocks match llama-quantize reference"
   test: |
-    GOLD=/home/noah/src/aprender-worktrees/crux-spec/evidence/crux/llama_cpp/q4_0-goldens.json
+    GOLD=${APR_CRUX_GOLDENS:-evidence/crux}/llama_cpp/q4_0-goldens.json
     [ -f "$GOLD" ] || { echo "golden set absent"; exit 2; }
     python3 - "$GOLD" <<'PY'
     import json, subprocess, tempfile, hashlib, os, sys, pathlib
@@ -140,7 +140,7 @@ falsification_tests:
   rule: dequantization error bounded by scale
   prediction: "max |W_fp32 - dequant(quant(W_fp32))| ≤ scale on every block"
   test: |
-    GOLD=/home/noah/src/aprender-worktrees/crux-spec/evidence/crux/llama_cpp/q4_0-goldens.json
+    GOLD=${APR_CRUX_GOLDENS:-evidence/crux}/llama_cpp/q4_0-goldens.json
     [ -f "$GOLD" ] || { echo "golden set absent"; exit 2; }
     INPUT=$(python3 -c "import json; print(json.load(open('$GOLD'))[0]['input'])")
     TMP=$(mktemp -d)
@@ -175,7 +175,7 @@ falsification_tests:
   rule: perplexity within 0.05 of llama.cpp reference on wiki.test.raw
   prediction: "apr perplexity - llama.cpp Q4_0 perplexity ≤ 0.05"
   test: |
-    GOLD=/home/noah/src/aprender-worktrees/crux-spec/evidence/crux/llama_cpp/wiki-text-test-goldens.json
+    GOLD=${APR_CRUX_GOLDENS:-evidence/crux}/llama_cpp/wiki-text-test-goldens.json
     [ -f "$GOLD" ] || { echo "golden set absent"; exit 2; }
     python3 - "$GOLD" <<'PY'
     import json, subprocess, tempfile, os, sys
@@ -193,15 +193,20 @@ falsification_tests:
   if_fails: "perplexity drift vs llama.cpp reference exceeds 0.05"
 
 proof_obligations:
-- type: equivalence
+- id: CB1C1F7-EQ-001
+  type: equivalence
   property: "apr quantize --type q4_0 matches llama-quantize Q4_0 byte-for-byte on evidence/crux/llama_cpp/q4_0-goldens.json"
-- type: invariant
+- id: CB1C1F7-INV-002
+  type: invariant
   property: "Q4_0 block layout = 18 bytes (fp16 scale + 16 packed nibbles) per 32-element block"
-- type: invariant
+- id: CB1C1F7-INV-003
+  type: invariant
   property: "Per-weight dequantization error ≤ block scale (one quant step)"
-- type: invariant
+- id: CB1C1F7-INV-004
+  type: invariant
   property: "Perplexity within 0.05 of llama.cpp reference on wiki.test.raw golden eval"
-- type: invariant
+- id: CB1C1F7-INV-005
+  type: invariant
   property: "dequant_q4_0(q, d)[j] == (nibble(j) - 8) * d, matching ggml_dequantize_row_q4_0"
 
 verification_summary:

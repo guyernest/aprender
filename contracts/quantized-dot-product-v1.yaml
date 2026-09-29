@@ -162,6 +162,8 @@ simd_dispatch:
     avx512_vnni: fused_q4k_dot_avx512_vnni
     q8k_scalar: fused_q4k_q8k_dot
     q8k_avx2: fused_q4k_q8k_dot_simd
+    q8k_avx2_kernel: fused_q4k_q8k_dot_avx2
+    q8k_bsums_avx2: fused_q4k_q8k_dot_with_bsums_avx2
     q8k_avx512_vnni: fused_q4k_q8k_dot_avx512vnni_v2
     q8k_4row_avx512_vnni: fused_q4k_q8k_dot_4rows_avx512vnni
   Q5_K:
@@ -235,6 +237,40 @@ falsification_tests:
   test: For each format in YAML, verify simd_dispatch has an entry with at least 'scalar'
     key
   if_fails: Format was added to registry but dispatch table not updated
+- id: FALSIFY-QDOT-006
+  rule: Every x86 Q4_K x Q8_K kernel matches scalar on every box that can run it, not only
+    on the box whose best CPU feature makes the dispatcher select it
+  prediction: fused_q4k_q8k_dot_avx2 and fused_q4k_q8k_dot_with_bsums_avx2 equal fused_q4k_q8k_dot
+    within 1e-3 relative on super-blocks whose 8 scales and 8 mins all differ, on any AVX2 box;
+    fused_q4k_q8k_dot_avx512vnni_v2 likewise on any AVX-512 VNNI box
+  test: cargo test -p aprender-serve --lib -- test_fused_q4k_q8k_dot_avx2_path_matches_scalar_on_every_avx2_box
+    test_fused_q4k_q8k_dot_with_bsums_matches_scalar_on_every_avx2_box test_fused_q4k_q8k_dot_avx512vnni_path_matches_scalar
+  if_fails: A kernel pairs a nibble half with the wrong block scale or drops part of a block's Q8 sum.
+    The dispatcher hid both AVX2 defects for as long as every x86 CI box had AVX-512 VNNI
+    (found 2026-09-10 when yoga, a Core Ultra 9 185H, joined the pool; reverting the fix gives
+    -3650.1 against scalar -25161.5)
+- id: FALSIFY-QDOT-007
+  rule: Every CPU Q5_K reader decodes ggml's block_q5_K, judged against gguf-py (llama.cpp's
+    own reader) on a block llama.cpp quantized, never against another aprender reader
+  prediction: realizar dequantize_q5_k and aprender-quant dequantize_q5_k_to_f32 reproduce all
+    256 gguf-py values of a real Qwen3.5-0.8B-Q4_K_M super-block bit-exactly; fused_q5k_dot with
+    a one-hot activation returns each of them; quantize_q5_k round-trips through the fixed reader
+  test: cargo test -p aprender-serve --lib -- q5k_ggml; cargo test -p aprender-quant --lib -- q5k_ggml
+  if_fails: A reader packs a sub-block's 32 values into its own 16 qs bytes, or takes the fifth
+    bit from the wrong qh byte, and every Q5_K tensor decodes to other numbers. Found 2026-09-11
+    (PMAT-1101) on Qwen3.5-0.8B-Q4_K_M, whose attn_qkv and ssm_out are Q5_K; realizar disagreed
+    with gguf-py on 5,959,751 of 6,291,456 values of blk.0.attn_qkv and its layer-0 QKV sum was
+    +26.64 against llama.cpp's -17.06. The dequantizer and the fused dot shared the invented
+    layout, so every test that compared one with the other passed
+- id: FALSIFY-QDOT-008
+  rule: The CUDA Q5_K GEMV decodes ggml's block_q5_K, judged against the same gguf-py values as
+    FALSIFY-QDOT-007, never against another aprender reader
+  prediction: q5k_gemv on the golden super-block returns each of its 256 gguf-py values for a
+    one-hot activation, and gguf-py's dot (1e-4 relative) for a ramp
+  test: cargo test -p aprender-serve --features cuda --lib -- tests_q5k_ggml (needs an NVIDIA GPU)
+  if_fails: The kernel takes a value's fifth bit from the wrong qh byte or bit. Found 2026-09-11
+    (#3111, PMAT-1104) - the shipped kernel read byte val_idx/8, bit val_idx%8 instead of byte
+    val_idx%32, bit val_idx/32; on the golden block its ramp dot was 2.659 against gguf-py's 0.622
 qa_gate:
   id: F-QDOT-001
   name: Quantized Dot Product Contract
@@ -244,7 +280,7 @@ qa_gate:
   - Format registry matches trait implementations
   - Dispatch table covers all formats
   - Cross-format isolation holds
-  pass_criteria: All 5 FALSIFY tests pass
+  pass_criteria: All 8 FALSIFY tests pass
   falsification: Introduce a sign error in nibble extraction — gate must catch it
 equations:
   identity:
@@ -304,7 +340,8 @@ proof_obligations:
 # format-specific ULP tolerance. There is no universal algebraic identity to prove
 # — it is a "matches-reference bit/ULP" runtime property (like GPU-matches-CPU),
 # discharged empirically by FALSIFY-QDOT-001 + KANI-QDOT-001, not by Lean.
-- type: postcondition
+- id: QDP-POST-001
+  type: postcondition
   property: SIMD-scalar numerical equivalence
   formal: for all formats F and data D, |simd_F(D) - scalar_F(D)| <= ULP_TOLERANCE_F * f32::EPSILON
   tolerance: 1e-6
@@ -321,7 +358,8 @@ proof_obligations:
 # empirical claim about typical byte reinterpretation with a 100x threshold. It is
 # NOT universally true (adversarial data could collide), so there is no theorem to
 # prove — discharged empirically by FALSIFY-QDOT-002 + KANI-QDOT-002.
-- type: invariant
+- id: QDP-INV-002
+  type: invariant
   property: Format isolation — cross-format dispatch produces garbage
   formal: for all F1 != F2, |kernel_F2(data_F1) - correct| > 100 * |correct|
   applies_to: all
@@ -336,7 +374,8 @@ proof_obligations:
 # CLASS (a) ANALYTIC-PROVABLE: precomputing per-sub-block activation sums vs.
 # computing them inline is an exact integer sum-partition identity (order/timing
 # independent). Proved in Lean.
-- type: postcondition
+- id: QDP-POST-003
+  type: postcondition
   property: Bsum precomputation equivalence
   formal: precompute_bsums(act) == inline_bsums(act) (exact integer equality)
   applies_to: all
@@ -359,7 +398,8 @@ proof_obligations:
 # CLASS (a) ANALYTIC-PROVABLE: the central correctness bound of a quantized dot
 # product — dequantized-weight dot product deviates from the exact dot product by
 # at most (scale/2)*||y||_1. Triangle inequality + per-element round-trip bound.
-- type: bound
+- id: QDP-BND-004
+  type: bound
   property: Quantized dot-product error bound
   formal: '|<dequant(quant(x)), y> - <x, y>| <= (scale/2) * sum_i |y_i|'
   applies_to: all

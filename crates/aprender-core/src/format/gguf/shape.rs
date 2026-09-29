@@ -56,7 +56,9 @@ impl GgufReader {
                 }
                 let bytes = &self.data[tensor_start..tensor_start + byte_size];
                 bytes
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                     .collect()
             }
@@ -76,7 +78,9 @@ impl GgufReader {
                 }
                 let bytes = &self.data[tensor_start..tensor_start + byte_size];
                 bytes
-                    .chunks_exact(2)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
                     .map(|c| f16_to_f32(u16::from_le_bytes([c[0], c[1]])))
                     .collect()
             }
@@ -124,20 +128,33 @@ impl GgufReader {
                 // Q6_K - dequantize (super blocks of 256 elements, 210 bytes/block)
                 dequantize_q6_k(&self.data, tensor_start, num_elements)?
             }
-            // I-quants (importance matrix quantization) - complex formats
-            // For now, approximate with simpler dequantization
-            16..=23 => {
-                // IQ2_XXS=16, IQ2_XS=17, IQ2_S=18, IQ3_XXS=19, IQ3_S=20, IQ1_S=21, IQ4_NL=22, IQ4_XS=23
-                // Fall back to zero-filled tensor with warning
-                eprintln!(
-                    "Warning: I-quant dtype {} for tensor '{}' not fully supported, using approximation",
-                    meta.dtype, name
-                );
-                dequantize_iq_approximate(&self.data, tensor_start, num_elements, meta.dtype)
+            // #3947: IQ4_NL (20), IQ3_S (21) and IQ4_XS (23) have real decoders in
+            // trueno_quant, bit-exact against gguf-py on every IQ tensor of the three
+            // #3947 release models. Every other IQ type still reaches the refusal below.
+            20 | 21 | 23 => {
+                trueno_quant::dequantize_iq_to_f32(
+                    meta.dtype,
+                    self.data.get(tensor_start..).unwrap_or(&[]),
+                    num_elements,
+                )
+                .map_err(|e| AprenderError::FormatError {
+                    message: format!("GGUF tensor '{name}': {e}"),
+                })?
             }
+            // #3656: IQ types (16..=23) used to go to `dequantize_iq_approximate`, which
+            // mapped each raw byte to `(b - 128) * 0.01` and returned Ok — `apr convert`
+            // wrote those invented weights (std 36.6x the real tensor) and exited 0. With
+            // no real dequantizer here, the only honest answer is a refusal.
             _ => {
+                let type_name = trueno_quant::GgmlType::from_id(meta.dtype)
+                    .map_or("a type ggml does not define", trueno_quant::GgmlType::as_str);
                 return Err(AprenderError::FormatError {
-                    message: format!("Unsupported GGUF dtype {} for tensor '{name}'", meta.dtype),
+                    message: format!(
+                        "GGUF tensor '{name}' is {type_name} (ggml type {}): aprender-core has \
+                         no dequantizer for it, so it cannot be read as F32. Refusing rather \
+                         than approximating, which would invent its weights",
+                        meta.dtype
+                    ),
                 });
             }
         };
@@ -158,6 +175,22 @@ impl GgufReader {
         &self,
         progress: impl Fn(usize, usize, &str),
     ) -> Result<TensorDataMap> {
+        // #3947 quorum (PR #3958): IQ4_NL / IQ3_S / IQ4_XS decode per tensor so
+        // inspection (`apr qa` tensor_contract, validate) can read them, but the ticket
+        // asked for inspection only. Every whole-model F32 load (`apr import`'s GH-375
+        // fallback, `apr convert`) goes through here, so it keeps refusing them, as it
+        // did under #3656. Checked before any decoding so nothing partial is produced.
+        if let Some(meta) = self.tensors.iter().find(|t| matches!(t.dtype, 20 | 21 | 23)) {
+            let type_name = trueno_quant::GgmlType::from_id(meta.dtype)
+                .map_or("an IQ type", trueno_quant::GgmlType::as_str);
+            return Err(AprenderError::FormatError {
+                message: format!(
+                    "GGUF tensor '{}' is {type_name} (ggml type {}): aprender-core decodes it \
+                     for inspection only and does not convert IQ models to F32 (#3947)",
+                    meta.name, meta.dtype
+                ),
+            });
+        }
         let total = self.tensors.len();
         let mut result = BTreeMap::new();
         for (i, meta) in self.tensors.iter().enumerate() {
@@ -170,9 +203,9 @@ impl GgufReader {
 
     /// Get raw tensor bytes without dequantization (preserves Q4K/Q6K)
     ///
-    /// Returns (raw_bytes, shape, ggml_dtype) where dtype is per GGML spec:
-    /// - 0=F32, 1=F16, 2=Q4_0, 3=Q4_1, 8=Q8_0
-    /// - 10=Q2_K, 11=Q3_K, 12=Q4_K, 13=Q5_K, 14=Q6_K
+    /// Returns (raw_bytes, shape, ggml_dtype) where dtype is the GGML type id. Every
+    /// type live in upstream ggml is sized (`trueno_quant::TRAITS`); an id upstream
+    /// removed, or one newer than that table, is refused by name.
     pub fn get_tensor_raw(&self, name: &str) -> Result<(Vec<u8>, Vec<usize>, u32)> {
         let meta = self
             .tensors
@@ -207,37 +240,20 @@ impl GgufReader {
 
         let tensor_start = self.data_offset + meta.offset as usize;
 
-        // Calculate byte size based on dtype (GGML dtype values)
-        // See llama.cpp ggml.h for type definitions
-        // GGML enum: 0=F32, 1=F16, 2=Q4_0, 3=Q4_1, 6=Q5_0, 7=Q5_1, 8=Q8_0, 9=Q8_1
-        //           10=Q2_K, 11=Q3_K, 12=Q4_K, 13=Q5_K, 14=Q6_K, 15=Q8_K
+        // #3601: size from ggml's own `type_traits` (`trueno_quant::TRAITS`, extracted
+        // from upstream and fixture-checked by PMAT-3430) rather than a hand-typed match.
+        // That match knew 15 of ggml's 35 live ids, so every IQ*/TQ* tensor was refused
+        // as "Unsupported dtype 23 for raw extraction" — which read as a corrupt file.
+        // Sizing a type is not a claim that anything here can dequantize it.
+        let ggml_type = trueno_quant::GgmlType::try_from_id(meta.dtype)
+            .map_err(|e| unsized_ggml_type_error(name, &e))?;
+
+        // Whole blocks, rounding DOWN: the arithmetic the hand-typed arms used, kept so
+        // no id that was already sized changes its byte count.
         // BUG-GGUF-002 FIX: Use checked arithmetic to prevent overflow in byte size calc
-        // Note: Some dtypes share byte sizes but are documented separately for clarity
-        #[allow(clippy::match_same_arms)]
-        let byte_size = match meta.dtype {
-            0 => num_elements.checked_mul(4),         // F32
-            1 => num_elements.checked_mul(2),         // F16
-            2 => (num_elements / 32).checked_mul(18), // Q4_0: 32 elements = 2 (d) + 16 (qs)
-            3 => (num_elements / 32).checked_mul(20), // Q4_1: 32 elements = 2 (d) + 2 (m) + 16 (qs)
-            // dtype 4,5 = removed (Q4_2, Q4_3)
-            6 => (num_elements / 32).checked_mul(22), // Q5_0: 32 elements = 2 (d) + 4 (qh) + 16 (ql)
-            7 => (num_elements / 32).checked_mul(24), // Q5_1: 32 elements = 2 (d) + 2 (m) + 4 (qh) + 16 (ql)
-            8 => (num_elements / 32).checked_mul(34), // Q8_0: 32 elements = 2 (d) + 32 (qs)
-            9 => (num_elements / 32).checked_mul(36), // Q8_1: 32 elements = 2 (d) + 2 (s) + 32 (qs)
-            10 => (num_elements / 256).checked_mul(84), // Q2_K: 256 elements = 84 bytes
-            11 => (num_elements / 256).checked_mul(110), // Q3_K: 256 elements = 110 bytes
-            12 => (num_elements / 256).checked_mul(144), // Q4_K: 256 elements = 144 bytes
-            13 => (num_elements / 256).checked_mul(176), // Q5_K: 256 elements = 176 bytes
-            14 => (num_elements / 256).checked_mul(210), // Q6_K: 256 elements = 210 bytes
-            15 => (num_elements / 256).checked_mul(292), // Q8_K: 256 elements = 292 bytes
-            30 => num_elements.checked_mul(2),        // BF16: 2 bytes per element
-            _ => {
-                return Err(AprenderError::FormatError {
-                    message: format!("Unsupported dtype {} for raw extraction", meta.dtype),
-                });
-            }
-        }
-        .ok_or_else(|| AprenderError::FormatError {
+        let byte_size = (num_elements / ggml_type.block_size())
+            .checked_mul(ggml_type.block_bytes())
+            .ok_or_else(|| AprenderError::FormatError {
             message: format!(
                 "Tensor '{}' byte size calculation overflow (dtype: {})",
                 name, meta.dtype
@@ -264,5 +280,30 @@ impl GgufReader {
             result.insert(meta.name.clone(), (data, shape, dtype));
         }
         Ok(result)
+    }
+}
+
+/// #3601: the refusal for a tensor whose ggml type id has no size in `trueno_quant::TRAITS`.
+///
+/// Every id live upstream is sized, so this is reached only by an id upstream REMOVED or one
+/// newer than the pinned table. The message says which — "Unsupported dtype 23" sent readers
+/// looking for file corruption when the gap was in apr.
+fn unsized_ggml_type_error(tensor: &str, e: &trueno_quant::GgmlTypeError) -> AprenderError {
+    let why = match e {
+        trueno_quant::GgmlTypeError::Removed { .. } => {
+            "no current ggml defines a layout for it, so the file must be re-quantized from \
+             its source weights"
+        }
+        trueno_quant::GgmlTypeError::Unknown { .. } => {
+            "it is newer than the ggml type table this apr was built with (pinned by \
+             scripts/llama_pin.toml) — a gap in apr, not a corrupt file; please report it at \
+             https://github.com/paiml/aprender/issues"
+        }
+    };
+    AprenderError::FormatError {
+        message: format!(
+            "GGUF tensor '{tensor}': {e}; {why}. The ids apr sizes are listed in \
+             contracts/ggml-type-v1.yaml"
+        ),
     }
 }

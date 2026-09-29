@@ -87,55 +87,68 @@ equations:
       - "Being outside the workspace means `cargo set-version` does not reach these manifests, so the upstream version pin is checked separately"
 
 proof_obligations:
-  - type: invariant
+  - id: PCF-INV-001
+    type: invariant
     property: "Code written against provable-contracts 0.3.1 still compiles against the facade"
     formal: "cargo check --workspace --all-targets in crates/facades exits 0"
     applies_to: old_consumer_code_still_compiles
-  - type: invariant
+  - id: PCF-INV-002
+    type: invariant
     property: "The compile gate demonstrably turns RED"
     formal: "With --features __facade_probe_mutant, naming an unexported item, the build exits non-zero"
     applies_to: old_consumer_code_still_compiles
-  - type: invariant
+  - id: PCF-INV-003
+    type: invariant
     property: "The compat corpus is not vacuous"
     formal: "The guard fails when fewer than 27 example targets are wired"
     applies_to: old_consumer_code_still_compiles
-  - type: invariant
+  - id: PCF-INV-004
+    type: invariant
     property: "All five 0.3.1 attribute macros expand through the macros facade"
     formal: "cargo test -p provable-contracts-macros --test compat_invoke exits 0"
     applies_to: proc_macros_still_expand_through_the_facade
-  - type: invariant
+  - id: PCF-INV-005
+    type: invariant
     property: "The CLI facade ships no binary at all"
     formal: "`cargo build -p provable-contracts-cli --bin pv` fails with 'no bin target named `pv`'"
     applies_to: the_cli_facade_ships_no_binary_and_signposts_the_replacement
-  - type: invariant
+  - id: PCF-INV-006
+    type: invariant
     property: "A failed install is signposted rather than a dead end"
     formal: "Cargo.toml, README.md, src/lib.rs and build.rs each name `cargo install aprender-contracts-cli` and `apr pv`, and the lib carries a #[deprecated] item"
     applies_to: the_cli_facade_ships_no_binary_and_signposts_the_replacement
-  - type: invariant
+  - id: PCF-INV-007
+    type: invariant
     property: "The routes the signpost names actually exist"
     formal: "aprender-contracts-cli declares [[bin]] name = 'pv' and crates/apr-cli declares the `Pv` subcommand"
     applies_to: the_cli_facade_ships_no_binary_and_signposts_the_replacement
-  - type: invariant
+  - id: PCF-INV-008
+    type: invariant
     property: "The signpost facade carries no dependency, so it is publishable at any point in the cascade"
     formal: "scripts/check_facade_compat.sh row R3 (SIGNPOST arm) reports no upstream dependency"
     applies_to: the_signpost_facade_depends_on_nothing
-  - type: invariant
+  - id: PCF-INV-009
+    type: invariant
     property: "No bin name is claimed by two packages without declared intent"
     formal: "scripts/check_duplicate_bin_names.sh exits 0 over both workspaces"
     applies_to: no_two_crates_claim_one_bin_name
-  - type: invariant
+  - id: PCF-INV-010
+    type: invariant
     property: "The duplicate-bin scan cannot be inert: it must see the excluded facade workspace"
     formal: "Rows W1 and W2 FAIL when the facade metadata document is absent from the scan"
     applies_to: no_two_crates_claim_one_bin_name
-  - type: invariant
+  - id: PCF-INV-011
+    type: invariant
     property: "The facades keep the upstream lib names and stay out of the aprender workspace"
     formal: "scripts/check_facade_compat.sh structural rows R1 and R2 pass"
     applies_to: facade_cannot_collide_with_the_crate_it_fronts
-  - type: invariant
+  - id: PCF-INV-012
+    type: invariant
     property: "The upstream version pin cannot drift silently past a release"
     formal: "Each facade requires its upstream at exactly the aprender workspace version"
     applies_to: facade_cannot_collide_with_the_crate_it_fronts
-  - type: invariant
+  - id: PCF-INV-013
+    type: invariant
     property: "The guard is enforced per-PR, not merely present"
     formal: "ci.yml invokes the guard in a job that `gate` depends on"
     applies_to: old_consumer_code_still_compiles
@@ -162,7 +175,7 @@ falsification_tests:
   - id: FALSIFY-FACADE-004
     rule: "The guard is wired into the per-PR gate, not merely present in the tree"
     prediction: "ci.yml invokes check_facade_compat.sh in guard-runner-labels, which `gate` lists in its needs"
-    test: "grep -q 'check_facade_compat.sh' .github/workflows/ci.yml"
+    test: "grep -q 'check_facade_compat.sh' .github/workflows/ci.yml ci/sections.yml"
     if_fails: "A reference is not an execution — the guard would sit unexecuted while being counted as enforcement"
 
   - id: FALSIFY-FACADE-005
@@ -170,6 +183,12 @@ falsification_tests:
     prediction: "All 28 example programs published in provable-contracts 0.3.1 are present in the tree"
     test: "test \"$(ls crates/facades/provable-contracts/compat/0.3.1/examples/*.rs | wc -l)\" = 28"
     if_fails: "Someone deleted a compat program instead of fixing what it revealed. The guard's floor catches an unwiring; this catches a deletion."
+
+  - id: FALSIFY-FACADE-006
+    rule: "A facade may never become an aprender workspace member"
+    prediction: "No aprender workspace member is named provable-contracts*"
+    test: "! cargo metadata --no-deps --format-version 1 | grep -q '\"name\":\"provable-contracts'"
+    if_fails: "The rlib/bin name collision is back. `cargo build` warns 'output filename collision … may become a hard error', and the facade pv overwrites the real pv in the shared target dir."
 
   - id: FALSIFY-FACADE-007
     rule: "No two crates in this repository declare the same bin name without declared intent"
@@ -188,9 +207,3 @@ falsification_tests:
     prediction: "`cargo build -p provable-contracts-cli --bin pv` fails with 'no bin target named `pv`', and every signpost surface names both working routes"
     test: "bash scripts/check_facade_compat.sh"
     if_fails: "Either the facade re-acquired the `pv` name — putting a second claimant on ~/.cargo/bin/pv — or 463 downloads/month now hit `there are no binaries to install` with nothing telling them where the tool went."
-
-  - id: FALSIFY-FACADE-006
-    rule: "A facade may never become an aprender workspace member"
-    prediction: "No aprender workspace member is named provable-contracts*"
-    test: "! cargo metadata --no-deps --format-version 1 | grep -q '\"name\":\"provable-contracts'"
-    if_fails: "The rlib/bin name collision is back. `cargo build` warns 'output filename collision … may become a hard error', and the facade pv overwrites the real pv in the shared target dir."

@@ -7,7 +7,8 @@
 //! PMAT-162: Phase 6 — makes `cmd_code` accessible from the library crate
 //! so `apr-cli` can call `batuta::agent::code::cmd_code()` directly.
 
-use std::path::PathBuf;
+use std::io::IsTerminal;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::agent::capability::Capability;
@@ -84,11 +85,242 @@ pub fn permit_single_prompt(
     }
 }
 
+/// The shape of an `apr code` invocation, as far as start-up policy cares.
+///
+/// Issue #2607: on the 0.63.0 dogfood sweep host, `apr code` with **no
+/// arguments at all** and stdin closed did not print help. It scanned the
+/// filesystem, auto-discovered the largest local GGUF (a 30 B MoE), and
+/// spawned an `apr serve` child for it — a consequential action chosen by
+/// looking at the disk, for a session that could never run: the REPL's very
+/// first `read_line` on a closed stdin returns EOF, so the parent exited
+/// immediately and left the child behind.
+///
+/// Only a *bare* invocation with **nothing on stdin** is refused. Every named
+/// argument is an explicit operator choice and keeps working, including on a
+/// pipe: `-p`/a prompt (non-interactive), `--model`, `--manifest`, `--resume`.
+/// So does a pipe that actually carries bytes — see [`Self::stdin_has_input`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CodeInvocation {
+    /// A positional prompt was supplied.
+    pub has_prompt: bool,
+    /// `--print` / `-p` was supplied.
+    pub print: bool,
+    /// `--model` was supplied.
+    pub has_model: bool,
+    /// `--manifest` was supplied.
+    pub has_manifest: bool,
+    /// `--resume` was supplied (with or without an id).
+    pub has_resume: bool,
+    /// stdin is an interactive terminal (so a REPL is actually possible).
+    pub stdin_is_terminal: bool,
+    /// stdin is not a terminal but **has bytes waiting** — a pipe or a
+    /// redirected file carrying REPL input.
+    ///
+    /// `echo "hi" | apr code` has always driven the REPL:
+    /// [`run_repl`](crate::agent::repl::run_repl) reads
+    /// stdin line by line and treats EOF as `/exit`, so one piped line is one
+    /// turn. Refusing on `!stdin_is_terminal` alone would have silently
+    /// narrowed that to an exit-2 usage error. Piped bytes ARE an
+    /// instruction; `/dev/null` and a closed fd are not, and those are the
+    /// shape #2607 was reported against.
+    ///
+    /// [`from_args`](Self::from_args) only populates this when every other
+    /// field already says "would refuse" — the peek blocks until the writer
+    /// sends a byte or closes, exactly as the REPL's first `read_line` would,
+    /// and there is no reason to pay that on a shape that runs regardless.
+    pub stdin_has_input: bool,
+}
+
+impl CodeInvocation {
+    /// Read the invocation shape of the current process' stdin plus the
+    /// parsed flags. Split from [`Self::wants_help`] so the policy is
+    /// testable without a controlled terminal.
+    ///
+    /// The stdin peek is deliberately last and deliberately conditional: it
+    /// runs **only** when every flag already says "would refuse", because
+    /// [`reader_has_input`] blocks until the writer produces a byte or closes
+    /// the pipe. On every other shape the field is not consulted by
+    /// [`Self::wants_help`], so leaving it `false` cannot change the verdict.
+    #[must_use]
+    pub fn from_args(
+        prompt: &[String],
+        print: bool,
+        model: Option<&PathBuf>,
+        manifest_path: Option<&PathBuf>,
+        resume: Option<&Option<String>>,
+    ) -> Self {
+        let mut inv = Self {
+            has_prompt: !prompt.is_empty(),
+            print,
+            has_model: model.is_some(),
+            has_manifest: manifest_path.is_some(),
+            has_resume: resume.is_some(),
+            stdin_is_terminal: std::io::stdin().is_terminal(),
+            stdin_has_input: false,
+        };
+        if inv.wants_help() {
+            inv.stdin_has_input = stdin_may_carry_input();
+        }
+        inv
+    }
+
+    /// `true` when this invocation must print help and do nothing else.
+    ///
+    /// The invariant: **no argument was given AND no input can ever arrive**,
+    /// so there is no work this run could legitimately do. Taking any action
+    /// here — least of all launching an inference server for a model picked
+    /// by scanning the disk — is a guess, not an instruction.
+    ///
+    /// "No input can ever arrive" is three distinct things, and only the
+    /// first two were checked when this guard was first written:
+    /// stdin is not a terminal (no REPL), **and** stdin has no bytes waiting
+    /// (not a pipe carrying a prompt). Dropping the third clause turned
+    /// `echo "hi" | apr code` — a working invocation — into an exit-2 usage
+    /// error, which is a narrowing #2607 never asked for.
+    #[must_use]
+    pub fn wants_help(&self) -> bool {
+        !self.has_prompt
+            && !self.print
+            && !self.has_model
+            && !self.has_manifest
+            && !self.has_resume
+            && !self.stdin_is_terminal
+            && !self.stdin_has_input
+    }
+}
+
+/// `true` when `reader` has at least one byte available, without consuming it.
+///
+/// Blocks until the writer produces a byte or closes: `/dev/null`, a closed
+/// fd, and a writer that closed without writing all report `false`; a pipe or
+/// a redirected file carrying data reports `true`. `fill_buf` is a peek, so
+/// the bytes stay queued for whoever reads next — and `Stdin`'s buffer is
+/// process-global, so the later `read_line`/`read_to_string` drains the very
+/// bytes this made visible.
+///
+/// Free function, generic over [`std::io::BufRead`], so the predicate is
+/// falsifiable against real readers without a controlled terminal or a real
+/// pipe. An I/O error is reported as "no input": a stdin that cannot be read
+/// is exactly the shape that must refuse.
+#[must_use]
+pub fn reader_has_input(reader: &mut impl std::io::BufRead) -> bool {
+    matches!(reader.fill_buf(), Ok(bytes) if !bytes.is_empty())
+}
+
+/// `true` when a stdin of this file type could ever deliver a byte.
+///
+/// A FIFO, a redirected regular file and a socket can; a character device
+/// cannot, and that is the whole point — `apr code < /dev/null`, the shape
+/// #2607 was reported against, lands here as a character device. A terminal
+/// is also a character device, but [`CodeInvocation::from_args`] has already
+/// settled that case with `IsTerminal` before this is consulted.
+///
+/// Split out as a pure predicate over a [`std::fs::FileType`] so it can be
+/// falsified against real files (`/dev/null` vs a `tempfile`) rather than
+/// against a mock.
+#[cfg(unix)]
+#[must_use]
+pub fn kind_can_carry_input(file_type: &std::fs::FileType) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    file_type.is_fifo() || file_type.is_file() || file_type.is_socket()
+}
+
+/// Whether this process' stdin can still deliver input.
+///
+/// Two steps, in this order, and the order is the load-bearing part:
+///
+/// 1. Stat stdin. A character device (`/dev/null`) can never deliver a byte,
+///    so it is refused **without reading** — which is also what keeps step 2
+///    unreachable from any test harness, since `cargo nextest` hands each
+///    test `/dev/null` and a plain `cargo test` in a terminal is short-
+///    circuited by `IsTerminal` one level up.
+/// 2. Otherwise peek. [`reader_has_input`] blocks until the writer sends a
+///    byte or closes, which is exactly what the REPL's first `read_line`
+///    always did — so `sleep 5 | apr code` waits, and `true | apr code`
+///    (a pipe closed without a byte) is refused instead of launching a
+///    server for a session that has nothing to say.
+///
+/// A stat that fails (no `/dev/stdin` on this host) falls through to the peek
+/// rather than refusing: an unreadable `/dev/stdin` says nothing about fd 0,
+/// and a closed fd 0 makes the peek return `false` on its own.
+#[cfg(unix)]
+fn stdin_may_carry_input() -> bool {
+    match std::fs::metadata("/dev/stdin") {
+        Ok(meta) if !kind_can_carry_input(&meta.file_type()) => false,
+        _ => reader_has_input(&mut std::io::stdin().lock()),
+    }
+}
+
+/// Non-Unix hosts have no `/dev/stdin` to stat; peek directly.
+#[cfg(not(unix))]
+fn stdin_may_carry_input() -> bool {
+    reader_has_input(&mut std::io::stdin().lock())
+}
+
+/// Message shown when [`CodeInvocation::wants_help`] refuses a run.
+pub const NO_ARG_NON_INTERACTIVE: &str =
+    "apr code: no arguments, stdin is not a terminal, and nothing was piped in — \
+     nothing to do.\n\
+     An interactive session needs a terminal; a non-interactive run needs a prompt.\n\
+     Try:  apr code -p \"explain src/lib.rs\"   |   echo \"hi\" | apr code   |   \
+     apr code --model <path>";
+
+/// #2607: refuse a bare `apr code` on a non-interactive stdin, before the
+/// process does anything at all.
+///
+/// The `apr` CLI checks the same predicate one level up so it can render
+/// clap's real help for the subcommand; this is [`cmd_code`] — a public
+/// library API — failing closed, so no embedder can reach the
+/// scan-the-disk-and-launch-a-server path by accident either.
+fn refuse_bare_non_interactive(
+    prompt: &[String],
+    print: bool,
+    model: Option<&PathBuf>,
+    manifest_path: Option<&PathBuf>,
+    resume: Option<&Option<String>>,
+) -> anyhow::Result<()> {
+    if CodeInvocation::from_args(prompt, print, model, manifest_path, resume).wants_help() {
+        anyhow::bail!(NO_ARG_NON_INTERACTIVE);
+    }
+    Ok(())
+}
+
+/// Release every owner of the inference driver so its `Drop` actually runs.
+///
+/// Issue #2607, second defect. The `-p` branch below ends in
+/// `std::process::exit`, which runs **no** destructors, so the `apr serve`
+/// child has to be reaped explicitly. It called `drop(driver)` and a comment
+/// claimed that killed the subprocess — but `driver` is an `Arc`, and
+/// [`register_task_tool`](crate::agent::task_tool::register_task_tool) stores
+/// a clone of it inside the tool registry. Dropping the local handle only
+/// decremented the strong count from 2 to 1, so `AprServeDriver::drop` — the
+/// one thing that SIGTERMs the child — never ran, and the server was orphaned
+/// holding the whole model in RSS.
+///
+/// Taking both by value makes the ordering a compile-time obligation: the
+/// registry cannot still be alive when the last driver handle is dropped.
+fn release_driver(tools: ToolRegistry, driver: Arc<dyn LlmDriver>) {
+    // The registry owns the TaskTool, which owns the other Arc clone.
+    drop(tools);
+    debug_assert_eq!(
+        Arc::strong_count(&driver),
+        1,
+        "#2607: something still holds the driver; its Drop will not kill `apr serve`"
+    );
+    drop(driver);
+}
+
 /// Entry point for `batuta code` / `apr code`.
 ///
 /// This is the public library API — callable from both the batuta binary
 /// and apr-cli (PMAT-162). Handles model discovery, driver selection,
 /// tool registration, and REPL launch.
+///
+/// #3775: a non-interactive run with `--output-format json` writes exactly
+/// one JSON document to stdout on EVERY exit. The exits inside this function
+/// write their own; an error it RETURNS is written by the caller through
+/// [`emit_error_document`], because only the caller knows the exit code the
+/// error becomes.
 #[allow(clippy::too_many_arguments)]
 pub fn cmd_code(
     model: Option<PathBuf>,
@@ -99,20 +331,191 @@ pub fn cmd_code(
     max_turns: u32,
     manifest_path: Option<PathBuf>,
     emit_trace: Option<PathBuf>,
-    // PMAT-CODE-OUTPUT-FORMAT-001 / PMAT-CODE-INPUT-FORMAT-001:
-    // accepted as &str ("text" | "json") to keep this crate's public API
-    // independent of apr-cli's ValueEnum types. Unknown values fall back
-    // to "text" — the legacy behavior — under Poka-Yoke.
     output_format: &str,
     input_format: &str,
 ) -> anyhow::Result<()> {
+    cmd_code_with(
+        model,
+        project,
+        resume,
+        prompt,
+        print,
+        max_turns,
+        manifest_path,
+        emit_trace,
+        output_format,
+        input_format,
+        CodeServeOptions::default(),
+    )
+}
+
+/// The `apr serve` controls `apr code` passes through (#3978).
+///
+/// Before these existed, `apr code` always launched `apr serve --gpu`, had no
+/// way to pin the generation length, and had no thinking switch. A caller that
+/// must hold those constant across engines (the CRUX code verb, quorum Q5)
+/// could only record them as "uncontrolled".
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CodeServeOptions {
+    /// Backend and `--max-tokens` for the `apr serve` child.
+    pub serve: crate::agent::driver::apr_serve::ServeLaunchOptions,
+    /// `--thinking on|off` (#3723): passed to the `apr serve` child on every request as
+    /// `chat_template_kwargs.enable_thinking`, rendered by the model's own template. A
+    /// template with no thinking mode refuses ON by name (HTTP 400), never serves OFF as ON.
+    /// `None` runs thinking OFF, `apr serve`'s default.
+    pub think: Option<bool>,
+}
+
+/// `--manifest` if given, else the default manifest with the settings ladder folded in
+/// (PMAT-CODE-CONFIG-LADDER-001). Extracted from `cmd_code_with` (complexity ratchet, #4046);
+/// behaviour unchanged.
+fn load_code_manifest(manifest_path: Option<&PathBuf>) -> anyhow::Result<AgentManifest> {
+    match manifest_path {
+        Some(path) => {
+            let content = std::fs::read_to_string(path)
+                .map_err(|e| anyhow::anyhow!("cannot read manifest {}: {e}", path.display()))?;
+            let m = AgentManifest::from_toml(&content)
+                .map_err(|e| anyhow::anyhow!("invalid manifest: {e}"))?;
+            eprintln!("✓ Loaded manifest: {}", path.display());
+            Ok(m)
+        }
+        None => {
+            let mut m = build_default_manifest();
+            // PMAT-CODE-CONFIG-LADDER-001: settings.json layered defaults.
+            // Errors are surfaced (Poka-Yoke) — a malformed settings file
+            // is reported rather than silently ignored.
+            let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            let settings = crate::agent::settings::AprSettings::load_layered(&project_root)?;
+            apply_settings_to_manifest(&mut m, &settings)?;
+            Ok(m)
+        }
+    }
+}
+
+/// PMAT-160: `apr serve` first (full CUDA/GPU), the embedded driver as the fallback -- except for
+/// `--thinking on`, which the fallback cannot honour (#3723). Extracted from `cmd_code_with`
+/// (complexity ratchet, #4046); behaviour unchanged.
+fn launch_code_driver(
+    manifest: &AgentManifest,
+    serve_opts: CodeServeOptions,
+) -> anyhow::Result<Arc<dyn LlmDriver>> {
+    let driver: Arc<dyn LlmDriver> = if let Some(model_path) = manifest.model.resolve_model_path() {
+        let launch = crate::agent::driver::apr_serve::ServeLaunchOptions {
+            think: serve_opts.think,
+            ..serve_opts.serve
+        };
+        match crate::agent::driver::apr_serve::AprServeDriver::launch_with(
+            model_path.clone(),
+            Some(code_driver_window(manifest, &model_path)),
+            &launch,
+        ) {
+            Ok(d) => Arc::new(d),
+            Err(e) if serve_opts.think == Some(true) => {
+                // #3723: the embedded fallback renders thinking OFF only; serving it for an
+                // explicit ON would be the silent false pin the flag exists to prevent.
+                anyhow::bail!(CodeOutcome::refused(
+                    "invalid_input",
+                    format!(
+                        "--thinking on: apr serve is unavailable ({e}) and the embedded fallback \
+                     has no thinking-ON path (#3723); use --thinking off or make `apr` available"
+                    ),
+                    exit_code::AGENT_ERROR,
+                ));
+            }
+            Err(e) => {
+                eprintln!("⚠ apr serve unavailable ({e}), using embedded inference");
+                Arc::from(build_fallback_driver(manifest)?)
+            }
+        }
+    } else {
+        Arc::from(build_fallback_driver(manifest)?)
+    };
+    Ok(driver)
+}
+
+/// PMAT-CODE-HOOKS-001: fire SessionStart; a Warn is shown, a Block aborts. Extracted from
+/// `cmd_code_with` (complexity ratchet, #4046); behaviour unchanged.
+fn run_session_start_hook(manifest: &AgentManifest) -> anyhow::Result<()> {
+    let hooks_reg = crate::agent::hooks::HookRegistry::from_configs(manifest.hooks.clone());
+    let hook_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    match hooks_reg.run(crate::agent::hooks::HookEvent::SessionStart, "", &hook_cwd) {
+        crate::agent::hooks::HookDecision::Allow => {}
+        crate::agent::hooks::HookDecision::Warn(msg) => {
+            if !msg.is_empty() {
+                eprintln!("⚠ SessionStart hook: {msg}");
+            }
+        }
+        crate::agent::hooks::HookDecision::Block(reason) => {
+            anyhow::bail!(CodeOutcome::refused(
+                "hook_blocked",
+                format!("SessionStart hook blocked session: {reason}"),
+                exit_code::AGENT_ERROR,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The one prompt of a non-interactive run: the arguments, else stdin (a JSON envelope under
+/// `--input-format json`). Extracted from `cmd_code_with` (complexity ratchet, #4046); behaviour unchanged.
+fn read_single_prompt_text(prompt: &[String], input_format: &str) -> anyhow::Result<String> {
+    let prompt_text = if prompt.is_empty() {
+        let mut buf = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+        // PMAT-CODE-INPUT-FORMAT-001: when --input-format=json, parse
+        // a `{"role":"user","content":"..."}` envelope and use `content`
+        // as the prompt. Empty/missing content is a hard error so the
+        // operator notices the malformed envelope.
+        if input_format.eq_ignore_ascii_case("json") {
+            parse_json_input_envelope(&buf)?
+        } else {
+            buf
+        }
+    } else {
+        prompt.join(" ")
+    };
+    Ok(prompt_text)
+}
+
+/// [`cmd_code`] with explicit `apr serve` controls (#3978).
+#[allow(clippy::too_many_arguments)]
+pub fn cmd_code_with(
+    model: Option<PathBuf>,
+    project: PathBuf,
+    resume: Option<Option<String>>,
+    prompt: Vec<String>,
+    print: bool,
+    max_turns: u32,
+    manifest_path: Option<PathBuf>,
+    emit_trace: Option<PathBuf>,
+    output_format: &str,
+    input_format: &str,
+    serve_opts: CodeServeOptions,
+) -> anyhow::Result<()> {
+    let json_document = json_document_mode(print, &prompt, output_format);
+    let started = std::time::Instant::now();
+    // #2607: settled BEFORE the working directory changes, before any
+    // settings file is read, and — the point of the issue — before any model
+    // is discovered or any `apr serve` child is spawned.
+    refuse_bare_non_interactive(
+        &prompt,
+        print,
+        model.as_ref(),
+        manifest_path.as_ref(),
+        resume.as_ref(),
+    )?;
+
     // --project: change working directory for project instructions.
     // A path that is not a directory used to be skipped silently, so
     // `--project /typo` ran the agent against the CURRENT directory while the
     // operator believed it was scoped to another tree. Fail closed instead.
     if project.as_os_str() != "." {
         if !project.is_dir() {
-            anyhow::bail!("--project: not a directory: {}", project.display());
+            anyhow::bail!(CodeOutcome::refused(
+                "invalid_input",
+                format!("--project: not a directory: {}", project.display()),
+                exit_code::AGENT_ERROR,
+            ));
         }
         std::env::set_current_dir(&project)?;
     }
@@ -122,7 +525,8 @@ pub fn cmd_code(
     // load. A non-interactive (`-p`) run is exactly one turn, so it needs one
     // permit; the REPL spends the same budget per turn inside its loop.
     let mut turn_budget = TurnBudget::new(max_turns);
-    let single_prompt_permit = permit_single_prompt(&mut turn_budget, print || !prompt.is_empty())?;
+    let single_prompt_permit = permit_single_prompt(&mut turn_budget, print || !prompt.is_empty())
+        .map_err(max_turns_refusal)?;
 
     // --resume <id>: resolve the session BEFORE any model is launched.
     // An unknown id used to be discarded without a word: `-p` mode returned
@@ -144,26 +548,7 @@ pub fn cmd_code(
     // `~/.config/apr/settings.json` (user-global) and
     // `<project_root>/.apr/settings.json` (project-local) as Claude-Code
     // parity defaults (PMAT-CODE-CONFIG-LADDER-001). CLI flags always win.
-    let mut manifest = match manifest_path {
-        Some(ref path) => {
-            let content = std::fs::read_to_string(path)
-                .map_err(|e| anyhow::anyhow!("cannot read manifest {}: {e}", path.display()))?;
-            let m = AgentManifest::from_toml(&content)
-                .map_err(|e| anyhow::anyhow!("invalid manifest: {e}"))?;
-            eprintln!("✓ Loaded manifest: {}", path.display());
-            m
-        }
-        None => {
-            let mut m = build_default_manifest();
-            // PMAT-CODE-CONFIG-LADDER-001: settings.json layered defaults.
-            // Errors are surfaced (Poka-Yoke) — a malformed settings file
-            // is reported rather than silently ignored.
-            let project_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            let settings = crate::agent::settings::AprSettings::load_layered(&project_root)?;
-            apply_settings_to_manifest(&mut m, &settings)?;
-            m
-        }
-    };
+    let mut manifest = load_code_manifest(manifest_path.as_ref())?;
 
     // --model flag overrides manifest model_path (and therefore overrides
     // any settings.json `model` field — CLI always wins, per the parity
@@ -186,28 +571,14 @@ pub fn cmd_code(
 
     // Contract: no_model_error — never silently use MockDriver
     if manifest.model.resolve_model_path().is_none() && manifest_path.is_none() {
-        print_no_model_error();
-        std::process::exit(exit_code::NO_MODEL);
+        exit_no_model(json_document, started);
     }
 
     // PMAT-160: Try AprServeDriver first (apr serve has full CUDA/GPU).
     // Falls back to embedded RealizarDriver if `apr` binary not found.
     // PMAT-CODE-SPAWN-PARITY-001: driver stored as Arc so TaskTool can
     // share it with the AgentPool for sub-agent execution.
-    let driver: Arc<dyn LlmDriver> = if let Some(model_path) = manifest.model.resolve_model_path() {
-        match crate::agent::driver::apr_serve::AprServeDriver::launch(
-            model_path,
-            manifest.model.context_window,
-        ) {
-            Ok(d) => Arc::new(d),
-            Err(e) => {
-                eprintln!("⚠ apr serve unavailable ({e}), using embedded inference");
-                Arc::from(build_fallback_driver(&manifest)?)
-            }
-        }
-    } else {
-        Arc::from(build_fallback_driver(&manifest)?)
-    };
+    let driver: Arc<dyn LlmDriver> = launch_code_driver(&manifest, serve_opts)?;
 
     // PMAT-CODE-MCP-JSON-LOADER-001: merge `<project>/.mcp.json` (Claude-Code-
     // shape) servers into manifest.mcp_servers BEFORE tool registration. The
@@ -249,19 +620,7 @@ pub fn cmd_code(
     // PMAT-CODE-HOOKS-001: build hook registry from manifest and fire SessionStart.
     // Returned Warn messages are surfaced to the user; a Block here aborts session
     // startup (matching Claude Code's exit-code-2 semantics).
-    let hooks_reg = crate::agent::hooks::HookRegistry::from_configs(manifest.hooks.clone());
-    let hook_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    match hooks_reg.run(crate::agent::hooks::HookEvent::SessionStart, "", &hook_cwd) {
-        crate::agent::hooks::HookDecision::Allow => {}
-        crate::agent::hooks::HookDecision::Warn(msg) => {
-            if !msg.is_empty() {
-                eprintln!("⚠ SessionStart hook: {msg}");
-            }
-        }
-        crate::agent::hooks::HookDecision::Block(reason) => {
-            anyhow::bail!("SessionStart hook blocked session: {reason}");
-        }
-    }
+    run_session_start_hook(&manifest)?;
 
     // Build memory
     let memory = crate::agent::memory::InMemorySubstrate::new();
@@ -273,21 +632,7 @@ pub fn cmd_code(
     // PMAT-161: Return exit code instead of process::exit() so driver Drop
     // runs and kills the apr serve subprocess (no zombie processes).
     if let Some(permit) = single_prompt_permit {
-        let prompt_text = if prompt.is_empty() {
-            let mut buf = String::new();
-            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
-            // PMAT-CODE-INPUT-FORMAT-001: when --input-format=json, parse
-            // a `{"role":"user","content":"..."}` envelope and use `content`
-            // as the prompt. Empty/missing content is a hard error so the
-            // operator notices the malformed envelope.
-            if input_format.eq_ignore_ascii_case("json") {
-                parse_json_input_envelope(&buf)?
-            } else {
-                buf
-            }
-        } else {
-            prompt.join(" ")
-        };
+        let prompt_text = read_single_prompt_text(&prompt, input_format)?;
         // `--resume <id> -p ...` used to run with an EMPTY history — the
         // resumed session was accepted and then ignored, so the reply looked
         // plausible while the model had no idea what came before. Restore the
@@ -303,7 +648,11 @@ pub fn cmd_code(
             resumed_store,
             permit,
         );
-        drop(driver); // Kill apr serve subprocess before exit
+        // #2607: `drop(driver)` alone did NOT kill the `apr serve` child —
+        // the tool registry holds a second `Arc` clone, so the strong count
+        // never reached zero and `AprServeDriver::drop` never ran. `exit`
+        // below runs no destructors, so this is the last chance to reap it.
+        release_driver(tools, driver);
         std::process::exit(code);
     }
 
@@ -402,10 +751,9 @@ fn build_fallback_driver(manifest: &AgentManifest) -> anyhow::Result<Box<dyn Llm
     #[cfg(feature = "inference")]
     {
         if let Some(model_path) = manifest.model.resolve_model_path() {
-            let driver = crate::agent::driver::realizar::RealizarDriver::new(
-                model_path,
-                manifest.model.context_window,
-            )?;
+            let window = code_driver_window(manifest, &model_path);
+            let driver =
+                crate::agent::driver::realizar::RealizarDriver::new(model_path, Some(window))?;
             return Ok(Box::new(driver));
         }
     }
@@ -441,6 +789,56 @@ fn discover_and_set_model(manifest: &mut AgentManifest) {
 }
 
 /// Print actionable error when no local model is available.
+/// `true` when this invocation owes exactly one JSON document on stdout:
+/// a non-interactive (`-p` / prompt) run with `--output-format json` (#3775).
+fn json_document_mode(print: bool, prompt: &[String], output_format: &str) -> bool {
+    (print || !prompt.is_empty()) && output_format.eq_ignore_ascii_case("json")
+}
+
+/// A `--max-turns` refusal, carried as its #3720 kind (#3775).
+fn max_turns_refusal(e: anyhow::Error) -> CodeOutcome {
+    CodeOutcome::refused("max_turns_exhausted", e.to_string(), exit_code::AGENT_ERROR)
+}
+
+/// The no-model exit: the stderr guidance, then (#3775) the JSON document a
+/// json run owes, then exit `NO_MODEL`.
+fn exit_no_model(json_document: bool, started: std::time::Instant) -> ! {
+    print_no_model_error();
+    if json_document {
+        let outcome = CodeOutcome::refused(
+            "no_model",
+            "no model found: pass --model or place a model where apr code discovers one",
+            exit_code::NO_MODEL,
+        );
+        println!("{}", envelope(None, Some(&outcome), started.elapsed()));
+    }
+    std::process::exit(exit_code::NO_MODEL);
+}
+
+/// #3775: write the JSON document for an error [`cmd_code`] RETURNED, when the
+/// invocation owes one; a no-op otherwise. `exit_code` is the code the caller
+/// exits with for that error (apr-cli: `CliError::Aprender`, 1), so the
+/// document cannot disagree with the process status. A refusal `cmd_code`
+/// typed (`CodeOutcome`) keeps its kind; anything else is `agent_error`.
+pub fn emit_error_document(
+    print: bool,
+    prompt: &[String],
+    output_format: &str,
+    err: &anyhow::Error,
+    exit_code: i32,
+    elapsed: std::time::Duration,
+) {
+    if !json_document_mode(print, prompt, output_format) {
+        return;
+    }
+    let mut outcome = err
+        .downcast_ref::<CodeOutcome>()
+        .cloned()
+        .unwrap_or_else(|| CodeOutcome::failed("agent_error", err.to_string(), exit_code));
+    outcome.exit_code = exit_code;
+    println!("{}", envelope(None, Some(&outcome), elapsed));
+}
+
 fn print_no_model_error() {
     eprintln!("✗ No local model found. apr code requires a local model.\n");
     if check_invalid_apr_in_search_dirs() {
@@ -500,6 +898,46 @@ fn load_project_instructions(max_bytes: usize) -> Option<String> {
         }
     }
     None
+}
+
+/// #4599: the window when neither the manifest nor the model names one (Qwen3-class, PMAT-197).
+const CODE_DEFAULT_CONTEXT_WINDOW: usize = 32_768;
+
+/// The window both `apr code` drivers are launched with (#4599): the one place the serve and the
+/// embedded fallback resolve it, so neither can drift back to a hard-coded size.
+fn code_driver_window(manifest: &AgentManifest, model_path: &Path) -> usize {
+    code_context_window(manifest.model.context_window, model_path)
+}
+
+/// #4599: the context window `apr code` sizes the conversation to. An explicit manifest or
+/// settings value wins; then the model's own declared context length; then 32K. A prompt that
+/// still does not fit is refused loudly (`context_overflow`), never dropped. The default
+/// manifest leaves `context_window` unset for this: the hard-coded 32K it had (PMAT-197)
+/// refused a >~105 KB prompt on a 262K-context model.
+fn code_context_window(manifest_window: Option<usize>, model_path: &Path) -> usize {
+    manifest_window
+        .or_else(|| model_context_length(model_path))
+        .unwrap_or(CODE_DEFAULT_CONTEXT_WINDOW)
+}
+
+/// The GGUF header's `<arch>.context_length`. Reads a bounded prefix (header, metadata and
+/// tensor infos precede the weights) so a multi-GB model is never mapped just to read one key.
+/// `None` for a non-GGUF file, a header larger than the prefix, or a missing key.
+/// Without `inference` there is no GGUF reader, so the window falls through to the default.
+fn model_context_length(path: &Path) -> Option<usize> {
+    #[cfg(feature = "inference")]
+    {
+        use std::io::Read;
+        const HEADER_PREFIX: u64 = 64 << 20;
+        let mut buf = Vec::new();
+        std::fs::File::open(path).ok()?.take(HEADER_PREFIX).read_to_end(&mut buf).ok()?;
+        realizar::gguf::GGUFModel::from_bytes(&buf).ok()?.context_length().filter(|&n| n > 0)
+    }
+    #[cfg(not(feature = "inference"))]
+    {
+        let _ = path;
+        None
+    }
 }
 
 /// Compute instruction budget based on model context window.
@@ -674,10 +1112,6 @@ fn build_default_manifest() -> AgentManifest {
             system_prompt,
             max_tokens: 4096,
             temperature: 0.0,
-            // PMAT-197: Qwen3 supports 32K context. Default 4096 caused
-            // truncate_messages to drop user query (9 tool schemas ~4000 tokens
-            // consumed the entire window). Set to 32K for Qwen3-class models.
-            context_window: Some(32768),
             ..ModelConfig::default()
         },
         resources: ResourceQuota {
@@ -867,26 +1301,32 @@ fn run_single_prompt(
         let _ = store.record_turn();
     }
 
+    let json = output_format.eq_ignore_ascii_case("json");
     match result {
         Ok(r) => {
             let elapsed = started.elapsed();
-            if r.text.is_empty() {
-                // PMAT-190: Empty response — model may be emitting only thinking tokens
-                // that get stripped by strip_thinking_blocks(). Common with Qwen3 when
-                // the serve backend doesn't use Qwen3NoThinkTemplate.
+            // PMAT-190: Empty response — model may be emitting only thinking tokens
+            // that get stripped by strip_thinking_blocks(). Common with Qwen3 when
+            // the serve backend doesn't use Qwen3NoThinkTemplate. #3775 / #3720: an
+            // empty completion is a failure with the inference-failure exit code
+            // (1); it used to print an error document and exit 0.
+            let empty = r
+                .text
+                .is_empty()
+                .then(|| CodeOutcome::empty_completion(r.iterations, r.tool_calls));
+            if empty.is_some() {
                 eprintln!(
                     "⚠ Empty response ({} iterations, {} tool calls). \
                      Model may be in thinking mode — rebuild apr from source for Qwen3NoThinkTemplate fix.",
                     r.iterations, r.tool_calls
                 );
-                if output_format.eq_ignore_ascii_case("json") {
-                    println!("{}", build_json_result_envelope(&r, elapsed, /*is_error*/ true));
-                }
-            } else if output_format.eq_ignore_ascii_case("json") {
+            }
+            if json {
                 // PMAT-CODE-OUTPUT-FORMAT-001: structured envelope mirroring
-                // Claude Code's `claude -p --output-format json` shape.
-                println!("{}", build_json_result_envelope(&r, elapsed, /*is_error*/ false));
-            } else {
+                // Claude Code's `claude -p --output-format json` shape, plus
+                // the #3720 status/error fields.
+                println!("{}", envelope(Some(&r), empty.as_ref(), elapsed));
+            } else if empty.is_none() {
                 println!("{}", r.text);
             }
 
@@ -904,11 +1344,18 @@ fn run_single_prompt(
                 }
             }
 
-            exit_code::SUCCESS
+            empty.map_or(exit_code::SUCCESS, |o| o.exit_code)
         }
         Err(e) => {
             eprintln!("Error: {e}");
-            map_error_to_exit_code(&e)
+            let code = map_error_to_exit_code(&e);
+            // #3775: a driver error (the serve child failing to load, an HTTP
+            // 500) used to leave stdout EMPTY in json mode.
+            if json {
+                let outcome = CodeOutcome::from_agent_error(&e, code);
+                println!("{}", envelope(None, Some(&outcome), started.elapsed()));
+            }
+            code
         }
     }
 }
@@ -1016,52 +1463,7 @@ fn parse_json_input_envelope(buf: &str) -> anyhow::Result<String> {
     Ok(content.to_owned())
 }
 
-/// PMAT-CODE-OUTPUT-FORMAT-001 (M-NON-INT-001): build a structured JSON
-/// envelope mirroring Claude Code's `claude -p --output-format json` shape:
-///
-/// ```json
-/// {
-///   "type": "result",
-///   "subtype": "success",
-///   "is_error": false,
-///   "duration_ms": 1234,
-///   "result": "the assistant text",
-///   "session_id": "<uuidv7-shaped>",
-///   "num_turns": 1,
-///   "total_cost_usd": 0
-/// }
-/// ```
-fn build_json_result_envelope(
-    result: &super::result::AgentLoopResult,
-    elapsed: std::time::Duration,
-    is_error: bool,
-) -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let ts_micros =
-        SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_micros()).unwrap_or(0);
-    // Same UUIDv7-shaped stable-per-run session id used by emit_ccpa_trace.
-    let session_id = format!(
-        "{:08x}-{:04x}-7000-{:04x}-{:012x}",
-        (ts_micros >> 64) as u32 & 0xFFFF_FFFF,
-        ((ts_micros >> 48) & 0xFFFF) as u16,
-        ((ts_micros >> 32) & 0xFFFF) as u16,
-        (ts_micros & 0xFFFF_FFFF_FFFF) as u64
-    );
-    let envelope = serde_json::json!({
-        "type": "result",
-        "subtype": if is_error { "error" } else { "success" },
-        "is_error": is_error,
-        "duration_ms": elapsed.as_millis() as u64,
-        "result": result.text,
-        "session_id": session_id,
-        "num_turns": result.iterations,
-        "tokens_in": result.usage.input_tokens,
-        "tokens_out": result.usage.output_tokens,
-        // Local sovereign inference: cost is always zero by construction.
-        "total_cost_usd": 0,
-    });
-    envelope.to_string()
-}
+use super::code_envelope::{envelope, CodeOutcome};
 
 // Prompts and exit codes extracted to code_prompts.rs
 use super::code_prompts::{

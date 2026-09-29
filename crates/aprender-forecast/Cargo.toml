@@ -21,8 +21,8 @@ path = "src/lib.rs"
 [dependencies]
 # The MAP fit runs on core's L-BFGS (D-07: forecasting numerics live here, not
 # in realizar — this crate is training-side).
-aprender = { path = "../aprender-core", version = "0.63.0", package = "aprender-core", default-features = false }
-trueno = { path = "../aprender-compute", version = "0.63.0", package = "aprender-compute" }
+aprender = { path = "../aprender-core", version = "0.69.3", package = "aprender-core", default-features = false }
+trueno = { path = "../aprender-compute", version = "0.69.3", package = "aprender-compute" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # JsonSchema on ForecastArgs so the MCP server advertises one strict schema.

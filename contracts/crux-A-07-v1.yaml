@@ -148,7 +148,7 @@ falsification_tests:
   rule: parity with huggingface-cli xet path on golden
   prediction: "apr xet output sha256 == huggingface-cli (hf_xet enabled) output sha256"
   test: |
-    GOLD=/home/noah/src/aprender-worktrees/crux-spec/evidence/crux/huggingface/xet-goldens.json
+    GOLD=${APR_CRUX_GOLDENS:-evidence/crux}/huggingface/xet-goldens.json
     [ -f "$GOLD" ] || { echo "golden set absent"; exit 2; }
     python3 - "$GOLD" <<'PY'
     import json, subprocess, tempfile, hashlib, sys, pathlib, os
@@ -163,15 +163,20 @@ falsification_tests:
   if_fails: "apr xet bytes diverge from huggingface_hub hf_xet golden"
 
 proof_obligations:
-- type: equivalence
+- id: CA0667F-EQ-001
+  type: equivalence
   property: "apr pull xet path matches huggingface_hub[hf_xet] bytes on evidence/crux/huggingface/xet-goldens.json"
-- type: invariant
+- id: CA0667F-INV-002
+  type: invariant
   property: "Xet path produces byte-identical output to HTTPS fallback for every file"
-- type: invariant
+- id: CA0667F-INV-003
+  type: invariant
   property: "Xet path issues >=4 concurrent chunk requests on files > 100 MiB"
-- type: invariant
+- id: CA0667F-INV-004
+  type: invariant
   property: "APR_XET=0 / --no-xet falls back to HTTPS and disables all xet CAS requests"
-- type: invariant
+- id: CA0667F-INV-005
+  type: invariant
   property: "sha256(download_xet(F)) == sha256(download_http(F)) for all xet-backed F"
 
 verification_summary:

@@ -13,6 +13,10 @@ name: CI
 on:
   push:
     branches: [main, master]
+    # #3676: sovereign-ci's `coverage_on: tag` (below) runs coverage only on a push of a
+    # v* tag, and its gate REQUIRES it to succeed there. A push filtered to branches never
+    # fires for a tag, so this is the reusable's second required edit.
+    tags: ['v*']
   pull_request:
     branches: [main, master]
   # Merge queue: GitHub dispatches a `merge_group` event for each batch it forms.
@@ -23,1200 +27,444 @@ on:
   merge_group:
   workflow_dispatch:
 
+# CONCURRENCY (#3292, measured in #3358)
+# `cancel-in-progress` is an EXPRESSION, which GitHub evaluates per event
+# ("To conditionally cancel currently running jobs or workflows in the same
+# concurrency group, you can specify cancel-in-progress as an expression with any
+# of the allowed expression contexts" -- workflow-syntax reference, fetched
+# 2026-09-16). It was an unconditional `true`, which is right for a pull_request
+# -- a new push supersedes the run it replaces instead of stacking behind it --
+# and is the destructive failure mode everywhere else: for `merge_group` the group
+# is the queue ref, and cancelling a queue BUILD throws away the verdict the queue
+# is waiting on (the same mistake, made by hand on 35078448806 at 11:25Z, turned a
+# healthy run's `gate` red in four seconds). Narrowed to the one event where
+# superseding is what we mean; `merge_group`, `push` and `workflow_dispatch`
+# evaluate to false and QUEUE.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  ci:
-    uses: paiml/.github/.github/workflows/sovereign-ci.yml@main
-    with:
-      repo: ${{ github.event.repository.name }}
-      # Phase 3 pilot (heavy workload) — build-performance.md §7 Phase 3.
-      # APR-MONO monorepo: 879+ compile units, largest dep graph in the fleet.
-      # Highest expected sccache hit-rate lift; without it each PR cold-compiles
-      # in its per-PR-per-run target dir
-      # (`/mnt/nvme-raid0/targets/aprender-ci/<PR>/run-<RUN_ID>`)
-      # for ~34min, leaving only ~4min for tests inside the 40min timeout —
-      # the entire merge queue saturates.
-      #
-      # 2026-05-15: target-dir path bumped from `aprender-ci/<PR>` to
-      # `aprender-ci/<PR>/run-<RUN_ID>` to break the cancel-corrupt-state
-      # race introduced by the prior per-PR fix (paiml/.github#31,
-      # 2026-04-23). `concurrency.cancel-in-progress: true` + persistent
-      # per-PR mount = the SIGTERM→SIGKILL window of a dying old cargo
-      # corrupted `/workspace/target/debug/deps/` for the new run that
-      # mounted the same host path. sccache stays on its own mount, so
-      # cross-run cache effectiveness is preserved; only cargo-incremental
-      # state (small fraction of total compile) is lost per new run.
-      #
-      # 2026-04-19: temporarily disabled — sovereign-ci:stable container image
-      # was missing the `rustc-sccache` wrapper script. Fixed upstream in
-      # paiml/infra commit f4fccf9 (PR #66, "use exec script not symlink").
-      # 2026-05-12: re-enabled — image verified to ship `/usr/local/bin/rustc-sccache`
-      # (sccache 0.14.0), shared cache at `/home/noah/data/sccache` (warm, ~11GB).
-      # 2026-08-20: that "warm, ~11GB" was NOT health — it was the cache pinned
-      # at sccache's DEFAULT 10 GiB cap. /var/log/ci-metrics/sccache-*.json has
-      # recorded cache_size and max_cache_size on every job all along (18,292
-      # files); nothing ever compared them. All of the newest 4000 samples read
-      # cache_size within ~2 KB of max_cache_size, i.e. an LRU evicting on every
-      # write. paiml-mcp-agent-toolkit-coverage was running 1240 compile requests
-      # for 5 hits and 811 misses. Cap raised to 50G in paiml/infra#230 and
-      # paiml/.github#50; the workspace-test job below passes the SAME value,
-      # because a server capped lower EVICTS the shared cache back down to its
-      # own cap — a mixed cap is strictly worse than a uniform small one.
-      enable_sccache: true
-      use_nextest: true
-      # NOTE: coverage_min (the opt-in coverage ratchet from the build-system audit)
-      # is intentionally NOT set on aprender. The pilot run exposed that aprender's
-      # ROOT crate is a facade — the sovereign-ci coverage job runs `--lib` on the
-      # root and exercises 0 tests ("test result: ok. 0 passed"); all real code +
-      # tests live in workspace members, run by the separate `workspace-test` job.
-      # So coverage_min has no lcov data to gate on. Making it meaningful here needs
-      # test_workspace: true + GPU-member test_args exclusions first (the PMAT-159
-      # workspace blind-spot). Tracked as a follow-up. The coverage ratchet
-      # MECHANISM is live fleet-wide via sovereign-ci (#37); a single-crate repo is
-      # the natural first coverage pilot. aprender's blocking-quality pilot is the
-      # diff-scoped mutation gate below.
-    secrets: inherit
-
-  # APR-MONO: Workspace-wide test (all 75 crates)
+  # ==========================================================================
+  # #4433 — FIVE FAT JOBS (operator ruling 2026-09-25, items 1+4):
+  #   "CI = 5 fat jobs (x86 main, gx10, yoga, mac-refusal, determinism). Each
+  #    runs all parts to completion on the biggest runner in its class, nextest
+  #    full-core, sccache warm. Same test set as today (Σ executed unchanged)."
   #
-  # 2026-05-13: Refactored from GH Actions `container:` syntax (which forces an
-  # unconditional `docker pull` with only 3 retries / ~6s total backoff) to
-  # explicit `docker run` steps with a 15-attempt linear-backoff pull retry.
-  # The previous design conflated "image is required" with "registry must be
-  # reachable at pull time" — when `localhost:5000` blipped (registry restart,
-  # network reload), the pull failed and the whole job died after ~25s. This
-  # refactor preserves the same execution semantics (same image, same volume
-  # mounts, same env) but moves the pull into a step the workflow controls,
-  # giving us up to ~13 minutes of retry headroom before declaring the
-  # registry unreachable. Mirrored in the `mutants` job below.
-  workspace-test:
-    runs-on: [self-hosted, X64, Linux, clean-room]
-    # 100, not 85. The step below sets `timeout-minutes: 75`, but "Set up runner"
-    # (image pull) has measured at 20 minutes, so 20 + 75 = 95 > 85 and the JOB
-    # timeout always fired first -- producing a bare "The operation was canceled"
-    # that names no step. Job 95162862834 died exactly on the 85-minute mark this
-    # way. The step timeout must be the one that can fire, because it points at
-    # the step; the job timeout is the backstop behind it.
-    timeout-minutes: 100
+  # The five, by job id: x86-main, gx10, yoga, determinism, and mac-check -- the
+  # ruling's "mac-refusal": the macOS lane, whose one expected failure is the
+  # Linux-only profiler's compile_error! refusal (excluded by name below). It
+  # keeps its context name `mac-check` and, as on main before #4433, is NOT in
+  # `gate`'s needs (its own comment: first-green proof before it may block).
+  #
+  # The job BODIES did not change: they moved, verbatim, to ci/sections.yml
+  # (and the pinned sovereign-ci reusable workflow to ci/vendor/). Each fat job
+  # below runs a set of them as SECTIONS on one runner through
+  # scripts/ci/fat_driver.py, which honours each section's if/needs/matrix/
+  # container/outputs exactly as the Actions runner did. The workspace tests
+  # are the exception: as one shard inside x86-main they took 5358 s of it and
+  # were the release critical path, so ci/sections.yml `matrix-pins` splits
+  # them into three shards and each runs as its own `workspace-test-shard` job
+  # below, in parallel. The `workspace-test` verdict job compares the UNION of
+  # the shards' executed test ids with the owed universe, by id (#4433).
+  #
+  # The required contexts are produced by three verdict jobs at the end:
+  # `workspace-test`, `ci / gate` and `gate`, each reading the fat jobs' results
+  # with the same rule the old job of that name applied.
+  # ==========================================================================
+  x86-main:
+    # Any free X64 runner in the pool takes it: intel, framework16 or yoga.
+    runs-on: [self-hosted, Linux, X64, clean-room]
+    timeout-minutes: 240
+    # The sections carry their own permissions blocks (the sov provenance section
+    # needs id-token + attestations); one job token must cover all of them.
+    permissions: write-all
+    outputs:
+      results: ${{ steps.wait.outputs.results }}
+      deferred: ${{ steps.wait.outputs.deferred }}
     env:
-      IMAGE: localhost:5000/sovereign-ci:stable
-      PR_OR_REF: ${{ github.event.pull_request.number || github.ref_name }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      FAT_VARS_JSON: ${{ toJSON(vars) }}
+      FAT_SECRET_PR_REVIEW_SIGNING_KEY_B64: ${{ secrets.PR_REVIEW_SIGNING_KEY_B64 }}
     steps:
-      - name: Pre-checkout ownership restore (EACCES self-heal)
-        # Five-whys: the end-of-job "Fix file ownership" step is
-        # `if: always()`, but a hard-killed job (runner death, forced
-        # cancel) skips even always() steps → root-owned
-        # target/.rustc_info.json + target/package/ survive in the runner
-        # checkout → the NEXT run's actions/checkout `git clean -ffdx`
-        # fails with EACCES (observed 2026-07-02: 4 jobs across PRs
-        # #2257/#2258 on runners 10/14/16, each needing a manual
-        # `ssh intel sudo rm` sweep). Restoring ownership BEFORE checkout
-        # makes every run self-healing instead of depending on the
-        # previous run's clean exit.
-        # Soundness of the cached-image gate: leftovers can only exist if
-        # a previous docker job ran on this runner — which implies the
-        # image is already in the local cache. So "image not cached ⟹ no
-        # leftovers" and skipping is safe (also keeps this step
-        # registry-outage-tolerant).
-        run: |
-          if docker image inspect "$IMAGE" > /dev/null 2>&1; then
-            docker run --rm -v "${GITHUB_WORKSPACE}:/workspace" "$IMAGE" \
-              bash -c 'chown -R 1000:1000 /workspace 2>/dev/null || true'
-          else
-            echo "Image not cached — no prior docker job on this runner, nothing to restore"
-          fi
+      # Full history: a section whose own checkout asked for depth 1 (the default)
+      # is cut back to exactly that by the driver; one asking for 0 needs it all.
       - uses: actions/checkout@v7
-      - name: Pull sovereign-ci image (with retry + local-cache fallback)
-        # Self-hosted runner's local Docker registry at localhost:5000 is
-        # occasionally restarting OR experiencing extended outages
-        # (paiml/infra ops). Two layers of resilience:
-        #   1. Check the local Docker daemon cache first — the image was
-        #      successfully pulled on a prior run, so it's almost certainly
-        #      still in the cache (Docker doesn't GC images unless `prune`
-        #      is run). If present, skip the pull entirely; this makes the
-        #      workflow registry-outage-tolerant.
-        #   2. Otherwise, try to pull with 15-attempt linear-backoff retry
-        #      (~13min total) — plenty for any normal restart cycle.
-        # The local-cache path accepts slight staleness as the price of
-        # registry-outage tolerance. paiml/infra:machines/intel/sovereign-
-        # ci/rebuild.sh rebuilds the stable tag nightly so any drift gets
-        # corrected within 24h on the next successful pull.
-        run: |
-          if docker image inspect "$IMAGE" > /dev/null 2>&1; then
-            echo "Image $IMAGE already cached locally — skipping pull"
-            echo "(local cache is registry-outage-tolerant; nightly rebuild keeps it fresh)"
-            exit 0
-          fi
-          max_attempts=15
-          delay=4
-          for i in $(seq 1 $max_attempts); do
-            if docker pull "$IMAGE"; then
-              echo "Image pulled successfully on attempt $i"
-              exit 0
-            fi
-            if [ $i -eq $max_attempts ]; then
-              echo "::error::Registry localhost:5000 unreachable after $max_attempts attempts (~13min) AND image not in local cache"
-              echo "::error::Suggests paiml/infra runner-side registry restart + initial image seed needed"
-              exit 1
-            fi
-            echo "Pull attempt $i/$max_attempts failed; sleeping ${delay}s"
-            sleep "$delay"
-            delay=$((delay + 6))  # linear backoff: 4,10,16,22,28,34,...
-          done
-      - name: Pre-flight target-dir consistency check
-        # Root cause (five-whys):
-        #   1. Why does workspace-test sometimes fail with "no such file or
-        #      directory .rcgu.o" / extern location missing / cc-rs can't
-        #      create .o? Cargo's incremental state on the per-PR target
-        #      dir is inconsistent.
-        #   2. Why inconsistent? A prior run was SIGKILL'd mid-compile and
-        #      left orphan .rmeta files (parts cargo had registered as built)
-        #      without the corresponding .rcgu.o codegen artifacts (which were
-        #      mid-write at the moment of the kill).
-        #   3. Why was it SIGKILL'd? concurrency.cancel-in-progress (line 22)
-        #      cancels the previous run as soon as a new commit lands on the
-        #      branch (and "Update branch" / strict-up-to-date triggers this
-        #      every time aprender main moves forward).
-        #   4. Why does this persist? The target dir is bind-mounted from a
-        #      per-PR persistent path /mnt/nvme-raid0/targets/aprender-ci/<PR>/,
-        #      so partial-compile state survives across runs.
-        #   5. Root cause: cargo's incremental state is not atomic-on-kill, so
-        #      a persistent shared target dir + cancel-in-progress = damage.
-        # Prevention (this step): BEFORE invoking cargo, check whether the
-        # immediately-preceding workflow run on this branch was cancelled. If
-        # yes, rm -rf the target dir contents. This is a one-time check at
-        # job start — NOT a retry-on-failure pattern (which the operator
-        # rejects under the "flake is not allowed" directive).
-        run: |
-          set -e
-          if [ -z "${{ github.event.pull_request.number }}" ]; then
-            echo "Not a PR run; skipping prior-cancel check"
-            exit 0
-          fi
-          # Find the immediately-preceding workflow run on this branch.
-          # status=completed filter excludes the current in-progress run.
-          PREV_CONCLUSION=$(gh api \
-            "repos/${GITHUB_REPOSITORY}/actions/runs?branch=${GITHUB_HEAD_REF}&status=completed&per_page=1" \
-            --jq '.workflow_runs[0].conclusion' 2>/dev/null || echo "")
-          echo "Previous run conclusion on ${GITHUB_HEAD_REF}: ${PREV_CONCLUSION:-<none>}"
-          if [ "$PREV_CONCLUSION" = "cancelled" ]; then
-            echo "::warning::Previous run was cancelled; nuking target dir to prevent cargo cancel-damage"
-            docker run --rm \
-              -v "/mnt/nvme-raid0/targets/aprender-ci/${PR_OR_REF}:/workspace/target" \
-              "$IMAGE" \
-              bash -c 'rm -rf /workspace/target/* /workspace/target/.[!.]* 2>/dev/null || true; ls -la /workspace/target/ || true'
-          else
-            echo "No cancel damage to clean (prior conclusion: ${PREV_CONCLUSION:-fresh-branch})"
-          fi
-        env:
-          GH_TOKEN: ${{ github.token }}
-      - name: Pre-build chown — fix per-RUN root ownership
-        # Root cause (five-whys):
-        #   1. Why do fresh runs sometimes fail with "failed to create
-        #      /workspace/target/debug" / "No such file or directory"?
-        #      Cargo (running as user 1000 inside the container) can't
-        #      write to /workspace/target/debug.
-        #   2. Why can't it write? The bind-mount source dir on the host
-        #      (/mnt/nvme-raid0/targets/aprender-ci/<PR>/run-<RUN_ID>) is
-        #      owned by root:root.
-        #   3. Why is it root-owned? Docker's bind-mount creates missing
-        #      host directories with the daemon's uid (root). Per-RUN
-        #      paths are always fresh, so this fires every run.
-        #   4. Why didn't this happen before? Pre-#1693 the per-PR (not
-        #      per-RUN) path persisted across runs, and the downstream
-        #      "post-job cleanup" docker chown step fixed ownership for
-        #      the NEXT run's git-clean. Per-RUN paths invalidate that —
-        #      each run gets a brand-new root-owned dir.
-        #   5. Root cause: the chown step runs AFTER cargo, not BEFORE.
-        #      First-runs always fail; reruns appear to work only when
-        #      the previous run's belated chown fixed the now-stale dir.
-        # Fix (this step): docker run as root, chown the per-RUN target
-        # dir + cargo registry to noah:1000 BEFORE the cargo step.
-        # Idempotent — `|| true` tolerates dirs that are already
-        # noah-owned (e.g. a rerun of the same run-id).
-        run: |
-          docker run --rm \
-            -v "/mnt/nvme-raid0/targets/aprender-ci/${PR_OR_REF}/run-${GITHUB_RUN_ID}:/workspace/target" \
-            -v "/mnt/nvme-raid0/cargo-ci/registry/${PR_OR_REF}:/usr/local/cargo/registry" \
-            "$IMAGE" \
-            bash -c 'chown -R 1000:1000 /workspace/target /usr/local/cargo/registry 2>/dev/null || true'
-      - name: Workspace lib tests (25,300+)
-        # Excluded: aprender-gpu (cuBLAS), aprender-cuda-edge (CUDA), aprender-compute (SIMD SIGSEGV at exit)
-        # Timeout: 75min (was 55, was 40).
-        # 2026-05-15: bumped to 75min after the P0 per-run target-dir fix
-        # (#1693) eliminated cargo-incremental cross-run warmth. Cold
-        # compiles now happen on every run; sccache covers codegen
-        # (~80% hit rate on warm cache) but cargo's metadata + linking +
-        # test binaries still cost ~40-50min cold. Under runner-pool
-        # saturation (7+ concurrent CI runs) we observed 55min hits
-        # exactly at the timeout — runs 25919246467 / 25919258460 /
-        # sibling PRs failed simultaneously at 55:00.0.
-        #
-        # 2026-06-24 (perf/ci-nextest, EXPERIMENT): switched from
-        # `cargo test --workspace --lib` to `cargo nextest run`. Profiling the
-        # ~40min job showed ~80% is SERIAL test EXECUTION (cargo's libtest runs
-        # one test binary at a time; ~27min of the wall clock is just running
-        # tests), not codegen (sccache already covers that). nextest runs every
-        # test in its own process across a thread pool, so the ~25,300 tests
-        # execute in PARALLEL across crates — the big lever. The exact
-        # `--exclude` list is preserved verbatim (aprender-compute stays
-        # excluded; its SIGSEGV-at-exit is handled by the dedicated "Compute
-        # tests" step below). `--profile ci` uses .config/nextest.toml
-        # ([profile.ci]: retries=0, fail-fast). line-tables-only debuginfo now
-        # comes from root Cargo.toml [profile.test]; the CARGO_PROFILE_*_DEBUG
-        # env vars are kept as belt-and-suspenders.
-        timeout-minutes: 75
-        run: |
-          docker run --rm \
-          -e CI -e GITHUB_ACTIONS -e GITHUB_REF -e GITHUB_SHA -e GITHUB_REPOSITORY -e GITHUB_RUN_ID -e GITHUB_EVENT_NAME -e GITHUB_WORKFLOW \
-            -v "${GITHUB_WORKSPACE}:/workspace" \
-            -v "/mnt/nvme-raid0/cargo-ci/registry/${PR_OR_REF}:/usr/local/cargo/registry" \
-            -v "/mnt/nvme-raid0/targets/aprender-ci/${PR_OR_REF}/run-${GITHUB_RUN_ID}:/workspace/target" \
-            -v "/home/noah/data/sccache:/sccache" \
-            -w /workspace \
-            -e CARGO_TARGET_DIR=/workspace/target \
-            -e RUSTC_WRAPPER=rustc-sccache \
-            -e SCCACHE_DIR=/sccache \
-            -e SCCACHE_CACHE_SIZE=50G \
-            -e CARGO_INCREMENTAL=0 \
-            -e CARGO_BUILD_JOBS=8 \
-            -e CARGO_PROFILE_TEST_DEBUG=line-tables-only \
-            -e CARGO_PROFILE_DEV_DEBUG=line-tables-only \
-            "$IMAGE" \
-            cargo nextest run --profile ci --workspace --lib --exclude aprender-gpu --exclude aprender-cuda-edge --exclude aprender-compute
-      - name: Phase 3 + Phase 4 SetFit tests (feature-gated — NOT reached by --workspace --lib above)
-        # REVIEW CR-01. `setfit` is declared but not default (aprender-train/Cargo.toml:79,
-        # `default = ["tui"]`); the module is `#[cfg(feature = "setfit")]` (train/mod.rs:51) and
-        # aprender-core's is gated the same way (lib.rs:165). No workspace member enables either,
-        # and resolver 2 does not unify it in, so the nextest run above COMPILES IT OUT. ~337 lib
-        # tests plus seven trybuild compile-fail cases ran in no CI job at all before this step.
-        #
-        # Three invocations because each is necessary: the two crates are gated independently, and
-        # the trybuild cases live in their own test target that no `--lib` run reaches.
-        #
-        # `cargo test` with a libtest filter rather than nextest: this is the exact command
-        # `make setfit-tests` runs, verified locally at 102 / 234 / 7. Keeping them identical stops
-        # the tier and the CI job from drifting apart. Fixtures are committed (17 files, 4.6 MB at
-        # crates/aprender-core/tests/fixtures/setfit) and resolved from an in-repo path, so this
-        # needs no network.
-        #
-        # `set -e` and no pipes: a non-zero cargo exit fails the step directly. Deliberately NOT
-        # the `| tee ... ; grep -q` shape used below — that reads grep's status, not cargo's
-        # (CLAUDE.md verification rule 1).
-        #
-        # --- PHASE 4 EXTENSION (plan 04-11) ---------------------------------------
-        # Phase 4 added apr-cli, aprender-serve, and two INTEGRATION targets. A
-        # `--lib` run never reaches an integration target, so until this change
-        # `crates/aprender-train/tests/setfit_apr_lifecycle.rs` — OPS-01's only
-        # proof — and `crates/apr-cli/tests/setfit_parity.rs` ran in NO CI job.
-        # That is the same CR-01 shape this step was created to remove, one phase
-        # later.
-        #
-        # Every command added below is COPIED VERBATIM from the Make target of the
-        # same name (04-10), one positional filter per invocation. The COUNT FLOORS
-        # live in the Make targets (`assert_tests_ran`); this step's job is that the
-        # surface RUNS at all. Target -> leg:
-        #   setfit-lifecycle-tests   -> aprender-train --test setfit_apr_lifecycle
-        #   setfit-cli-train-tests   -> apr-cli --lib setfit_train  (both legs)
-        #   setfit-cli-predict-tests -> apr-cli --lib predict
-        #   setfit-cli-inspect-tests -> apr-cli --lib inspect
-        #   setfit-cli-eval-tests    -> apr-cli --lib eval::setfit
-        #   setfit-cli-io-tests      -> apr-cli --lib setfit_io
-        #   setfit-cli-serve-tests   -> apr-cli --lib serve
-        #   setfit-serve-tests       -> aprender-serve --lib setfit  (SCOPED)
-        #   setfit-parity            -> apr-cli --test setfit_parity
-        #   setfit-feature-matrix    -> the apr-cli / aprender-serve check cells
-        # NINE targets need no new leg — the two EXISTING `--lib setfit::` legs
-        # above are their prefix supersets, so they already run in this step:
-        #   setfit-apr-tests setfit-classify-tests            (core setfit::*)
-        #   setfit-bundle-tests setfit-config-tests           (train setfit::*)
-        #   setfit-evaluate-tests setfit-codec-tests          (train setfit::*)
-        #   setfit-reload-tests setfit-lock-tests             (train setfit::*)
-        #   setfit-verify-tests                               (train setfit::*)
-        # setfit-ui-tests is the existing `--test ui` leg. setfit-all-tests is an
-        # aggregate of the 18 suites and has no command of its own. That accounts
-        # for all 23 targets 04-10 created, plus setfit-feature-matrix which it grew
-        # from two crates to four.
-        #
-        # TWO legs are deliberately NOT wired, both spawned-binary tier3 targets:
-        #  1. setfit-serve-smoke   (`-- --ignored spawned_serve_smoke`) spawns a
-        #     real server on a loopback port; a CI loopback-spawn is a NEW flake
-        #     surface (port races, bind permission, startup timing). tier3-local.
-        #  2. setfit-cli-lifecycle (`-- --ignored lifecycle` / `tooling`) spawns the
-        #     real `apr` binary. Same rationale. Promoting either is the human's
-        #     call at the 04-11 checkpoint, not the executor's.
-        #
-        # A THIRD target is absent and this is a DEVIATION the reviewer must rule on:
-        #  3. setfit-api-boundary is not a cargo test target at all — it is a
-        #     `cargo tree` graph gate written as a Make `for` loop with $$-escaped
-        #     variables and single-quoted `grep`/`tr` patterns. It cannot be pasted
-        #     into this step's single-quoted `bash -c '...'` without being REWRITTEN,
-        #     and rewriting is transcription — the drift this step's comment above
-        #     exists to prevent. Excluded on QUOTING grounds, NOT on value grounds:
-        #     unlike (1) and (2) it has genuine CI-only value, because a Linux
-        #     dependency closure can differ from the macOS dev host via
-        #     cfg(target_os) deps. See 04-11-SUMMARY.md.
-        #
-        # The `-- --ignored` setfit_train leg IS wired and the spawn rationale does
-        # NOT cover it: that test calls `commands::setfit_train::run` in-process over
-        # an in-repo fixture directory and spawns nothing (the W-5 reasoning that put
-        # setfit_apr_lifecycle back into this step). Its wall-clock was NOT measured
-        # by 04-11 — it tunes a real encoder over the slice fixture. If it proves
-        # slow in CI, drop THAT leg; never the OPS-01 one.
-        #
-        # TWO legs must NEVER appear here, both pre-existing standing reds. The
-        # command strings below are written EXACTLY as they would be invoked, so a
-        # future `grep` for either finds this warning:
-        #   cargo test -p aprender-serve --lib
-        #     D-04-08-A: 51 failures, all ONE overflow at contract_gate.rs:428:21.
-        #     Red on arrival — it cannot tell a regression from the standing red.
-        #     The wired leg is scoped: `--features setfit --lib setfit`.
-        #   cargo check -p apr-cli --no-default-features
-        #     D-04-09-A: rc=101 for BOTH minimal cells, since `setfit` does not
-        #     imply `inference`. The green gating leg is `--all-targets` (default
-        #     features), which is what is wired below.
-        run: |
-          docker run --rm \
-          -e CI -e GITHUB_ACTIONS -e GITHUB_REF -e GITHUB_SHA -e GITHUB_REPOSITORY -e GITHUB_RUN_ID -e GITHUB_EVENT_NAME -e GITHUB_WORKFLOW \
-            -v "${GITHUB_WORKSPACE}:/workspace" \
-            -v "/mnt/nvme-raid0/cargo-ci/registry/${PR_OR_REF}:/usr/local/cargo/registry" \
-            -v "/mnt/nvme-raid0/targets/aprender-ci/${PR_OR_REF}/run-${GITHUB_RUN_ID}:/workspace/target" \
-            -v "/home/noah/data/sccache:/sccache" \
-            -w /workspace \
-            -e CARGO_TARGET_DIR=/workspace/target \
-            -e RUSTC_WRAPPER=rustc-sccache \
-            -e SCCACHE_DIR=/sccache \
-            -e CARGO_INCREMENTAL=0 \
-            -e CARGO_BUILD_JOBS=8 \
-            "$IMAGE" \
-            bash -c 'set -e; \
-              cargo test -p aprender-core  --features setfit --lib setfit::; \
-              cargo test -p aprender-train --features setfit --lib setfit::; \
-              cargo test -p aprender-train --features setfit --test ui; \
-              cargo test -p aprender-train --features setfit --test setfit_apr_lifecycle; \
-              cargo test -p apr-cli --features setfit --lib setfit_train; \
-              cargo test -p apr-cli --features setfit --lib setfit_train -- --ignored; \
-              cargo test -p apr-cli --features setfit --lib predict; \
-              cargo test -p apr-cli --features setfit --lib inspect; \
-              cargo test -p apr-cli --features setfit --lib eval::setfit; \
-              cargo test -p apr-cli --features setfit --lib setfit_io; \
-              cargo test -p apr-cli --features setfit --lib serve; \
-              cargo test -p aprender-serve --features setfit --lib setfit; \
-              cargo test -p apr-cli --features setfit,inference --test setfit_parity; \
-              cargo check -p apr-cli --all-targets; \
-              cargo check -p apr-cli --features setfit; \
-              cargo check -p apr-cli --features setfit,inference --all-targets; \
-              cargo check -p aprender-serve --no-default-features; \
-              cargo check -p aprender-serve --no-default-features --features setfit; \
-              cargo check -p aprender-serve --features setfit'
-      - name: Compute tests (tolerate SIGSEGV at exit — all tests pass but harness crashes on cleanup)
-        run: |
-          docker run --rm \
-          -e CI -e GITHUB_ACTIONS -e GITHUB_REF -e GITHUB_SHA -e GITHUB_REPOSITORY -e GITHUB_RUN_ID -e GITHUB_EVENT_NAME -e GITHUB_WORKFLOW \
-            -v "${GITHUB_WORKSPACE}:/workspace" \
-            -v "/mnt/nvme-raid0/cargo-ci/registry/${PR_OR_REF}:/usr/local/cargo/registry" \
-            -v "/mnt/nvme-raid0/targets/aprender-ci/${PR_OR_REF}/run-${GITHUB_RUN_ID}:/workspace/target" \
-            -v "/home/noah/data/sccache:/sccache" \
-            -w /workspace \
-            -e CARGO_TARGET_DIR=/workspace/target \
-            -e RUSTC_WRAPPER=rustc-sccache \
-            -e SCCACHE_DIR=/sccache \
-            -e SCCACHE_CACHE_SIZE=50G \
-            -e CARGO_INCREMENTAL=0 \
-            -e CARGO_BUILD_JOBS=8 \
-            "$IMAGE" \
-            bash -c 'cargo test -p aprender-compute --lib 2>&1 | tee /tmp/compute-test.log; grep -q "test result: ok\." /tmp/compute-test.log && ! grep -q "test result: FAILED" /tmp/compute-test.log'
-      - name: Integration tests
-        # #2465: the four FALSIFY-AUTH targets were appended here because they
-        # were DARK — `falsify_auth_002` appeared nowhere in .github/, scripts/
-        # or Makefile, and neither did the contract loader
-        # `apr_serve_api_key_auth_contract` that is supposed to promote
-        # apr-serve-api-key-auth-v1 from DRAFT to ACTIVE. All 17 tests pass; they
-        # simply never ran. This is also the line that hides such targets: adding
-        # a `tests/*.rs` file does nothing until its name appears HERE, and only
-        # one PR at a time may edit this single physical line without hitting a
-        # merge-queue conflict.
-        #
-        # perf/ci-nextest (rank 3 — integration collapse): INTENTIONALLY SKIPPED.
-        # The investigation ranked collapsing these 8 `cargo test -p X --test Y`
-        # invocations into ONE `cargo nextest run -E '...'` as rank 3 (low lever:
-        # this step is NOT the ~27min bottleneck — the lib step is). It also
-        # carries a real risk: this chain includes
-        # `cargo test -p aprender-compute --lib beat_nf4_bitsandbytes_equivalence`,
-        # and aprender-compute SIGSEGVs at harness EXIT. Under cargo's libtest a
-        # single-name filter exits cleanly here, but nextest's per-test process
-        # model would observe the segfaulting process exit code and could fail
-        # the run. Per the experiment brief ("if fiddly/risky, SKIP — don't block
-        # the experiment"), this step is left AS-IS so the nextest signal stays
-        # attributable to the lib step alone. Revisit after the lib-step
-        # measurement lands.
-        run: |
-          docker run --rm \
-          -e CI -e GITHUB_ACTIONS -e GITHUB_REF -e GITHUB_SHA -e GITHUB_REPOSITORY -e GITHUB_RUN_ID -e GITHUB_EVENT_NAME -e GITHUB_WORKFLOW \
-            -v "${GITHUB_WORKSPACE}:/workspace" \
-            -v "/mnt/nvme-raid0/cargo-ci/registry/${PR_OR_REF}:/usr/local/cargo/registry" \
-            -v "/mnt/nvme-raid0/targets/aprender-ci/${PR_OR_REF}/run-${GITHUB_RUN_ID}:/workspace/target" \
-            -v "/home/noah/data/sccache:/sccache" \
-            -w /workspace \
-            -e CARGO_TARGET_DIR=/workspace/target \
-            -e RUSTC_WRAPPER=rustc-sccache \
-            -e SCCACHE_DIR=/sccache \
-            -e SCCACHE_CACHE_SIZE=50G \
-            -e CARGO_INCREMENTAL=0 \
-            -e CARGO_BUILD_JOBS=8 \
-            "$IMAGE" \
-            bash -c 'cargo test -p aprender-core --test monorepo_invariants && cargo test -p aprender-core --test readme_contract && cargo test -p apr-cli --test cli_commands && cargo test -p aprender-train-inspect --test falsify_no_fabricated_metadata_2519 && cargo test -p aprender-train-bench --test falsify_no_fabricated_benchmarks_2519 && cargo test -p aprender-train-shell --test falsify_no_fabricated_fetch_2519 && cargo test -p aprender-core --test beat_sklearn_iris && cargo test -p aprender-core --test beat_sklearn_nmi && cargo test -p aprender-core --test beat_sklearn_metrics_parity && cargo test -p aprender-core --test beat_sklearn_gaussiannb_accuracy && cargo test -p aprender-core --test beat_sklearn_svc_accuracy && cargo test -p aprender-core --test beat_sklearn_pipeline_encoder && cargo test -p aprender-serve --test beat_fail_closed_garbage && cargo test -p aprender-compute --lib beat_nf4_bitsandbytes_equivalence && cargo test -p aprender-core --test beat_pytorch_autograd_grad && cargo test -p aprender-train-lora --lib beat_lora_merge_forward_equivalence && cargo test -p apr-cli --release --test beat_pytorch_deploy_footprint && cargo test -p aprender-serve --test beat_fail_closed_structural && cargo test -p aprender-serve --test ollama_http_compat && cargo test -p apr-cli --test ollama_ndjson_streaming && cargo test -p apr-cli --test falsification_chat_http_cli && cargo test -p aprender-contracts --test apr_serve_api_key_auth_contract && cargo test -p apr-cli --test falsify_auth_001 --test falsify_auth_002 --test falsify_auth_003 --no-fail-fast && cargo test -p apr-cli --test beat_apr_data_alimentar_reach && cargo test -p apr-cli --test beat_apr_sibling_cli_reach && cargo test -p aprender-decide --test ui && cargo test -p aprender-mcp-decide --test e2e_stdio && cargo build --examples --workspace --keep-going'
-      - name: Build.rs crate-root escape check (v0.31.1 yank guard)
-        # Static Poka-Yoke: flags build.rs files that panic on files outside
-        # CARGO_MANIFEST_DIR, which break `cargo install` from crates.io.
-        # See scripts/check_build_rs_paths.sh for the full rationale.
-        run: |
-          docker run --rm \
-          -e CI -e GITHUB_ACTIONS -e GITHUB_REF -e GITHUB_SHA -e GITHUB_REPOSITORY -e GITHUB_RUN_ID -e GITHUB_EVENT_NAME -e GITHUB_WORKFLOW \
-            -v "${GITHUB_WORKSPACE}:/workspace" \
-            -w /workspace \
-            "$IMAGE" \
-            bash scripts/check_build_rs_paths.sh
-      - name: apr-format leaf sovereignty guard (#2231)
-        # Poka-Yoke: prove the extracted `apr-format` leaf pulls no ML/GPU/
-        # tokenizer/framework crate (so consumers `cargo add apr-format` without
-        # aprender-core + trueno/wgpu). Discriminating: PASSES on apr-format +
-        # aprender-quant, FAILS on aprender-core. Also runs a publish dry-run to
-        # catch dev-dep cycles. See scripts/check_format_sovereignty.sh.
-        run: |
-          docker run --rm \
-          -e CI -e GITHUB_ACTIONS -e GITHUB_REF -e GITHUB_SHA -e GITHUB_REPOSITORY -e GITHUB_RUN_ID -e GITHUB_EVENT_NAME -e GITHUB_WORKFLOW \
-            -v "${GITHUB_WORKSPACE}:/workspace" \
-            -w /workspace \
-            "$IMAGE" \
-            bash scripts/check_format_sovereignty.sh
-      - name: Fix file ownership (container runs as root, runner as noah:1000)
+        with:
+          fetch-depth: 0
+      # The driver decides what every section's if:/matrix/needs means and whether
+      # the vendored workflow is the upstream one; its case table must go RED on
+      # each planted defect before it is trusted to report a section green.
+      - name: fat_driver case table must still turn RED
+        run: python3 scripts/ci/fat_driver.py self-test
+      # PMAT-4510: every secrets.<NAME> a section reads must be plumbed above as
+      # FAT_SECRET_<NAME> under its full name; #4441 cut one short and the
+      # receipt signer ran with an empty key on every PR. Text-only, no build.
+      - name: FAT_SECRET plumbing guard case table
+        run: setsid --wait bash scripts/check_ci_fat_secrets_plumbed.sh --self-test
+      - name: every section secret is plumbed under its full name
+        run: setsid --wait bash scripts/check_ci_fat_secrets_plumbed.sh
+      - name: Sections (the determinism raster returns first; the rest keep running)
+        run: >-
+          python3 scripts/ci/fat_driver.py run
+          --sections 'sov.*,guard-tree,guard-cargo,vendored-schemas,pr-review-shadow,pr-review-sign,mutants,determinism[X64]'
+          --external-job workspace-test
+          --results "$RUNNER_TEMP/fat/results.json"
+          --background-until 'determinism[X64]'
+      # Published mid-run: the determinism job's compare section is waiting for it.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: determinism-X64
+          path: ${{ runner.temp }}/fat/artifacts/determinism-X64/
+          if-no-files-found: error
+      - name: Sections (wait for every one to finish)
+        id: wait
         if: always()
+        run: python3 scripts/ci/fat_driver.py wait --results "$RUNNER_TEMP/fat/results.json"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: pr-review-shadow-sample
+          path: ${{ runner.temp }}/fat/artifacts/pr-review-shadow-sample/
+          retention-days: 90
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: mutation-results
+          path: ${{ runner.temp }}/fat/artifacts/mutation-results/
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: bench-${{ github.event.repository.name }}
+          path: ${{ runner.temp }}/fat/artifacts/bench-${{ github.event.repository.name }}/
+          retention-days: 90
+          if-no-files-found: ignore
+      # The two actions that need the Actions runtime run here, on the section's
+      # own files; both were continue-on-error in the reusable workflow.
+      - uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4
+        if: always() && contains(steps.wait.outputs.deferred, 'codecov')
+        continue-on-error: true
+        with:
+          files: ${{ runner.temp }}/fat/sov.coverage/ws/${{ github.event.repository.name }}/lcov.info
+      - name: Generate SLSA provenance
+        if: always() && contains(steps.wait.outputs.deferred, 'attest')
+        uses: actions/attest-build-provenance@ef244123eb79f2f7a7e75d99086184180e6d0018 # v2
+        continue-on-error: true
+        with:
+          subject-path: ${{ runner.temp }}/fat/sov.provenance/ws/${{ github.event.repository.name }}/Cargo.toml
+
+  # The GPU decision stays OFF the GPU hosts, as before #4433: an `if:` that
+  # could only be evaluated on gx10/yoga would queue the job to answer it, and
+  # a queued job has already claimed the fleet's one GB10 / one RTX 4060 (and
+  # displaced a pending job in its perf-* group). A ten-second decision on the
+  # clean-room pool, not a sixth fat job; gx10 and yoga run only on a
+  # pull_request that it says touches the GPU set, exactly as gpu-quick and
+  # cuda-unit did. scripts/tests/ci_gpu_touched_test.sh pins this shape.
+  gpu-touched:
+    runs-on: [self-hosted, X64, Linux, clean-room]
+    timeout-minutes: 10
+    if: github.event_name == 'pull_request'
+    outputs:
+      gpu_touched: ${{ steps.decide.outputs.gpu_touched }}
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      FAT_VARS_JSON: ${{ toJSON(vars) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Sections
+        id: run
+        run: >-
+          python3 scripts/ci/fat_driver.py run
+          --sections 'gpu-touched'
+          --results "$RUNNER_TEMP/fat/results.json"
+      - name: The decision, as this job's output
+        id: decide
         run: |
-          # Five-whys: Docker container creates files as root on bind-mounted
-          # workspace. Runner (noah:1000) can't git-clean them on next run
-          # → checkout fails → CI breaks. This runs inside the container
-          # (as root) restoring host ownership for subsequent bare-metal jobs.
-          docker run --rm \
-          -e CI -e GITHUB_ACTIONS -e GITHUB_REF -e GITHUB_SHA -e GITHUB_REPOSITORY -e GITHUB_RUN_ID -e GITHUB_EVENT_NAME -e GITHUB_WORKFLOW \
-            -v "${GITHUB_WORKSPACE}:/workspace" \
-            -v "/mnt/nvme-raid0/cargo-ci/registry/${PR_OR_REF}:/usr/local/cargo/registry" \
-            -v "/mnt/nvme-raid0/targets/aprender-ci/${PR_OR_REF}/run-${GITHUB_RUN_ID}:/workspace/target" \
-            "$IMAGE" \
-            bash -c 'chown -R 1000:1000 /workspace || true; chown -R 1000:1000 /usr/local/cargo/registry || true; chown -R 1000:1000 /workspace/target || true'
+          set -euo pipefail
+          jq -r '"gpu_touched=" + ((."gpu-touched".outputs.gpu_touched // "0") | tostring)' \
+            "$RUNNER_TEMP/fat/results.json" | tee -a "$GITHUB_OUTPUT"
+
+  gx10:
+    runs-on: [self-hosted, Linux, ARM64, cuda, gx10, ephemeral, docker]
+    timeout-minutes: 30
+    needs: [gpu-touched]
+    if: github.event_name == 'pull_request' && needs.gpu-touched.outputs.gpu_touched == '1'
+    # Shared with the other gx10 perf workflows (qwen-story-daily, silicon-nightly,
+    # cuda-nightly, b2-gpu): one GPU job on the box at a time.
+    concurrency:
+      group: perf-gx10
+      cancel-in-progress: false
+    outputs:
+      results: ${{ steps.run.outputs.results }}
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      FAT_VARS_JSON: ${{ toJSON(vars) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Sections
+        id: run
+        run: >-
+          python3 scripts/ci/fat_driver.py run
+          --sections 'gpu-touched,gpu-quick'
+          --results "$RUNNER_TEMP/fat/results.json"
+
+  yoga:
+    runs-on: [self-hosted, Linux, X64, cuda, yoga, ephemeral, docker]
+    timeout-minutes: 50
+    needs: [gpu-touched]
+    if: github.event_name == 'pull_request' && needs.gpu-touched.outputs.gpu_touched == '1'
+    concurrency:
+      group: perf-yoga
+      cancel-in-progress: false
+    outputs:
+      results: ${{ steps.run.outputs.results }}
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      FAT_VARS_JSON: ${{ toJSON(vars) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Sections
+        id: run
+        run: >-
+          python3 scripts/ci/fat_driver.py run
+          --sections 'gpu-touched,cuda-unit'
+          --results "$RUNNER_TEMP/fat/results.json"
+
+  determinism:
+    runs-on: [self-hosted, Linux, clean-room, ARM64]
+    timeout-minutes: 120
+    outputs:
+      results: ${{ steps.wait.outputs.results }}
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      FAT_VARS_JSON: ${{ toJSON(vars) }}
+      # determinism-compare downloads both rasters; the X64 one is uploaded by
+      # x86-main mid-run, and the driver polls this run's artifacts for it.
+      FAT_EXPECT_ARTIFACTS: determinism-X64,determinism-ARM64
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Sections (the ARM64 raster returns first; the compare keeps running)
+        run: >-
+          python3 scripts/ci/fat_driver.py run
+          --sections 'determinism[ARM64],determinism-compare'
+          --results "$RUNNER_TEMP/fat/results.json"
+          --background-until 'determinism[ARM64]'
+      - uses: actions/upload-artifact@v7
+        with:
+          name: determinism-ARM64
+          path: ${{ runner.temp }}/fat/artifacts/determinism-ARM64/
+          if-no-files-found: error
+      - name: Sections (wait for the compare)
+        id: wait
+        if: always()
+        run: python3 scripts/ci/fat_driver.py wait --results "$RUNNER_TEMP/fat/results.json"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: determinism-receipt
+          path: ${{ runner.temp }}/fat/artifacts/determinism-receipt/
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: raster-receipt
+          path: ${{ runner.temp }}/fat/artifacts/raster-receipt/
+          if-no-files-found: ignore
+
+  # PACK-001: mini-m4 had taken ZERO jobs in the 24 h measured -- nothing in any
+  # workflow named macOS. The multiplatform dogfood requires a mini receipt at
+  # post-publish and the three macOS-only defect classes on record (#2567 aarch64
+  # scalar GEMV, #2568 an OOM guard that reads /proc/meminfo, #2572 a metal-only
+  # dep) were each found only by building there. This lane is the cheap version:
+  # a locked workspace check plus the CLI's lib tests, on the pinned toolchain
+  # (rust-toolchain.toml; rustup on mini holds 1.93.0). No docker on macOS, so
+  # the runner's own persistent target dir is used and nothing is bind-mounted.
+  # Not in `gate`'s needs yet: first-green proof on a real PR before it may block.
+  mac-check:
+    runs-on: [self-hosted, macOS, ARM64, apple-silicon, m4, mini]
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain is the pinned one
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain
+          cargo --version
+      # First run on mini (PR #3488, 2026-09-18) found the first macOS-only fact
+      # in two minutes: crates/aprender-profile/src/main.rs is a compile_error!
+      # on non-Linux by design ("renacer requires Linux (ptrace syscall
+      # tracing)"). That crate is excluded here on purpose; any OTHER crate that
+      # fails to check on macOS is a finding this lane exists to surface.
+      - name: cargo check --workspace --all-targets --locked (minus the Linux-only profiler)
+        run: cargo check --workspace --all-targets --locked --exclude aprender-profile
+      - name: apr-cli lib tests (nextest, ci profile)
+        run: cargo nextest run --profile ci -p apr-cli --lib
 
   # Poka-yoke (aprender#2269): fail fast if ANY self-hosted job omits a
   # discriminating runner label, so a bare [self-hosted, X64, Linux] selector
   # can never again silently land a job on a GPU/dev runner without the
   # sovereign-ci registry. Pure text check; runs on the clean-room pool.
-  guard-runner-labels:
-    runs-on: [self-hosted, X64, Linux, clean-room]
+
+  # ==========================================================================
+  # Verdict jobs: the required contexts, each with the old job's rule. A section
+  # missing from its fat job's results (the job died before writing them) is a
+  # failure, never a pass.
+  # ==========================================================================
+  # The workspace tests, one shard per job (nextest hash partition N/3 plus the
+  # explicit runner's round-robin N/3), in parallel on the X64 clean-room pool.
+  # The section body is ci/sections.yml `workspace-test-shard`, unchanged.
+  workspace-test-shard:
+    runs-on: [self-hosted, Linux, X64, clean-room]   # same pool as x86-main
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    outputs:
+      results: ${{ steps.run.outputs.results }}
     env:
-      IMAGE: localhost:5000/sovereign-ci:stable
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      FAT_VARS_JSON: ${{ toJSON(vars) }}
     steps:
-      - name: Pre-checkout ownership restore (EACCES self-heal)
-        # Same guard as workspace-test (:92) and mutants (:435). This job was
-        # the ONLY clean-room job missing it, and that asymmetry took main red
-        # on 2026-07-06 (run 28776891625): a hard-killed docker job left
-        # root-owned target/.rustc_info.json + target/package/ in the runner
-        # checkout, so this job's actions/checkout `git clean -ffdx` failed
-        # with EACCES before a single step ran. Because `gate` hard-requires
-        # guard-runner-labels (:379), a checkout-level EACCES here reads as a
-        # required-check failure and blocks every merge — the andon stays red
-        # until someone manually `ssh intel sudo rm`s the leftovers.
-        # Cached-image gate is sound: leftovers can only exist if a previous
-        # docker job ran on this runner, which implies the image is already in
-        # the local cache. So "image not cached ⟹ no leftovers" and skipping is
-        # safe (and keeps this step tolerant of a registry outage).
-        run: |
-          if docker image inspect "$IMAGE" > /dev/null 2>&1; then
-            docker run --rm -v "${GITHUB_WORKSPACE}:/workspace" "$IMAGE" \
-              bash -c 'chown -R 1000:1000 /workspace 2>/dev/null || true'
-          else
-            echo "Image not cached — no prior docker job on this runner, nothing to restore"
-          fi
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 1
-      - name: Every self-hosted job must pin a discriminating label
-        run: bash scripts/check_runner_labels.sh
-      # Poka-yoke: a beat that no workflow executes reads as enforcement, is
-      # counted as enforcement, and proves nothing. The Pillar-4 marquee decode
-      # beat sat in ZERO workflows while being quoted as an enforced win (#2319).
-      # Pure text check, no build, so it belongs in this job rather than paying
-      # for its own runner.
-      - name: Every beat must be executed by some workflow
-        run: bash scripts/check_beats_gated.sh
-      # Poka-yoke: PMAT-CI-PASSGREP-001 killed ONE `grep "0 failed"` that also
-      # matched "10 failed". Two more instances of the same class survived that
-      # fix, one of them a live contract falsifier. Probe every zero-count
-      # pass-grep against an all-failing line instead of trusting review.
-      - name: Every zero-count pass-grep must reject a failing line
-        run: bash scripts/check_pass_grep_anchored.sh
-      # Poka-yoke: a bare `apr` runs whatever PATH resolves. qwen-story-daily
-      # installed 0.61.0 to ~/.cargo/bin and then executed a 24-day-old 0.60.0
-      # from ~/.local/bin, so every beat validated stale code while reporting
-      # green. Text-only check, no build.
-      - name: Every execution-surface `apr` reference must be pinned
-        run: bash scripts/check_apr_bin_pinned.sh
-      # The guard's own must-match/must-not-match table plus one mutation per
-      # SCANNED SURFACE, in that surface's own syntax. #2358: extending the
-      # scope to scripts/** and .claude/skills/** did NOT carry the old proof
-      # over - the Makefile lesson repeated itself twice (a skill bash fence and
-      # a `!`...`` inline command were both invisible to a pattern that was
-      # correct everywhere else). Run the table; do not re-read the regex.
-      - name: "`apr`-pinning guard must still turn RED (case table + surfaces)"
-        run: bash scripts/check_apr_bin_pinned.sh --self-test
-      # deny.toml is 7.2 KB of licence / banned-crate / source-allowlist policy
-      # that ran in NO workflow -- only `make deny`, which is not a prerequisite
-      # of any tier, so nothing but a human typing it ever invoked it. Meanwhile
-      # cargo-deny 0.20.2 ships INSIDE the CI image already.
-      #
-      # Because nothing ran it, the policy drifted out of sync with the repo's
-      # own deliberate architecture and now fails on main:
-      #     advisories ok, bans FAILED, licenses FAILED, sources ok
-      # Both failures were config drift, not defects (see the deny.toml comments).
-      # Fixed there; wired here so it cannot drift unnoticed again.
-      #
-      # `ci / security` from the reusable workflow runs `cargo audit`, which does
-      # NOT read deny.toml -- so this covers licences, bans and sources, which
-      # nothing else does.
-      - name: cargo-deny (licences, bans, sources, advisories)
-        run: |
-          docker run --rm \
-            -v "${GITHUB_WORKSPACE}:/workspace" \
-            -w /workspace \
-            "$IMAGE" \
-            cargo deny check
-      # check_apr_bin_pinned asserts CALLERS pin the binary; it says nothing
-      # about which binary the resolver hands them. apr_bin.sh returned
-      # target/release/apr whenever it existed, so a stale release build beside
-      # a debug build made FROM HEAD hard-failed every gate that sources it --
-      # while telling the caller to `cargo install`. Resolution order is now
-      # evidence-driven, and this is the falsifier for it. Costs no cargo build:
-      # the fixture binaries are shell scripts that print a version string.
-      - name: apr_bin.sh must resolve the HEAD-built binary, whatever its profile
-        run: bash scripts/check_apr_bin_resolution.sh
-      # CLAUDE.md mandates bashrs over shellcheck; CI honoured that for SEVEN of
-      # 72 scripts (`bashrs lint scripts/check_book_*.sh` in book.yml).
-      # apr_bin.sh -- sourced by every gate in this repo -- was not one of them,
-      # and pmat reports Functions:0 / Cyclomatic:0 for it because pmat does not
-      # parse shell. Ratcheted rather than fixed: turning the glob on outright
-      # surfaces ~851 diagnostics, most of them bashrs false positives on
-      # hand-written bash, and a gate that cannot go green gets disabled.
-      - name: bashrs must see every script in scripts/ (shrink-only)
-        run: |
-          cargo install bashrs --locked --quiet || true
-          bash scripts/check_shell_lint_ratchet.sh
-      # Poka-yoke: Cargo.lock was 15 days stale on main (last touched 2026-08-01,
-      # manifests changed 08-10 and 08-11). Every CI job runs cargo WITHOUT
-      # --locked, so cargo rewrote the lock in place and stayed green; the only
-      # jobs that pass --locked are in binary-release.yml, i.e. the RELEASE path,
-      # which was broken on main. Resolution only, no build, ~1s.
-      - name: Cargo.lock must match the manifests
-        run: bash scripts/check_lockfile_current.sh
-      - name: "lockfile guard must still turn RED (case table)"
-        run: bash scripts/check_lockfile_current.sh --self-test
-      # Poka-yoke: nextest IGNORES an unknown config key with a warning instead
-      # of failing. `slow-warning = "60s"` is not a nextest key, so profile.ci
-      # had no per-test timeout and a hung run died at the job's 85-minute
-      # timeout naming nothing -- evicting #2502 from the merge queue. The
-      # warning was in every workspace-test log and nobody read it, so it is a
-      # hard failure now. Runs nextest's real parser on a 3-line crate.
-      - name: nextest must ignore no key in .config/nextest.toml
-        # Runs INSIDE the image: cargo-nextest is installed there, not on the
-        # host runner (the first version of this step failed with "SKIP:
-        # cargo-nextest not installed" -> exit 1, which is the guard failing
-        # closed in the wrong place). The probe crate has ZERO dependencies, so
-        # CARGO_NET_OFFLINE=1 is safe and no registry mount is needed.
-        run: |
-          docker run --rm \
-            -v "${GITHUB_WORKSPACE}:/workspace" \
-            -w /workspace \
-            -e CARGO_NET_OFFLINE=1 \
-            "$IMAGE" \
-            bash scripts/check_nextest_config_keys.sh
-      - name: "nextest-key guard must still turn RED (case table)"
-        run: |
-          docker run --rm \
-            -v "${GITHUB_WORKSPACE}:/workspace" \
-            -w /workspace \
-            -e CARGO_NET_OFFLINE=1 \
-            "$IMAGE" \
-            bash scripts/check_nextest_config_keys.sh --self-test
-      # Hand-rolled argv parsing is banned. simular's `match args[1]` silently
-      # DROPPED --seed: unknown flags fell through a catch-all, a valueless flag
-      # was discarded, and an unparseable value became the default instead of an
-      # error. The command exits 0 and does the wrong thing.
-      #
-      # Structural, and complementary to dogfood_surfaces.sh, which probes
-      # BEHAVIOUR (feed each binary an unknown flag, demand rejection). The probe
-      # catches today's broken parsers; this bans the construct, so the guarantee
-      # does not rely on a probe happening to hit the broken case.
-      - name: No binary may hand-roll argv parsing
-        run: bash scripts/check_no_hand_rolled_parsers.sh
-      - name: "hand-rolled-parser guard must still turn RED (case table)"
-        run: bash scripts/check_no_hand_rolled_parsers.sh --self-test
-      # Poka-yoke: `set` in a SOURCED file mutates the caller's shell. apr_bin.sh
-      # opened with `set -euo pipefail`; qwen-story.sh sources it and had chosen
-      # `set -uo pipefail` deliberately (it must run every beat and tally the
-      # failures). The leak turned errexit on underneath it and the nightly
-      # story died after six lines inside an ADVISORY pmat hunt. Both files read
-      # correctly on their own - only the combination is wrong, which is why
-      # this is mechanical rather than a review note. Text-only, no build.
-      - name: Sourced libraries must not mutate the caller's shell options
-        run: bash scripts/check_sourced_libs_option_neutral.sh --self-test
-      # Poka-yoke: a Cargo `exclude` entry is a gitignore pattern, so a bare
-      # `"tests/"` is NOT anchored to the package root - it matches at every
-      # depth. CB-510 was the same bug with `"models/"` hiding `src/models/`.
-      # In v0.63.0 it dropped 443 files from the published aprender-serve and
-      # left 11 (serve) + 18 (train) `mod tests;` declarations pointing at
-      # directories that are not in the tarball, so neither published crate can
-      # compile its own test suite. Text-only check, no build.
-      - name: No exclude pattern may swallow a src/ directory
-        run: bash scripts/check_exclude_anchored.sh
-      # Poka-yoke: a contract may not name an enforcement command that cannot
-      # run. #2504: apr-cli-commands-v1.yaml declared five falsification
-      # conditions enforced by `cargo test --test apr_cli_commands ...`; there
-      # is no such target, so all five exited 101. The underlying tests are real
-      # and DO run (line 327, inside workspace-test) — what was fiction is the
-      # contract's account of HOW, which destroys the discrimination between
-      # "stale pointer" and "missing gate" that a contract exists to provide.
-      # Nothing caught it because these strings sit under a `falsification:`
-      # key the typed Contract struct does not have, so serde drops them and
-      # `pv validate` never sees them. Self-test first (Verification Discipline
-      # #7). Needs `cargo metadata` only — no build.
-      - name: Enforcement guard's own case table must pass before it judges
-        run: bash scripts/check_contract_enforcement.sh --self-test
-      - name: No contract may name an enforcement command that cannot run
-        run: bash scripts/check_contract_enforcement.sh
-      # Poka-yoke: a release gate must name the STAGE at which it is satisfiable.
-      # #2543: Gate 5 of the pre-release skill runs `cargo package -p apr-cli`,
-      # which re-resolves all 26 workspace siblings against crates.io. Pre-bump
-      # they resolve to the published copy of the SAME version number, missing
-      # every symbol added since, so the verify build dies on dozens of
-      # E0432/E0433 SYMBOL-not-found errors. Nothing is broken — the gate is
-      # unsatisfiable at that stage — but a release engineer meeting it cold
-      # reads it as a blocker and aborts the cut. Nothing in CI ran Gate 5, so
-      # the ordering constraint lived only as folklore in a memory file. This
-      # guard requires the skill to declare the stage per crate and requires the
-      # declaration to be TRUE against `cargo metadata`. Self-test first
-      # (Verification Discipline #7). Text + `cargo metadata --offline` only —
-      # no build, no network.
-      - name: Gate-5 stage guard's own case table must pass before it judges
-        run: bash scripts/check_gate5_stage.sh --self-test
-      - name: A pre-release gate must name the stage it is valid at (#2543)
-        run: bash scripts/check_gate5_stage.sh
-      # Poka-yoke: capturing `cmd 2>&1` into one variable and then parsing it as
-      # JSON puts the command's diagnostics in front of its data. On 2026-08-11
-      # the nightly story reported `no format_parity gate found in --json output
-      # (got: '')` for a gate that had run and PASSED, because `apr qa --json`
-      # writes JSON to stdout while the CUDA path emits `[trueno#243]` lines to
-      # stderr. A false FAIL reddens main for a non-reason. The converse matters
-      # too: a Rust panic arrives on stderr, so the panic checks must keep
-      # reading the merged view. Behavioural, text-only, no build.
-      - name: Story JSON parsing must read stdout, not the merged stream
-        run: bash scripts/check_story_json_streams.sh
-      # Poka-yoke: a path filter is a claim that nothing outside those paths can
-      # break the gate. book.yml filtered on `book/**`, so the CLI/book parity gate
-      # never ran when the CLI gained a command — `apr beat-run` shipped in #1995
-      # with no chapter and the gate stayed green for three months, hiding a lib
-      # parity failure, a `pv` step that exited 127, and two chapter examples
-      # training to NaN behind it. Text-only check, no build.
-      - name: A path-filtered workflow must not be able to go dark
-        run: |
-          bash scripts/check_workflow_path_filters.sh --self-test
-          bash scripts/check_workflow_path_filters.sh
-      # Poka-yoke: mac-server runs 16 runners under ONE $HOME, so
-      # $HOME/.cargo/bin is shared mutable state. `cargo install` replaces a
-      # binary there while another job is mid-run and about to exec it — on
-      # 2026-07-31 Coverage Nightly died on
-      # `could not execute process .../cargo-llvm-cov ... No such file or
-      # directory (os error 2)` and posted an EMPTY coverage figure, i.e. a
-      # missing measurement (#2353). Text-only check, no build.
-      - name: Self-hosted jobs must install cargo tools into a private root
-        run: |
-          bash scripts/check_cargo_install_private_root.sh --self-test
-          bash scripts/check_cargo_install_private_root.sh
-      # Poka-yoke: the nightly's pmat bug-hunt printed eight manifest headers and
-      # ZERO rows every night since the cron was added (#2356), so the workflow's
-      # "manifest grew by >5" alert branch never had a non-zero input. Three
-      # causes, each silent: the jq filters named `.function`/`.churn.commit_count`
-      # /`.faults` where pmat emits `function_name`/`commit_count`/
-      # `fault_annotations`; the churn and fault hunts passed the beat label as a
-      # free-text query, which is a relevance filter applied BEFORE `--path` and
-      # collapses a module-scoped hunt to nothing; and three hunted paths had been
-      # deleted or moved. All three present as "the manifest is empty tonight",
-      # which used to be indistinguishable from "the code is clean tonight" -
-      # pmat_hunt returned 0 unconditionally. It now fails the beat. Behavioural
-      # against a stubbed pmat, text-only, no build.
-      - name: The pmat bug-hunt manifest must be able to produce rows
-        run: bash scripts/check_story_pmat_hunt.sh
-      # Poka-yoke: the 0.63.0 dogfood audit found 201 defects in code that was
-      # shipped, tested and covered. The 5 Whys (docs/audits/dogfood-0.63.0-hansei.md)
-      # landed on: nothing mechanical requires an assertion to EXCLUDE an outcome.
-      # `assert!(status == OK || status == BAD_REQUEST || status == NOT_IMPLEMENTED)`
-      # passes whatever the endpoint does, earns identical line coverage to an
-      # assert_eq!, and is exempt from diff-scoped mutation testing on
-      # pre-existing surface. 320 such sites existed; the first one tightened
-      # showed a test named `test_apr_explain_endpoint` never reaching the
-      # explain handler at all. Baseline-ratcheted so the debt only falls.
-      # Text-only check, no build.
-      - name: Assertions must exclude an outcome, not merely reach one
-        run: bash scripts/check_assertions_exclude.sh
-      - name: Assertion-exclusion guard case table
-        run: bash scripts/check_assertions_exclude.sh --self-test
+          fetch-depth: 0
+      - name: fat_driver case table must still turn RED
+        run: python3 scripts/ci/fat_driver.py self-test
+      # `?` for the brackets and the comma: --sections splits on commas.
+      - name: Sections
+        id: run
+        run: >-
+          python3 scripts/ci/fat_driver.py run
+          --sections 'workspace-test-shard?${{ matrix.shard }}?3?'
+          --results "$RUNNER_TEMP/fat/results.json"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: sigma-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/fat/artifacts/sigma-shard-${{ matrix.shard }}/
+          if-no-files-found: ignore
 
-      # FALSIFY-README-00*: README metric claims must match measurement. The
-      # guard existed and ran nowhere -- its only caller was scripts/dogfood-book.sh,
-      # which is itself in no workflow and no Makefile target, so it was
-      # unreachable. It was also pattern-narrow: it matched `**M** provable
-      # contracts` and took `head -1`, while the README carried THREE different
-      # contract counts (1771 in the table, 1158 at line 225, 1767 at line 256).
-      # It now checks every contract-count claim, so the README cannot contradict
-      # itself either. Text-only, no build -- and as of 2026-08-19 that is
-      # actually true: the CLI-count check used to `cargo run -p apr-cli` from
-      # this bare (non-container) step, which took 14 minutes and then failed,
-      # since cargo is not reliably on PATH for raw run: steps here. It now
-      # reads contracts/apr-cli-commands-v1.yaml, whose equivalence to the real
-      # binary is enforced by FALSIFY-CLI-001/002 in the integration line.
-      - name: README claims must match measurement
-        run: bash scripts/check_readme_claims.sh
-
-      # Three guards that existed and could not block a merge. The publish-safety
-      # one is the gate credited with keeping a 28 MB test.apr out of a published
-      # package, and it was `make`-only -- invoked by whoever remembered to type
-      # it. Its size check also looked at 2 of 72 publishable crates and never
-      # measured a size, so the 5.4 MB of .pmat-baseline.json it now catches had
-      # been shipping to crates.io unseen.
-      - name: Publish safety (binary/oversize files in published packages)
-        run: bash scripts/check_publish_safety.sh
-      - name: Every include!() file is tracked by git (CB-510)
-        run: bash scripts/check_include_files.sh
-      # #2512: these two were invoked by NO workflow -- one Makefile-only
-      # (`make tier3`, which CI does not run), one reachable from nothing at all.
-      # Both pass today and are cheap, so there was never a reason for them to be
-      # dark; nothing was watching.
-      - name: Every contract cites a test that exists (strict-test-binding)
-        run: bash scripts/check_contract_test_binding.sh
-      - name: aprender-core builds for wasm32
-        run: bash scripts/check_wasm32_core_builds.sh
-      # aprender#2546: `provable-contracts*` were renamed to `aprender-contracts*`
-      # and the published names left frozen at 0.3.1. A pin on the old name
-      # resolved SILENTLY and installed a tool sixty versions behind. The names
-      # are now carried forward as facades in crates/facades/, which is a
-      # separate workspace -- `cargo check --workspace` does NOT reach it, so
-      # without this step the facades are dark by construction. The self-test
-      # (text-only, no build) runs first, per the convention above.
-      - name: Renamed-crate facades case table
-        run: bash scripts/check_facade_compat.sh --self-test
-      - name: provable-contracts 0.3.1 code still compiles against the facades
-        run: bash scripts/check_facade_compat.sh
-      # aprender#2558: nothing detected two crates declaring the same `[[bin]]
-      # name`. FOUR things claimed `pv` -- the crates.io pipe viewer, /usr/bin/pv,
-      # aprender-contracts-cli and the provable-contracts-cli facade -- all
-      # writing ~/.cargo/bin/pv. MEASURED: `cargo install` FAILS CLOSED on that
-      # collision (exit 101, first binary survives); it does NOT overwrite, so
-      # the hazard is a BLOCKED install rather than a silent clobber. The
-      # facade gave up the name; this stops the next one being noticed by
-      # accident. Scans BOTH workspaces: crates/facades is `exclude`d from the
-      # root, so a root-only scan is inert by construction. `apr` is a
-      # deliberate duplicate and passes via a declared-intent allowlist. The
-      # text-only case table runs first, per the convention above.
-      - name: Duplicate bin-name case table
-        run: bash scripts/check_duplicate_bin_names.sh --self-test
-      - name: No two crates may claim one bin name
-        run: bash scripts/check_duplicate_bin_names.sh
-      # aprender#2559: the release cascade could not SEE the facades. TIERS[] in
-      # scripts/cascade-publish.sh was exactly the 70 publishable crates of the
-      # ROOT workspace -- a perfect match, no drift -- so nothing indicated the
-      # three publishable crates in the second, `exclude`d workspace were
-      # missing. FINAL VERIFICATION iterated the same TIERS[], so their absence
-      # printed as "ALL crates at 0.63.0". This step also checks the ORDER: a
-      # facade resolves its upstream from the REGISTRY, so publishing it first
-      # yields a crate that cannot compile for anyone -- while inside this tree
-      # it resolves through `path` and looks perfectly fine. Case table first.
-      - name: Cascade-coverage case table
-        run: bash scripts/check_cascade_covers_all_crates.sh --self-test
-      - name: The release cascade must cover and order every publishable crate
-        run: bash scripts/check_cascade_covers_all_crates.sh
-      # The bump half of the same defect. `cargo set-version --workspace` cannot
-      # reach an `exclude`d workspace and does not warn, so three files in
-      # crates/facades/ have to ride in every bump commit. scripts/bump-version.sh
-      # does that; these two rows keep its case table live and assert the tree is
-      # version-consistent right now (which check_facade_compat.sh R3/R5 also
-      # backstop from the compat side).
-      - name: Version-bump case table (reaches the excluded workspace)
-        run: bash scripts/bump-version.sh --self-test
-      - name: Every workspace is at a consistent version
-        run: bash scripts/bump-version.sh --check
-      # The meta-guard. Four guards were found unwired by accident while looking
-      # for something else; without this the fifth is found the same way.
-      - name: Every check_*.sh is named by a workflow
-        run: bash scripts/check_guards_are_wired.sh
-      - name: Wiring guard case table
-        run: bash scripts/check_guards_are_wired.sh --self-test
-      # aprender-profile appeared in this file ZERO times while carrying 58
-      # integration test targets. Running them found 110 failures -- 109 from a
-      # single stale binary name left by the APR-MONO rename, dead since. Gated
-      # now so the crate cannot go dark again. --lib only: the integration
-      # targets shell out to the built binary and take minutes.
-      - name: aprender-profile lib tests (was gated by nothing)
-        run: cargo test -p aprender-profile --lib
-      - name: Book rust examples compile
-        run: bash scripts/check_book_examples_compile.sh
-      # CB-510: a Cargo.toml `exclude` pattern can strip an include!() target
-      # from the published crate while git still tracks it, so the crate compiles
-      # in-tree and fails for everyone installing from crates.io. This guard is
-      # Gate 1 of the pre-release skill and it could not fail: it scanned `src/`
-      # and packaged `-p aprender`, the PRE-MONOREPO layout. Root `src/` now holds
-      # 2 files with zero include!(), so it reported "All 0 include!() files are
-      # included" for every release since consolidation, while 1798 live under
-      # crates/. Now checks all 10 publishable crates that have include!() against
-      # their OWN package listing, and refuses to pass on an empty scan.
-      - name: include!() targets must survive cargo package (CB-510)
-        run: bash scripts/check_package_includes.sh
-      - name: Package-includes guard case table
-        run: bash scripts/check_package_includes.sh --self-test
-      # The manifest-level sibling guard proves no Cargo.toml DECLARES an in-tree
-      # crate from crates.io. It passes, and it is not sufficient: a dependency we
-      # legitimately take from the registry can drag an in-tree name in
-      # TRANSITIVELY, and no manifest here mentions it. `whisper-apr = "0.2"`
-      # resolves crates.io `aprender 0.27.8` -- this monorepo depending on a
-      # published copy of ITSELF, 36 minors stale -- plus registry trueno,
-      # realizar, trueno-quant, batuta-common, renacer-core.
-      #
-      # NOT `cargo tree --duplicates`: trueno/realizar/batuta-common are [lib]
-      # names, so the lockfile holds exactly ONE package of each (the registry
-      # one). They are not duplicates and never will be; measured, --duplicates
-      # catches 0 of 8 under default features. The lockfile is the only surface
-      # that sees all of them, and it is feature-independent.
-      - name: No in-tree crate name may resolve from crates.io
-        run: bash scripts/check_lockfile_no_registry_siblings.sh
-      - name: Lockfile sibling guard case table
-        run: bash scripts/check_lockfile_no_registry_siblings.sh --self-test
-      # .gitignore DECLARES, the index CONTRADICTS, and nothing compared them.
-      # `.gitignore:62` says `**/.pmat-work/`; git tracked 461 of those anyway,
-      # 315 MB of regenerable pmat scratch read by nothing in the build. Ratchet
-      # only -- 320 remain and they are not all removable (proptest-regressions
-      # MUST stay tracked; there the ignore RULE is what is wrong). Text-only.
-      - name: No tracked file may be declared ignored
-        run: bash scripts/check_no_tracked_ignored_files.sh
-      - name: Tracked-ignored guard case table
-        run: bash scripts/check_no_tracked_ignored_files.sh --self-test
-      # Poka-yoke: APR-MONO made every sibling a path alias under crates/, but
-      # `trueno = "0.16"` still BUILDS - cargo resolves the crates.io copy
-      # alongside the in-tree one, so the tree compiles two mutually
-      # type-incompatible `trueno`s and the published-crate dependency cycle the
-      # consolidation removed comes back. Nothing goes red; you only see it in
-      # `cargo tree --duplicates`. At 88791ff55 the lockfile held four registry
-      # copies of trueno beside the path one. CLAUDE.md has forbidden this in
-      # prose since the consolidation - prose is not a gate.
-      # The name set is package names UNION lib names, because they diverge here
-      # (package aprender-compute has lib trueno): a guard built from package
-      # names alone would sail straight past the one declaration it exists to
-      # stop. Vacuity-guarded three ways, including a positive control that must
-      # be flagged before any clean verdict is printed. Text-only, no build.
-      # Self-test first: if the guard is blind, that matters more than its verdict.
-      - name: Sibling-crate pathing guard case table
-        run: bash scripts/check_workspace_siblings_pathed.sh --self-test
-      - name: In-tree siblings must be pathed, never pulled from crates.io
-        run: bash scripts/check_workspace_siblings_pathed.sh
-      # A publishable crate depending on a `publish = false` one is invisible to
-      # build/test/clippy -- the path dep resolves locally -- and only fails at
-      # `cargo publish`, i.e. mid-release-cascade. #2493 did exactly this
-      # (apr-cli -> aprender-qa-cli) and the tree was green throughout. The
-      # v0.50.0 cascade died this way at 29 of 68 crates. Text-only, no build.
-      - name: Publishable crates may not depend on unpublishable ones
-        run: bash scripts/check_publishable_deps_publishable.sh
-      - name: Publishable-deps guard case table
-        run: bash scripts/check_publishable_deps_publishable.sh --self-test
-
-      # `cargo deny` ran in ZERO workflows -- only `make deny`. Positive control:
-      # 9 workflows mention `cargo`, 0 mentioned `deny`. Meanwhile the `security`
-      # job runs `cargo audit` with continue-on-error, which cannot fail the build
-      # AND does not read deny.toml. The whole advisory surface was one tool that
-      # ignores the exemption file, in a job that cannot fail, plus one tool that
-      # honours it running nowhere -- so all 29 exemptions gated nothing.
-      #
-      # Install-if-missing: free once the runner has it, self-healing if a runner
-      # is rebuilt from a base image without it.
-      #
-      # PRIVATE INSTALL ROOT (scripts/check_cargo_install_private_root.sh):
-      # mac-server runs 16 runners under one $HOME, so a shared `cargo install`
-      # replaces a binary another running job is about to exec (aprender#2353:
-      # cargo-llvm-cov ENOENT, empty coverage figure). Install into a per-run
-      # root and put it FIRST on PATH so the freshly installed binary is the one
-      # that runs, here and in the steps that follow.
-      - name: Install cargo-deny (if absent)
-        env:
-          CARGO_INSTALL_ROOT: /tmp/cargo-deny-${{ github.run_id }}-${{ github.run_attempt }}
-        run: |
-          if ! command -v cargo-deny > /dev/null 2>&1; then
-            cargo install cargo-deny --locked
-            echo "$CARGO_INSTALL_ROOT/bin" >> "$GITHUB_PATH"
-            export PATH="$CARGO_INSTALL_ROOT/bin:$PATH"
-          fi
-          cargo deny --version
-      - name: Advisories must pass, with deny.toml exemptions honoured
-        run: cargo deny check advisories
-      # Separate from the check above on purpose: a newly-FIXED upstream must
-      # never fail anyone's build. It fails only this guard, whose remedy is
-      # deleting a line.
-      - name: Every deny.toml exemption must still be live
-        run: bash scripts/check_deny_exemptions_live.sh
-      # A test gated on a path outside the workspace is green on every machine
-      # that lacks it, which is every machine but one. The monorepo merged 20
-      # sibling repos in-tree, so gates like
-      #   file_exists("/home/noah/src/realizar/src/quantize.rs")
-      # now probe a path that CANNOT exist again -- realizar is
-      # crates/aprender-serve. Five such gates remain and none of them reads the
-      # file it probes; the path only decides whether to skip. Ratcheted, because
-      # repointing them makes dormant tests run for the first time and belongs in
-      # its own change. Text-only check, no build.
-      - name: Tests must not gate on paths outside the workspace
-        run: bash scripts/check_test_fixture_paths.sh
-      - name: Fixture-path guard case table
-        run: bash scripts/check_test_fixture_paths.sh --self-test
-
-  # Top-level gate: satisfies org ruleset "Green Main" which requires check named "gate".
-  # The reusable workflow produces "ci / gate" but rulesets need exact match on "gate".
-  gate:
-    runs-on: [self-hosted, X64, Linux, clean-room]
-    needs: [ci, workspace-test, mutants, guard-runner-labels]
+  workspace-test:
+    runs-on: [self-hosted, Linux, clean-room]
+    timeout-minutes: 10
+    needs: [workspace-test-shard]
     if: always()
     steps:
-      - name: Check required jobs
-        run: |
-          if [ "${{ needs.guard-runner-labels.result }}" != "success" ]; then
-            echo "guard-runner-labels failed: ${{ needs.guard-runner-labels.result }}"
-            exit 1
-          fi
-          if [ "${{ needs.ci.result }}" != "success" ]; then
-            echo "ci failed: ${{ needs.ci.result }}"
-            exit 1
-          fi
-          if [ "${{ needs.workspace-test.result }}" != "success" ]; then
-            echo "workspace-test failed: ${{ needs.workspace-test.result }}"
-            exit 1
-          fi
-          # Diff-scoped mutation gate (PMAT gap #1): blocking on PRs.
-          # `skipped` is the expected result on push-to-main (the job has
-          # `if: github.event_name == 'pull_request'`); treat it as pass so
-          # main-branch pushes are not blocked by a job that intentionally
-          # did not run. Only an explicit `failure` blocks.
-          MUT="${{ needs.mutants.result }}"
-          if [ "$MUT" = "failure" ]; then
-            echo "mutants (diff-scoped mutation) failed: $MUT"
-            exit 1
-          fi
-          echo "mutants result: $MUT (success/skipped both pass)"
-          echo "All required jobs passed"
-
-  # Mutation testing — DIFF-SCOPED + BLOCKING on PRs (PMAT build-system audit gap #1).
-  #
-  # BEFORE: full-tree `cargo mutants -- --lib`, push-to-main only, and
-  # `continue-on-error: true` at BOTH the job and step level → a surviving
-  # mutant never blocked anything. New under-tested code merged silently,
-  # contradicting the 80%-mutation / ZERO-tolerance rule.
-  #
-  # AFTER: scope mutation to the PR DIFF (`cargo mutants --in-diff`), run it on
-  # pull_request events, and make it BLOCKING (no continue-on-error; wired into
-  # the `gate` job). Diff-scoping is the key lever: full-tree mutation on a
-  # 75-crate monorepo is hours-long and would choke the merge queue. Gating only
-  # the lines a PR actually touches keeps it fast (minutes, proportional to diff
-  # size) while still preventing NEW untested code from landing. A PR whose diff
-  # contains no mutable code is a clean no-op pass (cargo-mutants reports 0
-  # mutants → exit 0).
-  #
-  # On a push to main (post-merge), the job is a no-op pass: there is no PR diff
-  # to scope against, so we skip rather than fall back to the old hours-long
-  # full-tree run.
-  mutants:
-    runs-on: [self-hosted, X64, Linux, clean-room]
-    timeout-minutes: 60
-    needs: [ci, workspace-test]
-    if: github.event_name == 'pull_request'
-    env:
-      IMAGE: localhost:5000/sovereign-ci:stable
-      # Max surviving (missed) mutants tolerated on the PR diff. 0 = every
-      # mutant introduced/touched by this PR must be caught by a test. Tune up
-      # via repo variable MUTANTS_MAX_MISSED if a diff legitimately can't reach 0.
-      MUTANTS_MAX_MISSED: ${{ vars.MUTANTS_MAX_MISSED || '0' }}
-    steps:
-      - name: Pre-checkout ownership restore (EACCES self-heal)
-        # Same guard as workspace-test: a hard-killed docker job leaves
-        # root-owned files that EACCES this job's `git clean` at checkout
-        # (observed 2026-07-02 — the mutants job failed twice at checkout
-        # with zero mutants actually run, reading as a gate failure).
-        # Cached-image gate is sound: leftovers ⟹ a docker job ran here
-        # ⟹ image is cached.
-        run: |
-          if docker image inspect "$IMAGE" > /dev/null 2>&1; then
-            docker run --rm -v "${GITHUB_WORKSPACE}:/workspace" "$IMAGE" \
-              bash -c 'chown -R 1000:1000 /workspace 2>/dev/null || true'
-          else
-            echo "Image not cached — no prior docker job on this runner, nothing to restore"
-          fi
-      - uses: actions/checkout@v7
-        with:
-          # Need history + base branch to compute the PR diff for --in-diff.
-          fetch-depth: 0
-      - name: Compute PR diff for mutation scoping
-        # cargo-mutants --in-diff takes a unified diff and mutates ONLY the
-        # lines it adds/changes. We diff the PR head against the merge-base with
-        # the target branch so the scope is exactly "what this PR introduces".
+      - name: Every shard passed
+        env:
+          SHARD_RESULT: ${{ needs.workspace-test-shard.result }}
         run: |
           set -euo pipefail
-          BASE_REF="${{ github.event.pull_request.base.ref }}"
-          # NOT --depth=1: a shallow base commit has no shared ancestor with the
-          # fetch-depth:0 PR head, so `git merge-base` finds none and (under
-          # `set -e`) the step dies — failing the mutants gate on every PR.
-          # Fetch the base branch's history so the merge-base is reachable.
-          git fetch --no-tags origin "$BASE_REF"
-          MERGE_BASE=$(git merge-base HEAD "origin/$BASE_REF" 2>/dev/null || true)
-          if [ -z "$MERGE_BASE" ]; then
-            echo "No merge-base with origin/$BASE_REF — scoping diff to base tip"
-            MERGE_BASE="origin/$BASE_REF"
-          fi
-          echo "Base ref: $BASE_REF  merge-base: $MERGE_BASE"
-          git diff "$MERGE_BASE"...HEAD > pr.diff
-          echo "Diff size: $(wc -l < pr.diff) lines"
-          if [ ! -s pr.diff ]; then
-            echo "Empty diff — no code to mutate"
-          fi
-      - name: Pull sovereign-ci image (with retry + local-cache fallback)
-        # Same two-layer resilience as workspace-test — see that job for full context.
+          echo "workspace-test-shard matrix result: $SHARD_RESULT"
+          [ "$SHARD_RESULT" = success ] || { echo "::error::workspace-test: shard matrix result is '$SHARD_RESULT' (a cancelled or skipped shard is not a pass)"; exit 1; }
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: sigma-shard-*
+          path: ${{ runner.temp }}/sigma
+      # #4433, the cop's condition: the test-id set across the jobs equals the
+      # owed set, by id. Each shard ran a partition; the UNION of their executed
+      # ids is compared with the universe shard 1 listed. A shard whose ids did
+      # not arrive is RED, never a smaller universe.
+      - name: "Σ-executed: the union of the shards is exactly the owed set (#4433)"
         run: |
-          if docker image inspect "$IMAGE" > /dev/null 2>&1; then
-            echo "Image $IMAGE already cached locally — skipping pull"
-            exit 0
-          fi
-          max_attempts=15
-          delay=4
-          for i in $(seq 1 $max_attempts); do
-            if docker pull "$IMAGE"; then
-              echo "Image pulled successfully on attempt $i"
-              exit 0
-            fi
-            if [ $i -eq $max_attempts ]; then
-              echo "::error::Registry localhost:5000 unreachable after $max_attempts attempts AND image not in local cache"
+          set -euo pipefail
+          d="$RUNNER_TEMP/sigma"
+          python3 scripts/ci/sigma_executed.py --self-test
+          tiers=""
+          for n in 1 2 3; do
+            [ -f "$d/sigma-shard-$n/tier" ] || { echo "::error::Σ: shard $n staged no tier file"; exit 1; }
+            tiers="$tiers $(cat "$d/sigma-shard-$n/tier")"
+          done
+          echo "shard tiers:$tiers"
+          # Each shard decides its tier on its own. Only an AGREED non-full tier
+          # skips the lib/explicit Σ; a split (full full quick) is RED, since
+          # the full shards' partitions would otherwise go unchecked.
+          set -- $tiers
+          [ "$1" = "$2" ] && [ "$2" = "$3" ] || { echo "::error::Σ: the shards disagree on the tier:$tiers"; exit 1; }
+          [ "$1" = full ] || { echo "every shard ran tier '$1': the lib/explicit Σ is not owed"; exit 0; }
+          j=() l=()
+          for n in 1 2 3; do
+            j+=(--junit "$d/sigma-shard-$n/lib.junit.xml")
+            l+=(--log "$d/sigma-shard-$n/section.log")
+          done
+          rc=0
+          python3 scripts/ci/sigma_executed.py nextest --kind "nextest lib (3 shards)" "${j[@]}" --list-json "$d/sigma-shard-1/lib.list.json" || rc=1
+          python3 scripts/ci/sigma_executed.py explicit --kind "explicit (3 shards)" "${l[@]}" --step "Integration tests" --list "$d/sigma-shard-1/explicit.list.txt" || rc=1
+          exit "$rc"
+
+  ci-gate:
+    name: ci / gate
+    runs-on: [self-hosted, Linux, clean-room]
+    timeout-minutes: 10
+    needs: [x86-main]
+    if: always()
+    steps:
+      - name: The sovereign-ci gate section's result
+        env:
+          RESULTS: ${{ needs.x86-main.outputs.results }}
+        run: |
+          set -euo pipefail
+          r=$(printf '%s' "${RESULTS:-null}" | jq -r '(. // {})."sov.gate".result // "missing"')
+          echo "sovereign-ci gate section: $r"
+          [ "$r" = success ] || { echo "::error::ci / gate: section result is '$r'"; exit 1; }
+
+  gate:
+    runs-on: [self-hosted, Linux, clean-room]   # arch-neutral: intel, yoga or gx10 (#3100)
+    timeout-minutes: 22
+    needs: [x86-main, workspace-test, determinism]   # as on main: the GPU jobs are advisory (68-C3 / 68-D2)
+    if: always()
+    steps:
+      - name: Check required sections
+        env:
+          X86: ${{ needs.x86-main.outputs.results }}
+          DET: ${{ needs.determinism.outputs.results }}
+          WT: ${{ needs.workspace-test.result }}
+          EVT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          res() { printf '%s' "${1:-null}" | SEC="$2" jq -r '(. // {})[env.SEC].result // "missing"'; }
+          # The old gate's needs, in its order: guard-tree, guard-cargo, ci (the
+          # sovereign-ci gate), workspace-test, determinism-compare. gpu-quick and
+          # cuda-unit were never in the gate; they still are not.
+          # workspace-test is its own job now (three shard jobs + the Σ fan-in).
+          [ "$WT" = success ] || { echo "workspace-test failed: $WT"; exit 1; }
+          for pair in X86:guard-tree X86:guard-cargo X86:sov.gate DET:determinism-compare; do
+            job="${pair%%:*}" sec="${pair#*:}"
+            r=$(res "${!job}" "$sec")
+            if [ "$r" != success ]; then
+              echo "$sec failed: $r"
               exit 1
             fi
-            echo "Pull attempt $i/$max_attempts failed; sleeping ${delay}s"
-            sleep "$delay"
-            delay=$((delay + 6))
           done
-      - name: Install cargo-mutants
-        run: |
-          docker run --rm \
-          -e CI -e GITHUB_ACTIONS -e GITHUB_REF -e GITHUB_SHA -e GITHUB_REPOSITORY -e GITHUB_RUN_ID -e GITHUB_EVENT_NAME -e GITHUB_WORKFLOW \
-            -v "${GITHUB_WORKSPACE}:/workspace" \
-            -w /workspace \
-            "$IMAGE" \
-            cargo install cargo-mutants --locked
-      - name: Run diff-scoped mutation testing (BLOCKING)
-        # No continue-on-error: a missed mutant on the PR diff fails the job,
-        # which fails `gate`, which blocks merge. --in-diff pr.diff restricts
-        # mutation to PR-touched lines. Empty diff → 0 mutants → clean pass.
-        # We parse mutants.out/outcomes.json for the missed count and compare to
-        # MUTANTS_MAX_MISSED so the threshold is explicit and tunable (rather
-        # than relying solely on cargo-mutants' aggregate exit code).
-        run: |
-          set -euo pipefail
-          if [ ! -s pr.diff ]; then
-            echo "No PR diff content — nothing to mutate. Pass."
-            exit 0
-          fi
-          docker run --rm \
-          -e CI -e GITHUB_ACTIONS -e GITHUB_REF -e GITHUB_SHA -e GITHUB_REPOSITORY -e GITHUB_RUN_ID -e GITHUB_EVENT_NAME -e GITHUB_WORKFLOW \
-            -v "${GITHUB_WORKSPACE}:/workspace" \
-            -w /workspace \
-            -e MUTANTS_MAX_MISSED \
-            "$IMAGE" \
-            bash -c '
-              set -uo pipefail
-              # The sovereign-ci image bakes cargo-nextest but NOT cargo-mutants,
-              # so `cargo mutants` exited 101 (no such command) on every run. Before
-              # #2514 hardened the outcomes.json check, that 101 was read as
-              # "0 mutants in diff. Pass." -- the gate passed BECAUSE the tool was
-              # absent. Installing it here is a stopgap; it belongs baked into the
-              # image (paiml/infra), which is tracked separately.
-              #
-              # Assert it RUNS after installing. An install that half-succeeds must
-              # not reach the gate looking like a clean diff -- that is the same
-              # failure mode #2514 just closed.
-              # Private install root, per scripts/check_cargo_install_private_root.sh.
-              # This install already runs INSIDE the ephemeral container (CARGO_HOME
-              # is /usr/local/cargo and the container is --rm), so it cannot reach
-              # the host toolchain -- but the guard reads workflow text and cannot
-              # see that, and "the guard cannot tell" is not a reason to exempt.
-              # Declaring the root makes it true rather than merely argued.
-              export CARGO_INSTALL_ROOT=/tmp/cargo-mutants-root
-              export PATH="$CARGO_INSTALL_ROOT/bin:$PATH"
-              if ! cargo mutants --version > /dev/null 2>&1; then
-                echo "cargo-mutants absent from image; installing"
-                cargo install cargo-mutants --locked --version 27.1.0 > /tmp/mi.log 2>&1 || {
-                  echo "::error::cargo-mutants install failed; the gate cannot run"
-                  tail -20 /tmp/mi.log
-                  exit 1
-                }
-              fi
-              cargo mutants --version || {
-                echo "::error::cargo-mutants still not runnable after install"
-                exit 1
-              }
-              # --in-diff pr.diff: mutate only PR-touched lines.
-              # cargo-mutants exits non-zero when mutants survive; we still
-              # parse outcomes.json so the threshold (MUTANTS_MAX_MISSED) is
-              # explicit and the failure message is actionable.
-              cargo mutants --no-times --timeout 300 --in-place \
-                --in-diff pr.diff -- --lib
-              MUT_EXIT=$?
-              echo "cargo-mutants exit: $MUT_EXIT"
-              OUTCOMES=mutants.out/outcomes.json
-              if [ ! -f "$OUTCOMES" ]; then
-                # #2481 F-7: this used to be an unconditional `exit 0` on the
-                # theory that no outcomes file means no mutants in the diff.
-                # That is one reason the file can be absent. The other is that
-                # cargo-mutants CRASHED before writing it -- and that passed
-                # too. MUT_EXIT distinguishes them, and it was captured on the
-                # line above and then never tested.
-                if [ "$MUT_EXIT" -ne 0 ]; then
-                  echo "::error::cargo-mutants exited $MUT_EXIT and wrote no outcomes.json. The gate cannot tell whether the diff was clean or the run died, so it refuses rather than passing."
-                  exit 1
-                fi
-                echo "No mutants.out/outcomes.json and cargo-mutants exited 0 — 0 mutants in diff. Pass."
-                exit 0
-              fi
-              MISSED=$(grep -o "\"summary\"[^}]*\"missed\":[0-9]*" "$OUTCOMES" \
-                | grep -o "\"missed\":[0-9]*" | grep -o "[0-9]*" | head -1)
-              TIMEOUT=$(grep -o "\"timeout\":[0-9]*" "$OUTCOMES" \
-                | grep -o "[0-9]*" | head -1)
-              # #2481 F-7: `MISSED=${MISSED:-0}` made an UNPARSEABLE outcomes.json
-              # read as "zero missed" -- so a cargo-mutants JSON format change
-              # would silently disarm this gate rather than break it. Not being
-              # able to measure is not the same as measuring zero.
-              if [ -z "$MISSED" ] || [ -z "$TIMEOUT" ]; then
-                echo "::error::could not parse missed/timeout out of $OUTCOMES. The gate refuses rather than assuming zero — check whether cargo-mutants changed its JSON shape."
-                head -40 "$OUTCOMES" || true
-                exit 1
-              fi
-              echo "Diff-scoped mutation result: missed=$MISSED timeout=$TIMEOUT (max allowed missed=$MUTANTS_MAX_MISSED)"
-              UNCAUGHT=$((MISSED + TIMEOUT))
-              if [ "$UNCAUGHT" -gt "$MUTANTS_MAX_MISSED" ]; then
-                echo "::error::$UNCAUGHT mutant(s) survived/timed-out on the PR diff (> $MUTANTS_MAX_MISSED allowed). New code is under-tested — add tests that kill these mutants. This would have merged SILENTLY before (PMAT gap #1)."
-                exit 1
-              fi
-              echo "All diff-scoped mutants caught (or within threshold). Pass."
-              exit 0
-            '
-      - name: Upload mutation results
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: mutation-results
-          path: mutants.out/
+          MUT=$(res "$X86" mutants)
+          # --- GATE-MUTANTS-RULE-BEGIN (#3676; scripts/check_ci_gate_mutants_rule.sh runs this block) ---
+          # `skipped` is a pass ONLY when the skip is the job's own filter:
+          # mutants declares `if: github.event_name == 'pull_request'`, so on every
+          # other event it is skipped by design. On a pull_request it must have RUN
+          # and succeeded -- a diff with no .rs still succeeds (its steps skip, the
+          # job passes), so a pull_request `skipped` or `cancelled` means the job
+          # never ran, and the old rule ("success/skipped both pass") passed that.
+          case "$EVT:$MUT" in
+            pull_request:success) echo "mutants result: success on a pull_request" ;;
+            pull_request:*) echo "mutants on a pull_request must succeed; got '$MUT' -- a skip here is not the job's filter"; exit 1 ;;
+            *:skipped) echo "mutants result: skipped on $EVT (its filter: pull_request only)" ;;
+            *:success) echo "mutants result: success on $EVT" ;;
+            *) echo "mutants (diff-scoped mutation) on $EVT: $MUT"; exit 1 ;;
+          esac
+          # --- GATE-MUTANTS-RULE-END ---
+          echo "All required sections passed"

@@ -206,7 +206,7 @@ falsification_tests:
   rule: parity with huggingface_hub on cache-hit offline reads
   prediction: "bytes from offline apr pull == bytes from huggingface_hub local_files_only=True"
   test: |
-    GOLD=/home/noah/src/aprender-worktrees/crux-spec/evidence/crux/huggingface/offline-goldens.json
+    GOLD=${APR_CRUX_GOLDENS:-evidence/crux}/huggingface/offline-goldens.json
     [ -f "$GOLD" ] || { echo "golden set absent"; exit 2; }
     python3 - "$GOLD" <<'PY'
     import json, subprocess, tempfile, hashlib, os, sys, pathlib
@@ -223,15 +223,20 @@ falsification_tests:
   if_fails: "offline bytes diverged from online huggingface_hub golden"
 
 proof_obligations:
-- type: equivalence
+- id: CA2-EQ-001
+  type: equivalence
   property: "apr --offline matches huggingface_hub(local_files_only=True) / HF_HUB_OFFLINE=1 on evidence/crux/huggingface/offline-goldens.json"
-- type: invariant
+- id: CA2-INV-002
+  type: invariant
   property: "Zero outbound non-loopback TCP connects under APR_OFFLINE=1, HF_HUB_OFFLINE=1, or --offline (strace-verified)"
-- type: invariant
+- id: CA2-INV-003
+  type: invariant
   property: "Cache miss in offline mode is a hard error with 'offline' + cache-miss context in stderr"
-- type: invariant
+- id: CA2-INV-004
+  type: invariant
   property: "HF_HUB_OFFLINE=1, APR_OFFLINE=1, and --offline are observationally equivalent"
-- type: invariant
+- id: CA2-INV-005
+  type: invariant
   property: "|TCP_connect_trace(offline invocation)| == 0 (strict equality)"
 
 verification_summary:

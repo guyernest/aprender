@@ -122,6 +122,7 @@ mod tests {
                 positional_encoding: PositionalEncoding::Rope,
                 mlp_type: MlpType::SwiGlu,
                 qk_norm: false,
+                deltanet: None,
             },
             tensor_template: TensorTemplate {
                 embedding: "model.embed_tokens.weight".to_string(),
@@ -206,6 +207,10 @@ mod tests {
         assert_eq!(
             AttentionType::from_str_contract("mqa").expect("parse"),
             AttentionType::Mqa
+        );
+        assert_eq!(
+            AttentionType::from_str_contract("hybrid_gated_deltanet").expect("parse"),
+            AttentionType::HybridGatedDeltaNet
         );
         assert!(AttentionType::from_str_contract("unknown").is_err());
     }

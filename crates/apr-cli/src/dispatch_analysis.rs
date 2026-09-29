@@ -122,6 +122,12 @@ fn dispatch_analysis_commands(cli: &Cli) -> Option<Result<(), CliError>> {
         // GH-876 Milestone 1: Probar is now a subcommand container.
         // The existing flat-args behavior moved under `apr probar tensor <FILE>`.
         ExtendedCommands::Test { command } => match command {
+            // GH-876 Milestone 2 — `apr test llm bench`.
+            // PERF-025: the arm moved into commands::test_llm::dispatch. This
+            // router was at cognitive 24 against a threshold of 25; the band
+            // branch tipped it, and the destructure belongs next to the
+            // functions it feeds anyway.
+            TestSubcommand::Llm { command } => commands::test_llm::dispatch(command),
             TestSubcommand::Tensor {
                 file,
                 output,
@@ -531,6 +537,12 @@ fn dispatch_analysis_commands_rest(cli: &Cli) -> Option<Result<(), CliError>> {
         return None;
     };
     let result = match ext {
+        // PP-066 R-0a: `apr devices` — an extended command dispatched from this
+        // file because dispatch.rs's runtime dispatcher carries pre-existing
+        // complexity debt the pre-commit gate refuses to let any edit ride on.
+        #[cfg(feature = "inference")]
+        ExtendedCommands::Capability { json } => commands::capability::run(*json || cli.json),
+        ExtendedCommands::Devices { json } => commands::devices::run(*json || cli.json),
         ExtendedCommands::OtlpLint {
             otlp_file,
             require_apr_span,
@@ -1375,6 +1387,17 @@ fn dispatch_tokenize_command(
             output,
             include_added_tokens,
         } => tokenize::run_import_hf(input, output, *include_added_tokens, cli.json),
+        #[cfg(feature = "inference")]
+        TokenizeCommands::Encode {
+            model,
+            prompt,
+            file,
+        } => commands::tokenize_encode::run_encode(
+            model,
+            prompt.as_deref(),
+            file.as_deref(),
+            cli.json,
+        ),
         #[cfg(feature = "training")]
         TokenizeCommands::EncodeCorpus {
             corpus,
@@ -1758,9 +1781,17 @@ fn dispatch_profiling_commands(cli: &Cli) -> Option<Result<(), CliError>> {
             file,
             prompt,
             assert,
+            per_op,
+            out,
+            threshold,
             // GH-636: pass cli.json to parity — was dropping the flag
-        } => crate::error::resolve_model_path(file)
-            .and_then(|r| commands::parity::run(&r, prompt, *assert, cli.verbose, cli.json)),
+        } => crate::error::resolve_model_path(file).and_then(|r| {
+            if *per_op {
+                commands::parity_per_op::run(&r, prompt, out.as_deref(), *threshold, cli.json)
+            } else {
+                commands::parity::run(&r, prompt, *assert, cli.verbose, cli.json)
+            }
+        }),
 
         ExtendedCommands::PtxMap {
             file,
@@ -1903,11 +1934,21 @@ fn dispatch_extended_command(cli: &Cli) -> Result<(), CliError> {
             trace_output,
             trace_level,
             profile,
-            backend,
+            backend: BackendArg { backend },
+            thinking,
         } => {
             if let Some(ref b) = backend {
                 eprintln!("Backend override: {b}");
             }
+            // PERF-021: the third surface. `apr chat` accepted --gpu, verified
+            // nothing, and ran on CPU — the same defect as `apr run`, and
+            // unlike `apr run` it does not even carry the bespoke
+            // `--backend cuda` check. Three surfaces, one refusal, so a fix
+            // here cannot land on two of them again.
+            crate::accel::ensure_available(
+                *gpu && !*no_gpu,
+                &crate::accel::asked_flag(*gpu, backend.as_deref()),
+            )?;
             // GH-326: --gpu overrides --no-gpu when both specified
             let effective_no_gpu = if *gpu { false } else { *no_gpu };
             chat::run(
@@ -1918,6 +1959,7 @@ fn dispatch_extended_command(cli: &Cli) -> Result<(), CliError> {
                 system.as_deref(),
                 *inspect,
                 effective_no_gpu,
+                run_accelerator_forced(*gpu, *no_gpu, backend.as_deref()),
                 *trace,
                 trace_steps.as_deref(),
                 *trace_verbose,
@@ -1925,6 +1967,8 @@ fn dispatch_extended_command(cli: &Cli) -> Result<(), CliError> {
                 trace_level.as_str(),
                 *profile,
                 cli.offline,
+                cli.json,
+                thinking.mode(),
             )
         }
 

@@ -43,7 +43,11 @@ fn try_gpu_completions(
     let gpu_config = GpuGenerateConfig {
         max_tokens,
         temperature,
-        top_k: 1,
+        // #3760: this was `top_k: 1`, which every loop reads as greedy, so a request
+        // `temperature` did nothing on the GpuModel completions path. The same rule
+        // the CPU completions handlers use; the request carries no top_k or seed.
+        top_k: if temperature == 0.0 { 1 } else { 40 },
+        seed: crate::sampling::DEFAULT_SEED,
         stop_tokens: Vec::new(),
         trace: state.is_trace_enabled(),
         cancel: cancel.clone(),
@@ -99,7 +103,101 @@ fn try_gpu_completions(
             completion_tokens,
             total_tokens: prompt_tokens + completion_tokens,
         },
+        // This arm records no backend (#3894).
+        used_gpu: None,
     }))
+}
+
+/// `AprTransformer` (f32 APR / SafeTensors CPU) backend for `POST /v1/completions`.
+///
+/// aprender#2609, second pass: the first pass gave `/stream/generate`,
+/// `/v1/chat/completions{,/stream}` and `/v1/embeddings` an APR arm and left
+/// `/v1/completions` walking straight into [`registry_completions`], which
+/// resolves the dense f32 [`Model`](crate::layers::Model) — `None` on an
+/// `AprTransformer` server. So the ONE route the `apr serve` startup banner
+/// prints by name was still answering `"No model available"` on a server whose
+/// `/generate` returned 200. Same class, same backend, one route later.
+///
+/// Mirrors `try_apr_transformer_backend` in `cuda_chat_backend.rs`: the completion
+/// and chat surfaces must be alive on exactly the same set of resident models, so
+/// they walk the same chain over the same state.
+///
+/// Returns `None` when no `AprTransformer` is resident, leaving the dense
+/// fallback unchanged.
+fn try_apr_transformer_completions(
+    state: &AppState,
+    request: &CompletionRequest,
+    max_tokens: usize,
+    temperature: f32,
+    start: std::time::Instant,
+    cancel: &CancelToken,
+) -> Result<Option<CompletionResponse>, RErr> {
+    use crate::apr_transformer::GenerateConfig;
+
+    let apr_transformer = match state.apr_transformer() {
+        Some(m) => m,
+        None => return Ok(None),
+    };
+    let tokenizer = state.tokenizer.clone().ok_or_else(|| {
+        rerr(
+            state,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "No tokenizer available",
+        )
+    })?;
+    let prompt_ids = tokenizer.encode(&request.prompt);
+    if prompt_ids.is_empty() {
+        return Err(rerr(
+            state,
+            StatusCode::BAD_REQUEST,
+            "Prompt cannot be empty",
+        ));
+    }
+    let prompt_tokens = prompt_ids.len();
+
+    let gen_config = GenerateConfig {
+        max_tokens,
+        temperature,
+        cancel: cancel.clone(),
+        ..Default::default()
+    };
+
+    // aprender#2376 finding 9 / #2609: a caller-supplied prompt longer than the
+    // context window is fully determined by the request, so it is 400 — not the
+    // 500 that invites a retry of the identical body.
+    let generated = apr_transformer
+        .generate_with_cache(&prompt_ids, &gen_config)
+        .map_err(|e| {
+            rerr(
+                state,
+                super::generation_error_status(&e),
+                format!("APR generation failed: {e}"),
+            )
+        })?;
+
+    let token_ids: Vec<u32> = generated.iter().skip(prompt_tokens).copied().collect();
+    let completion_tokens = token_ids.len();
+    let text = tokenizer
+        .decode(&token_ids)
+        .map_err(|e| rerr(state, StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    state
+        .metrics
+        .record_success(completion_tokens, start.elapsed());
+
+    // #2465(2): stops and finish_reason come from the shared `apply_stop_sequences`
+    // inside `completion_resp`, so this backend cannot drift from the others.
+    Ok(Some(completion_resp(
+        "cmpl",
+        request.model.clone(),
+        text,
+        prompt_tokens,
+        completion_tokens,
+        max_tokens,
+        request.stop.as_deref(),
+        // The APR transformer arm reports no backend: nothing in its path records
+        // whether the generation ran on the accelerator (#3894).
+        None,
+    )))
 }
 
 /// CPU model fallback.
@@ -117,9 +215,15 @@ fn registry_completions(
         Some(request.model.as_str())
     };
 
+    // aprender#2609: hardcoded 404 — "route not found" — for a condition that has
+    // nothing to do with routing. `/v1/completions` is mounted and advertised, and
+    // the identical `RegistryError("No model available")` came back as 503 from
+    // `/generate`, `/stream/generate` and `/batch/generate`. `model_resolution_status`
+    // keeps 404 for the case that IS a client error: an unknown `model` in registry
+    // mode (`ModelNotFound`).
     let (model, tokenizer) = state
         .get_model(model_id)
-        .map_err(|e| rerr(state, StatusCode::NOT_FOUND, e))?;
+        .map_err(|e| rerr(state, super::model_resolution_status(&e), e))?;
     let prompt_ids = tokenizer.encode(&request.prompt);
     if prompt_ids.is_empty() {
         return Err(rerr(
@@ -169,6 +273,8 @@ fn registry_completions(
         completion_tokens,
         max_tokens,
         request.stop.as_deref(),
+        // The registry arm is the CPU fallback of last resort and records nothing.
+        None,
     ))
 }
 
@@ -210,6 +316,8 @@ async fn try_apr_q4k_completions(
             prompt_ids,
             max_tokens,
             temperature,
+            // #3786: the request seed reaches the APR Q4K sampler.
+            seed: crate::sampling::DEFAULT_SEED,
             eos_ids,
             cancel: cancel.clone(),
             response_tx,
@@ -240,6 +348,9 @@ async fn try_apr_q4k_completions(
         completion_tokens,
         max_tokens,
         request.stop.as_deref(),
+        // `AprQ4kResponse` carries output_tokens/tokens_generated/timings and NO
+        // backend flag, so this arm cannot report what ran (#3894).
+        None,
     )))
 }
 
@@ -290,11 +401,19 @@ async fn try_cuda_gguf_completions(
         token_tx,
         non_streaming: true,
         enqueue_time: std::time::Instant::now(),
+        // §3: `/v1/completions` has no `timings` field on its response shape,
+        // so there is nothing for the engine's measurement to reach. Dropped
+        // rather than measured-and-discarded.
+        timing_tx: None,
     };
 
-    batch_tx
-        .try_send(batch_req)
-        .map_err(|_| rerr(state, StatusCode::SERVICE_UNAVAILABLE, "CUDA batch queue full"))?;
+    batch_tx.try_send(batch_req).map_err(|_| {
+        // §5.2: counted at the refusal — `/v1/completions` shares the scheduler
+        // with `/v1/chat/completions`, so a rejection here is a rejection the
+        // `kv.admission_rejected` figure has to include.
+        state.record_admission_rejected();
+        rerr(state, StatusCode::SERVICE_UNAVAILABLE, "CUDA batch queue full")
+    })?;
 
     // Collect all generated tokens
     let mut output_tokens = Vec::with_capacity(max_tokens);
@@ -326,6 +445,8 @@ async fn try_cuda_gguf_completions(
         completion_tokens,
         max_tokens,
         request.stop.as_deref(),
+        // The CUDA GGUF batch arm records no backend flag on its response.
+        None,
     )))
 }
 
@@ -348,7 +469,7 @@ pub(crate) fn completion_sse_response(response: &CompletionResponse) -> axum::re
         |c| c.finish_reason.clone(),
     );
 
-    let envelope = |text: String, finish_reason: Option<String>| CompletionChunk {
+    let envelope = |text: String, finish_reason: Option<String>, usage: Option<Usage>| CompletionChunk {
         id: response.id.clone(),
         object: response.object.clone(),
         created: response.created,
@@ -359,13 +480,19 @@ pub(crate) fn completion_sse_response(response: &CompletionResponse) -> axum::re
             logprobs: None,
             finish_reason,
         }],
+        usage,
     };
 
     let mut chunks: Vec<CompletionChunk> = crate::api::ollama_handlers::content_fragments(text)
         .into_iter()
-        .map(|fragment| envelope(fragment, None))
+        .map(|fragment| envelope(fragment, None, None))
         .collect();
-    chunks.push(envelope(String::new(), Some(finish_reason)));
+    // #4272: the terminal chunk carries the usage the body carries.
+    chunks.push(envelope(
+        String::new(),
+        Some(finish_reason),
+        Some(response.usage.clone()),
+    ));
 
     let stream = tokio_stream::iter(
         chunks
@@ -396,6 +523,13 @@ pub async fn openai_completions_handler(
     use axum::response::IntoResponse;
 
     let stream = request.stream;
+    // #4272: a Qwen3.5 session streams LIVE from its `on_token`; every other
+    // backend still buffers and slices (below).
+    if stream {
+        if let Some(live) = try_qwen35_completions_stream(&state, &request, &cancel)? {
+            return Ok(live);
+        }
+    }
     let completion = completions_inner(state, request, cancel).await?;
     Ok(if stream {
         completion_sse_response(&completion)
@@ -420,8 +554,12 @@ async fn completions_inner(
         return Ok(r);
     }
 
+    // #3874 + the quantized arm, behind ONE branch. Both are ungated and both answer
+    // from a model already resident in `AppState`, so they belong together; folding
+    // them gives back the cognitive level the Qwen3.5 arm added to this function
+    // rather than leaving the chain one deeper than the ratchet's ceiling.
     if let Some(r) =
-        try_quantized_completions(&state, &request, max_tokens, temperature, start, &cancel)?
+        try_resident_completions(&state, &request, max_tokens, temperature, start, &cancel).await?
     {
         return Ok(r);
     }
@@ -463,7 +601,7 @@ async fn completions_inner(
         let config = QuantizedGenerateConfig {
             max_tokens: max_tokens.min(4096),
             temperature,
-            top_k: if temperature == 0.0 { 1 } else { 40 },
+            top_k: crate::infer::sampling_top_k(temperature, None),
             stop_tokens: vec![eos],
             ..Default::default()
         };
@@ -503,7 +641,17 @@ async fn completions_inner(
                 completion_tokens,
                 total_tokens: prompt_ids.len() + completion_tokens,
             },
+            // The inline CUDA block records no backend flag either (#3894).
+            used_gpu: None,
         });
+    }
+
+    // aprender#2609: the f32 APR / SafeTensors CPU backend, in the same position
+    // the chat chain puts it — after quantized, before the dense registry.
+    if let Some(r) =
+        try_apr_transformer_completions(&state, &request, max_tokens, temperature, start, &cancel)?
+    {
+        return Ok(r);
     }
 
     registry_completions(&state, &request, max_tokens, temperature, start, &cancel)
@@ -639,8 +787,9 @@ pub async fn openai_embeddings_handler(
     State(state): State<AppState>,
     Json(request): Json<EmbeddingRequest>,
 ) -> Result<Json<EmbeddingResponse>, (StatusCode, Json<ErrorResponse>)> {
-    // Delegate to native handler
-    realize_embed_handler(State(state), Json(request)).await
+    // Same body as /realize/embed, but named as the route the client called
+    // (aprender#2609).
+    crate::api::realize_handlers::embed_for_route(state, request, "/v1/embeddings")
 }
 
 #[cfg(test)]
@@ -692,4 +841,30 @@ mod pmat795_finish_reason_tests {
         let stops = vec!["ZZZ".to_string()];
         assert_eq!(reason("abXc", Some(&stops), 256, 256), "length");
     }
+}
+
+include!("qwen35_completions_backend.rs");
+
+/// The two arms that answer from a model already resident in `AppState`, in order:
+/// the Qwen3.5 session (#3874), then the quantized dense model.
+///
+/// They are one function because they are one question — "is the model already
+/// loaded here?" — and because `completions_inner` is at the cognitive ceiling, so a
+/// seventh sibling `if let` there costs a level this does not.
+///
+/// `Ok(None)` when neither owns the request, so the caller's chain is unchanged.
+async fn try_resident_completions(
+    state: &AppState,
+    request: &CompletionRequest,
+    max_tokens: usize,
+    temperature: f32,
+    start: std::time::Instant,
+    cancel: &CancelToken,
+) -> Result<Option<CompletionResponse>, RErr> {
+    if let Some(r) =
+        try_qwen35_completions(state, request, max_tokens, temperature, start, cancel).await?
+    {
+        return Ok(Some(r));
+    }
+    try_quantized_completions(state, request, max_tokens, temperature, start, cancel)
 }

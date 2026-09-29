@@ -1,0 +1,28 @@
+ladder:
+  hosts: []
+  inventory:
+    backends:
+    - cuda
+    dirs:
+    - ~/models
+    patterns:
+    - '*q4_k*.gguf'
+    - '*q4k*.apr'
+    - '*q4_k*.apr'
+  rungs:
+  - arch: qwen2
+    backends:
+    - cpu
+    - cuda
+    gguf: c.gguf
+    id: ctrl-q4km
+    required: true
+    sha256: '0000000000000000000000000000000000000000000000000000000000000000'
+  - arch: qwen3
+    backends:
+    - cpu
+    - cuda
+    gguf: q.gguf
+    id: q3-q4km
+    required: true
+    sha256: '1111111111111111111111111111111111111111111111111111111111111111'

@@ -187,7 +187,8 @@
             trace_output: None,
             trace_level: "basic".to_string(),
             profile: false,
-            backend: None,
+            backend: BackendArg::default(),
+            thinking: ThinkingArg::default(),
         }));
         let result = dispatch_analysis_commands(&cli);
         assert!(result.is_none(), "Chat command should not be handled by analysis dispatcher");
@@ -423,7 +424,8 @@
             trace_output: None,
             trace_level: "basic".to_string(),
             profile: false,
-            backend: None,
+            backend: BackendArg::default(),
+            thinking: ThinkingArg::default(),
         }));
         let result = dispatch_profiling_commands(&cli);
         assert!(result.is_none(), "Chat should not be handled by profiling dispatcher");
@@ -956,7 +958,8 @@
             trace_output: None,
             trace_level: "basic".to_string(),
             profile: false,
-            backend: None,
+            backend: BackendArg::default(),
+            thinking: ThinkingArg::default(),
         }));
         let result = dispatch_core_command(&cli);
         assert!(result.is_none(), "Chat (extended) should NOT be handled by core dispatcher");

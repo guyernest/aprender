@@ -103,6 +103,11 @@ mod cublaslt;
 pub mod cublaslt_sys;
 
 // GH-480: PTX backward branch patcher (not feature-gated — pure string transform)
+// CUDA-backed queries that FEED launch_budget (the policy itself is ungated at
+// crate::launch_budget so its case table runs in the required check).
+#[cfg(feature = "cuda")]
+pub mod budget_query;
+
 pub(crate) mod ptx_patch;
 
 // PTX disk cache utilities (not feature-gated — SHA-256, cache I/O testable without CUDA)
@@ -123,9 +128,9 @@ pub use cublaslt::CublasLtHandle;
 pub use graph::{CaptureMode, CudaGraph, CudaGraphExec};
 #[cfg(feature = "cuda")]
 pub use memory::{
-    device_bytes_outstanding, device_memory_exclusive, DeviceMemoryExclusive, GpuBuffer,
+    classify_device_memory, device_allocs_total, device_bytes_outstanding, device_memory_exclusive,
+    device_to_host_bytes_total, DeviceMemoryClass, DeviceMemoryExclusive, GpuBuffer,
 };
-#[cfg(feature = "cuda")]
 pub use module::CudaModule;
 #[cfg(feature = "cuda")]
 pub use stream::{CudaEvent, CudaStream, DEFAULT_STREAM};

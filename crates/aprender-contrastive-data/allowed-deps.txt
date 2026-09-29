@@ -63,7 +63,12 @@ itoa
 libc
 memchr
 proc-macro2
-provable-contracts-macros
+# The `#[contract]` derive. `provable-contracts-macros` is the workspace
+# dependency KEY; `package = "aprender-contracts-macros"` is the crate, and the
+# crate name is what `cargo tree` prints — so the key was never going to match.
+# This is a name correction, not a widening: the reviewed decision (this crate
+# may depend on the contracts macro crate) is unchanged.
+aprender-contracts-macros
 quote
 serde
 serde_core

@@ -13,7 +13,7 @@ pub fn f16_to_f32(bits: u16) -> f32 {
 /// Dequantize F16 data to F32
 pub fn dequantize_f16(bytes: &[u8], num_elements: usize) -> Vec<f32> {
     let mut result = Vec::with_capacity(num_elements);
-    for chunk in bytes.chunks_exact(2) {
+    for chunk in bytes.as_chunks::<2>().0 {
         let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
         result.push(f16_to_f32(bits));
     }
@@ -232,7 +232,7 @@ pub fn dtype_to_ggml_qtype(dtype: &str) -> Option<u32> {
     // GH-321: Use unified GgmlQuantType enum for GGML-compatible formats.
     // APR-native Q8/Q4 are NOT GGML — different binary layout — returns None.
     // F32/F16/BF16 are not quantized — returns None.
-    crate::gguf::GgmlQuantType::from_str_lossy(dtype)
+    crate::gguf::admitted_from_name(dtype)
         .filter(|qt| {
             matches!(
                 qt,

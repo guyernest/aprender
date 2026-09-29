@@ -20,7 +20,6 @@ metadata:
   - 'crates/aprender-serve/src/inference/simd.rs:264 — simd_bf16_to_f32 (reused converter)'
   - 'contracts/q3k-dequant-v1.yaml — the sibling missing-dispatch fix this mirrors'
 
-kind: KernelContract
 name: bf16-dequant
 version: 1.0.0
 scope: aprender-serve GGUF loader BF16 (type 30) dispatch — get_tensor_f32 + tensor_byte_size
@@ -49,12 +48,14 @@ equations:
     lean_theorem: Theorems.BF16_Dequant_Formula
 
 proof_obligations:
-- type: invariant
+- id: BDFB7E-INV-001
+  type: invariant
   property: dequant length and value
   formal: |
     For BF16 bytes built from f32 vals via half::bf16::from_f32, simd_bf16_to_f32
     returns those f32s within bf16 rounding tolerance; length == bytes/2.
-- type: classification
+- id: BDFB7E-CLS-002
+  type: classification
   property: BF16 dispatches, not rejected
   formal: |
     A GGUFModel with a GGUF_TYPE_BF16 tensor: get_tensor_f32 returns Ok with the

@@ -26,6 +26,7 @@ pub mod beat_run;
 pub mod bench;
 pub(crate) mod blob_gc;
 pub mod canary;
+pub mod capability;
 pub mod cbtop;
 pub mod chat;
 pub mod check;
@@ -51,6 +52,8 @@ pub(crate) mod data_contrastive;
 pub(crate) mod data_tweeteval;
 pub(crate) mod diagnose;
 
+#[cfg(feature = "inference")]
+pub(crate) mod devices;
 pub(crate) mod dry_sampling_classifier;
 pub(crate) mod dry_sampling_lint;
 pub(crate) mod embed;
@@ -106,6 +109,9 @@ pub(crate) mod mcp;
 pub(crate) mod merge;
 #[cfg(feature = "training")]
 pub(crate) mod model_config;
+// #3661: a model parse failure names the format its magic bytes identify.
+#[cfg(test)]
+mod model_file_error_tests_3661;
 #[cfg(feature = "training")]
 pub(crate) mod monitor;
 #[cfg(feature = "dev")]
@@ -126,6 +132,13 @@ pub(crate) mod oracle;
 pub(crate) mod otlp_classifier;
 pub(crate) mod otlp_lint;
 pub(crate) mod parity;
+/// REG-15 model admission (#2971, PMAT-1065): a forced backend never
+/// downgrades on a load-time parity-gate failure. Re-exported publicly at
+/// `apr_cli::parity_admission` (see `lib.rs`) so `tests/reg15_admission.rs`
+/// can exercise it without reaching into the private `commands` tree.
+pub(crate) mod parity_admission;
+pub(crate) mod parity_per_op;
+pub(crate) mod parity_per_op_table;
 pub(crate) mod pipeline;
 pub(crate) mod png_encode;
 pub(crate) mod ppl;
@@ -136,15 +149,22 @@ pub(crate) mod predict;
 #[cfg(feature = "training")]
 pub(crate) mod pretrain;
 pub(crate) mod probar;
+// GH-876 Milestone 2: `apr test llm`, a surface over the in-tree llm module.
 pub(crate) mod profile;
 pub(crate) mod progress;
 pub(crate) mod prometheus_classifier;
 pub(crate) mod prometheus_lint;
 pub(crate) mod prune;
 pub(crate) mod ps_schema;
+pub(crate) mod test_llm;
+// PERF-025: the `--band` mode of `apr test llm bench`. Its own file so that
+// `test_llm.rs`'s complexity is untouched by it -- the PMAT pre-commit gate
+// blocks a FILE with any pre-existing violation, not a function.
+pub(crate) mod test_llm_band;
 // #2399: gated on the crate it actually needs (aprender-explain, aliased
 // `trueno-explain`) rather than on `full`, so `--features ptx` is enough and a
 // user does not have to pull CUDA + training to analyze a .ptx file.
+pub(crate) mod model_header;
 #[cfg(feature = "trueno-explain")]
 pub(crate) mod ptx_explain;
 pub(crate) mod ptx_map;
@@ -191,6 +211,9 @@ pub(crate) mod stop_op;
 pub(crate) mod tensors;
 pub(crate) mod token_redactor;
 pub(crate) mod tokenize;
+/// #3726: `apr tokenize encode` — a GGUF's own token ids for a text, and the path that made them.
+#[cfg(feature = "inference")]
+pub(crate) mod tokenize_encode;
 pub(crate) mod tokenize_parquet;
 pub(crate) mod tool_use_classifier;
 pub(crate) mod tool_use_lint;
@@ -210,3 +233,81 @@ pub(crate) mod unified_search_lint;
 pub(crate) mod validate;
 pub(crate) mod validate_manifest;
 pub(crate) mod xet_mode;
+
+/// #4018: at most the first `max` bytes of `s`, cut at a CHAR BOUNDARY, for a log or error line.
+///
+/// `&s[..s.len().min(max)]` panicked ("byte index N is not a char boundary") whenever byte `max`
+/// fell inside a multi-byte UTF-8 char, so `apr run -v` crashed on a non-ASCII prompt instead of
+/// answering. The cut floors to the previous boundary: at most 3 bytes short, since a char is at
+/// most 4 (the CRUX judge reads a logged prompt of >= max-3 bytes as possibly cut, #3962 B2).
+/// `str::floor_char_boundary` would do this, but is not stable at this crate's rust-version.
+pub(crate) fn log_head(s: &str, max: usize) -> &str {
+    let mut end = s.len().min(max);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+#[cfg(test)]
+mod log_head_4018 {
+    use super::log_head;
+
+    /// MUST-RED (#4018): decoded model output, a formatted prompt and a subprocess's stdout/stderr
+    /// were each sliced at a fixed BYTE length, which panics when that byte falls inside a
+    /// multi-byte char.
+    #[test]
+    fn non_ascii_text_cut_mid_char_does_not_panic() {
+        let t = format!("x{}", "\u{6c34}".repeat(200));
+        for max in [200usize, 500] {
+            assert!(
+                !t.is_char_boundary(max),
+                "fixture: byte {max} must be mid-char"
+            );
+            let head = log_head(&t, max);
+            assert!(
+                head.len() <= max && head.len() + 3 >= max,
+                "{max}: {}",
+                head.len()
+            );
+            assert!(t.starts_with(head));
+        }
+    }
+
+    #[test]
+    fn ascii_and_short_inputs_are_unchanged() {
+        assert_eq!(log_head("ok", 200), "ok");
+        assert_eq!(log_head(&"a".repeat(600), 500).len(), 500);
+    }
+
+    /// #4018: the SITES use it -- the helper alone proves nothing if a caller still byte-slices.
+    #[test]
+    fn no_log_site_byte_slices_text_any_more() {
+        for (f, old) in [
+            (
+                "chat_generate_session_02.rs",
+                "&decoded[..decoded.len().min(200)]",
+            ),
+            (
+                "chat_generate_session_02.rs",
+                "&formatted_prompt[..formatted_prompt.len().min(500)]",
+            ),
+            (
+                "inference_result.rs",
+                "&stdout_text[..stdout_text.len().min(200)]",
+            ),
+            (
+                "inference_result.rs",
+                "&stderr_text[..stderr_text.len().min(200)]",
+            ),
+        ] {
+            let src =
+                std::fs::read_to_string(format!("{}/src/commands/{f}", env!("CARGO_MANIFEST_DIR")))
+                    .expect("source");
+            assert!(
+                !src.contains(old),
+                "{f} still slices text at a fixed byte length: {old}"
+            );
+        }
+    }
+}

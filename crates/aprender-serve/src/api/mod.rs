@@ -57,16 +57,25 @@ pub use cancel_scope::request_cancel_token;
 // PMAT-802: Extracted handlers
 //
 // aprender#2465(1): NOT `#[cfg(feature = "cuda")]` on the module. Every
-// CUDA-dependent item inside is individually gated; the decode loop
-// (`q4k_decode`) and its cancellation falsifiers are not, so they compile and
-// run under the default feature set. Gating the whole module put the only
-// cancellation-free decode loop in the crate outside every CI test job.
+// CUDA-dependent item inside is individually gated; the session config
+// (`q4k_generate_config`), the forward over it (`apr_q4k_forward`) and their
+// cancellation falsifiers are not, so they compile and run under the default
+// feature set. Gating the whole module put the only cancellation-free decode
+// loop in the crate outside every CI test job.
+pub mod apr_q4k_forward;
 pub mod apr_q4k_scheduler;
+// PERF-041: NOT `#[cfg(feature = "cuda")]`, on purpose. It holds the admission
+// predicate of contracts/batch-admission-v1.yaml and its exhaustive table test,
+// which `cargo test -p aprender-serve --lib batch_admission` must be able to
+// select in the default feature set — the same dark-target reasoning as the
+// comment above `apr_q4k_scheduler`.
+pub mod batch_admission;
 #[cfg(feature = "cuda")]
 pub mod cuda_batch_scheduler;
 #[cfg(feature = "cuda")]
 pub mod iteration_scheduler;
 mod openai_handlers;
+pub(crate) use openai_handlers::LiveUtf8Deltas;
 pub(crate) use openai_handlers::{
     openai_chat_completions_handler, openai_chat_completions_stream_handler, openai_models_handler,
 };
@@ -81,6 +90,19 @@ pub(crate) use ollama_handlers::{
 // handlers read it instead of substituting plausible-looking constants.
 mod model_source;
 pub use model_source::{detect_format_from_magic, gguf_qtype_name, ModelSourceInfo};
+// PP-LLAMA-001 §12 row 6 / PP-2: `GET /v1/effective-config` — what THIS
+// process resolved, read from the process. NOT `#[cfg(feature = "cuda")]`: the
+// route is unconditional and its JSON shape is identical on every build, or the
+// PP-2 must-not-fire case ("the CPU cell reports cpu") is unreachable.
+pub mod effective_config;
+// Carried on `AppState` and read by the handler; not part of the public API,
+// which reaches the same facts through `effective_config(&state)`.
+pub use effective_config::{
+    admission_ceiling_reason, build_features, compute_class_from_residency, effective_config,
+    pp14_holds, AdmissionCounter, EffectiveConfigResponse, InFlightCounter, KvReport, ModelReport,
+    OffloadReport, SchedulerReport, ServerClock, ServerReport, ADMISSION_POLICY,
+};
+pub(crate) use effective_config::{effective_config_handler, EffectiveConfigState};
 mod gpu_handlers;
 pub(crate) use gpu_handlers::{
     batch_generate_handler, batch_tokenize_handler, generate_handler,
@@ -99,7 +121,9 @@ pub use gpu_handlers::{
 pub use gpu_handlers::{spawn_batch_processor, BatchConfig};
 mod realize_handlers;
 pub(crate) use realize_handlers::{
-    clean_chat_output, format_chat_messages, openai_completions_handler, openai_embeddings_handler,
+    clean_chat_output, format_chat_messages, format_chat_messages_for_state,
+    format_chat_messages_for_state_thinking, format_chat_messages_official,
+    format_chat_messages_official_thinking, openai_completions_handler, openai_embeddings_handler,
     realize_embed_handler, realize_model_handler, realize_reload_handler,
 };
 #[cfg(feature = "cuda")]
@@ -158,10 +182,11 @@ pub struct AppState {
     #[cfg(feature = "gpu")]
     gpu_model: Option<Arc<std::sync::RwLock<crate::gpu::GpuModel>>>,
     /// Quantized model for fused Q4_K inference (IMP-100)
-    /// This is 1.37x faster than dequantized GpuModel due to reduced memory bandwidth
+    /// Faster than the dequantized GpuModel because it reads less memory per token
+    /// (IMP-100; the measured factor has no receipt under evidence/, so it is not stated here)
     quantized_model: Option<Arc<crate::gguf::OwnedQuantizedModel>>,
     /// Thread-safe cached model for HTTP serving (IMP-116)
-    /// Uses Mutex-based scheduler caching for 10.6x speedup
+    /// Uses Mutex-based scheduler caching (IMP-116; the measured speedup has no receipt under evidence/)
     #[cfg(feature = "gpu")]
     cached_model: Option<Arc<crate::gguf::OwnedQuantizedModelCachedSync>>,
     /// Dispatch metrics for adaptive CPU/GPU tracking (IMP-126)
@@ -174,8 +199,10 @@ pub struct AppState {
     /// Batch configuration for window timing and size thresholds (PARITY-052)
     #[cfg(feature = "gpu")]
     batch_config: Option<BatchConfig>,
-    /// CUDA-optimized model for high-performance GPU inference (PAR-111)
-    /// Uses pre-uploaded weights and batched workspaces for 755+ tok/s (2.6x Ollama)
+    /// CUDA-optimized model for GPU inference (PAR-111).
+    /// Uses pre-uploaded weights and batched workspaces. The throughput and
+    /// Ollama-ratio this comment used to assert were withdrawn: they were taken
+    /// on the batched path while it emitted garbage tokens (aprender#2753).
     #[cfg(feature = "cuda")]
     cuda_model: Option<Arc<std::sync::RwLock<crate::gguf::OwnedQuantizedModelCuda>>>,
     /// PMAT-044: CUDA batch scheduler for continuous batching on /v1/chat/completions
@@ -200,6 +227,18 @@ pub struct AppState {
     /// and any future streaming/batch backends.
     /// See `contracts/qwen3-moe-serve-dispatch-v1.yaml` (V1_001, V1_003).
     mapped_gguf_model: Option<Arc<crate::gguf::MappedGGUFModel>>,
+    /// #3987: whether qwen3moe generation must stay on the CPU. `true` for every
+    /// constructor, which is exactly the pre-#3987 behaviour (the serve MoE backend
+    /// called the CPU-only generator). Only a CUDA server opts in, via
+    /// `with_moe_gpu()`, and then the MoE backend goes through the ONE dispatch
+    /// `apr run` uses (`run_qwen3_moe_generate_dispatch`), proven by #3714's parity tests.
+    moe_no_gpu: bool,
+    /// #3571: the Qwen3.5 hybrid, resident for the server's lifetime. Its
+    /// Gated-DeltaNet and attention layers live here, not in
+    /// `quantized_model` — the hybrid has no dense layers — so a Qwen3.5
+    /// request is served from this session or refused, never decoded through
+    /// the base (embeddings, norm, `lm_head`) alone.
+    qwen35_session: Option<Arc<Qwen35Served>>,
     /// GH-330: Cached EOS token ID (avoids RwLock in hot path)
     cached_eos_token_id: Option<u32>,
     /// Phase 4 D-09: the verified SetFit classifier `POST /v1/classify` serves.
@@ -220,6 +259,11 @@ pub struct AppState {
     /// without that knowledge — the metadata handlers then report the fields
     /// as ABSENT rather than inventing values.
     model_source: Option<Arc<ModelSourceInfo>>,
+    /// PP-LLAMA-001 §5.2: the process clock, the resolved offload, the
+    /// scheduler identity and the in-flight counter that `GET
+    /// /v1/effective-config` reports. One field rather than four so that adding
+    /// a reported fact does not mean editing sixteen struct literals.
+    effective: EffectiveConfigState,
 }
 
 impl AppState {
@@ -238,6 +282,57 @@ impl AppState {
     #[must_use]
     pub fn model_source(&self) -> Option<&ModelSourceInfo> {
         self.model_source.as_deref()
+    }
+
+    /// Attach what the loader resolved for `--gpu-layers` (PP-14, PP-15).
+    ///
+    /// Called by whatever placed the layers, next to the line that prints them,
+    /// so the endpoint reports the same resolution the operator saw and not a
+    /// second derivation of it.
+    #[must_use]
+    pub fn with_offload_report(mut self, report: effective_config::OffloadReport) -> Self {
+        self.effective.offload = Some(Arc::new(report));
+        self
+    }
+
+    /// Attach the scheduler identity and its live in-flight counter (PP-13/PP-24).
+    #[must_use]
+    pub fn with_scheduler_report(
+        mut self,
+        report: effective_config::SchedulerReport,
+        counter: Option<Arc<effective_config::InFlightCounter>>,
+    ) -> Self {
+        self.effective.scheduler = Some(Arc::new(report));
+        self.effective.in_flight = counter;
+        self
+    }
+
+    /// The `/v1/effective-config` state carried on this server.
+    #[must_use]
+    pub(crate) fn effective_config_state(&self) -> &EffectiveConfigState {
+        &self.effective
+    }
+
+    /// This server's process clock (PP-30).
+    #[must_use]
+    pub fn clock(&self) -> &Arc<effective_config::ServerClock> {
+        &self.effective.clock
+    }
+
+    /// Record one request REFUSED admission (§5.2 `kv.admission_rejected`).
+    ///
+    /// Called from the `503` return itself, not from a wrapper around it: every
+    /// site that turns a client away because the scheduler could not take the
+    /// request is an admission rejection, and a counter incremented anywhere
+    /// else would drift from the response the client actually got.
+    pub fn record_admission_rejected(&self) -> u64 {
+        self.effective.admission.record_rejected()
+    }
+
+    /// Requests refused admission since start.
+    #[must_use]
+    pub fn admission_rejected(&self) -> u64 {
+        self.effective.admission.rejected()
     }
 }
 
@@ -298,6 +393,11 @@ pub(crate) fn generation_error_status(err: &RealizarError) -> StatusCode {
 }
 
 include!("mod_app_state_gpu.rs");
+include!("mod_app_state_qwen35.rs");
 include!("mod_create_demo.rs");
 include!("router.rs");
 include!("dispatch_metrics.rs");
+
+#[cfg(test)]
+#[path = "tests_engine_identity.rs"]
+mod tests_engine_identity;

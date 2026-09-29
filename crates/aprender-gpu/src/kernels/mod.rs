@@ -26,6 +26,7 @@ mod bias_activation;
 mod conv1d;
 mod elementwise;
 mod fused;
+pub mod gdn;
 pub(crate) mod gemm;
 mod gemv;
 mod layernorm;
@@ -82,6 +83,11 @@ pub use elementwise::{
     TransposeKernel, // WAPR-PERF-004
 };
 pub use fused::{FusedGateUpKernel, FusedGemmBiasGeluKernel, FusedQKVKernel};
+pub use gdn::{
+    CausalConv1dSiluKernel, DecodeAttention256Kernel, DeltaRuleRecurrenceKernel,
+    GatedRmsNormKernel, GdnGatesKernel, PartialNeoxRopeKernel, PerHeadL2NormKernel,
+    SigmoidGateKernel, SplitInterleavedKernel, DEFAULT_MAX_POSITIONS_PER_PASS,
+};
 pub use gemm::basic::tensor_core::cta64_wmma::build_cta64x128_mma_pipeline_fp16;
 pub use gemm::{
     Batched4DGemmConfig, Batched4DGemmKernel, BatchedGemmConfig, BatchedGemmKernel, GemmConfig,
@@ -112,10 +118,11 @@ pub use quantize::{
     MultiWarpTensorCoreQ4KGemmKernel, MultiWarpVectorizedQ4KGemvKernel, MwvDp4aQ4KGemvKernel,
     Nf4GemmKernel, Nf4GemmTransposeKernel, Nf4Quantized, Nf4TensorCoreGemmKernel,
     PackedDp4aQ4KQ8Kernel, Q4KDequantFp16Kernel, Q4KDequantKernel, Q4KGemvKernel, Q4KQ8DotKernel,
-    Q4_0GemvKernel, Q4_1GemvKernel, Q5KGemvKernel, Q5KKernel, Q5_0GemvKernel, Q6KDequantKernel,
-    Q6KGemvKernel, Q6KKernel, Q8QuantizeKernel, Q8_0GemvKernel, QuantizeKernel,
-    TensorCoreQ4KGemmKernel, TiledQ4KGemvKernel, TrueDp4aQ4KGemvKernel, VectorizedQ4KGemvKernel,
-    W4a16WmmaQ4KGemmKernel, WideQ4KGemvKernel, NF4_BLOCK_BYTES, NF4_BLOCK_SIZE, NF4_LUT,
+    Q4_0GemvKernel, Q4_1GemvKernel, Q5KDequantKernel, Q5KGemvKernel, Q5KKernel, Q5_0GemvKernel,
+    Q6KDequantKernel, Q6KGemvKernel, Q6KKernel, Q8QuantizeKernel, Q8_0DequantKernel,
+    Q8_0GemvKernel, QuantizeKernel, TensorCoreQ4KGemmKernel, TiledQ4KGemvKernel,
+    TrueDp4aQ4KGemvKernel, VectorizedQ4KGemvKernel, W4a16WmmaQ4KGemmKernel, WideQ4KGemvKernel,
+    NF4_BLOCK_BYTES, NF4_BLOCK_SIZE, NF4_LUT,
 };
 pub use softmax::{LongRowSoftmaxKernel, SoftmaxKernel};
 

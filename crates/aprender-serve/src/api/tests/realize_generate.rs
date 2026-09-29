@@ -52,8 +52,10 @@ async fn test_realize_batch_endpoint_more_cov() {
 }
 
 #[tokio::test]
+#[cfg(feature = "gpu")]
 async fn test_gpu_batch_completions_empty_prompts_more_cov() {
-    let app = create_test_app_shared();
+    // #3991: only a `cached_model` state mounts this route.
+    let app = crate::api::test_helpers::create_test_cached_app();
     let json = r#"{"prompts":[]}"#;
 
     let response = app
@@ -161,12 +163,10 @@ async fn test_deep_apicov_completions_endpoint_cpu_fallback() {
         .await
         .expect("test");
 
-    // Demo model can't generate - returns 500 (error handling path)
-    // This still exercises the CPU fallback code path
-    assert!(
-        response.status() == StatusCode::INTERNAL_SERVER_ERROR
-            || response.status() == StatusCode::NOT_FOUND
-    );
+    // aprender#2609: was a disjunction over every plausible status — including
+    // NOT_FOUND, which is what this route WAS wrongly answering. This state has
+    // no model, so exactly one status is correct.
+    crate::api::test_helpers::assert_no_model_status(response.status());
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .expect("test");

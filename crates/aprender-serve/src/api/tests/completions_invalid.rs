@@ -182,6 +182,7 @@ fn test_chat_completion_request_traits() {
 #[test]
 fn test_chat_completion_response_traits() {
     let response = ChatCompletionResponse {
+        used_gpu: None,
         id: "test".to_string(),
         object: "chat.completion".to_string(),
         created: 1000,
@@ -195,6 +196,7 @@ fn test_chat_completion_response_traits() {
         brick_trace: None,
         step_trace: None,
         layer_trace: None,
+    timings: None,
     };
 
     let cloned = response.clone();
@@ -322,13 +324,10 @@ async fn test_completions_with_params() {
         .await
         .expect("send");
 
-    let status = response.status();
-    assert!(
-        status == StatusCode::OK
-            || status == StatusCode::NOT_FOUND
-            || status == StatusCode::INTERNAL_SERVER_ERROR
-            || response.status() == StatusCode::NOT_FOUND
-    );
+    // aprender#2609: was a disjunction over every plausible status — including
+    // NOT_FOUND, which is what this route WAS wrongly answering. This state has
+    // no model, so exactly one status is correct.
+    crate::api::test_helpers::assert_no_model_status(response.status());
 }
 
 // =============================================================================

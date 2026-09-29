@@ -48,7 +48,7 @@ use crate::schema::Contract;
 
 use super::finding::LintFinding;
 use super::rules::RuleSeverity;
-use super::{GateDetail, GateResult};
+use super::{GateDetail, GateResult, Verdict};
 
 /// Which field of a `falsification_tests[]` entry a binding claim was read from.
 ///
@@ -254,6 +254,7 @@ pub(crate) fn run_strict_test_binding_gate(
             name: "strict-test-binding".into(),
             passed: gate_passed,
             skipped: false,
+            verdict: Verdict::from_gate(gate_passed, false),
             duration_ms: duration,
             detail: GateDetail::Verify {
                 total_refs,
@@ -958,6 +959,7 @@ fn ignored_test_still_counts() {}
             test_harness: Some(harness.into()),
             name: Some(name.into()),
             if_fails: "investigate".into(),
+            ..Default::default()
         });
         vec![("fixture".to_string(), c)]
     }
@@ -1132,6 +1134,11 @@ fn ignored_test_still_counts() {}
         for line in text.lines() {
             let line = line.trim_end();
             if line.is_empty() {
+                continue;
+            }
+            if line.starts_with('#') {
+                // BSE-10a (PMAT-1066): every ratchet baseline carries a
+                // `# tool_version=` header, read by lib_baseline_ratchet.sh.
                 continue;
             }
             let (p, c) = line

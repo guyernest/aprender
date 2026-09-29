@@ -15,7 +15,16 @@ name: qwen-story-daily
 on:
   schedule:
     # 04:17 UTC daily — off-peak for the self-hosted fleet.
-    - cron: '17 4 * * *'
+    # SHIFTED so it actually runs at night (#3292). GitHub dispatches
+    # schedule events 3h51m-6h49m late on this account (28 runs, 10
+    # workflows, 3 nights, zero on time), so a 04:17 cron fired mid-
+    # morning and the nightly tier occupied 06:49-14:14 UTC — the
+    # working day, competing with PR traffic for the same runners.
+    # Cron is set ~5h EARLY so the delayed dispatch lands near 04:17 UTC.
+    # This is CALIBRATION AGAINST A MOVING TARGET: the delay varies by
+    # ~3h and is growing. The durable fix is a fleet-side timer calling
+    # `gh workflow run` (#3292); until then, re-measure before trusting.
+    - cron: '17 23 * * *'   # 23:17 UTC -> lands ~04:17 UTC
   workflow_dispatch:
     inputs:
       pmat_hunt:
@@ -38,12 +47,27 @@ concurrency:
 jobs:
   story:
     name: Qwen story (apr-cli E2E)
-    # No self-hosted runner carries a bare `gpu` label (the retired lambda-labs-gpu
-    # runner did; it was never replaced). Target the CUDA x86 GPU pool instead —
-    # `cuda` + `X64` resolves to the RTX 4090 runner that actually holds the Qwen
-    # model registry this story exercises. Do NOT use `gpu` (matches nothing → the
-    # cron silently queued+cancelled daily). See feedback_ci_clean_room_label.
-    runs-on: [self-hosted, cuda, X64]
+    # THE SELECTOR NAMED A POOL THAT NO LONGER EXISTS. `[self-hosted, cuda, X64]`
+    # resolved to the RTX 4090 lambda-labs runner, which aprender#2740 /
+    # paiml/infra#359 REMOVED ("lambda-labs is the workstation and must never be
+    # a CI host"). Nothing else in the org carries `cuda` + `X64`: the live
+    # inventory is one gx10-blackwell runner and sixteen intel clean-room
+    # runners. So this cron has queued and been cancelled every day since
+    # 2026-08-30 — a dark lane, and exactly the failure the previous comment here
+    # warned about, arriving from the other direction.
+    #
+    # gx10 is the fleet's only sanctioned GPU runner. Its labels are literal, not
+    # a matrix expression, because paiml/infra#352 requires a selector that can
+    # reach gx10 to name `gpu` and a guard can only check labels it can see.
+    runs-on: [self-hosted, gpu, gx10, cuda, blackwell]
+    # PP-19 / §5.4: this job now contends gx10 with cuda-nightly and
+    # silicon-nightly, so it joins their host group. Groups are repo-wide, so the
+    # shared name is what serialises the three. The workflow-level
+    # `qwen-story-daily` group above still keeps this lane from overlapping
+    # itself. Enforced by scripts/check_perf_concurrency_groups.sh.
+    concurrency:
+      group: perf-gx10
+      cancel-in-progress: false
     timeout-minutes: 30
     env:
       # Default to the runner user's $HOME/models (the models live there, e.g.
@@ -60,9 +84,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo install --path crates/apr-cli --force --features cuda 2>&1 | tail -5
+          # BUILD, never `cargo install`. This runner runs as the host user, so
+          # `cargo install` wrote the HOST's ~/.cargo/bin/apr - on gx10 that is
+          # the fleet-bins install dir, and every beat replaced the fleet's
+          # release binary with a CI dev build (measured 2026-09-25 01:30Z:
+          # v0.69.3 overwritten by `apr 0.69.0 (aa7c6ef0)`, .crates.toml naming
+          # this runner's _work checkout; fleet drift RED bytes-not-recorded).
+          # The story needs the binary on PATH, not installed; scripts/apr_bin.sh
+          # finds <target>/release/apr first and attributes it by dep-info.
+          cargo build --release -p apr-cli --bin apr --features cuda 2>&1 | tail -5
+          APR_BUILT_DIR="$(cargo metadata --format-version 1 --no-deps | jq -r .target_directory)/release"
+          [ -x "$APR_BUILT_DIR/apr" ] || { echo "::error::no apr at $APR_BUILT_DIR"; exit 1; }
 
-          # `cargo install` writes to ~/.cargo/bin. On this runner ~/.local/bin
+          # `cargo install` wrote to ~/.cargo/bin. On this runner ~/.local/bin
           # comes FIRST in PATH and held a 24-day-old apr, so every previous run
           # of this story installed a fresh binary and then executed a stale one:
           #
@@ -72,8 +106,8 @@ jobs:
           # Detected because the format_parity gate reported its OLD result
           # shape (value/threshold 17/17, a token id) on a commit whose source
           # reports 64/64 decode steps. Put the freshly built binary first.
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          export PATH="$HOME/.cargo/bin:$PATH"
+          echo "$APR_BUILT_DIR" >> "$GITHUB_PATH"
+          export PATH="$APR_BUILT_DIR:$PATH"
 
           # Fail closed on staleness. A path fix alone would silently rot again
           # the next time PATH changes; this asserts that the apr the story is

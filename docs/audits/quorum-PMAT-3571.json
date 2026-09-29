@@ -1,0 +1,241 @@
+{
+  "ticket": "PMAT-3571",
+  "base": "origin/main",
+  "base_resolved": "origin/main",
+  "base_note": "no origin/origin/main exists; judged against the local ref",
+  "head": "7e6bc1a50d3d314202d0eefb271e4777c7243a97",
+  "diff_sha256": "11ab75b50065e70855c0d0da4cca6e82a8e5527729c0c9ff2ad0017ec3b5cbc6",
+  "width": 3,
+  "executor": "agy",
+  "prompt_mode": "inline",
+  "prompt_bytes": 22433,
+  "author": {
+    "model": "claude-opus-5",
+    "family": "claude",
+    "source": "flag"
+  },
+  "agreed": false,
+  "lanes": [
+    {
+      "lane": 1,
+      "status": "SUCCESS",
+      "verdict": "PASS",
+      "summary": "The diff precisely implements Unit 1 of the ticket's acceptance criteria. It introduces `zero_layer_refusal` to reject 0-layer transformer stacks at load across all `apr serve` entry points, names the architecture and #3571 in the error, and provides the mandated case row and mutant tests. The implementation correctly limits its scope to Unit 1 (refusal) without prematurely modifying the Qwen35 routing logic reserved for Unit 2. No regressions, weakened gates, or forbidden modifications were found.",
+      "findings": [
+        {
+          "claim": "The zero_layer_refusal function is correctly implemented to reject models with 0 transformer layers, explicitly naming the architecture and ticket #3571 in the CliError.",
+          "file": "crates/apr-cli/src/commands/serve/handler_gpu_completion.rs",
+          "grounding": "cited",
+          "line": 492
+        },
+        {
+          "claim": "The required case row test ('zero_layers_is_refused_by_name_and_any_layer_is_admitted') and mutant test ('serve_refuses_the_qwen35_base_at_load') are included.",
+          "file": "crates/apr-cli/src/commands/serve/handler_gpu_completion.rs",
+          "grounding": "cited",
+          "line": 463
+        },
+        {
+          "claim": "The refusal check is correctly integrated across all specified GGUF, APR, and Safetensors serve entry points, including pre-checking the declared layer count for APR Q4K pool GPU before spawning its thread.",
+          "file": "crates/apr-cli/src/commands/serve/handlers_include_01.rs",
+          "grounding": "cited",
+          "line": 146
+        }
+      ],
+      "raw_bytes": 4046,
+      "err_bytes": 100,
+      "envelope_status": "SUCCESS",
+      "verdict_source": "structured_output",
+      "grounding_check": "parity",
+      "model": "gemini-3.1-pro-high",
+      "model_measured": "gemini-3.1-pro-high",
+      "model_source": "measured",
+      "family": "gemini",
+      "role": "independent",
+      "fallback": {
+        "judged_by": "gemini-3.1-pro-high",
+        "exhausted": false,
+        "attempts": [
+          {
+            "model": "gemini-3.1-pro-high",
+            "family": "gemini",
+            "outcome": "answered"
+          }
+        ],
+        "skipped": []
+      }
+    },
+    {
+      "lane": 2,
+      "status": "SUCCESS",
+      "verdict": "PASS",
+      "summary": "The diff accurately implements the PMAT-3571 requirement. It ensures that any model stack resolving to 0 transformer layers is refused at load on all serve paths, preventing the Qwen3.5 hybrid model from incorrectly proceeding through the generic serve path.\n\nSpecifically, it checks:\n1. `build_serve_model` catches the 0-layer architecture, covering `start_gguf_server`, `start_gguf_server_cuda` and `try_start_wgpu_backend`.\n2. SafeTensors & APR handlers manually perform `zero_layer_refusal` as requested before finalizing initialization, catching the problem early.\n3. It names the architecture and references #3571 in the refusal message, along with the required `apr chat` hint for `qwen35`.\n4. It implements the two requested test criteria: the case row table `zero_layers_is_refused_by_name_and_any_layer_is_admitted` and the mutant test `serve_refuses_the_qwen35_base_at_load`.\n5. All sibling endpoints specified in the issue are accounted for and adequately guarded.\n\nNo refute found.",
+      "findings": [],
+      "raw_bytes": 3385,
+      "err_bytes": 100,
+      "envelope_status": "SUCCESS",
+      "verdict_source": "structured_output",
+      "grounding_check": "parity",
+      "model": "gemini-3.1-pro-low",
+      "model_measured": "gemini-3.1-pro-low",
+      "model_source": "measured",
+      "family": "gemini",
+      "role": "independent",
+      "fallback": {
+        "judged_by": "gemini-3.1-pro-low",
+        "exhausted": false,
+        "attempts": [
+          {
+            "model": "gemini-3.1-pro-low",
+            "family": "gemini",
+            "outcome": "answered"
+          }
+        ],
+        "skipped": []
+      }
+    },
+    {
+      "lane": 3,
+      "status": "NO-VERDICT",
+      "verdict": "NO-VERDICT",
+      "summary": "",
+      "findings": [],
+      "raw_bytes": 1754,
+      "err_bytes": 100,
+      "envelope_status": "SUCCESS",
+      "transport_status": "SUCCESS",
+      "transport_error": "",
+      "salvageable": "/home/noah/.gemini/antigravity-cli/brain/612e5b75-9884-4d4b-8f4c-af249538f9d7 (1280489 bytes)",
+      "carried_verdict": "",
+      "blind_reason": "",
+      "agy_exit": "",
+      "model": "gemini-3.8-flash-high",
+      "model_measured": "gemini-3.8-flash-high",
+      "model_source": "measured",
+      "family": "gemini",
+      "role": "independent",
+      "fallback": {
+        "judged_by": "gemini-3.8-flash-high",
+        "exhausted": false,
+        "attempts": [
+          {
+            "model": "gemini-3.8-flash-high",
+            "family": "gemini",
+            "outcome": "answered"
+          }
+        ],
+        "skipped": []
+      }
+    }
+  ],
+  "dissent": [
+    {
+      "lane": 3,
+      "verdict": "NO-VERDICT",
+      "summary": "",
+      "findings": []
+    }
+  ],
+  "dedup": [
+    {
+      "file": "crates/apr-cli/src/commands/serve/handler_gpu_completion.rs",
+      "line": 463,
+      "lanes_agreeing": [
+        1
+      ],
+      "claims": [
+        "The required case row test ('zero_layers_is_refused_by_name_and_any_layer_is_admitted') and mutant test ('serve_refuses_the_qwen35_base_at_load') are included."
+      ]
+    },
+    {
+      "file": "crates/apr-cli/src/commands/serve/handler_gpu_completion.rs",
+      "line": 492,
+      "lanes_agreeing": [
+        1
+      ],
+      "claims": [
+        "The zero_layer_refusal function is correctly implemented to reject models with 0 transformer layers, explicitly naming the architecture and ticket #3571 in the CliError."
+      ]
+    },
+    {
+      "file": "crates/apr-cli/src/commands/serve/handlers_include_01.rs",
+      "line": 146,
+      "lanes_agreeing": [
+        1
+      ],
+      "claims": [
+        "The refusal check is correctly integrated across all specified GGUF, APR, and Safetensors serve entry points, including pre-checking the declared layer count for APR Q4K pool GPU before spawning its thread."
+      ]
+    }
+  ],
+  "uncovered": [],
+  "coverage_source": "lanes",
+  "partial": true,
+  "partial_reasons": [
+    "lane 3: no verdict object found in lane file (status=SUCCESS) salvageable=/home/noah/.gemini/antigravity-cli/brain/612e5b75-9884-4d4b-8f4c-af249538f9d7 (1280489 bytes) [UNREVIEWED CLAIM MATERIAL — never a PASS]"
+  ],
+  "fallback": {
+    "same_family_width": 1,
+    "chain": [
+      {
+        "model": "gemini-3.1-pro-high",
+        "family": "gemini",
+        "disposition": "configured"
+      },
+      {
+        "model": "gemini-3.1-pro-low",
+        "family": "gemini",
+        "disposition": "configured"
+      },
+      {
+        "model": "gemini-3.8-flash-high",
+        "family": "gemini",
+        "disposition": "configured"
+      },
+      {
+        "model": "gpt-oss-120b-medium",
+        "family": "openai",
+        "disposition": "fallback"
+      },
+      {
+        "model": "qwen3.5",
+        "family": "qwen",
+        "disposition": "not-run",
+        "why": "no quorum.local_lane in the config — the aprender lane has no model to load"
+      },
+      {
+        "model": "claude-opus-4-6-thinking",
+        "family": "claude",
+        "disposition": "width",
+        "why": "same family as the author: at most 1 lane, recorded role width, counted toward no floor (R-15a)"
+      },
+      {
+        "model": "claude-sonnet-4-6",
+        "family": "claude",
+        "disposition": "width",
+        "why": "same family as the author: at most 1 lane, recorded role width, counted toward no floor (R-15a)"
+      }
+    ],
+    "precheck": [
+      {
+        "family": "gemini",
+        "model": "gemini-3.1-pro-high",
+        "probe": 1,
+        "outcome": "live"
+      }
+    ],
+    "prah": {
+      "source": "install-receipt",
+      "path": "/home/noah/.claude/skills/paiml-implement/bin/prah"
+    }
+  },
+  "auto_merge": {
+    "checked": false,
+    "was_armed": false,
+    "disarmed": false,
+    "note": "no --pr given: nothing to disarm"
+  },
+  "lint": {
+    "ok": true,
+    "output": "receipt complete: kind=artifact lanes=3 author=claude-opus-5/claude"
+  }
+}

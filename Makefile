@@ -57,7 +57,7 @@ SHELL := /bin/bash
 .SHELLFLAGS := -e -c
 .ONESHELL:
 
-.PHONY: all build test test-smoke test-fast test-quick test-full test-heavy lint fmt clean doc book book-build book-serve book-test tier1 tier2 tier3 tier4 coverage coverage-fast profile hooks-install hooks-verify lint-scripts bashrs-score bashrs-lint-makefile chaos-test chaos-test-full chaos-test-lite fuzz bench dev pre-push ci check run-ci run-bench audit deps-validate deny pmat-score pmat-gates quality-report semantic-search examples mutants mutants-fast property-test install-alsa test-alsa test-audio-full contract-validate contract-test contract-audit contract-audit-phase2 contract-audit-phase3 contract-regen contract-check dev-setup check-siblings setfit-feature-matrix setfit-repro-inproc setfit-repro-crossproc setfit-repro-replay gemm-thread-determinism setfit-tests setfit-bench-tests contract-audit-phase4 contract-audit-phase5 contract-audit-phase6 contract-audit-phase8 contract-audit-phase8-selftest setfit-apr-tests setfit-classify-tests setfit-bundle-tests setfit-config-tests setfit-evaluate-tests setfit-codec-tests setfit-reload-tests setfit-lock-tests setfit-verify-tests setfit-lifecycle-tests setfit-ui-tests setfit-cli-train-tests setfit-cli-predict-tests setfit-cli-inspect-tests setfit-cli-eval-tests setfit-cli-io-tests setfit-cli-serve-tests setfit-serve-tests setfit-parity setfit-serve-smoke setfit-cli-lifecycle setfit-api-boundary setfit-all-tests setfit-bench-door-probe setfit-bench-door-probe-build lint-current check-wasm32
+.PHONY: all build test test-smoke test-fast test-quick test-full test-heavy lint fmt clean doc book book-build book-serve book-test tier1 tier2 tier3 tier4 coverage coverage-fast profile hooks-install hooks-verify lint-scripts bashrs-score bashrs-lint-makefile chaos-test chaos-test-full chaos-test-lite fuzz bench dev pre-push ci check run-ci run-bench audit deps-validate deny pmat-score pmat-gates quality-report semantic-search examples mutants mutants-fast property-test install-alsa test-alsa test-audio-full contract-validate contract-test contract-audit contract-audit-phase2 contract-audit-phase3 contract-regen contract-check dev-setup check-siblings setfit-feature-matrix setfit-repro-inproc setfit-repro-crossproc setfit-repro-replay gemm-thread-determinism setfit-tests setfit-bench-tests contract-audit-phase4 contract-audit-phase5 contract-audit-phase6 contract-audit-phase8 contract-audit-phase8-selftest setfit-apr-tests setfit-classify-tests setfit-bundle-tests setfit-config-tests setfit-evaluate-tests setfit-codec-tests setfit-reload-tests setfit-lock-tests setfit-verify-tests setfit-lifecycle-tests setfit-ui-tests setfit-cli-train-tests setfit-cli-predict-tests setfit-cli-inspect-tests setfit-cli-eval-tests setfit-cli-io-tests setfit-cli-serve-tests setfit-serve-tests setfit-parity setfit-serve-smoke setfit-cli-lifecycle setfit-api-boundary setfit-all-tests setfit-bench-door-probe setfit-bench-door-probe-build lint-current check-wasm32 gate contrastive-data-boundary contrastive-data-boundary-cases
 
 # Default target
 all: tier2
@@ -142,22 +142,38 @@ test-heavy: ## Heavy/slow tests (ignored tests)
 	@time PROPTEST_CASES=256 QUICKCHECK_TESTS=256 cargo test --workspace -- --ignored
 	@echo "✅ Heavy tests passed"
 
+# aprender#2522: both targets below piped cargo into `grep`, so make read
+# GREP's exit status and never cargo's. `test-spec` therefore printed
+# "✅ Spec tests complete" for months while the suite was 38-red — grep found
+# the "test result:" line, which is exactly what it does when tests FAIL. These
+# were the suite's only callers anywhere, so nothing could observe the failures.
+# CLAUDE.md "Verification Discipline" rule 1: never read `$?` through a pipe.
 test-model: ## Run model falsification tests ONE AT A TIME (requires models/, ollama, GPU)
 	@echo "🧪 Running model falsification tests (one at a time to avoid OOM)..."
-	@for test in f_ollama_001 f_ollama_002 f_ollama_003 f_ollama_004 f_ollama_005 \
+	@rc=0; for test in f_ollama_001 f_ollama_002 f_ollama_003 f_ollama_004 f_ollama_005 \
 	             f_perf_003 f_trueno_004 f_trueno_008 f_rosetta_002 f_qa_002; do \
 		echo "  ⏳ $$test"; \
 		PROPTEST_CASES=10 QUICKCHECK_TESTS=10 \
-		cargo test --features model-tests --test falsification_spec_v10_tests "$$test" 2>&1 \
-			| grep "test result:" || echo "  ❌ $$test FAILED"; \
-	done
+		cargo test --features model-tests --test falsification_spec_v10_tests "$$test" \
+			> /tmp/apr-test-model-$$test.log 2>&1 \
+			|| { rc=1; echo "  ❌ $$test FAILED"; }; \
+		grep "test result:" /tmp/apr-test-model-$$test.log || true; \
+	done; \
+	[ "$$rc" -eq 0 ] || { echo "❌ Model tests FAILED"; exit 1; }
 	@echo "✅ Model tests complete"
 
 test-spec: ## Run ALL spec falsification tests (structural only, no models)
 	@echo "🔬 Running spec structural tests..."
 	@PROPTEST_CASES=10 QUICKCHECK_TESTS=10 \
-		cargo test --features model-tests --test falsification_spec_v10_tests 2>&1 \
-		| grep "test result:"
+		cargo test --features model-tests \
+			--test falsification_spec_v10_tests \
+			--test falsification_stress_tests \
+			--test falsification_gpu_state_tests \
+		> /tmp/apr-test-spec.log 2>&1; \
+	rc=$$?; \
+	grep "test result:" /tmp/apr-test-spec.log || true; \
+	[ "$$rc" -eq 0 ] || { sed -n '/^failures:/,$$p' /tmp/apr-test-spec.log; \
+		echo "❌ Spec tests FAILED"; exit 1; }
 	@echo "✅ Spec tests complete"
 
 # Linting
@@ -484,6 +500,17 @@ tier3:
 	@echo "Checking no contract names an enforcement command that cannot run (aprender#2504)..."
 	@bash scripts/check_contract_enforcement.sh --self-test
 	@bash scripts/check_contract_enforcement.sh
+	@echo "Checking no test asserts about the fd 0 it inherited (aprender#2307)..."
+	@bash scripts/check_hermetic_stdin_tests.sh --self-test
+	@bash scripts/check_hermetic_stdin_tests.sh
+	@echo "Checking fleet hosts accept only the manifest nightly apr/pv (aprender#4186)..."
+	@bash scripts/check_nightly_pin.sh --self-test
+	@echo "Checking no declared-unsupported capability is already implemented (aprender#3686)..."
+	@bash scripts/check_unwired_capabilities.sh --self-test
+	@bash scripts/check_unwired_capabilities.sh
+	@echo "Checking no NEW silent truncation of a value a human reads later (aprender#3904)..."
+	@bash scripts/check_no_silent_truncation.sh --self-test
+	@bash scripts/check_no_silent_truncation.sh
 	@if [ -d tests/golden ]; then \
 		if . scripts/apr_bin.sh 2>/dev/null; then \
 			echo "Running probar golden regression with profiling... ($$APR)"; \
@@ -877,10 +904,20 @@ contrastive-data-boundary: ## D-04: bytes boundary for aprender-contrastive-data
 # into the comparison would read the comparison's status (CLAUDE.md rule 1), and
 # a cargo tree that failed outright would feed an EMPTY closure into a subset
 # test — which passes vacuously and silently disarms the supply-chain half.
+# stderr goes to its OWN file, never into the one parsed as the closure. It used to be
+# `2>&1`, and cargo writes progress to stderr: `Blocking waiting for file lock on package
+# cache`, `Updating crates.io index`, `Downloading ...`. Each contributes a first field
+# that `awk` below turns into a phantom package name and `comm -23` reports as an
+# unlisted dependency. That fired twice unprompted during review (rc=2, offender
+# `Blocking`) on a tree that was clean seconds earlier -- so any concurrent cargo, a
+# rust-analyzer or a parallel CI job, reds this gate at random. The FAIL text says do not
+# widen the allowlist, which leaves a developer no lever except to add `Blocking` to
+# allowed-deps.txt permanently. A required gate that reds at random is worse than one
+# that never reds.
 	@cargo tree -p aprender-contrastive-data -e normal --prefix none --no-dedupe \
-		> target/contrastive-data-tree.txt 2>&1 || \
+		> target/contrastive-data-tree.txt 2> target/contrastive-data-tree.err || \
 		{ echo "FAIL: cargo tree failed; the D-04 dependency check would pass vacuously"; \
-		  cat target/contrastive-data-tree.txt; exit 1; }
+		  cat target/contrastive-data-tree.txt target/contrastive-data-tree.err; exit 1; }
 	@if [ ! -s target/contrastive-data-tree.txt ]; then \
 		echo "FAIL: cargo tree produced no output; the D-04 dependency check would pass vacuously"; \
 		exit 1; \
@@ -926,9 +963,23 @@ contrastive-data-boundary: ## D-04: bytes boundary for aprender-contrastive-data
 		exit 1; \
 	fi
 	@: > target/contrastive-data-symbols.txt
+# The third detector is not decoration. The first two match five literal spellings, and
+# `use std::{fs, net::TcpStream};` contains NONE of them -- the text is `std::{fs` -- while
+# binding `fs` and `TcpStream` into scope identically. This is what rustfmt emits under
+# `imports_granularity = "Crate"`, which is exactly what rustfmt.toml asks for here, so it
+# is the DEFAULT spelling rather than an exotic one. Verified against a compiled mutation:
+# a module doing `fs::File::create(...).write_all(...)` and `TcpStream::connect(...)`
+# compiled with rc=0 AND passed the gate with rc=0 before this line existed.
+#
+# awk, not grep, because a grouped import spans lines: it accumulates a `use` statement
+# until the `;` and tests the whole statement. The pattern set is a case table, not a
+# guess -- 6 must-match and 6 must-not-match cases live in
+# tests/gate_cases/, and `make contrastive-data-boundary-cases` re-runs them. Re-run the
+# table rather than re-reading the pattern.
 	@while IFS= read -r srcfile; do \
 		{ grep -nE 'std::fs|std::net|std::path' "$$srcfile" || true; \
-		  grep -nwE 'Path|PathBuf' "$$srcfile" || true; } \
+		  grep -nwE 'Path|PathBuf' "$$srcfile" || true; \
+		  awk -f scripts/lib/d04_grouped_std_import.awk "$$srcfile" || true; } \
 		| grep -vE '^[0-9]+:[[:space:]]*//' \
 		| sed "s|^|$$srcfile:|" >> target/contrastive-data-symbols.txt || true; \
 	done < target/contrastive-data-srcfiles.txt
@@ -939,7 +990,51 @@ contrastive-data-boundary: ## D-04: bytes boundary for aprender-contrastive-data
 		exit 1; \
 	fi
 	@echo "  source: no fs/net/path symbols under src/ (no cfg(test) exemption)"
+	@$(MAKE) --no-print-directory contrastive-data-boundary-cases
 	@echo "contrastive-data-boundary: PASSED"
+
+# D-04 CASE TABLE. The source half is a set of text patterns, and the ONLY thing that ever
+# caught one of its misses was a case -- never a review. So the patterns carry a table and
+# the gate runs it on every invocation: a detector that has silently stopped matching
+# fails HERE, loudly, instead of passing a violation through in silence.
+#
+# The filename IS the expectation. must_match_* must be flagged, must_not_match_* must not.
+# Both directions matter: a pattern that flags everything is as broken as one that flags
+# nothing, and only the must_not_match half can tell them apart.
+contrastive-data-boundary-cases: ## D-04: prove the source detectors still match what they claim
+	@cases=crates/aprender-contrastive-data/tests/gate_cases; \
+	if [ ! -d "$$cases" ]; then \
+		echo "FAIL: $$cases is MISSING. Without it the detectors are unproven and this"; \
+		echo "      target would report PASS while checking nothing."; \
+		exit 1; \
+	fi; \
+	n=0; bad=0; \
+	for f in "$$cases"/must_*.rs; do \
+		[ -e "$$f" ] || continue; \
+		n=$$((n + 1)); \
+		hits=$$({ grep -nE 'std::fs|std::net|std::path' "$$f" || true; \
+		          grep -nwE 'Path|PathBuf' "$$f" || true; \
+		          awk -f scripts/lib/d04_grouped_std_import.awk "$$f" || true; } \
+		        | grep -vE '^[0-9]+:[[:space:]]*//' | wc -l); \
+		case "$$(basename "$$f")" in \
+		  must_match_*)     want=1 ;; \
+		  must_not_match_*) want=0 ;; \
+		  *) echo "FAIL: $$f is neither must_match_* nor must_not_match_*"; exit 1 ;; \
+		esac; \
+		if [ "$$want" = 1 ] && [ "$$hits" -eq 0 ]; then \
+			echo "FAIL: $$f MUST be flagged and was not -- a detector stopped matching"; \
+			bad=$$((bad + 1)); \
+		fi; \
+		if [ "$$want" = 0 ] && [ "$$hits" -ne 0 ]; then \
+			echo "FAIL: $$f MUST NOT be flagged and was -- a detector is over-broad"; \
+			bad=$$((bad + 1)); \
+		fi; \
+	done; \
+	if [ "$$n" -eq 0 ]; then \
+		echo "FAIL: no case files found; the case table would pass vacuously"; exit 1; \
+	fi; \
+	if [ "$$bad" -ne 0 ]; then echo "  $$bad of $$n case(s) WRONG"; exit 1; fi; \
+	echo "  cases:  $$n/$$n (6 must-match, 6 must-not-match)"
 
 # Tier 4: CI/CD (5-60 minutes, heavyweight)
 tier4: tier3
@@ -959,9 +1054,18 @@ tier4: tier3
 # ============================================================================
 # COVERAGE TARGETS (Two-Phase Pattern from bashrs)
 # ============================================================================
-# Pattern: bashrs/Makefile - Two-phase coverage with mold linker workaround
-# CRITICAL: mold linker breaks LLVM coverage instrumentation
-# Solution: Temporarily move ~/.cargo/config.toml during coverage runs
+# #3839: these targets used to `mv ~/.cargo/config.toml` aside for the whole run
+# (the bashrs "mold breaks LLVM coverage" workaround). That renames a file every
+# other cargo process of this user reads, so on a shared host it silently changes
+# other agents' builds mid-run. No fleet host has a global config (checked
+# 2026-09-23: lambda, intel, yoga, gx10), so the move was a no-op there. Instead,
+# COV_REFUSE_GLOBAL_MOLD refuses to measure where a global config enables mold,
+# and never edits it.
+COV_REFUSE_GLOBAL_MOLD = @if [ -f "$${CARGO_HOME:-$$HOME/.cargo}/config.toml" ] && grep -q mold "$${CARGO_HOME:-$$HOME/.cargo}/config.toml"; then \
+	echo "❌ $${CARGO_HOME:-$$HOME/.cargo}/config.toml enables mold, which breaks LLVM coverage instrumentation."; \
+	echo "   Refusing rather than moving a file every other cargo process on this host reads (issue 3839)."; \
+	echo "   Run with CARGO_HOME pointing at a copy without mold, or remove mold from that file."; \
+	exit 1; fi
 
 # Exclusion patterns for coverage reports
 # ONLY excludes truly external/feature-gated code - all apr subcommands INCLUDED
@@ -1008,7 +1112,13 @@ COV_THRESHOLD := 95
 # So the enforced condition is "do not regress below what we actually have".
 # Raise this number whenever a run comes in higher; never lower it to make red
 # go away. Integer truncation gives ~0.78pt of headroom before 88 becomes 87.
-COV_FLOOR := 88
+# 2026-09-23, #4023: 88 -> 89. The first COMPLETE measurement (every aprender-serve process
+# exited normally; coverage-nightly run 35908686532) was 849871/941605 = 90.26%. 89 is a
+# ratchet with margin, since 90 would leave no room for noise; it goes to 90 once two
+# consecutive nightlies measure >= 90.5% (release-cop ruling).
+COV_FLOOR := 89
+# #4023: libtest threads for aprender-serve's `gpu` coverage shard (25.9 GB at 22 on yoga).
+COV_GPU_SHARD_THREADS ?= 4
 
 # NVMe target dir (mirrors cargo() shell function that sets CARGO_TARGET_DIR)
 # Without this, Make's subshell bypasses the function and uses ./target/ instead
@@ -1038,10 +1148,46 @@ COV_CARGO_ENV := $(if $(COV_TARGET_DIR),CARGO_TARGET_DIR=$(COV_TARGET_DIR))
 #   two-phase, unscoped report  -> LH=0   LF=0    (empty)
 #   report --summary-only -p A -p B -> LH=686 LF=737  (93.08%)
 #   single-phase --lcov --output-path -> LH=686 LF=737  (93.08%)
-# Single-phase is chosen over an explicit -p list because the invocation that selects the
-# scope is the one that writes the report, so the two cannot drift apart again. profraw
+# #4023 brings two-phase BACK, deliberately: aprender-serve's lib tests cannot run in one
+# process on a 28 GB runner (#4028), so they run as several --no-report processes and one
+# report merges them. It is safe because every report is now scoped by an explicit `-p` list
+# DERIVED from `cargo metadata` (scripts/coverage_report_scope.py), the verified alternative
+# above, and scripts/check_coverage_report_scoped.sh refuses any unscoped `llvm-cov report`. profraw
 # survive it (31 present afterwards), so coverage-html still has data to work from.
 .PHONY: coverage-check contracts
+
+# BSE-03 phase A (Pmat-Ticket: PMAT-1068). The README's contract count is
+# DERIVED: scripts/readme_sync.sh rewrites the text between the
+# <!-- CONTRACT_COUNT_START/END --> markers with `find contracts/ -name '*.yaml'`
+# and nothing else in the file. Idempotent — running it twice is byte-identical.
+#
+# Before this, three literals in three prose sites were maintained by hand and
+# `--regen` only PRINTED the numbers for a human to copy; they sat two behind
+# the filesystem (1812 vs 1814) and were GREEN, because the guard lets the
+# README lag. scripts/check_readme_claims.sh judges the generated block by
+# EQUALITY against the MERGE TREE, with origin/main as the comparand.
+.PHONY: readme-sync readme-sync-check
+readme-sync: ## Regenerate the README's derived contract count (BSE-03)
+	@bash scripts/readme_sync.sh --write
+
+readme-sync-check: ## Fail if README.md is not what the generator produces
+	@bash scripts/readme_sync.sh --check
+
+# The polarity table of the D2 normaliser, on a throwaway git repo (BSE-03
+# phase A). It carries its own registered mutation: a copy of the guard whose
+# merge-tree measurement READS A FILE ON DISK must turn the hand-edited rows
+# GREEN, which is what makes their RED load-bearing rather than incidental.
+# `--class complexity` and `--class satd` are stubs and exit 3, never 0.
+.PHONY: roadmap-aggregate roadmap-aggregate-check
+roadmap-aggregate: ## Regenerate docs/roadmaps/roadmap.yaml from docs/roadmaps/entries/ (#3296)
+	@python3 scripts/lib/roadmap_fragments.py aggregate --write
+
+roadmap-aggregate-check: ## Fail if roadmap.yaml is not what the aggregator produces, or if it is not idempotent
+	@python3 scripts/lib/roadmap_fragments.py aggregate --check
+
+.PHONY: ratchet-semantics-test
+ratchet-semantics-test: ## BSE-03: D2 ratchet polarity rows (--class readme)
+	@bash scripts/tests/ratchet_semantics_test.sh --class readme
 
 # Alias the dogfood pre-release protocol looks for. It expects `coverage-check`;
 # without it the gate reports WARN ("verify >=95% manually"), i.e. a release gate
@@ -1053,44 +1199,157 @@ coverage-check: coverage
 # CLAUDE.md, and the dogfood protocol looked for a target that did not exist, so
 # it WARNed instead of checking. `pv lint` runs validate + audit + score across
 # contracts/ and is the documented entry point (never hand-rolled bash).
+# EXIT PROPAGATION (PVL-001 EV-4, aprender#4168). Under .ONESHELL this whole
+# recipe is ONE shell script, so without errexit its status is the LAST line's
+# and every earlier step -- `pv lint` included -- was advisory: a failing lint
+# printed its tail and the gate exited 0. `set -e` stops at a failing step.
+# It is NOT enough on the pv lines: errexit ignores a failure on the LEFT of
+# `&&`, so a pv_bin.sh that REFUSES the binary (stale, wrong identity) would
+# fall through to the next step. Hence `|| exit` there as well, which exits
+# with that list's own status (pv's rc through the pipe, via -o pipefail).
+# Case table + mutants: scripts/tests/make_contracts_propagates.sh.
 contracts:
+	@set -e
 	@echo "== provable contracts: pv lint contracts/ =="
-	@. scripts/pv_bin.sh && "$$PV" lint contracts/ 2>&1 | tail -5
+# `| tail -5` DISCARDED THE VERDICT: the pipeline's status is tail's, so the armed-meet
+# result was PRINTED and NOT ENFORCED (found by aprender-d8, 0.69.1 tail rehearsal). That
+# is Verification Discipline #1 in the release's own contract gate, and
+# contracts-exit-integrity does not catch it -- it looks for `|| true` and bare for-loops,
+# not for a pipe. The output is kept to a tail for readability by writing it to a file and
+# tailing THAT, so the exit status belongs to pv and nothing else.
+# .ONESHELL: the whole recipe is ONE shell, so an unconditional `exit $$rc` here ended the
+# recipe green after lint -- census, graph, README, provenance and the engine tests never ran.
+# Exit only on failure (#4315, caught by scripts/tests/make_contracts_propagates.sh).
+	@. scripts/pv_bin.sh && { "$$PV" lint contracts/ > /tmp/pv-lint-contracts.$$$$.log 2>&1; rc=$$?; tail -5 /tmp/pv-lint-contracts.$$$$.log; rm -f /tmp/pv-lint-contracts.$$$$.log; [ $$rc -eq 0 ] || exit $$rc; } || exit
+	@echo "== census: tracked contracts/census.json == a fresh one (ONT-001 ONT-1, F-1) =="
+	@git ls-files --error-unmatch contracts/census.json >/dev/null || { echo "FAIL: contracts/census.json is not tracked, so diffing it proves nothing"; exit 1; }
+	@. scripts/pv_bin.sh && "$$PV" census contracts --format json > contracts/census.json || exit
+	@git diff --exit-code contracts/census.json || { echo "FAIL: the tracked census differs from a fresh one — commit the regenerated contracts/census.json"; exit 1; }
+	@echo "== graph: tracked contracts/contracts.nt + shapes.ttl == a fresh extraction (ONT-001 ONT-4b, R-18) =="
+	@. scripts/pv_bin.sh && "$$PV" extract contracts --check >/dev/null || exit
+	@echo "== README states the censused count =="
+	@bash scripts/readme_sync.sh --check
+	@echo "== provenance marks, interim (ONT-001 R-10) =="
+	@bash scripts/lint-provenance.sh --self-test
+	@bash scripts/lint-provenance.sh contracts/external-corpora.yaml
 	@echo "== contract engine tests =="
 	@cargo test -p aprender-contracts --lib 2>&1 | grep -E "test result" | tail -1
 
+# #3839: skips are EXACT full test paths from scripts/coverage-skips.txt, one reason
+# per entry. They used to be 19 --skip substrings that removed 2,713 tests (2,702 of
+# which pass without a GPU), so the number measured a subset over the whole denominator.
 coverage: ## Coverage summary + threshold check (warm: ~3min)
 	@echo "📊 Running coverage ($(COV_THRESHOLD)%+ threshold)..."
+	@# #4023: refuse before any test runs if a `llvm-cov report` anywhere would cover only the facade.
+	@scripts/check_coverage_report_scoped.sh
 	@which cargo-llvm-cov > /dev/null 2>&1 || { cargo install cargo-llvm-cov --locked || exit 1; }
-	@test -f ~/.cargo/config.toml && mv ~/.cargo/config.toml ~/.cargo/config.toml.bak || true
+	$(COV_REFUSE_GLOBAL_MOLD)
 	@# Pre-clean: remove stale profraw files to avoid LLVM version mismatch
 	@COVDIR=$$($(COV_CARGO_ENV) cargo llvm-cov show-env 2>/dev/null | grep CARGO_LLVM_COV_TARGET_DIR | sed "s/.*=//"); \
 	if [ -n "$$COVDIR" ]; then find "$$COVDIR" -name '*.profraw' -delete 2>/dev/null || true; fi
 	@mkdir -p target/coverage
+	@rm -f target/coverage/lcov.info target/coverage/test.log target/coverage/failed-tests.txt
 	@printf '%s' '$(COVERAGE_EXCLUDE_REGEX)' > target/coverage/.exclude-re
-	@echo "🧪 Tests with instrumentation + report in ONE invocation (CB-127-A: cargo llvm-cov test, not nextest)..."
+	@# #4023: aprender-serve's lib tests run as SEVERAL processes. In one process they build up
+	@# memory across tests (#4028: 30 GB single-threaded, 45 GB at 22 threads on gx10) and earlyoom
+	@# SIGTERMed them on yoga's 28 GB box (run 35868368976); one module group per process peaks
+	@# <= 7.8 GB. EVERY run is --no-report and ONE `cargo llvm-cov report` merges them: a run WITH a
+	@# report cleans the earlier profiles (measured: the first run's coverage fell to 0).
+	@echo "🧪 Workspace lib tests except aprender-serve (instrumented, --no-report)..."
 	@PROPTEST_CASES=10 QUICKCHECK_TESTS=10 RUST_MIN_STACK=16777216 CARGO_BUILD_JOBS=4 \
-		$(COV_CARGO_ENV) cargo llvm-cov test \
-		--workspace --exclude aprender-gpu --lib \
-		--lcov --output-path target/coverage/lcov.info \
-		--ignore-filename-regex "$$(cat target/coverage/.exclude-re)" \
-		-- --skip prop_gbm_expected_value --skip slow --skip heavy --skip h12_ --skip j2_ \
-		   --skip falsification --skip chaos --skip disconnect --skip benchmark_parity \
-		   --skip qwen2_generation --skip qwen2_golden --skip qwen2_weight --skip load_test \
-		   --skip spec_checklist_w --skip spec_checklist_u --skip verify_audio --skip g9_roofline \
-		   --skip cuda --skip gpu_ \
-		|| { test -f ~/.cargo/config.toml.bak && mv ~/.cargo/config.toml.bak ~/.cargo/config.toml; exit 1; }
+		$(COV_CARGO_ENV) cargo llvm-cov test --no-report \
+		--workspace --exclude aprender-gpu --exclude aprender-serve --lib --ignore-run-fail \
+		-- --exact $$(sed -e '/^#/d' -e '/^[[:space:]]*$$/d' -e 's/^/--skip /' scripts/coverage-skips.txt) \
+		2>&1 | tee target/coverage/test.log; \
+	rc=$${PIPESTATUS[0]}; \
+	if [ "$$rc" -ne 0 ]; then \
+		echo "❌ coverage DID NOT MEASURE: cargo llvm-cov exited $$rc on the workspace run (build failure;"; \
+		echo "   with --ignore-run-fail a failing test alone does not stop it). No coverage verdict."; \
+		exit 1; \
+	fi
+	@echo "🧪 aprender-serve lib tests, one process per module group (instrumented, --no-report)..."
+	@rm -rf target/coverage/serve-shards
+	@$(COV_CARGO_ENV) cargo llvm-cov test --no-report -p aprender-serve --lib -- --list \
+		> target/coverage/serve-list.txt 2>> target/coverage/test.log || \
+		{ echo "❌ coverage DID NOT MEASURE: could not list aprender-serve's lib tests. No coverage verdict."; exit 1; }
+	@python3 scripts/coverage_serve_shards.py target/coverage/serve-list.txt scripts/coverage-skips.txt \
+		target/coverage/serve-shards scripts/coverage-solo.txt
+	@# scripts/coverage-solo.txt: run FIRST, each in its OWN process, and print its test binary's peak RSS
+	@# (RUSAGE_CHILDREN.ru_maxrss), so a later skip carries a measured per-test reason.
+	@: > target/coverage/failed-runs.txt; \
+	for solo in target/coverage/serve-shards/solo-*.txt; do \
+		[ -e "$$solo" ] || continue; \
+		t=$$(cat $$solo); \
+		PROPTEST_CASES=10 QUICKCHECK_TESTS=10 RUST_MIN_STACK=16777216 CARGO_BUILD_JOBS=4 \
+			$(COV_CARGO_ENV) python3 -c 'import resource, subprocess, sys; rc = subprocess.call(sys.argv[2:]); print("coverage-solo-maxrss", resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss, "KB", sys.argv[1], "rc=%d" % rc, flush=True); sys.exit(rc)' \
+			"$$t" cargo llvm-cov test --no-report -p aprender-serve --lib --ignore-run-fail -- --exact "$$t" \
+			2>&1 | tee -a target/coverage/test.log; \
+		rc=$${PIPESTATUS[0]}; \
+		[ "$$rc" -eq 0 ] || echo "solo $$t rc=$$rc" >> target/coverage/failed-runs.txt; \
+	done
+	@# The `gpu` module builds up memory in one process on yoga (25.9 GB at 22 threads, 26.5 GB at 4;
+	@# runs 35881004821, 35885731831), so the partitioner chunks it into <= 200-test processes, which
+	@# also run at COV_GPU_SHARD_THREADS. EVERY shard runs even if one fails, so a dispatch yields the
+	@# whole picture; any failure then means no verdict, naming each failed shard.
+	@for shard in target/coverage/serve-shards/shard-*.txt; do \
+		threads=""; case "$$shard" in *-gpu.*.txt) threads="--test-threads=$(COV_GPU_SHARD_THREADS)" ;; esac; \
+		echo "   $$shard ($$(wc -l < $$shard) tests) $$threads"; \
+		PROPTEST_CASES=10 QUICKCHECK_TESTS=10 RUST_MIN_STACK=16777216 CARGO_BUILD_JOBS=4 \
+			$(COV_CARGO_ENV) cargo llvm-cov test --no-report -p aprender-serve --lib --ignore-run-fail \
+			-- --exact $$threads $$(cat $$shard) 2>&1 | tee -a target/coverage/test.log; \
+		rc=$${PIPESTATUS[0]}; \
+		echo "   coverage-shard-rc $$rc $$shard"; \
+		[ "$$rc" -eq 0 ] || echo "shard $$shard rc=$$rc" >> target/coverage/failed-runs.txt; \
+	done
+	@if [ -s target/coverage/failed-runs.txt ]; then \
+		echo "❌ coverage DID NOT MEASURE: these aprender-serve runs failed (every one was still run):"; \
+		sed 's/^/     /' target/coverage/failed-runs.txt; \
+		echo "   No coverage verdict."; \
+		exit 1; \
+	fi
+	@echo "📊 Merging every run's profiles into one report..."
+	@# `--workspace --exclude aprender-gpu` is REQUIRED: the root Cargo.toml is also a package (the
+	@# `apr` facade), and an unqualified `report` covers ONLY the root package. Proof run
+	@# 35892421393 printed "Finished report saved" and then found no (non-empty) lcov. Measured with
+	@# cargo-llvm-cov 0.9.0 (CI's version) on a root-package workspace: without --workspace the
+	@# lcov held only src/lib.rs; with it, every member.
+	@# SCOPE IS EXPLICIT: an unscoped `report` covers only the root facade (empty lcov, run
+	@# 35892421393 and the single-phase note above); `report --exclude` is rejected by 0.9.0 (run
+	@# 35901458111) and `report --workspace` by older versions. A derived `-p` list works on both.
+	@$(COV_CARGO_ENV) cargo llvm-cov report $$(python3 scripts/coverage_report_scope.py --exclude aprender-gpu) \
+		--lcov --output-path $(CURDIR)/target/coverage/lcov.info \
+		--ignore-filename-regex "$$(cat target/coverage/.exclude-re)" 2>&1 | tee -a target/coverage/test.log; \
+	rc=$${PIPESTATUS[0]}; \
+	echo "   lcov: $$(ls -la $(CURDIR)/target/coverage/lcov.info 2>&1)"; \
+	echo "   lcov files under the workspace: $$(find $(CURDIR) -name lcov.info -newer target/coverage/.exclude-re 2>/dev/null | tr '\n' ' ')"; \
+	echo "   profraw files: $$(find $${CARGO_TARGET_DIR:-$(CURDIR)/target} -name '*.profraw' 2>/dev/null | wc -l)"; \
+	if [ "$$rc" -ne 0 ]; then echo "❌ coverage DID NOT MEASURE: the merged report step exited $$rc. No coverage verdict."; exit 1; fi
+	@# #3839: --ignore-run-fail keeps one failing test from blanking the number (the 2026-09-23
+	@# nightly wrote no lcov because of one timing test). Failures are LISTED, not hidden, and
+	@# every test run here is also run by CI's workspace-test, which fails on them.
+	@grep -E '^test .* \.\.\. FAILED$$' target/coverage/test.log | sed -e 's/^test //' -e 's/ \.\.\. FAILED$$//' | sort -u > target/coverage/failed-tests.txt || true
+	@# A test BINARY killed by a signal (earlyoom SIGTERMed aprender-serve at 25.7 GB on yoga, run
+	@# 35868368976) is swallowed by --ignore-run-fail, and its crate's profile is missing from the
+	@# lcov: that run printed "76% ... REGRESSION" with the largest crate absent. No verdict then.
+	@scripts/check_coverage_log_complete.sh target/coverage/test.log
 	@echo "📊 Parsing LCOV for the threshold check..."
 	@# Parse LCOV for line coverage (LH=lines hit, LF=lines found)
-	@LH=$$(awk -F: '/^LH:/{s+=$$2} END{print s+0}' target/coverage/lcov.info); \
+	@if [ ! -s target/coverage/lcov.info ]; then echo "❌ coverage DID NOT MEASURE: no lcov.info was written. No coverage verdict."; exit 1; fi; \
+	LH=$$(awk -F: '/^LH:/{s+=$$2} END{print s+0}' target/coverage/lcov.info); \
 	LF=$$(awk -F: '/^LF:/{s+=$$2} END{print s+0}' target/coverage/lcov.info); \
-	if [ "$$LF" -gt 0 ]; then COV_PCT=$$((LH * 100 / LF)); else COV_PCT=0; fi; \
+	if [ "$$LF" -eq 0 ]; then echo "❌ coverage DID NOT MEASURE: lcov.info has 0 instrumented lines. No coverage verdict."; exit 1; fi; \
+	COV_PCT=$$((LH * 100 / LF)); \
+	NFAIL=$$(wc -l < target/coverage/failed-tests.txt); \
 	echo "TOTAL: $$LH/$$LF lines covered ($${COV_PCT}%)"; \
-	echo "TOTAL $$LH $$LF $${COV_PCT}%" > target/coverage/summary.txt; \
-	mkdir -p .pmat-metrics; \
+	echo "TOTAL $$LH $$LF $${COV_PCT}% failed_tests=$$NFAIL" > target/coverage/summary.txt; \
+	if [ "$$NFAIL" -gt 0 ]; then \
+		echo "⚠  $$NFAIL test(s) FAILED in the instrumented run (measured anyway; CI workspace-test gates them):"; \
+		sed 's/^/     /' target/coverage/failed-tests.txt; \
+		sed 's/^/FAILED /' target/coverage/failed-tests.txt >> target/coverage/summary.txt; \
+	fi; \
+	mkdir -p .pmat-metrics || exit 1; \
 	printf '{"coverage_pct":%s}' "$$COV_PCT" > .pmat-metrics/coverage.result; \
 	echo "   wrote .pmat-metrics/coverage.result ($${COV_PCT}%) for pmat score"; \
-	test -f ~/.cargo/config.toml.bak && mv ~/.cargo/config.toml.bak ~/.cargo/config.toml || true; \
 	if [ "$$COV_PCT" -lt "$(COV_FLOOR)" ]; then \
 		echo "❌ REGRESSION: coverage $${COV_PCT}% fell below the enforced floor $(COV_FLOOR)%"; \
 		echo "   The floor is the last measured value, so this means coverage went DOWN."; \
@@ -1116,12 +1375,11 @@ coverage-fast: coverage
 # gate anything - unlike `coverage`, whose 0% fed the >=95% threshold check.
 coverage-html: ## Generate HTML + LCOV reports from last coverage run
 	@echo "📊 Generating HTML + LCOV reports..."
-	@test -f ~/.cargo/config.toml && mv ~/.cargo/config.toml ~/.cargo/config.toml.bak || true
+	$(COV_REFUSE_GLOBAL_MOLD)
 	@mkdir -p target/coverage
 	@printf '%s' '$(COVERAGE_EXCLUDE_REGEX)' > target/coverage/.exclude-re
-	@$(COV_CARGO_ENV) cargo llvm-cov report --html --output-dir target/coverage/html --ignore-filename-regex "$$(cat target/coverage/.exclude-re)"
-	@$(COV_CARGO_ENV) cargo llvm-cov report --lcov --output-path target/coverage/lcov.info --ignore-filename-regex "$$(cat target/coverage/.exclude-re)"
-	@test -f ~/.cargo/config.toml.bak && mv ~/.cargo/config.toml.bak ~/.cargo/config.toml || true
+	@$(COV_CARGO_ENV) cargo llvm-cov report $$(python3 scripts/coverage_report_scope.py --exclude aprender-gpu) --html --output-dir target/coverage/html --ignore-filename-regex "$$(cat target/coverage/.exclude-re)"
+	@$(COV_CARGO_ENV) cargo llvm-cov report $$(python3 scripts/coverage_report_scope.py --exclude aprender-gpu) --lcov --output-path target/coverage/lcov.info --ignore-filename-regex "$$(cat target/coverage/.exclude-re)"
 	@echo "📍 HTML: target/coverage/html/index.html"
 
 # Full coverage: All features (for CI, slower)
@@ -1129,18 +1387,17 @@ coverage-html: ## Generate HTML + LCOV reports from last coverage run
 coverage-full: ## Full coverage report (all features, CI only)
 	@echo "📊 Running full coverage analysis (all features)..."
 	@which cargo-llvm-cov > /dev/null 2>&1 || { cargo install cargo-llvm-cov --locked || exit 1; }
-	@test -f ~/.cargo/config.toml && mv ~/.cargo/config.toml ~/.cargo/config.toml.bak || true
+	$(COV_REFUSE_GLOBAL_MOLD)
 	@mkdir -p target/coverage
 	@printf '%s' '$(COVERAGE_EXCLUDE_REGEX)' > target/coverage/.exclude-re
 	@PROPTEST_CASES=10 QUICKCHECK_TESTS=10 CARGO_BUILD_JOBS=4 \
 		$(COV_CARGO_ENV) cargo llvm-cov test --no-report --workspace --lib --all-features \
 		--ignore-filename-regex "$$(cat target/coverage/.exclude-re)" \
 		-- --skip prop_gbm_expected_value --skip slow --skip heavy --skip benchmark --skip h12_ --skip j2_
-	@$(COV_CARGO_ENV) cargo llvm-cov report --html --output-dir target/coverage/html --ignore-filename-regex "$$(cat target/coverage/.exclude-re)"
-	@$(COV_CARGO_ENV) cargo llvm-cov report --lcov --output-path target/coverage/lcov.info --ignore-filename-regex "$$(cat target/coverage/.exclude-re)"
+	@$(COV_CARGO_ENV) cargo llvm-cov report $$(python3 scripts/coverage_report_scope.py) --html --output-dir target/coverage/html --ignore-filename-regex "$$(cat target/coverage/.exclude-re)"
+	@$(COV_CARGO_ENV) cargo llvm-cov report $$(python3 scripts/coverage_report_scope.py) --lcov --output-path target/coverage/lcov.info --ignore-filename-regex "$$(cat target/coverage/.exclude-re)"
 	@echo ""
-	@$(COV_CARGO_ENV) cargo llvm-cov report --summary-only --ignore-filename-regex "$$(cat target/coverage/.exclude-re)"
-	@test -f ~/.cargo/config.toml.bak && mv ~/.cargo/config.toml.bak ~/.cargo/config.toml || true
+	@$(COV_CARGO_ENV) cargo llvm-cov report $$(python3 scripts/coverage_report_scope.py) --summary-only --ignore-filename-regex "$$(cat target/coverage/.exclude-re)"
 
 # Open coverage report in browser
 coverage-open: ## Open HTML coverage report in browser
@@ -1196,6 +1453,44 @@ pre-push: tier3
 # CI/CD checks
 ci: tier4
 
+# Fail-closed, comparand-pinned composite gate (BSE-16, docs/specifications/
+# build-system-enhancement.md, infra repo). Replaces both a bare `pmat verify`
+# (RED on pre-existing SATD, verify.rs:460,493) and `cargo test --workspace`
+# (42-94min measured, docs/reports/work-history-delay-optimization-report.md)
+# with: skip the SATD/tests stages pmat can't pass or can't scope correctly,
+# run the tree-property guard, then test only the touched crates and their
+# direct reverse dependents (scripts/gate_touched_crates.sh), falling back to
+# `cargo check --workspace --tests` when that selection can't be trusted.
+# `@set -e` is REQUIRED as the first recipe line: under .ONESHELL (see top of
+# this file) a failing line does NOT abort a multi-line recipe on its own —
+# only the shell's own exit status does, and without `set -e` that is just the
+# LAST command's exit code (measured: a `false` mid-recipe is otherwise silently
+# swallowed). This local `set -e` is scoped to this recipe's own shell
+# invocation only, not the file-wide .SHELLFLAGS (see that comment for why -e
+# is not applied globally).
+gate: ## Fail-closed, comparand-pinned composite gate (BSE-16)
+	@set -e
+	@echo "==> gate comparand: origin/main@$$(git rev-parse origin/main)"
+	pmat verify --format json --skip satd --skip tests
+	scripts/guard_tree.sh --no-cargo
+	scripts/gate_touched_crates.sh
+
+# Predict whether merge(origin/main, HEAD) will pass the tree-property
+# guards, BEFORE pushing (BSE-14, docs/specifications/build-system-
+# enhancement.md §4 wave 3, infra repo). `predict` builds the merge in a
+# throwaway `git worktree` (never touches this branch's own working tree),
+# runs guard_tree.sh --no-cargo and gate_touched_crates.sh --dry-run against
+# it, and records the verdict in .predict/last-<branch>.json. `predict-check`
+# is the cheap replay for a pre-push hook: it refuses (exit 3) rather than
+# reuse a verdict made stale by origin/main moving, HEAD moving, or the
+# working tree going dirty, and exits 4 (distinct) on a fetch/network
+# failure.
+predict: ## Predict merge(origin/main, HEAD) against the tree-property guards (BSE-14)
+	scripts/predict_merge.sh
+
+predict-check: ## Refuse a stale prediction; exit 0 only if still fresh (BSE-14)
+	scripts/predict_merge.sh --check
+
 # Quick check (compile only)
 check:
 	cargo check --all
@@ -1227,6 +1522,8 @@ deps-validate:
 deny:
 	@echo "🔒 Running cargo-deny checks..."
 	@bash scripts/check_deny_exemptions_live.sh
+	@bash scripts/check_no_ghsa_banned_crates.sh --self-test
+	@bash scripts/check_no_ghsa_banned_crates.sh
 	@if command -v cargo-deny >/dev/null 2>&1; then \
 		cargo deny check; \
 	else \
@@ -1622,7 +1919,7 @@ run-bench: ## Run benchmark suite
 
 pmat-score: ## Calculate Rust project quality score
 	@echo "📊 Calculating Rust project quality score..."
-	@pmat rust-project-score || echo "⚠️  pmat not found. Install with: cargo install pmat"
+	@pmat rust-project-score || echo "⚠️  pmat not found — run: cargo install pmat"
 	@echo ""
 
 pmat-gates: ## Run pmat quality gates
@@ -1829,13 +2126,13 @@ install-alsa: ## Install ALSA development libraries (Linux only)
 			sudo apt-get update && sudo apt-get install -y libasound2-dev; \
 		elif command -v dnf >/dev/null 2>&1; then \
 			echo "  Detected: Fedora/RHEL"; \
-			sudo dnf install -y alsa-lib-devel; \
+			sudo dnf install -y alsa-lib-devel || exit 1; \
 		elif command -v pacman >/dev/null 2>&1; then \
 			echo "  Detected: Arch Linux"; \
 			sudo pacman -S --noconfirm alsa-lib; \
 		elif command -v zypper >/dev/null 2>&1; then \
 			echo "  Detected: openSUSE"; \
-			sudo zypper install -y alsa-devel; \
+			sudo zypper install -y alsa-devel || exit 1; \
 		else \
 			echo "❌ Unknown package manager. Please install ALSA dev libraries manually:"; \
 			echo "   - Debian/Ubuntu: sudo apt-get install libasound2-dev"; \
@@ -1882,7 +2179,12 @@ test-audio-full: ## Run all audio tests including ALSA (if available)
 # contracts/aprender/binding.yaml. Generated tests: tests/contracts/.
 # Pre-consolidation `../provable-contracts/` references retired.
 
-PV_BIN := cargo run --release -p aprender-contracts-cli --bin pv --
+# NOT named PV_BIN (PVL-001 EV-4): a makefile assignment overrides an inherited
+# environment variable AND is what make exports to recipes, so `PV_BIN := cargo
+# run ...` handed scripts/pv_bin.sh the string "cargo run ..." whenever a caller
+# exported PV_BIN=/path/to/pv -- the one override pv_bin.sh honours -- and every
+# `. scripts/pv_bin.sh` step refused with `not executable: cargo run ...`.
+PV_CARGO_RUN := cargo run --release -p aprender-contracts-cli --bin pv --
 BINDING := contracts/aprender/binding.yaml
 CONTRACTS := contracts/softmax-kernel-v1.yaml \
              contracts/rmsnorm-kernel-v1.yaml \
@@ -2050,22 +2352,24 @@ contract-validate: ## Validate all kernel contracts (schema + staleness)
 	@echo "Validating kernel contracts..."
 	@for contract in $(CONTRACTS); do \
 		echo "  $$contract"; \
-		$(PV_BIN) validate "$$contract" || exit 1; \
+		$(PV_CARGO_RUN) validate "$$contract" || exit 1; \
 	done
 	@echo "Contract validation passed"
 
 contract-test: ## Run contract-driven property tests
+	@set -e
 	@echo "Running contract property tests..."
-	@PROPTEST_CASES=100 cargo test --test contract_tests
+	@PROPTEST_CASES=100 cargo test -p aprender-core --test contract_tests
 	@echo "Contract tests passed"
 
 contract-audit: ## Audit binding coverage (equations -> implementations)
 	@echo "Running binding audit..."
-	@for contract in $(CONTRACTS); do \
+	@rc=0; for contract in $(CONTRACTS); do \
 		echo ""; \
-		$(PV_BIN) audit "$$contract" --binding $(BINDING); \
+		$(PV_CARGO_RUN) audit "$$contract" --binding $(BINDING) || rc=$$?; \
 	done
 	@echo ""
+	@if [ "$$rc" -ne 0 ]; then echo "Binding audit FAILED: at least one audit exited non-zero (last rc=$$rc)"; exit "$$rc"; fi
 	@echo "Binding audit complete"
 
 # D-26 / review finding F9 (plan 02-08). `pv validate` checks contract SHAPE;
@@ -3680,12 +3984,15 @@ setfit-all-tests: setfit-apr-tests setfit-classify-tests setfit-bundle-tests \
 	setfit-serve-tests ## Phase 4: every scoped setfit suite, each guarded
 	@echo "setfit-all-tests: every Phase 4 suite ran under its own floor"
 
+# contract-regen keeps `|| true` ON PURPOSE (PVL-001 EV-4): it is not a gate --
+# it writes .rs.new files for a human to review, and one contract probar cannot
+# render must not stop the others being written.
 contract-regen: ## Regenerate wired test files from contracts
 	@echo "Regenerating contract test files..."
 	@for contract in $(CONTRACTS); do \
 		name=$$(basename "$$contract" .yaml | sed 's/-kernel-v[0-9]*//;s/-v[0-9]*//'); \
 		echo "  $$name <- $$contract"; \
-		$(PV_BIN) probar "$$contract" --binding $(BINDING) > tests/contracts/$${name}_contract.rs.new 2>/dev/null || true; \
+		$(PV_CARGO_RUN) probar "$$contract" --binding $(BINDING) > tests/contracts/$${name}_contract.rs.new 2>/dev/null || true; \
 	done
 	@echo "Regeneration complete (review .rs.new files)"
 
@@ -3700,10 +4007,10 @@ contract-check: contract-validate contract-test contract-audit ## Full contract 
 # Sibling repos required for full-stack development
 SIBLINGS := ../realizar ../entrenar ../trueno ../renacer ../provable-contracts ../pacha
 
-dev-setup: ## Set up local dev environment with sibling repo overrides
+dev-setup: ## Set up the dev environment with sibling repo overrides
 	@echo "Setting up full-stack development environment..."
 	@if [ ! -f .cargo/config.toml ]; then \
-		cp .cargo/config.toml.dev-overrides .cargo/config.toml; \
+		cp .cargo/config.toml.dev-overrides .cargo/config.toml || exit 1; \
 		echo "Created .cargo/config.toml with sibling overrides"; \
 	elif ! grep -q '\[patch.crates-io\]' .cargo/config.toml; then \
 		echo "" >> .cargo/config.toml; \
@@ -3718,7 +4025,7 @@ dev-setup: ## Set up local dev environment with sibling repo overrides
 publish: ## Publish crate(s) to crates.io — strips [patch], publishes, then verifies cargo install
 	@echo "Publishing to crates.io (removing [patch.crates-io] temporarily)..."
 	@if [ -f .cargo/config.toml ]; then \
-		cp .cargo/config.toml .cargo/config.toml.publish-backup; \
+		cp .cargo/config.toml .cargo/config.toml.publish-backup || exit 1; \
 		echo "# Clean config for publishing" > .cargo/config.toml; \
 	fi
 	@CRATE=$(CRATE); \
@@ -3730,7 +4037,7 @@ publish: ## Publish crate(s) to crates.io — strips [patch], publishes, then ve
 		echo "          before aprender#2559."; \
 		echo "Restoring config..."; \
 		if [ -f .cargo/config.toml.publish-backup ]; then \
-			cp .cargo/config.toml.publish-backup .cargo/config.toml; \
+			cp .cargo/config.toml.publish-backup .cargo/config.toml && \
 			rm -f .cargo/config.toml.publish-backup; \
 		fi; \
 		exit 1; \
@@ -3743,7 +4050,7 @@ publish: ## Publish crate(s) to crates.io — strips [patch], publishes, then ve
 		echo "FAIL: $$CRATE is not a publishable crate in ANY workspace here."; \
 		echo "      (scripts/lib/cascade_universe.py enumerates all of them)"; \
 		if [ -f .cargo/config.toml.publish-backup ]; then \
-			cp .cargo/config.toml.publish-backup .cargo/config.toml; \
+			cp .cargo/config.toml.publish-backup .cargo/config.toml && \
 			rm -f .cargo/config.toml.publish-backup; \
 		fi; \
 		exit 1; \
@@ -3762,7 +4069,7 @@ publish: ## Publish crate(s) to crates.io — strips [patch], publishes, then ve
 	STATUS=$$?; \
 	echo "Restoring .cargo/config.toml..."; \
 	if [ -f .cargo/config.toml.publish-backup ]; then \
-		cp .cargo/config.toml.publish-backup .cargo/config.toml; \
+		cp .cargo/config.toml.publish-backup .cargo/config.toml && \
 		rm -f .cargo/config.toml.publish-backup; \
 	fi; \
 	if [ $$STATUS -ne 0 ]; then \
@@ -3839,3 +4146,33 @@ check-siblings: ## Verify sibling repos exist and versions are compatible
 		echo "Or build standalone (uses crates.io versions):"; \
 		echo "  Remove [patch.crates-io] from .cargo/config.toml"; \
 	fi
+
+# APR-RELEASE-001 §11.2 (ONT R-6): the five ontology counters move ONLY through
+# this target. `--check` is what guard_tree.sh runs on every PR; `--write` is the
+# deliberate restamp, and it is the only way a counter is allowed to change.
+.PHONY: ont-ratchet ont-ratchet-check
+ont-ratchet:
+	@bash scripts/check_ont_ratchet.sh --write
+
+ont-ratchet-check:
+	@bash scripts/check_ont_ratchet.sh --check
+
+# ONT-001 §5 ONT-4b2 / R-13 — the out-of-gate SHACL differential oracle.
+#
+# NOT a PR check, by the rule that puts it here: `shacl` is 316 crates and pinned at ONE version (ONT-0's
+# ledger), so it lives in tests/oracle/ — a crate DETACHED from the workspace — and runs in the release gate
+# only. It validates the same graph twice (the pinned processor and the in-house validator) and writes
+# tests/oracle/differential.json, which is TRACKED: the row's probe reads `cases>0 and disagreements==0`, and
+# a tracked file nobody regenerated is caught by `oracle-check` diffing it.
+.PHONY: oracle oracle-check
+oracle:
+	@echo "== W3C cases + the real corpus through the pinned oracle (shacl 0.3.21, out of gate) =="
+	@. scripts/pv_bin.sh && "$$PV" lint contracts --gate shapes --format json > "$${TMPDIR:-/tmp}/pv-shapes.json" 2>/dev/null || true
+	@# No `cd`: this Makefile is .ONESHELL, so a cd on one line moves every line after it (the first form of
+	@# this target built in tests/oracle/ and then ran `$(cd tests/oracle …)` from inside it — "No such file").
+	@cargo build --release --quiet --manifest-path tests/oracle/Cargo.toml
+	@"$$(cargo metadata --no-deps --format-version 1 --manifest-path tests/oracle/Cargo.toml | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')/release/ont-oracle" . "$${TMPDIR:-/tmp}/pv-shapes.json"
+
+oracle-check: oracle
+	@git diff --exit-code tests/oracle/differential.json \
+	  || { echo "FAIL: tests/oracle/differential.json differs from a fresh run — commit it"; exit 1; }

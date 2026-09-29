@@ -12,6 +12,9 @@ fn dispatch_run(
     task: Option<&str>,
     format: &str,
     no_gpu: bool,
+    // #3602: threaded, not re-derived — `dispatch.rs` classifies it once with
+    // `registry::Request::wanted()`.
+    accel_forced: bool,
     offline: bool,
     benchmark: bool,
     verbose: bool,
@@ -31,6 +34,8 @@ fn dispatch_run(
     repeat_penalty: f32,
     repeat_last_n: usize,
     split_prompt: bool,
+    // #3723: `--thinking on|off`, None when absent.
+    thinking: Option<bool>,
 ) -> Result<(), CliError> {
     let effective_trace = trace || trace_payload;
     let effective_trace_level = if trace_payload {
@@ -38,34 +43,19 @@ fn dispatch_run(
     } else {
         trace_level
     };
-    let merged_prompt = prompt.or(positional_prompt).cloned();
-    // GH-638: Auto-detect chat template from model name when --chat not explicit.
-    // Instruct/Chat models (Qwen-Instruct, LLaMA-Instruct, Mistral-Instruct, etc.)
-    // need ChatML wrapping for correct output. Without it, the model ignores the
-    // prompt structure and produces garbled responses.
-    let use_chat = chat || {
-        let src_lower = source.to_lowercase();
-        merged_prompt.is_some()
-            && (src_lower.contains("instruct") || src_lower.contains("chat"))
-    };
-    let effective_prompt = if use_chat {
-        merged_prompt
-            .as_ref()
-            .map(|p| format!("<|im_start|>user\n{p}<|im_end|>\n<|im_start|>assistant\n"))
-    } else {
-        merged_prompt
-    };
+    let (run_prompt, chat_template) = run_prompt_and_chat(prompt, positional_prompt, source, chat);
 
     run::run(
         source,
         input,
-        effective_prompt.as_deref(),
+        run_prompt.as_deref(),
         max_tokens,
         stream,
         language,
         task,
         format,
         no_gpu,
+        accel_forced,
         offline,
         benchmark,
         verbose,
@@ -82,7 +72,33 @@ fn dispatch_run(
         repeat_penalty,
         repeat_last_n,
         split_prompt,
+        chat_template,
+        thinking,
     )
+}
+
+/// The prompt `apr run` hands to realizar, and whether realizar must apply the chat
+/// template to it.
+///
+/// #3672: this used to return the prompt already wrapped in hard-coded ChatML whenever
+/// `--chat` was given or the source name said instruct/chat (GH-638). realizar's
+/// `prepare_tokens` then applied the model's own template on top, escaping the inner
+/// special tokens (`<\u{200B}|`), so every instruct `apr run` fed the model a user turn
+/// nested inside a user turn: 52 prompt tokens where llama.cpp has 21, and ChatML even for
+/// a model whose template is not ChatML. The prompt now stays raw text. The flag, `--chat`
+/// or the GH-638 name heuristic, reaches realizar as `force_chat_template`, and the model's
+/// own template is applied exactly once.
+fn run_prompt_and_chat(
+    prompt: Option<&String>,
+    positional_prompt: Option<&String>,
+    source: &str,
+    chat: bool,
+) -> (Option<String>, bool) {
+    let merged_prompt = prompt.or(positional_prompt).cloned();
+    let src_lower = source.to_lowercase();
+    let chat_template = chat
+        || (merged_prompt.is_some() && (src_lower.contains("instruct") || src_lower.contains("chat")));
+    (merged_prompt, chat_template)
 }
 
 /// Build server config and launch serve.
@@ -95,6 +111,7 @@ fn dispatch_serve(
     no_metrics: bool,
     no_gpu: bool,
     gpu: bool,
+    gpu_layers: &Option<String>,
     batch: bool,
     trace: bool,
     trace_level: &str,
@@ -117,6 +134,15 @@ fn dispatch_serve(
         metrics: !no_metrics,
         no_gpu,
         gpu,
+        // PERF-021: parse HERE so a bad value is rejected before a server
+        // starts, and so `--gpu` keeps meaning `--gpu-layers all`.
+        gpu_layers: match gpu_layers.as_deref() {
+            Some(v) => Some(serve::GpuLayerRequest::parse(v).map_err(CliError::InvalidInput)?),
+            None if gpu && !no_gpu => Some(serve::GpuLayerRequest::All),
+            // #4089: no flag resolves as `apr run` resolves it on this build.
+            None => serve::GpuLayerRequest::serve_default(no_gpu, backend.as_deref()),
+        },
+        gpu_layers_defaulted: gpu_layers.is_none() && !(gpu && !no_gpu),
         batch,
         trace,
         trace_level: trace_level.to_owned(),
@@ -157,16 +183,32 @@ fn dispatch_serve_command(command: &ServeCommands, cli: &Cli) -> Result<(), CliE
             no_metrics,
             no_gpu,
             gpu,
+            gpu_layers,
+            list_devices,
             batch,
             trace,
             trace_level,
             profile,
-            backend,
+            backend: BackendArg { backend },
             otlp_endpoint,
             context_length,
             no_fp8_cache,
             ollama_compat,
-        } => crate::error::resolve_model_path(file).and_then(|r| {
+        } => {
+            // PERF-021: answer "what can this BUILD dispatch to" without needing
+            // a model or a port — the question a user hitting #2696 had no way
+            // to ask.
+            if *list_devices {
+                return crate::commands::serve::list_devices();
+            }
+            // clap guarantees `file` is present unless --list-devices short-
+            // circuited above, so this cannot be None here.
+            let Some(file) = file.as_ref() else {
+                return Err(CliError::InvalidInput(
+                    "serve run needs a model file".to_string(),
+                ));
+            };
+            crate::error::resolve_model_path(file).and_then(|r| {
             dispatch_serve(
                 &r,
                 *port,
@@ -175,6 +217,7 @@ fn dispatch_serve_command(command: &ServeCommands, cli: &Cli) -> Result<(), CliE
                 *no_metrics,
                 *no_gpu,
                 *gpu,
+                gpu_layers,
                 *batch,
                 *trace,
                 trace_level,
@@ -186,7 +229,8 @@ fn dispatch_serve_command(command: &ServeCommands, cli: &Cli) -> Result<(), CliE
                 *no_fp8_cache,
                 *ollama_compat,
             )
-        }),
+        })
+        },
     }
 }
 

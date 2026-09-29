@@ -170,23 +170,18 @@ contracts:
       // Verify GemmBackwardAKernel::tiled() is used, not ::new()
 
       '
-qa_gates:
-  ptx_static_analysis:
-    description: Verify emitted PTX has shared memory and FMA
-    command: cargo test -p trueno-gpu -- backward_gemm_tiled
-    expected: All tiled backward GEMM tests pass
-  numerical_parity:
-    description: Tiled vs naive output parity on GPU
-    command: cargo test -p trueno-gpu --features cuda-test -- backward_gemm_parity
-    expected: Max elementwise diff < 1e-4
-  barrier_safety:
-    description: No divergent barriers in tiled kernels
-    command: cargo test -p trueno-gpu -- backward_gemm_barrier
-    expected: analyze_barrier_safety().is_safe == true
-  entrenar_dispatch:
-    description: Production backward dispatch uses tiled kernels
-    command: cargo test -p entrenar -- backward_gemm_dispatch
-    expected: Kernel names do not contain 'naive'
+# The four checks below lived under a top-level `qa_gates:` (plural) block that
+# the schema has no field for, so serde dropped every one of them and no pv gate
+# ever saw them. SCHEMA-019 now rejects that spelling; the checks are folded into
+# the real `qa_gate:` below, with the command each one runs kept alongside.
+#   ptx_static_analysis  cargo test -p trueno-gpu -- backward_gemm_tiled
+#                        expect: all tiled backward GEMM tests pass
+#   numerical_parity     cargo test -p trueno-gpu --features cuda-test -- backward_gemm_parity
+#                        expect: max elementwise diff < 1e-4
+#   barrier_safety       cargo test -p trueno-gpu -- backward_gemm_barrier
+#                        expect: analyze_barrier_safety().is_safe == true
+#   entrenar_dispatch    cargo test -p entrenar -- backward_gemm_dispatch
+#                        expect: kernel names do not contain 'naive'
 qa_gate:
   id: F-GBTV-001
   name: gemm-backward-tiled-v1 Contract
@@ -194,44 +189,58 @@ qa_gate:
   checks:
   - validation
   - falsification
+  - ptx_static_analysis
+  - numerical_parity
+  - barrier_safety
+  - entrenar_dispatch
 proof_obligations:
-- type: invariant
+- id: GBT-INV-001
+  type: invariant
   property: Tiled GEMM AI scales linearly with tile size
   formal: Tiled GEMM AI scales linearly with tile size
   applies_to: all
-- type: invariant
+- id: GBT-INV-002
+  type: invariant
   property: Naive GEMM AI = 2*K / (K + N) * 1/sizeof(f32) ~ 0.5 for large N
   formal: Naive GEMM AI = 2*K / (K + N) * 1/sizeof(f32) ~ 0.5 for large N
   applies_to: all
-- type: invariant
+- id: GBT-INV-003
+  type: invariant
   property: 'RTX 4090 (sm_89): 100KB shared memory per SM'
   formal: 'RTX 4090 (sm_89): 100KB shared memory per SM'
   applies_to: all
-- type: invariant
+- id: GBT-INV-004
+  type: invariant
   property: 'TILE=32: 8KB << 100KB, allows 12 concurrent blocks per SM'
   formal: 'TILE=32: 8KB << 100KB, allows 12 concurrent blocks per SM'
   applies_to: all
-- type: invariant
+- id: GBT-INV-005
+  type: invariant
   property: 'B^T access: B is stored row-major [K,N], transposed read is B[j,i] for column i'
   formal: 'B^T access: B is stored row-major [K,N], transposed read is B[j,i] for column i'
   applies_to: all
-- type: invariant
+- id: GBT-INV-006
+  type: invariant
   property: 'Tiled: load B_tile as transposed tile from global memory'
   formal: 'Tiled: load B_tile as transposed tile from global memory'
   applies_to: all
-- type: invariant
+- id: GBT-INV-007
+  type: invariant
   property: 'A^T access: A stored row-major [M,K], transposed read is A[i,j] for row j'
   formal: 'A^T access: A stored row-major [M,K], transposed read is A[i,j] for row j'
   applies_to: all
-- type: invariant
+- id: GBT-INV-008
+  type: invariant
   property: 'Tiled: load A_tile as transposed tile from global memory'
   formal: 'Tiled: load A_tile as transposed tile from global memory'
   applies_to: all
-- type: invariant
+- id: GBT-INV-009
+  type: invariant
   property: 'Without unrolling: 1 / (1 + 3) = 0.25 (75% overhead)'
   formal: 'Without unrolling: 1 / (1 + 3) = 0.25 (75% overhead)'
   applies_to: all
-- type: invariant
+- id: GBT-INV-010
+  type: invariant
   property: 'With 4x unroll: 4 / (4 + 3) = 0.57 (43% overhead)'
   formal: 'With 4x unroll: 4 / (4 + 3) = 0.57 (43% overhead)'
   applies_to: all

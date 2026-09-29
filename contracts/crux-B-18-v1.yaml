@@ -107,7 +107,7 @@ falsification_tests:
   prediction: "cos_sim(apr_imatrix, llama_imatrix) ≥ 0.99 per tensor"
   test: |
     # TODO: check in reference imatrix.dat from llama.cpp in evidence/crux/llama_cpp/
-    REF=/home/noah/src/aprender-worktrees/crux-spec/evidence/crux/llama_cpp/imatrix-wikitext2-tinyllama.dat
+    REF=${APR_CRUX_GOLDENS:-evidence/crux}/llama_cpp/imatrix-wikitext2-tinyllama.dat
     [ -f "$REF" ] || { echo "reference imatrix absent"; exit 2; }
     apr calibrate test-data/tinyllama-q4km.apr --dataset wikitext-2 --samples 128 --seq-len 512 --seed 42 -o /tmp/apr-im.apr
     apr diff /tmp/apr-im.apr "$REF" --metric cosine --json > /tmp/cmp.json
@@ -115,13 +115,17 @@ falsification_tests:
   if_fails: "apr imatrix diverges from llama.cpp imatrix (cos < 0.99 on some tensor)"
 
 proof_obligations:
-- type: invariant
+- id: CB16069-INV-001
+  type: invariant
   property: "Calibration sampling is deterministic given (dataset_ref, seed, samples)"
-- type: invariant
+- id: CB16069-INV-002
+  type: invariant
   property: "imatrix covers every linear tensor in the model graph"
-- type: invariant
+- id: CB16069-INV-003
+  type: invariant
   property: "No NaN/Inf/negative importance values emitted"
-- type: equivalence
+- id: CB16069-EQ-004
+  type: equivalence
   property: "apr imatrix cosine_sim ≥ 0.99 vs llama.cpp imatrix per tensor"
 
 verification_summary:

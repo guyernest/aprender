@@ -123,9 +123,44 @@ fn metrics_routes() -> Vec<Route> {
     ]
 }
 
+/// What the loaded `AppState` can answer (#3991).
+///
+/// A route in `GET /` is a capability claim. `/v1/batch/completions` needs a
+/// `cached_model` (the wgpu batch path); a GGUF server — CPU or CUDA — has none, so
+/// the route answered 503 "No GPU-capable model loaded" while `GET /` and the
+/// startup banner listed it. A route whose handler has no backend in this state is
+/// now neither mounted nor listed.
+#[derive(Debug, Clone, Copy)]
+pub struct RouteCapabilities {
+    /// `cached_model` is present, so `/v1/batch/completions` can answer.
+    pub gpu_batch: bool,
+}
+
+impl RouteCapabilities {
+    /// Read the capabilities off a built state.
+    #[must_use]
+    pub fn of(state: &AppState) -> Self {
+        #[cfg(feature = "gpu")]
+        let gpu_batch = state.cached_model().is_some();
+        // Without `gpu` the handler is a stub that always answers 503.
+        #[cfg(not(feature = "gpu"))]
+        let gpu_batch = {
+            let _ = state;
+            false
+        };
+        Self { gpu_batch }
+    }
+
+    /// Every capability present: the largest surface any state can mount.
+    #[must_use]
+    pub fn all() -> Self {
+        Self { gpu_batch: true }
+    }
+}
+
 /// Routes mounted only when `RouterConfig::openai_api` is set (the default).
-fn openai_routes() -> Vec<Route> {
-    vec![
+fn openai_routes(caps: RouteCapabilities) -> Vec<Route> {
+    let mut routes = vec![
         // OpenAI-compatible API (v1) - spec §5.1
         ("GET", "/v1/models", get(openai_models_handler)),
         ("POST", "/v1/completions", post(openai_completions_handler)),
@@ -147,13 +182,13 @@ fn openai_routes() -> Vec<Route> {
         // GPU batch inference API (PARITY-022)
         ("POST", "/v1/gpu/warmup", post(gpu_warmup_handler)),
         ("GET", "/v1/gpu/status", get(gpu_status_handler)),
-        (
-            "POST",
-            "/v1/batch/completions",
-            post(gpu_batch_completions_handler),
-        ),
         // TUI monitoring API (PARITY-107)
         ("GET", "/v1/metrics", get(server_metrics_handler)),
+        // PP-LLAMA-001 §12 row 6 / PP-2: what THIS process resolved — compute
+        // class from residency, build features, offload, scheduler, KV and the
+        // CUDA block. Unconditional: a harness must be able to ask a CPU server
+        // what it is, and get `compute_class: "cpu"` rather than a 404.
+        ("GET", "/v1/effective-config", get(effective_config_handler)),
         // PMAT-923: Ollama-native HTTP API (/api/* prefix) — makes `apr serve` a
         // drop-in Ollama HTTP replacement. Both delegate to the OpenAI chat
         // generation path. Discharges OBLIG-OLLAMA-API-CHAT-GENERATE-ROUTED.
@@ -168,7 +203,16 @@ fn openai_routes() -> Vec<Route> {
         // aprender#2396(2): every Ollama embedding client posts here; the route
         // did not exist, so they got the 404 fallback.
         ("POST", "/api/embeddings", post(ollama_embeddings_handler)),
-    ]
+    ];
+    // GPU batch inference API (PARITY-022): only where a `cached_model` can serve it.
+    if caps.gpu_batch {
+        routes.push((
+            "POST",
+            "/v1/batch/completions",
+            post(gpu_batch_completions_handler),
+        ));
+    }
+    routes
 }
 
 /// Routes mounted only in CUDA builds (realizr#191, F-QUALITY-01).
@@ -210,14 +254,14 @@ fn setfit_routes() -> Vec<Route> {
     )]
 }
 
-/// Every route this configuration mounts, in advertised order.
-fn route_table(config: &RouterConfig) -> Vec<Route> {
+/// Every route this configuration mounts for a state with `caps`, in advertised order.
+fn route_table(config: &RouterConfig, caps: RouteCapabilities) -> Vec<Route> {
     let mut table = native_routes();
     if config.metrics {
         table.extend(metrics_routes());
     }
     if config.openai_api {
-        table.extend(openai_routes());
+        table.extend(openai_routes(caps));
     }
     #[cfg(feature = "cuda")]
     table.extend(cuda_routes());
@@ -236,9 +280,16 @@ fn route_table(config: &RouterConfig) -> Vec<Route> {
 /// and `/v1/predict` for GGUF models, where it can only answer 503.
 ///
 /// Derived from `route_table`, the same table `create_router_with_config` mounts,
-/// so advertising a route and mounting it are one act.
-pub fn advertised_routes(config: &RouterConfig) -> Vec<String> {
-    route_index_of(&route_table(config))
+/// so advertising a route and mounting it are one act. It takes the STATE the
+/// router will be built with (#3991): which routes are mounted depends on what the
+/// loaded model can answer, so a banner computed without it would be a second claim.
+pub fn advertised_routes(config: &RouterConfig, state: &AppState) -> Vec<String> {
+    advertised_routes_for(config, RouteCapabilities::of(state))
+}
+
+/// `advertised_routes` for explicit capabilities — the guard's route universe.
+pub fn advertised_routes_for(config: &RouterConfig, caps: RouteCapabilities) -> Vec<String> {
+    route_index_of(&route_table(config, caps))
 }
 
 fn route_index_of(table: &[Route]) -> Vec<String> {
@@ -274,7 +325,7 @@ pub fn create_router_with_config(state: AppState, config: RouterConfig) -> Route
     // route table this router actually mounted — the one thing a client needs to
     // discover the surface it landed on — and `/ready` is the conventional
     // readiness path, an alias of `/health/ready`.
-    let table = route_table(&config);
+    let table = route_table(&config, RouteCapabilities::of(&state));
     let index_routes = route_index_of(&table);
 
     // `GET /` answers with the route table this router actually mounted — the one
@@ -426,6 +477,15 @@ fn sanitized_error_message(status: StatusCode) -> String {
 /// through untouched, so every handler-authored message survives verbatim. The
 /// original headers are preserved as well — notably `allow` on a 405, which a
 /// rebuilt response would have dropped.
+///
+/// aprender#2609: `application/x-ndjson` is passed through on the same grounds.
+/// It is JSON — one object per line — and the only thing that emits it here is
+/// the Ollama streaming path, whose terminal `done:true` object is the contract
+/// an Ollama client parses. Collapsing that into a single `{"error":…}` object
+/// would leave the client with no `done` field at all, which is exactly the
+/// malformed-stream outcome `chat_response_to_parts` exists to prevent. Without
+/// this, propagating the real status onto `/api/chat` and `/api/generate`
+/// (#2609) destroyed the frame it was meant to keep honest.
 async fn sanitize_json_rejection(
     request: axum::http::Request<axum::body::Body>,
     next: axum::middleware::Next,
@@ -437,12 +497,14 @@ async fn sanitize_json_rejection(
         return response;
     }
 
-    let already_json = response
+    let already_structured = response
         .headers()
         .get(axum::http::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|ct| ct.starts_with("application/json"));
-    if already_json {
+        .is_some_and(|ct| {
+            ct.starts_with("application/json") || ct.starts_with("application/x-ndjson")
+        });
+    if already_structured {
         return response;
     }
 
@@ -543,17 +605,19 @@ mod client_visible_reason_tests {
     }
 }
 
-/// Process-wide server start instant.
+/// Seconds since this server started.
 ///
-/// Initialised lazily on the first `/health*` hit. `Instant` is
-/// monotonic in `std` — see `std::time::Instant` docs — which
-/// discharges FALSIFY-CRUX-C-34-003 (monotonic `uptime_sec`).
-fn server_uptime_sec() -> f64 {
-    static SERVER_START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    SERVER_START
-        .get_or_init(std::time::Instant::now)
-        .elapsed()
-        .as_secs_f64()
+/// PP-30: read from the ONE process clock (`AppState::clock`), which also
+/// produces `started_utc` on `/v1/effective-config` and `created` on
+/// `/v1/models`. It used to be a private `OnceLock<Instant>` latched on the
+/// first `/health*` hit — monotonic, so FALSIFY-CRUX-C-34-003 held, but with no
+/// wall-clock counterpart a receipt could cite and disagreeing with the two
+/// OTHER "start" clocks in this crate about what "start" meant.
+///
+/// `Instant` is monotonic in `std`, which is what discharges
+/// FALSIFY-CRUX-C-34-003.
+fn server_uptime_sec(state: &AppState) -> f64 {
+    state.clock().uptime_sec()
 }
 
 /// Test-only hook: force the health handler to report `status = "loading"`.
@@ -576,7 +640,14 @@ fn build_health_response(state: &AppState) -> HealthResponse {
         compute_mode = "gpu";
     }
     #[cfg(feature = "cuda")]
-    if state.has_cuda_model() {
+    if state.has_cuda_model() || state.apr_q4k_tx().is_some() {
+        compute_mode = "gpu";
+    }
+    // #3571: the hybrid's session reports its own backend, without waiting on a generation.
+    if state
+        .qwen35_session()
+        .is_some_and(|s| s.on_gpu.load(std::sync::atomic::Ordering::Relaxed))
+    {
         compute_mode = "gpu";
     }
 
@@ -608,7 +679,7 @@ fn build_health_response(state: &AppState) -> HealthResponse {
         version: crate::VERSION.to_string(),
         compute_mode: compute_mode.to_string(),
         model_loaded,
-        uptime_sec: server_uptime_sec(),
+        uptime_sec: server_uptime_sec(state),
         classifier_artifact_sha256,
         classifier_verified,
     }

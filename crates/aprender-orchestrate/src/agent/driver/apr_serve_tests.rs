@@ -17,7 +17,37 @@ fn test_find_apr_binary() {
 
 /// Write an executable `/bin/sh` script at `path` that prints `marker`.
 #[cfg(unix)]
+/// Every marker binary is written under one lock. `fork(2)` gives the child
+/// every open descriptor of the whole test process, so a sibling still inside
+/// `write_marker_bin` hands a forked child a write-open descriptor on its own
+/// marker. Measured in a clean-room `cargo test --workspace --lib`
+/// (CARGO_BUILD_JOBS=2): 1 failure in 39,833 tests, this test, ETXTBSY.
+static MARKER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// THE LOCK WAS NOT ENOUGH, AND COULD NOT BE.
+///
+/// It serialises `write_marker_bin` against `spawn_marker`, which only covers
+/// forks made by THESE two functions. ETXTBSY is refused by `exec` when *any*
+/// process anywhere holds the file open for writing — and every other test in
+/// this binary that spawns a child forks too, inheriting the write descriptor
+/// for the window between `fork` and its own `exec`. Nothing this module locks
+/// can close that.
+///
+/// Measured: coverage-nightly has been red on this single test every night
+/// (#3185), 5971 passed / 1 failed, `Os { code: 26, kind: ExecutableFileBusy }`.
+/// It is near-certain under `cargo llvm-cov` — instrumented runs spawn far more
+/// children — and rare enough elsewhere to look like a flake.
+///
+/// So do not exec the file that was just written. `/bin/sh <script>` runs the
+/// script's CONTENT without `exec`ing that inode, which is what the assertion
+/// actually cares about: that the resolved path is the SELF marker and not the
+/// PATH one. A retry loop would have hidden a race instead of removing it.
+fn spawn_marker(path: &std::path::Path) -> std::process::Output {
+    std::process::Command::new("/bin/sh").arg(path).output().expect("spawn resolved backend")
+}
+
 fn write_marker_bin(path: &std::path::Path, marker: &str) {
+    let _g = MARKER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     use std::io::Write;
     let mut f = std::fs::File::create(path).expect("create marker bin");
     writeln!(f, "#!/bin/sh").expect("shebang");
@@ -60,7 +90,7 @@ fn falsify_2384_self_wins_over_path_lookup() {
         resolved.display()
     );
 
-    let out = std::process::Command::new(&resolved).output().expect("spawn resolved backend");
+    let out = spawn_marker(&resolved);
     assert_eq!(
         String::from_utf8_lossy(&out.stdout).trim(),
         "SELF-0.63.0",
@@ -449,4 +479,66 @@ fn ready_timeout_qwen3_coder_30b_real_size() {
         "Qwen3-Coder-30B (18.5 GB) must get >= 50s budget; got {secs}s — fix paiml/claude-code-parity-apr M260"
     );
     assert!(secs <= 90, "Default scaling must not exceed reasonable max; got {secs}s");
+}
+
+// ═══ #3978: `apr code` passes the backend, length and port through ═══
+//
+// It hardcoded `apr serve run … --gpu`, capped every request at 1024 tokens with
+// no flag to pin it, and asked for port `19384 + pid % 1000`, so two sessions
+// whose pids agreed mod 1000 fought over one port.
+
+#[test]
+fn f3978_cpu_backend_launches_no_gpu_and_never_gpu() {
+    let opts = ServeLaunchOptions { backend: ServeBackend::Cpu, max_tokens: None, think: None };
+    let args = serve_args(std::path::Path::new("/m/x.gguf"), 4242, &opts);
+    assert!(args.iter().any(|a| a == "--no-gpu"), "cpu lane must pass --no-gpu: {args:?}");
+    assert!(!args.iter().any(|a| a == "--gpu"), "cpu lane must NOT pass --gpu: {args:?}");
+    assert_eq!(&args[..3], ["serve", "run", "/m/x.gguf"]);
+    let port = args.iter().position(|a| a == "--port").expect("--port present");
+    assert_eq!(args[port + 1], "4242");
+}
+
+#[test]
+fn f3978_default_backend_is_still_gpu() {
+    let args = serve_args(std::path::Path::new("m.gguf"), 1, &ServeLaunchOptions::default());
+    assert!(args.iter().any(|a| a == "--gpu") && !args.iter().any(|a| a == "--no-gpu"), "{args:?}");
+}
+
+#[test]
+fn f3978_reserved_port_is_never_one_a_listener_holds() {
+    // Hold a port; every reservation made while it is held must avoid it. The old
+    // pid-derived port is the SAME value on every call from one process, so it
+    // fails the "two reservations differ" half of this at once.
+    let held = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+    let held_port = held.local_addr().expect("addr").port();
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..16 {
+        let p = reserve_port().expect("reserve");
+        assert_ne!(p, 0);
+        assert_ne!(p, held_port, "reserved a port a live listener holds");
+        seen.insert(p);
+    }
+    assert!(seen.len() > 1, "16 reservations returned one port: {seen:?}");
+}
+
+#[test]
+fn f3978_port_race_is_recognised_for_relaunch() {
+    assert!(is_addr_in_use("apr serve exited with exit status: 1 during startup\nsubprocess stderr:\nError: Address already in use (os error 98)"));
+    assert!(is_addr_in_use("bind: AddrInUse"));
+    assert!(!is_addr_in_use(
+        "apr serve exited with exit status: 1 during startup\nsubprocess stderr:\nmodel not found"
+    ));
+}
+
+#[test]
+fn f3978_max_tokens_override_is_exact_and_uncapped() {
+    assert_eq!(effective_max_tokens(Some(3072), 4096, None), 3072, "the override is uncapped");
+    assert_eq!(
+        effective_max_tokens(Some(64), 4096, Some("16")),
+        64,
+        "the override beats the env cap"
+    );
+    assert_eq!(effective_max_tokens(None, 4096, None), 1024, "no override: PMAT-170 cap");
+    assert_eq!(effective_max_tokens(None, 4096, Some("100")), 100);
+    assert_eq!(effective_max_tokens(None, 50, None), 50);
 }

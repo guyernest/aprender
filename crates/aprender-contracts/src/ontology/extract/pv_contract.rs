@@ -1,0 +1,412 @@
+//! ONT-001 §3.7, §5 ONT-4b — `extract:pv-contract`: the contract YAML itself becomes triples.
+//!
+//! One contract file → one subject, `https://ont.paiml.dev/v1alpha1/contract/<stem>`, typed `ont:Contract`,
+//! `prov:Entity` and — when it has an `entity.type` T — `entity:T` (#4160, so a shape can target one type),
+//! carrying what the corpus already says about it: `ont:id` (the stem — every contract has one, which is why the
+//! first shape can require it), `ont:file`, `ont:kind` (`metadata.kind`), `ont:name`, `ont:version`,
+//! `ont:status`, `ont:evidenceLevel`, `ont:entityType`/`ont:entityRef` (§4.2 `entity:`), and ONT-4's typed relations
+//! as `ont:<role>` edges to `contract/<target>`. Nothing is inferred; a key the contract does not carry produces no
+//! triple, so a shape's `minCount` over it is a real constraint and not a tautology.
+//!
+//! **Reads RAW YAML**, like the sigma and relations gates: `entity:`, `relations:` and `shape:` are §4.2 additive keys
+//! serde drops from the typed `Contract`. Deterministic: files are visited in byte order and the graph is a set.
+
+use std::path::Path;
+
+use crate::ontology::rdf::{iri, ont, Graph, Term, PROV_ENTITY, RDF_TYPE};
+
+/// Every `.yaml` under `contract_dir` except Σ itself, as triples. Files that do not parse contribute nothing —
+/// parse errors are the `validate` gate's verdict, not this extractor's.
+#[must_use]
+pub fn extract(contract_dir: &Path) -> Graph {
+    let mut g = Graph::new();
+    for (stem, rel, doc) in documents(contract_dir) {
+        extract_one(&mut g, &stem, &rel, &doc);
+    }
+    g
+}
+
+/// Every contract document under `contract_dir` (Σ excluded), in byte order: `(stem, path relative to the
+/// repository root, raw YAML)`. The one walk every extractor shares, so they all see the same corpus.
+#[must_use]
+pub fn documents(contract_dir: &Path) -> Vec<(String, String, serde_yaml::Value)> {
+    let sigma_path = contract_dir.join("ontology.yaml");
+    let mut files = Vec::new();
+    crate::lint::collect_yaml_files(contract_dir, &mut files);
+    files.sort();
+    let mut out = Vec::new();
+    for file in &files {
+        if file == &sigma_path {
+            continue;
+        }
+        let Ok(raw) = std::fs::read_to_string(file) else {
+            continue;
+        };
+        let Ok(doc) = serde_yaml::from_str::<serde_yaml::Value>(&raw) else {
+            continue;
+        };
+        let stem = file
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let rel = file
+            .strip_prefix(contract_dir.parent().unwrap_or(contract_dir))
+            .unwrap_or(file)
+            .to_string_lossy()
+            .replace('\\', "/");
+        out.push((stem, rel, doc));
+    }
+    out
+}
+
+/// One contract document into `g`. Public so a fixture can be extracted without a directory.
+pub fn extract_one(g: &mut Graph, stem: &str, file: &str, doc: &serde_yaml::Value) {
+    let s = iri("contract", stem);
+    g.insert(s.clone(), RDF_TYPE, Term::iri(ont("Contract")));
+    g.insert(s.clone(), RDF_TYPE, Term::iri(PROV_ENTITY));
+    g.insert(s.clone(), ont("id"), Term::string(stem));
+    g.insert(s.clone(), ont("file"), Term::string(file));
+    for (key, pred) in [
+        ("name", "name"),
+        ("version", "version"),
+        ("status", "status"),
+    ] {
+        if let Some(v) = scalar(doc.get(key)) {
+            g.insert(s.clone(), ont(pred), Term::string(v));
+        }
+    }
+    if let Some(kind) = scalar(doc.get("metadata").and_then(|m| m.get("kind"))) {
+        g.insert(s.clone(), ont("kind"), Term::string(kind));
+    }
+    if let Some(level) = scalar(doc.get("evidence").and_then(|e| e.get("level"))) {
+        g.insert(s.clone(), ont("evidenceLevel"), Term::string(level));
+    }
+    if let Some(entity) = doc.get("entity") {
+        let entity_type = scalar(entity.get("type"));
+        if let Some(t) = entity_type.clone() {
+            g.insert(s.clone(), RDF_TYPE, Term::iri(entity_class(&t)));
+            g.insert(s.clone(), ont("entityType"), Term::string(t));
+        }
+        if let Some(r) = scalar(entity.get("ref")) {
+            g.insert(s.clone(), ont("entityRef"), Term::string(r));
+        }
+        emit_entity_properties(g, &s, entity_type.as_deref(), entity);
+    }
+    if let Some(rel) = doc.get("relations").and_then(serde_yaml::Value::as_mapping) {
+        for (role, targets) in rel {
+            let (Some(role), Some(list)) = (role.as_str(), targets.as_sequence()) else {
+                continue;
+            };
+            for t in list.iter().filter_map(serde_yaml::Value::as_str) {
+                let t = t.trim();
+                let t = t.strip_prefix("contracts/").unwrap_or(t);
+                let t = t.strip_suffix(".yaml").unwrap_or(t);
+                g.insert(s.clone(), ont(role), Term::iri(iri("contract", t)));
+            }
+        }
+    }
+}
+
+/// The positive control (R-3, PMAT-3704), in memory every gate run: a contract carrying `metadata.kind`, a
+/// `depends_on` relation and an `entity.type` must come out with `ont:kind`, the typed edge and its entity class
+/// (#4160), and the planted copy with `metadata` and `entity` removed must carry NO `ont:kind` and NO entity class
+/// — "nothing is inferred", measured rather than stated.
+#[must_use]
+pub fn positive_control() -> bool {
+    const STEM: &str = "__pc_extract__";
+    let Ok(doc) = serde_yaml::from_str::<serde_yaml::Value>(
+        "metadata: {kind: kernel}\nrelations: {depends_on: [contracts/__pc_target__-v1.yaml]}\nentity: {type: __pc__}\n",
+    ) else {
+        return false;
+    };
+    let s = iri("contract", STEM);
+    let mut g = Graph::new();
+    extract_one(&mut g, STEM, "contracts/__pc_extract__.yaml", &doc);
+    let kind = g
+        .objects(&s, &ont("kind"))
+        .iter()
+        .any(|t| t.as_literal().is_some_and(|l| l.0 == "kernel"));
+    let edge = g
+        .objects(&s, &ont("depends_on"))
+        .iter()
+        .any(|t| t.as_iri() == Some(iri("contract", "__pc_target__-v1").as_str()));
+    let class = g
+        .objects(&s, RDF_TYPE)
+        .iter()
+        .any(|t| t.as_iri() == Some(entity_class("__pc__").as_str()));
+    let mut planted = doc;
+    if let Some(m) = planted.as_mapping_mut() {
+        m.remove("metadata");
+        m.remove("entity");
+    }
+    let mut g2 = Graph::new();
+    extract_one(&mut g2, STEM, "contracts/__pc_extract__.yaml", &planted);
+    let class_absent = !g2
+        .objects(&s, RDF_TYPE)
+        .iter()
+        .any(|t| t.as_iri() == Some(entity_class("__pc__").as_str()));
+    kind && edge && class && class_absent && g2.objects(&s, &ont("kind")).is_empty()
+}
+
+/// §4.2 `entity: {type, ref, properties}` — the entity's OWN properties, as `<type>:<key>` on the contract node.
+///
+/// A contract may carry the properties of the thing it is a contract FOR, and for a pre-registration the
+/// contract IS the thing: apex's nine researcher degrees of freedom live at `entity.properties` because
+/// APEX-001 EV-6 hashes the contract, and moving them to a sidecar document would change what is locked.
+/// Before this they were read by nothing, so a `shape:` over them had no predicate to constrain and every
+/// `minCount: 1` fired for the wrong reason — a shape failing because the extractor was silent, which is the
+/// vacuity R-2 exists to end (measured on apex, 2026-09-19).
+///
+/// The predicate is namespaced by the ENTITY TYPE (`study:scale`, not `ont:scale`): two entity types may both
+/// carry a `scale`, and one predicate for both would let a shape over one constrain the other. A contract with
+/// no `entity.type` gets no property triples — there is no namespace to put them in, and inventing one would
+/// be an inference. Nested mappings and sequences are not emitted at v1alpha1: the subset has no path
+/// expressions, so a predicate no shape could reach is decoration.
+fn emit_entity_properties(
+    g: &mut Graph,
+    subject: &str,
+    entity_type: Option<&str>,
+    entity: &serde_yaml::Value,
+) {
+    let (Some(ty), Some(props)) = (
+        entity_type,
+        entity
+            .get("properties")
+            .and_then(serde_yaml::Value::as_mapping),
+    ) else {
+        return;
+    };
+    for (key, value) in props {
+        let (Some(key), Some(v)) = (key.as_str(), scalar(Some(value))) else {
+            continue;
+        };
+        g.insert(
+            subject.to_string(),
+            entity_predicate(ty, key),
+            Term::string(v),
+        );
+    }
+}
+
+/// The predicate IRI for one entity property: `<ONT_BASE><entityType>/<key>`.
+///
+/// Spelled here rather than left to `expand("<ty>:<key>")` because the equality is the whole rule and two
+/// independent readers took the prefixed form for a literal IRI (quorum PMAT-3529, rounds 2 and 3). It IS what
+/// `expand` produces — §3.6's prefix rule maps any unregistered `p:name` into `<ONT_BASE>p/name` — and
+/// [`tests::the_predicate_is_the_expansion_of_the_prefixed_form`] pins the two together, so a change to either
+/// side is a failing test and not a silent divergence.
+#[must_use]
+pub fn entity_predicate(entity_type: &str, key: &str) -> String {
+    format!("{}{entity_type}/{key}", crate::ontology::rdf::ONT_BASE)
+}
+
+/// The class of every contract whose `entity.type` is `entity_type`: `<ONT_BASE>entity/<type>` (#4160).
+///
+/// `ont:Contract` is every contract, so a shape targeting it fires on every entity type in the directory — apex's
+/// closed `study` shape failed each of its 18 `claim` contracts. This class is what `targetClass: entity:study`
+/// expands to, so a shape can select one entity type and nothing else. The literal `ont:entityType` stays: it is
+/// what a shape's `path:` reads, and a class is not a value. Nothing is inferred — a contract with no
+/// `entity.type` gets no entity class, as it gets no `<type>:<key>` predicates.
+///
+/// Built like [`entity_predicate`], never through `iri()`: `iri()` percent-encodes and `expand` does not, so a
+/// type holding a character outside `iri()`'s safe set would type its contracts with a class no shape can name
+/// (quorum PMAT-4160, haiku seat).
+#[must_use]
+pub fn entity_class(entity_type: &str) -> String {
+    format!("{}entity/{entity_type}", crate::ontology::rdf::ONT_BASE)
+}
+
+/// A YAML scalar as a string: strings as they are, numbers and booleans by their YAML spelling. Mappings and
+/// sequences are not scalars and produce no triple.
+pub(crate) fn scalar(v: Option<&serde_yaml::Value>) -> Option<String> {
+    match v? {
+        serde_yaml::Value::String(s) => Some(s.clone()),
+        serde_yaml::Value::Number(n) => Some(n.to_string()),
+        serde_yaml::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_contract_becomes_a_typed_subject_with_what_it_says_and_nothing_more() {
+        let doc: serde_yaml::Value = serde_yaml::from_str(
+            "name: n\nversion: '1.2.0'\nstatus: active\nmetadata:\n  kind: pattern\nrelations:\n  depends_on: [b, contracts/c.yaml]\nentity:\n  type: pv-contract\n  ref: contracts/\n",
+        )
+        .unwrap();
+        let mut g = Graph::new();
+        extract_one(&mut g, "a", "contracts/a.yaml", &doc);
+        let s = iri("contract", "a");
+        assert_eq!(g.instances_of(&ont("Contract")), vec![s.as_str()]);
+        assert_eq!(g.objects(&s, &ont("id"))[0].as_literal().unwrap().0, "a");
+        assert_eq!(
+            g.objects(&s, &ont("kind"))[0].as_literal().unwrap().0,
+            "pattern"
+        );
+        assert_eq!(g.objects(&s, &ont("depends_on")).len(), 2);
+        assert_eq!(
+            g.objects(&s, &ont("depends_on"))[1].as_iri().unwrap(),
+            iri("contract", "c")
+        );
+        assert_eq!(g.objects(&s, &ont("entityType")).len(), 1);
+        // no evidence: block → no evidenceLevel triple; a shape's minCount over it is real
+        assert!(g.objects(&s, &ont("evidenceLevel")).is_empty());
+        assert!(!g.to_ntriples().contains("_:"));
+    }
+
+    /// The prefixed form and the IRI are the SAME predicate — §3.6's rule maps any unregistered `p:name` into
+    /// `<ONT_BASE>p/name`. Pinned here because a shape writes `path: study:scale` while the extractor writes the
+    /// IRI, and a reader who does not know the rule sees two different things (quorum PMAT-3529, rounds 2/3).
+    #[test]
+    fn the_predicate_is_the_expansion_of_the_prefixed_form() {
+        assert_eq!(
+            entity_predicate("study", "scale"),
+            crate::ontology::shapes::expand("study:scale")
+        );
+        assert_eq!(
+            entity_predicate("study", "scale"),
+            "https://ont.paiml.dev/v1alpha1/study/scale"
+        );
+        // …and never the bare ont: local, which another entity type's `scale` would share.
+        assert_ne!(entity_predicate("study", "scale"), ont("scale"));
+    }
+
+    #[test]
+    fn an_entitys_own_properties_become_typed_predicates_on_the_contract_node() {
+        // apex EV-21: the nine degrees of freedom live in the contract, because the contract IS the
+        // pre-registration. `study:scale` &c. so a shape can constrain them by path.
+        let doc: serde_yaml::Value = serde_yaml::from_str(
+            "entity:\n  type: study\n  ref: study-shape-v1\n  properties:\n    scale: linear\n    vintage: '2026-09-12'\n    bins: 7\n    logged: true\n    nested: {a: 1}\n    listed: [a, b]\n",
+        )
+        .expect("yaml");
+        let mut g = Graph::new();
+        extract_one(
+            &mut g,
+            "study-shape-v1",
+            "contracts/study-shape-v1.yaml",
+            &doc,
+        );
+        let s = iri("contract", "study-shape-v1");
+        let p = |k: &str| crate::ontology::shapes::expand(&format!("study:{k}"));
+        assert_eq!(
+            g.objects(&s, &p("scale"))[0]
+                .as_literal()
+                .expect("literal")
+                .0,
+            "linear"
+        );
+        assert_eq!(
+            g.objects(&s, &p("vintage"))[0]
+                .as_literal()
+                .expect("literal")
+                .0,
+            "2026-09-12"
+        );
+        assert_eq!(
+            g.objects(&s, &p("bins"))[0]
+                .as_literal()
+                .expect("literal")
+                .0,
+            "7"
+        );
+        assert_eq!(
+            g.objects(&s, &p("logged"))[0]
+                .as_literal()
+                .expect("literal")
+                .0,
+            "true"
+        );
+        // Not emitted at v1alpha1: the subset has no path expressions, so these would be unreachable.
+        assert!(g.objects(&s, &p("nested")).is_empty());
+        assert!(g.objects(&s, &p("listed")).is_empty());
+        // The namespace is the ENTITY TYPE, never ont: — two types may both carry `scale`.
+        assert!(g.objects(&s, &ont("scale")).is_empty());
+    }
+
+    #[test]
+    fn properties_without_an_entity_type_are_not_guessed_into_a_namespace() {
+        let doc: serde_yaml::Value =
+            serde_yaml::from_str("entity:\n  ref: x\n  properties:\n    scale: linear\n")
+                .expect("yaml");
+        let mut g = Graph::new();
+        extract_one(&mut g, "a", "contracts/a.yaml", &doc);
+        let s = iri("contract", "a");
+        assert!(
+            g.predicates_of(&s).iter().all(|p| !p.ends_with("scale")),
+            "{:?}",
+            g.to_ntriples()
+        );
+    }
+
+    /// #4160: `targetClass: entity:study` (and its `ont:` spelling) is the class the extractor writes, so a shape
+    /// scoped to one entity type selects exactly those contracts.
+    #[test]
+    fn the_entity_class_is_the_expansion_of_the_prefixed_form() {
+        use crate::ontology::shapes::expand;
+        assert_eq!(entity_class("study"), expand("entity:study"));
+        assert_eq!(entity_class("study"), expand("ont:entity/study"));
+        assert_eq!(
+            entity_class("pv-contract"),
+            "https://ont.paiml.dev/v1alpha1/entity/pv-contract"
+        );
+        assert_ne!(entity_class("study"), ont("Contract"));
+        // Every character class, not only the ones iri() leaves alone: the equality holds by construction.
+        for t in ["a b", "x/y", "q?r#s", "é", "100%", "a:b"] {
+            assert_eq!(
+                entity_class(t),
+                expand(&format!("entity:{t}")),
+                "entity type {t:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_contract_is_an_instance_of_its_entity_type_class_and_of_no_other() {
+        let mut g = Graph::new();
+        for (stem, ty) in [("s", "study"), ("c1", "claim"), ("c2", "claim")] {
+            let doc: serde_yaml::Value =
+                serde_yaml::from_str(&format!("entity:\n  type: {ty}\n")).expect("yaml");
+            extract_one(&mut g, stem, &format!("contracts/{stem}.yaml"), &doc);
+        }
+        let none: serde_yaml::Value = serde_yaml::from_str("name: n\n").expect("yaml");
+        extract_one(&mut g, "bare", "contracts/bare.yaml", &none);
+        let at = |t: &str| crate::ontology::shapes::instances_closed(&g, &entity_class(t));
+        assert_eq!(at("study"), vec![iri("contract", "s")]);
+        assert_eq!(
+            at("claim"),
+            vec![iri("contract", "c1"), iri("contract", "c2")]
+        );
+        // ont:Contract still selects all four — the new class is additive, not a re-typing.
+        assert_eq!(g.instances_of(&ont("Contract")).len(), 4);
+        // No entity.type, no entity class: nothing is inferred.
+        let bare = iri("contract", "bare");
+        assert!(
+            g.objects(&bare, RDF_TYPE)
+                .iter()
+                .filter_map(|t| t.as_iri())
+                .all(|t| !t.contains("/v1alpha1/entity/")),
+            "{}",
+            g.to_ntriples()
+        );
+    }
+
+    #[test]
+    fn two_extractions_of_a_fixture_corpus_are_byte_identical() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/ont/relations-ok");
+        let a = extract(&dir).to_ntriples();
+        let b = extract(&dir).to_ntriples();
+        assert_eq!(a, b);
+        assert!(a.contains("/contract/a> <https://ont.paiml.dev/v1alpha1/contradicts> <https://ont.paiml.dev/v1alpha1/contract/d>"), "{a}");
+    }
+
+    #[test]
+    fn the_positive_control_fires() {
+        // PMAT-3704: drawn by the shapes gate every run as pc_extract["pv-contract"].
+        assert!(positive_control());
+    }
+}

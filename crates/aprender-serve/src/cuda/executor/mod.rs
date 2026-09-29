@@ -247,6 +247,55 @@ use crate::cuda::types::{
 /// can recover — only a process restart fixes it.
 ///
 /// This check prevents kernel launch and returns a clean error instead.
+/// #4215: the `modules` cache key `format!($fmt, $args…)`, formatted the first
+/// time these arguments are seen and served from `module_keys` afterwards, so a
+/// hot launch path neither allocates nor formats. Every argument must convert
+/// to `u64` losslessly (pass an `f32` as `.to_bits()`, and format it yourself if
+/// the key spells it differently); at most four.
+macro_rules! module_key {
+    ($ex:expr, $fmt:literal $(, $arg:expr)* $(,)?) => {{
+        let dims = $crate::cuda::executor::key_dims(&[$(u64::from($arg)),*]);
+        $ex.module_key(($fmt, dims), || format!($fmt $(, $arg)*))
+    }};
+}
+pub(crate) use module_key;
+
+/// Pad a cache key's integer arguments to the fixed width `module_keys` stores.
+#[inline]
+pub(crate) fn key_dims(args: &[u64]) -> [u64; 4] {
+    assert!(args.len() <= 4, "module_key!: at most four key arguments");
+    let mut dims = [0u64; 4];
+    dims[..args.len()].copy_from_slice(args);
+    dims
+}
+
+impl CudaExecutor {
+    /// The formatted `modules` key for `id`, calling `make` only on the first
+    /// request for it (#4215). Use through [`module_key!`].
+    pub(crate) fn module_key(
+        &mut self,
+        id: (&'static str, [u64; 4]),
+        make: impl FnOnce() -> String,
+    ) -> std::sync::Arc<str> {
+        if let Some(key) = self.module_keys.get(&id) {
+            return std::sync::Arc::clone(key);
+        }
+        let key: std::sync::Arc<str> = make().into();
+        self.module_keys.insert(id, std::sync::Arc::clone(&key));
+        key
+    }
+}
+
+/// [`validate_device_ptr`] for argument `index` of `kernel`, naming it only on
+/// failure — the name costs a `format!`, and the check runs on every launch.
+#[inline]
+fn validate_kernel_arg(ptr: u64, kernel: &str, index: usize) -> Result<(), GpuError> {
+    if ptr == 0 {
+        return validate_device_ptr(ptr, &format!("{kernel} arg {index}"));
+    }
+    Ok(())
+}
+
 #[inline]
 fn validate_device_ptr(ptr: u64, name: &str) -> Result<(), GpuError> {
     if ptr == 0 {
@@ -263,6 +312,14 @@ mod activations;
 mod attention;
 mod bound_dispatch;
 mod core;
+// #3727: PMAT-084 FP8 activation reuse, opt-in per shared-input group.
+mod fp8_activation_cache;
+// #3759: one module-cache key, one PTX text (debug builds prove it).
+/// PMAT-3477 (#3090): wrappers for the six Gated `DeltaNet` device kernels.
+mod gdn_ops;
+/// PMAT-3596 (#3596): the Qwen3.5 hybrid's batched-prefill wrappers (GEMM projections,
+/// row-batched Gated `DeltaNet` kernels, causal attention over the resident cache).
+mod gdn_prefill_ops;
 mod gemm;
 /// PMAT-291: Transformer layer graph builder for Qwen2.5 architecture
 mod graph_builder;
@@ -271,9 +328,11 @@ mod graph_dispatch;
 mod kv_cache;
 mod layer;
 mod layers;
+mod module_key_guard;
 mod q4k;
 mod q_basic;
 mod quantized;
+mod stage_dump;
 mod weights;
 mod workspace;
 
@@ -290,8 +349,18 @@ mod gqa_parity_tests;
 #[cfg(test)]
 mod test_fixtures;
 
+// #3759: a norm kernel compiled for one epsilon is never reused for another.
+#[cfg(test)]
+mod rmsnorm_eps_tests_3759;
+
 #[cfg(test)]
 mod poison_trace_test;
+
+// FALSIFY-QDOT-008 (#3111): the Q5_K GEMV against gguf-py's values of a llama.cpp block
+#[cfg(test)]
+mod tests_q5k_ggml;
+#[cfg(test)]
+mod tests_q8_activation_staleness;
 
 // COV-003 through COV-006 (layer preload, kv_cache, attention, quantized)
 #[cfg(test)]
@@ -346,6 +415,13 @@ pub struct CudaExecutor {
     // Thousands of cuModuleUnload cycles exhaust the CUDA driver.
     // Leaked modules (~KB each) are cleaned up at process exit.
     modules: std::mem::ManuallyDrop<HashMap<String, CudaModule>>,
+    /// #3759: debug and test builds record what each module key was compiled from.
+    #[cfg(any(debug_assertions, test))]
+    module_key_ledger: module_key_guard::ModuleKeyLedger,
+    /// #4215: `modules` keys already formatted, by (format string, integer
+    /// arguments) — see [`module_key!`]. A decode token looks its keys up here
+    /// instead of `format!`-ing ~600 of them.
+    module_keys: HashMap<(&'static str, [u64; 4]), std::sync::Arc<str>>,
     // Persistent weight buffers on GPU (PARITY-037)
     // These are loaded once at startup and reused for all forward passes
     weight_cache: HashMap<String, GpuBuffer<f32>>,
@@ -427,10 +503,18 @@ pub struct CudaExecutor {
     // Compute stream for kernel execution (PARITY-038)
     // PoolableStream: returned to pool on executor drop, not destroyed.
     compute_stream: PoolableStream,
-    // Transfer stream for async H2D/D2H copies (PARITY-038)
-    // Runs in parallel with compute_stream for overlapped execution
+    // Transfer stream for async H2D/D2H copies (PARITY-038).
+    //
+    // PERF-053 (aprender#2767): it carries NO production work. Its only users are
+    // `copy_to_gpu_async` / `copy_from_gpu_async` (zero callers anywhere, tests included) and
+    // `synchronize_transfer` / `synchronize_all` (test callers only). The "runs in parallel with
+    // compute_stream for overlapped execution" this comment used to claim does not happen.
     transfer_stream: PoolableStream,
-    // Legacy alias for compute_stream (kept for backward compatibility)
+    // A THIRD stream, distinct from compute_stream -- NOT an alias, whatever this comment used
+    // to say. `checkout_streams` mints three, and CORRECTNESS-011/012 deliberately move work onto
+    // THIS one ("Use self.stream (NOT compute_stream) to ensure synchronization"), which is only
+    // meaningful because they are different streams. Reading it as an alias makes those fixes
+    // look like no-ops.
     stream: PoolableStream,
     // PAR-054: CUDA Graph Capture for decode loop optimization
     // Captures ~280 kernel launches into single graph replay (~10us vs ~5.6ms)
@@ -575,19 +659,15 @@ pub struct CudaExecutor {
     // PMAT-053: FP8 activation scratch for FP8 GEMM input conversion
     fp8_activation_scratch: Option<GpuBuffer<u8>>,
     fp8_activation_scratch_size: usize,
-    // PMAT-079: Per-tensor FP8 dequant scale = absmax / 448.0 (CPU float).
-    // Key: quantized weight GPU pointer → dequant scale.
-    // Used as GEMM alpha (constant per weight, no GPU→CPU sync needed).
-    fp8_weight_scales: HashMap<u64, f32>,
+    // #3807: per-output-channel FP8 weight absmax (f32 × N on the device), one per cached
+    // weight. Key: quantized weight GPU pointer. Applied in the GEMM's dequant step.
+    fp8_weight_row_absmax: HashMap<u64, GpuBuffer<f32>>,
     // PMAT-053b: Persistent activation scale buffer (single f32 on GPU).
     // Reused across prefill GEMMs to avoid alloc-per-matmul leak.
     fp8_act_scale_buf: Option<GpuBuffer<f32>>,
-    // PMAT-079: Persistent absmax result buffer (single u32 on GPU).
-    // Reused across prefill GEMMs — avoids alloc-per-matmul.
-    fp8_absmax_buf: Option<GpuBuffer<u32>>,
-    // PMAT-079: Persistent activation dequant scale buffer (single f32 on GPU).
-    // Holds act_absmax/448.0 — used as A_SCALE_POINTER for cuBLASLt scaled GEMM.
-    fp8_act_dequant_buf: Option<GpuBuffer<f32>>,
+    // #3807: persistent per-token FP8 activation absmax (f32 × rows on the GPU), reused
+    // across prefill GEMMs and by PMAT-084's K/V and up reuse. Grows, never shrinks.
+    fp8_act_row_absmax: Option<GpuBuffer<f32>>,
     // PMAT-091: Column-interleaved Q4K weight cache for coalesced WMMA GEMM.
     // Key: quantized weight GPU pointer → interleaved tile buffer.
     // Same size as original Q4K (ceil(N/16) × num_sb × 2304 bytes).
@@ -620,11 +700,18 @@ pub struct CudaExecutor {
     // Set to true after q8_quantize_into; callers invalidate (set false)
     // when the input buffer content changes (e.g. after RMSNorm write).
     q8_activation_valid: bool,
+    // #4258: which activation the Q8 cache holds — (source buffer ptr, element
+    // count). `ensure_q8_activation` re-quantizes when a GEMV's input is not this
+    // buffer, and every in-place writer clears `q8_activation_valid` when it writes
+    // this buffer, so a DP4A GEMV never reads another activation's Q8_1 bytes.
+    q8_activation_src: (u64, u32),
     // PMAT-084: FP8 activation cache — skip redundant absmax+convert when
     // multiple FP8 GEMMs share the same input (QKV phase, FFN gate+up).
     // Saves 84 kernel pairs per prefill (3 per layer × 28 layers).
-    // Key: (input_ptr, element_count). Invalidated on scratch buffer realloc.
-    fp8_activation_cache_key: Option<(u64, u32)>,
+    // #3727: reuse is opt-in (`share_next` before K, V and up); every other
+    // dispatch drops the held conversion, so a (ptr, count) that outlives its
+    // contents can no longer be reused across layers.
+    fp8_act_cache: fp8_activation_cache::Fp8ActivationCache,
     // PMAT-291: Positions side-channel for graph-based dispatch.
     // Set before execute_graph(), read by dispatch_rope and dispatch_attention.
     pub(crate) graph_dispatch_positions: Vec<u32>,
@@ -637,6 +724,11 @@ pub struct CudaExecutor {
     // when FP16 weight cache is retained during decode. Routes batched GEMV
     // through cuBLAS tensor cores instead of compute-bound DP4A GEMV.
     pub(crate) hgemm_batched_decode_active: bool,
+    // PP-LLAMA-001 §5.2 / §9 #7: highest `total - free` this process has
+    // sampled from the driver. Atomic because the sampler runs from the
+    // scheduler thread and from the effective-config handler, which only holds
+    // a READ lock. 0 means "never sampled" and is reported as absent.
+    vram_used_peak: std::sync::atomic::AtomicUsize,
     // CUDA context — declared last so all GPU resources above drop first
     // (they need the context alive for cuMemFree etc.).
     //

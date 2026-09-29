@@ -1,42 +1,52 @@
 # aprender-contrastive-data
 
-Deterministic, leakage-safe contrastive data construction: class buckets,
-balanced few-shot selection, bounded pair sampling.
+Deterministic, leakage-safe contrastive data construction — class buckets, balanced
+few-shot selection, bounded pair sampling.
 
-SetFit is its first consumer, not its owner — the crate owns contrastive and
-Siamese *data construction* as a general capability: class buckets, balanced
-few-shot selection, bounded positive/negative pair sampling, typed split roles,
-dataset fingerprints, and the cross-split leakage checks that make the rest
-trustworthy. Contract: `contracts/contrastive-pair-protocol-v1.yaml`.
+Part of the [Aprender](https://github.com/paiml/aprender) monorepo.
 
-## The bytes boundary
+## What it does
 
-The public API is bytes-in / bytes-out and typed values. This crate performs no
-filesystem access, opens no sockets, and exposes no path-shaped parameters —
-not even in its tests. `apr-cli` owns every filesystem adapter.
+Builds the pair dataset that contrastive/Siamese fine-tuning (SetFit) trains on: strict
+JSONL ingest, typestate split roles, dataset attestation, cross-split deduplication,
+balanced k-shot selection, bounded positive/negative pair sampling, and a canonical
+manifest for every artifact along the way.
 
-That is enforced, not asserted. `make contrastive-data-boundary` compares the
-resolved `cargo tree -e normal` closure against `allowed-deps.txt`, a POSITIVE
-allowlist so that a new transitive dependency fails by default rather than
-passing unnoticed, and bans `std::fs` / `std::net` / `std::path` / `Path` /
-`PathBuf` throughout `src/`.
+```toml
+[dependencies]
+aprender-contrastive-data = "0.64"
+```
 
-The reason is the destination: object storage behind a serverless consumer,
-where a manifest is an object rather than a file. A crate whose API speaks in
-`&Path` forces such a consumer to be a rewrite instead of a wrapper.
+## Three constraints shape the API
 
-## Determinism
+**Bytes in, bytes out.** No filesystem access, no sockets, no path-shaped parameters —
+not even in tests. `apr-cli` owns every filesystem adapter. The destination for these
+artifacts is object storage, where a manifest is an object rather than a file; an API
+that speaks `&Path` makes such a consumer a rewrite instead of a wrapper. Enforced by
+`make contrastive-data-boundary`, which checks the resolved dependency closure against a
+positive allowlist and bans `std::fs`/`std::net`/`std::path` under `src/` — including the
+grouped-import spellings rustfmt produces.
 
-Every random decision is a pure function of its draw ordinal, obtained from the
-counter-based Philox generator in `aprender-rand` (library name `trueno_rand`)
-rather than from a stateful stream. Worker-count independence is therefore
-structural: draw *i* cannot depend on how many draws preceded it, because
-nothing precedes it.
+**Determinism.** Every random decision is a pure function of its draw ordinal, taken from
+the counter-based Philox generator in `aprender-rand`. Draw *i* cannot depend on how many
+draws preceded it, because nothing precedes it. No `HashMap` or `HashSet` appears in
+`src/`; ordered maps only.
 
-## Entry points
+**Typestate.** A `Split<Train>` cannot be built from validation bytes, a compatibility
+dataset has no validation witness, and pairs cannot be built from raw ids. Five such
+misuses are proven uncompilable with `trybuild` and committed `.stderr` snapshots.
 
-The CLI adapters are `apr data select` (balanced few-shot selection) and
-`apr data pairs` (bounded pair sampling); `aprender-train`'s `setfit` feature
-consumes the same modules directly.
+## Contract
 
-Part of the [aprender](https://github.com/paiml/aprender) monorepo.
+`contracts/contrastive-pair-protocol-v1.yaml` — 24 equations, 15 proof obligations,
+20 falsification tests, 2 Kani harnesses.
+
+```bash
+pv validate contracts/contrastive-pair-protocol-v1.yaml
+pv audit    contracts/contrastive-pair-protocol-v1.yaml --binding contracts/aprender/binding.yaml
+```
+
+## Links
+
+- [Monorepo](https://github.com/paiml/aprender)
+- [Contract](https://github.com/paiml/aprender/blob/main/contracts/contrastive-pair-protocol-v1.yaml)

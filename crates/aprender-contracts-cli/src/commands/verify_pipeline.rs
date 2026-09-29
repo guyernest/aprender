@@ -13,20 +13,16 @@ use provable_contracts::graph::dependency_graph;
 use provable_contracts::schema::Contract;
 use serde_json::Value;
 
-use crate::contract_walk::collect_contracts;
+use crate::contract_walk::collect_corpus;
 use crate::json_obj::obj;
 
 /// Run the verify-pipeline command.
-pub fn run(contract_dir: &Path, format: &str) {
+pub fn run(contract_dir: &Path, format: &str) -> Result<(), Box<dyn std::error::Error>> {
     // 1. Load all contracts
-    let mut contracts = Vec::new();
-    collect_contracts(contract_dir, &mut contracts);
+    // PVL-1 (PMAT-1099): an empty corpus is refused (exit 2) — it used to print
+    // "No contracts found" and return at exit 0, a pass over nothing.
+    let mut contracts = collect_corpus(contract_dir)?;
     contracts.sort_by(|a, b| a.0.cmp(&b.0));
-
-    if contracts.is_empty() {
-        eprintln!("No contracts found in {}", contract_dir.display());
-        return;
-    }
 
     // 2. Build dependency graph + topological sort
     let refs: Vec<(String, &Contract)> = contracts.iter().map(|(s, c)| (s.clone(), c)).collect();
@@ -58,6 +54,49 @@ pub fn run(contract_dir: &Path, format: &str) {
     if !edges_broken.is_empty() {
         std::process::exit(1);
     }
+
+    Ok(())
+}
+
+/// Resolve one composition edge against the upstream contract it names.
+///
+/// Extracted from `walk_composition_edges`, which measured cognitive 29
+/// against the repo's per-function ceiling of 25 (verified against
+/// 68b059ca9's copy of this file) and so blocked any commit touching this
+/// file. Every `continue`-with-a-broken-edge arm in the old loop body is one
+/// early return here; the loop keeps only the bookkeeping.
+fn resolve_edge_status(
+    index: &BTreeMap<&str, &Contract>,
+    from_contract: &str,
+    from_equation: Option<&str>,
+) -> EdgeStatus {
+    let Some(upstream_contract) = index.get(from_contract) else {
+        return EdgeStatus::Broken("upstream contract not found".into());
+    };
+
+    // No specific equation named: any upstream equation with guarantees will do.
+    let Some(upstream_eq_name) = from_equation else {
+        return if upstream_contract
+            .equations
+            .values()
+            .any(|eq| eq.guarantees.is_some())
+        {
+            EdgeStatus::Satisfied(vec![])
+        } else {
+            EdgeStatus::Broken("no equations with guarantees".into())
+        };
+    };
+
+    let Some(upstream_eq) = upstream_contract.equations.get(upstream_eq_name) else {
+        return EdgeStatus::Broken("upstream equation not found".into());
+    };
+    // `let ... else` rather than an `is_none()` guard followed by `.unwrap()`:
+    // the binding carries the proof that guarantees exist, so there is no
+    // unwrap left to justify.
+    let Some(guarantees) = upstream_eq.guarantees.as_ref() else {
+        return EdgeStatus::Broken("upstream has no guarantees".into());
+    };
+    EdgeStatus::Satisfied(guarantees.shapes.keys().cloned().collect())
 }
 
 fn walk_composition_edges(
@@ -91,60 +130,14 @@ fn walk_composition_edges(
                     from_eq.map_or(String::new(), |e| format!(".{e}"))
                 ),
                 assumed_shapes: assumes.shapes.keys().cloned().collect(),
-                status: EdgeStatus::Unknown,
+                status: resolve_edge_status(index, from_contract, from_eq),
             };
 
-            // Resolve upstream
-            let Some(upstream_contract) = index.get(from_contract.as_str()) else {
-                let mut e = edge;
-                e.status = EdgeStatus::Broken("upstream contract not found".into());
-                edges_broken.push(e.clone());
-                chains.push(e);
-                continue;
-            };
-
-            if let Some(upstream_eq_name) = from_eq {
-                let Some(upstream_eq) = upstream_contract.equations.get(upstream_eq_name) else {
-                    let mut e = edge;
-                    e.status = EdgeStatus::Broken("upstream equation not found".into());
-                    edges_broken.push(e.clone());
-                    chains.push(e);
-                    continue;
-                };
-
-                // `let ... else` rather than an `is_none()` guard followed by
-                // `.unwrap()`: the binding carries the proof that guarantees
-                // exist, so there is no unwrap left to justify.
-                let Some(guarantees) = upstream_eq.guarantees.as_ref() else {
-                    let mut e = edge;
-                    e.status = EdgeStatus::Broken("upstream has no guarantees".into());
-                    edges_broken.push(e.clone());
-                    chains.push(e);
-                    continue;
-                };
-
-                // Edge satisfied: upstream has guarantees
-                let mut e = edge;
-                let guaranteed_shapes: Vec<String> = guarantees.shapes.keys().cloned().collect();
-                e.status = EdgeStatus::Satisfied(guaranteed_shapes);
-                edges_satisfied += 1;
-                chains.push(e);
-            } else {
-                // No specific equation -- check any equation has guarantees
-                let has_guarantees = upstream_contract
-                    .equations
-                    .values()
-                    .any(|eq| eq.guarantees.is_some());
-                let mut e = edge;
-                if has_guarantees {
-                    e.status = EdgeStatus::Satisfied(vec![]);
-                    edges_satisfied += 1;
-                } else {
-                    e.status = EdgeStatus::Broken("no equations with guarantees".into());
-                    edges_broken.push(e.clone());
-                }
-                chains.push(e);
+            match edge.status {
+                EdgeStatus::Satisfied(_) => edges_satisfied += 1,
+                EdgeStatus::Broken(_) => edges_broken.push(edge.clone()),
             }
+            chains.push(edge);
         }
     }
 
@@ -160,8 +153,15 @@ struct CompositionEdge {
 }
 
 #[derive(Debug, Clone)]
+/// The resolved state of one composition edge.
+///
+/// There is no `Unknown` variant. There used to be, as the placeholder
+/// `walk_composition_edges` wrote into a freshly-built `CompositionEdge`
+/// before immediately overwriting it — so nothing could ever observe it, yet
+/// `pv verify-pipeline --json` documented `"status": "unknown"` as a state its
+/// output could take. `resolve_edge_status` is total, so the enum now has
+/// exactly the two states an edge can actually be in.
 enum EdgeStatus {
-    Unknown,
     Satisfied(Vec<String>),
     Broken(String),
 }
@@ -195,7 +195,6 @@ fn print_text(
             let icon = match &edge.status {
                 EdgeStatus::Satisfied(_) => "✓",
                 EdgeStatus::Broken(_) => "✗",
-                EdgeStatus::Unknown => "?",
             };
             let detail = match &edge.status {
                 EdgeStatus::Satisfied(shapes) if !shapes.is_empty() => {
@@ -239,7 +238,6 @@ fn print_json(
                 EdgeStatus::Broken(reason) => {
                     ("broken", obj([("reason", Value::from(reason.clone()))]))
                 }
-                EdgeStatus::Unknown => ("unknown", obj([])),
             };
             obj([
                 ("downstream", Value::from(e.downstream.clone())),
@@ -278,8 +276,9 @@ mod tests {
         if !dir.exists() {
             return; // skip in CI without contracts
         }
-        // Should not panic
-        run(&dir, "text");
+        // PVL-1 (PMAT-1099): `run` is fallible now — an ignored Result is a test
+        // that cannot fail. The real corpus verifies (measured 2026-09-11, rc 0).
+        run(&dir, "text").expect("the real corpus under contracts/ verifies");
     }
 
     #[test]
@@ -288,12 +287,20 @@ mod tests {
         if !dir.exists() {
             return;
         }
-        run(&dir, "json");
+        run(&dir, "json").expect("the real corpus under contracts/ verifies as json");
     }
 
     #[test]
     fn verify_pipeline_empty_dir() {
-        let tmp = tempfile::tempdir().unwrap();
-        run(tmp.path(), "text");
+        let tmp = tempfile::tempdir().expect("temp dir is creatable");
+        // PVL-1 (PMAT-1099): an empty directory is REFUSED (exit-2 class), never
+        // reported. Before this assertion the test called `run` and ignored the
+        // Result, so it passed over a vacuous PASS and over the refusal alike.
+        let err = run(tmp.path(), "text").expect_err("an empty dir is refused, never reported");
+        assert!(
+            err.downcast_ref::<crate::contract_walk::ZeroContracts>()
+                .is_some(),
+            "not the empty-corpus refusal: {err}"
+        );
     }
 }

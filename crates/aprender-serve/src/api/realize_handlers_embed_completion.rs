@@ -65,11 +65,18 @@ fn mean_pool_hidden_states(
 /// and every client of them failed on a server whose `/generate` was answering and
 /// whose `/health` said `model_loaded:true`. The quantized backend now supplies the
 /// same quantity via `forward_hidden_states`, so both backends can serve embeddings.
+///
+/// aprender#2609 closed the same gap for the THIRD resident backend: an
+/// `AppState` holding an `AprTransformer` (the f32 APR / SafeTensors CPU serve
+/// path) matched neither arm, so the embedding routes stayed dead there — again
+/// on a server reporting `model_loaded: true` and answering `/generate`.
 enum EmbedBackend {
     /// Dense f32 transformer (.apr / .safetensors).
     Dense(std::sync::Arc<crate::layers::Model>),
     /// Quantized GGUF weights — what `apr serve run model.gguf` loads.
     Quantized(std::sync::Arc<crate::gguf::OwnedQuantizedModel>),
+    /// f32 `AprTransformer` — the APR / SafeTensors CPU serve path.
+    Apr(std::sync::Arc<crate::apr_transformer::AprTransformer>),
 }
 
 impl EmbedBackend {
@@ -78,6 +85,7 @@ impl EmbedBackend {
         match self {
             Self::Dense(m) => m.config().hidden_dim,
             Self::Quantized(m) => m.config.hidden_dim,
+            Self::Apr(m) => m.config.hidden_dim,
         }
     }
 
@@ -89,6 +97,7 @@ impl EmbedBackend {
                 Ok(m.forward_hidden(&usize_ids)?.data().to_vec())
             },
             Self::Quantized(m) => m.forward_hidden_states(token_ids),
+            Self::Apr(m) => m.forward_hidden_states(token_ids),
         }
     }
 }
@@ -128,6 +137,17 @@ fn resolve_embed_backend(
             )
         })?;
         return Ok((EmbedBackend::Quantized(quantized.clone()), tokenizer));
+    }
+    if let Some(apr) = state.apr_transformer() {
+        let tokenizer = state.get_tokenizer(model_id).map_err(|e| {
+            (
+                super::model_resolution_status(&e),
+                Json(ErrorResponse {
+                    error: e.to_string(),
+                }),
+            )
+        })?;
+        return Ok((EmbedBackend::Apr(apr.clone()), tokenizer));
     }
     Err((
         StatusCode::SERVICE_UNAVAILABLE,
@@ -210,12 +230,26 @@ pub async fn realize_embed_handler(
     State(state): State<AppState>,
     Json(request): Json<EmbeddingRequest>,
 ) -> Result<Json<EmbeddingResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let (embeddings, prompt_tokens) = embed_inputs(
-        &state,
-        request.model.as_deref(),
-        &request.input,
-        "/realize/embed",
-    )?;
+    embed_for_route(state, request, "/realize/embed")
+}
+
+/// The shared body of every OpenAI-shaped embedding route, told which route it is.
+///
+/// aprender#2609: `/v1/embeddings` delegated to [`realize_embed_handler`], so its
+/// unavailable-model body read `"No model available: /realize/embed needs a loaded
+/// model"` — naming a route the client never called. `/api/embeddings` already
+/// passed its own name; `/v1/embeddings` now does too.
+///
+/// # Errors
+///
+/// Propagates the status and JSON envelope from [`embed_inputs`].
+pub(super) fn embed_for_route(
+    state: AppState,
+    request: EmbeddingRequest,
+    route: &str,
+) -> Result<Json<EmbeddingResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let (embeddings, prompt_tokens) =
+        embed_inputs(&state, request.model.as_deref(), &request.input, route)?;
 
     let data = embeddings
         .into_iter()
@@ -435,6 +469,13 @@ pub async fn realize_reload_handler(
 /// and had no effect at all. Threading the stops through the ONE builder every
 /// backend already calls makes forgetting them a compile error rather than a
 /// silently ignored field.
+/// `used_gpu` is a REQUIRED parameter rather than a defaulted field, deliberately
+/// (#3894). A field defaulting to `None` lets an arm stay silent forever, which is
+/// exactly how the serve dimension came to have no backend attribution at all. As a
+/// parameter the compiler makes every arm answer the question, and an arm that
+/// genuinely cannot answer says so at its call site, in front of a reader, with the
+/// reason next to it.
+#[allow(clippy::too_many_arguments)]
 fn completion_resp(
     id_prefix: &str,
     model: String,
@@ -443,6 +484,7 @@ fn completion_resp(
     completion_tokens: usize,
     max_tokens: usize,
     stops: Option<&[String]>,
+    used_gpu: Option<bool>,
 ) -> CompletionResponse {
     let (text, finish_reason) = apply_stop_sequences(text, stops, completion_tokens, max_tokens);
     let finish_reason = finish_reason.as_str();
@@ -462,6 +504,7 @@ fn completion_resp(
             completion_tokens,
             total_tokens: prompt_tokens + completion_tokens,
         },
+        used_gpu,
     }
 }
 
@@ -494,7 +537,7 @@ async fn try_batch_completion(
         prompt_tokens: prompt_ids.to_vec(),
         max_tokens,
         temperature,
-        top_k: if temperature == 0.0 { 1 } else { 40 },
+        top_k: crate::infer::sampling_top_k(temperature, None),
         response_tx,
         submitted_at: std::time::Instant::now(),
     };
@@ -521,6 +564,8 @@ async fn try_batch_completion(
         completion_tokens,
         max_tokens,
         stops,
+        // The batch arm's response carries no backend flag.
+        None,
     )))
 }
 
@@ -686,7 +731,7 @@ async fn try_cached_completions(
     let q_config = QuantizedGenerateConfig {
         max_tokens,
         temperature,
-        top_k: if temperature == 0.0 { 1 } else { 40 },
+        top_k: crate::infer::sampling_top_k(temperature, None),
         stop_tokens: Vec::new(),
         trace: state.is_trace_enabled(),
         cancel: cancel.clone(),
@@ -723,6 +768,10 @@ async fn try_cached_completions(
         completion_tokens,
         max_tokens,
         request.stop.as_deref(),
+        // `generate_with_cache` returns tokens only. `is_gpu_cache_warm()` exists on
+        // the model but is a STATE, not a record of what this generation did, so it is
+        // deliberately NOT used here (#3894).
+        None,
     )))
 }
 
@@ -761,18 +810,46 @@ fn try_quantized_completions(
     let q_config = QuantizedGenerateConfig {
         max_tokens,
         temperature,
-        top_k: if temperature == 0.0 { 1 } else { 40 },
+        top_k: crate::infer::sampling_top_k(temperature, None),
         stop_tokens: Vec::new(),
         trace: state.is_trace_enabled(),
         cancel: cancel.clone(),
         ..Default::default()
     };
 
+    // #3987: a qwen3moe model has no dense FFN, so the dense `generate_with_cache`
+    // cannot run it -- /v1/completions answered 500 on both hosts. Route it through the
+    // ONE dispatch `apr run` uses (#3714), which serves on the GPU when the server opted
+    // in (`with_moe_gpu`) and reports which backend actually ran. Qwen3.5-MoE spellings
+    // are left alone: the capability refusal names them (#3714 fold).
+    let moe_arch = state.model_architecture().filter(|a| {
+        crate::gguf::moe_forward_handles(a) && crate::capability::no_cuda_forward_reason(a).is_none()
+    });
     // aprender#2376(9): a context-budget rejection is a client error (400), not a
     // server failure — same classification as /generate.
-    let generated = quantized_model
-        .generate_with_cache(&prompt_ids, &q_config)
+    let (generated, used_gpu) = if moe_arch.is_some() {
+        let mapped = state.mapped_gguf_model().ok_or_else(|| {
+            rerr(
+                state,
+                StatusCode::NOT_IMPLEMENTED,
+                "qwen3moe needs the retained GGUF map, which this server did not keep (#3987)",
+            )
+        })?;
+        let (tokens, gpu) = crate::infer::qwen3_moe_dispatch::run_qwen3_moe_generate_dispatch(
+            &mapped,
+            quantized_model,
+            &prompt_ids,
+            &q_config,
+            state.moe_no_gpu(),
+        )
         .map_err(|e| rerr(state, super::generation_error_status(&e), e))?;
+        (tokens, Some(gpu))
+    } else {
+        let tokens = quantized_model
+            .generate_with_cache(&prompt_ids, &q_config)
+            .map_err(|e| rerr(state, super::generation_error_status(&e), e))?;
+        (tokens, None)
+    };
     let token_ids: Vec<u32> = generated.iter().skip(prompt_tokens).copied().collect();
     let completion_tokens = token_ids.len();
     let text = tokenizer
@@ -791,6 +868,9 @@ fn try_quantized_completions(
         completion_tokens,
         max_tokens,
         request.stop.as_deref(),
+        // The dense `generate_with_cache` returns tokens only, so it records no backend
+        // (None); the MoE dispatch reports the one that actually ran (#3987).
+        used_gpu,
     )))
 }
 

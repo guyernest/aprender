@@ -21,7 +21,7 @@ fusion_decisions:
       replaces:
       - SiluKernel (trueno-gpu/src/kernels/elementwise/activations.rs)
       - ElementwiseMulKernel (trueno-gpu/src/kernels/elementwise/activations.rs)
-    call_site: realizar/src/cuda/executor/layers/indexed.rs:1411
+    call_site: crates/aprender-serve/src/cuda/executor/layers/indexed_ffn.rs:172
     saves_per_layer: 1
     saves_per_seq_28L: 28
     memory_saved_bytes: 75776
@@ -39,7 +39,7 @@ fusion_decisions:
       fused: BatchedSwigluKernel (trueno-gpu/src/kernels/elementwise/swiglu.rs)
       replaces:
       - M × FusedSwigluKernel invocations
-    call_site: realizar/src/cuda/executor/layers/prefill.rs
+    call_site: crates/aprender-serve/src/cuda/executor/layers/prefill.rs:927
     benchmark:
       model: qwen2.5-coder-7b-instruct-q4_k_m
       prefill_tok_s: 290
@@ -130,7 +130,7 @@ fusion_decisions:
       - Q projection GEMV
       - K projection GEMV
       - V projection GEMV
-    call_site: crates/aprender-serve/src/cuda/generate.rs:267
+    call_site: crates/aprender-serve/src/cuda/kernels_generate_gemm_cuda.rs:371
     saves_per_layer: 2
     falsification: Splitting fused Q/K/V into three separate GEMV launches must increase per-token wall.
   fused_gate_up:
@@ -143,7 +143,7 @@ fusion_decisions:
       - Gate projection GEMV
       - Up projection GEMV
       - SwiGLU activation
-    call_site: crates/aprender-serve/src/cuda/generate.rs:270
+    call_site: crates/aprender-serve/src/cuda/kernels_generate_gemm_cuda.rs:374
     saves_per_layer: 2
     falsification: Splitting fused Gate+Up+SwiGLU into separate launches must increase per-token wall.
   fused_gemm_bias_gelu:
@@ -171,7 +171,7 @@ fusion_decisions:
       replaces:
       - RmsNormKernel
       - Q4K GEMV (separate normalization read)
-    call_site: crates/aprender-serve/src/cuda/generate.rs:202
+    call_site: crates/aprender-serve/src/cuda/kernels_generate_gemm_cuda.rs:259
     saves_per_layer: 1
     falsification: Splitting RMSNorm and Q4K GEMV into two kernels must increase per-token wall.
   fused_gate_up_q4k_gemv:
@@ -183,7 +183,7 @@ fusion_decisions:
       replaces:
       - Gate Q4K GEMV (separate input load)
       - Up Q4K GEMV (separate input load)
-    call_site: crates/aprender-serve/src/cuda/generate.rs:273
+    call_site: crates/aprender-serve/src/cuda/kernels_generate_gemm_cuda.rs:377
     saves_per_layer: 1
     notes: |
       Distinct from FUSION-007 (FusedGateUpKernel = FP32 input) — this
@@ -281,7 +281,8 @@ proof_obligations:
 # file:line exists and dispatches, and over measured tok/s numbers. None has an
 # algebraic statement to prove — they are enforced by the `enforcement` scan +
 # `kani_harnesses` and are marked l4_not_applicable in verification_summary.
-- type: invariant
+- id: KF42A6-INV-001
+  type: invariant
   property: Registry completeness — no orphaned kernels
   formal: for all K in fused_kernels, exists E in fusion_decisions where E.kernels.fused == K
   tolerance: 1e-6
@@ -291,7 +292,8 @@ proof_obligations:
     N/A for Lean: quantifies over kernel *source files on disk* in
     trueno-gpu/src/kernels/. A filesystem-completeness scan, not an algebraic
     identity. Enforced by enforcement.kernel_registry_complete + KANI-FUSION-001.
-- type: postcondition
+- id: KF42A6-POST-002
+  type: postcondition
   property: ACTIVE entry call site validity
   formal: for all E where E.status == ACTIVE, file_exists(E.call_site) and dispatches(E.kernels.fused)
   applies_to: all
@@ -300,7 +302,8 @@ proof_obligations:
     N/A for Lean: file_exists(call_site) and dispatches(...) are runtime /
     build-graph predicates over real source paths, not provable in exact
     arithmetic. Enforced by enforcement.active_must_be_called + KANI-FUSION-002.
-- type: precondition
+- id: KF42A6-PRE-003
+  type: precondition
   property: BLOCKED entries have complete benchmarks
   formal: for all E where E.status == BLOCKED, E.benchmark.unfused_tok_s != null and E.benchmark.fused_tok_s != null
   applies_to: all

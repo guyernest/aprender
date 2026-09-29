@@ -53,7 +53,7 @@ pub(crate) fn run(
     if let Some(min) = min_score {
         if !produces_qa_score(format) {
             return Err(CliError::ValidationFailed(format!(
-                "--min-score {min} does not apply to {format}: the 100-point QA checklist is the .apr validator, and {format} validation reports per-tensor pass/fail with no score. Re-run without --min-score, or use --strict to fail on NaN/Inf/all-zero findings."
+                "--min-score {min} does not apply to {format}: the structural QA checklist is the .apr validator, and {format} validation reports per-tensor pass/fail with no score. Re-run without --min-score, or use --strict to fail on NaN/Inf/all-zero findings."
             )));
         }
     }
@@ -521,9 +521,12 @@ fn print_apr_validation_json(
         check_min_score(report, min_score)?;
         let failed = report.failed_checks().len();
         if failed > 0 {
+            // #2612: the JSON consumer reads the exit code AND stderr; give it
+            // the same named reason the human path prints.
             return Err(CliError::ValidationFailed(format!(
-                "{failed} validation checks failed ({})",
-                report.implemented_score()
+                "{failed} validation checks failed ({}) — {}",
+                report.implemented_score(),
+                failed_check_details(report)
             )));
         }
     }
@@ -663,7 +666,7 @@ fn summary_line(report: &ValidationReport) -> String {
 fn print_summary(report: &ValidationReport) -> Result<(), CliError> {
     // PMAT-926: --strict is now honored via the fail-closed content gate
     // (`gate_apr_content`), not ignored here. This function prints only the
-    // structural 100-point summary table.
+    // structural summary table, scored on the checks that ran (#2394).
     println!();
     println!("{}", summary_line(report));
 
@@ -672,11 +675,33 @@ fn print_summary(report: &ValidationReport) -> Result<(), CliError> {
     if failed_checks.is_empty() {
         Ok(())
     } else {
+        // #2612: name the failures. A truncated `.apr` now fails check 5
+        // ("Data section within file"), and the caller that reads only stderr
+        // — every machine consumer does — needs the reason, not a count. The
+        // "N validation checks failed" prefix is preserved verbatim.
         Err(CliError::ValidationFailed(format!(
-            "{} validation checks failed",
-            failed_checks.len()
+            "{} validation checks failed — {}",
+            failed_checks.len(),
+            failed_check_details(report)
         )))
     }
+}
+
+/// `[id] name: reason` for every failed check, semicolon-separated (#2612).
+///
+/// Shared by the human and `--json` paths so both name the same defect. A count
+/// alone ("1 validation checks failed") tells a machine consumer nothing it can
+/// act on, and the count was the only thing either path emitted.
+fn failed_check_details(report: &ValidationReport) -> String {
+    report
+        .failed_checks()
+        .iter()
+        .map(|c| match &c.status {
+            CheckStatus::Fail(reason) => format!("[{}] {}: {reason}", c.id, c.name),
+            _ => format!("[{}] {}", c.id, c.name),
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// The `--quality` category table and TOTAL line, as a string.

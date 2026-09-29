@@ -24,7 +24,16 @@ name: Toolchain Ceiling
 
 on:
   schedule:
-    - cron: '0 5 * * *' # 05:00 UTC — after the 04:00 binary nightly
+    # SHIFTED so it actually runs at night (#3292). GitHub dispatches
+    # schedule events 3h51m-6h49m late on this account (28 runs, 10
+    # workflows, 3 nights, zero on time), so a 05:00 cron fired mid-
+    # morning and the nightly tier occupied 06:49-14:14 UTC — the
+    # working day, competing with PR traffic for the same runners.
+    # Cron is set ~5h EARLY so the delayed dispatch lands near 05:00 UTC.
+    # This is CALIBRATION AGAINST A MOVING TARGET: the delay varies by
+    # ~3h and is growing. The durable fix is a fleet-side timer calling
+    # `gh workflow run` (#3292); until then, re-measure before trusting.
+    - cron: '0 0 * * *'   # 00:00 UTC -> lands ~05:00 UTC
   workflow_dispatch: {}
 
 permissions:
@@ -54,9 +63,9 @@ jobs:
     runs-on: [self-hosted, X64, Linux, clean-room]
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Workspace builds on its DECLARED MSRV
-        run: bash scripts/check_msrv.sh
+        run: setsid --wait bash scripts/check_msrv.sh
 
   clippy-current-stable:
     # clean-room pool, same as coverage-nightly: this is a full-workspace clippy
@@ -76,4 +85,28 @@ jobs:
           # (see memory: feedback_gh_default_shell_no_pipefail). No pipes below, and
           # the script's own exit status is the verdict — do not tee it.
           export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
-          bash scripts/check_clippy_current_stable.sh
+          setsid --wait bash scripts/check_clippy_current_stable.sh
+
+  # THE FEATURE AXIS (#3837). The ceiling above varies the TOOLCHAIN; this varies the FEATURES. `ci / lint` runs
+  # clippy without `--features cuda` and the cuda jobs run tests, never clippy, so nothing had ever linted code
+  # behind `--features cuda`: 62 findings accumulated in aprender-train/-compute, #2370's mechanism on a different
+  # axis. No CUDA toolkit is needed (the driver is dlopen'd), so any clean-room host runs it.
+  #
+  # The self-test runs FIRST and must pass before the verdict counts: it plants a cuda-only finding and requires
+  # exactly the cuda axis to go red, which proves the flags reach cargo as separate words (#3837's zsh trap made
+  # a flag string one argument and read as a lint failure).
+  clippy-feature-matrix:
+    runs-on: [self-hosted, Linux, X64, clean-room]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          clean: false
+      - name: Self-test — an unreached feature is refused, and a planted cuda-only finding reddens only the cuda-reaching axes
+        run: |
+          export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
+          setsid --wait bash scripts/check_clippy_feature_matrix.sh --self-test
+      - name: Strict clippy on every feature axis — the axis table must reach every apr-cli feature (derived)
+        run: |
+          export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
+          setsid --wait bash scripts/check_clippy_feature_matrix.sh

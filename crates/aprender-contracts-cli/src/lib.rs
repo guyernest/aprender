@@ -19,12 +19,49 @@ use std::str::FromStr;
 use clap::Parser;
 use cli::Commands;
 
+/// Glance form, printed by `pv -V`. One line, and it names the tool.
+///
+/// clap renders `{name} {version}`, so this yields
+/// `pv 0.69.0 (aa7c6ef03) (aprender provable-contracts verifier)` — the build
+/// SHA from `aprender-build-sha` (#4219), as every workspace binary prints.
+/// The bare semver stays the SECOND whitespace field because
+/// `scripts/pv_bin.sh` reads it positionally to prove a resolved binary was
+/// built from HEAD.
+const SHORT_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("APR_GIT_SHA"),
+    ") (aprender provable-contracts verifier)"
+);
+
+/// Full form, printed by `pv --version`.
+///
+/// Four things claim the name `pv` on a developer box: `pv(1)` the pipe viewer
+/// from every distro, the `pv` crate on crates.io (also a pipe viewer, first
+/// published 2019), this binary, and — until #2553 — the aprender facade. The
+/// operator settled that this tool KEEPS the name (2026-08-21), which makes this
+/// string the mitigation the project relies on, so it rules the others out by
+/// name rather than merely describing itself. See #2559 and
+/// `tests/version_identity.rs`.
+const LONG_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (",
+    env!("APR_GIT_SHA"),
+    ") (aprender provable-contracts verifier)\n",
+    "crate aprender-contracts-cli — ",
+    env!("CARGO_PKG_REPOSITORY"),
+    "\n",
+    "Verifies YAML contracts under contracts/; run `pv --help` for the command surface.\n",
+    "This is NOT pv(1), the pipe viewer (distro package `pv`, or the `pv` crate on crates.io)."
+);
+
 /// Top-level CLI argument parser for the `pv` command
 #[derive(Parser)]
 #[command(
     name = "pv",
     about = "provable-contracts — papers to provable Rust kernels",
-    version
+    version = SHORT_VERSION,
+    long_version = LONG_VERSION
 )]
 pub struct Cli {
     /// The command to run
@@ -57,7 +94,10 @@ pub fn dispatch(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
             format,
             binding,
         } => commands::explain::run(&contract, binding.as_deref(), &format),
-        Commands::Validate { contract } => commands::validate::run(&contract),
+        Commands::Validate {
+            contract,
+            check_ids,
+        } => commands::validate::run(&contract, check_ids),
         Commands::CheckParity { contract } => commands::check_parity::run(&contract),
         Commands::Scaffold {
             contract,
@@ -80,6 +120,25 @@ pub fn dispatch(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
             contract, binding, ..
         } => commands::audit::run(&contract, binding.as_deref()),
         Commands::Diff { old, new } => commands::diff::run(&old, &new),
+        Commands::Census {
+            contract_dir,
+            format,
+            json,
+        } => {
+            let as_json = json || matches!(format, cli::CensusFormat::Json);
+            commands::census::run(&contract_dir, as_json)
+        }
+        Commands::Extract {
+            contract_dir,
+            check,
+            out,
+            release,
+        } => {
+            let subject = release
+                .subject()
+                .map_err(crate::contract_walk::ReleaseArgsRefused)?;
+            commands::extract_rdf::run(&contract_dir, check, subject.as_ref(), out.as_deref())
+        }
         Commands::Coverage {
             contract_dir,
             binding,
@@ -157,6 +216,10 @@ pub fn dispatch(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
             explain,
             watch,
             strict_test_binding,
+            armed_baseline_ref,
+            gate,
+            shape,
+            release,
             ..
         } => {
             if let Some(ref rule_id) = explain {
@@ -186,6 +249,9 @@ pub fn dispatch(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
                 min_level.as_deref(),
                 watch,
                 strict_test_binding,
+                armed_baseline_ref.as_deref(),
+                gate.as_deref(),
+                commands::lint::shapes_options(gate.as_deref(), shape, &release)?,
             )
         }
         Commands::Score {
@@ -316,10 +382,7 @@ pub fn dispatch(command: Commands) -> Result<(), Box<dyn std::error::Error>> {
         Commands::VerifyPipeline {
             contract_dir,
             format,
-        } => {
-            commands::verify_pipeline::run(&contract_dir, &format);
-            Ok(())
-        }
+        } => commands::verify_pipeline::run(&contract_dir, &format),
         Commands::Migrate {
             contract_dir,
             dry_run,
@@ -334,10 +397,20 @@ pub fn run() {
     let _ = (cli.quiet, cli.verbose); // Flags accepted; used by subcommands via Cli struct
 
     if let Err(e) = dispatch(cli.command) {
-        eprintln!("error: {e}");
-        std::process::exit(1);
+        // PVL-1 (PMAT-1099): a refused EMPTY corpus is a DECLINE — exit 2 and the
+        // `decline:` (exit 2, nothing was measured), `reject:` (exit 1, measured and
+        // failed) or `error:` — PVL-001 §0's vocabulary, one definition in
+        // contract_walk::verdict_for so the word and the exit code cannot drift.
+        let code = contract_walk::exit_code_for(e.as_ref());
+        let verdict = contract_walk::verdict_for(e.as_ref());
+        eprintln!("{verdict}: {e}");
+        std::process::exit(code);
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/includes/version_identity_unit.rs"]
+mod version_identity_unit;
 
 #[cfg(test)]
 #[path = "../tests/includes/dispatch_tests.rs"]

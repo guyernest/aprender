@@ -861,7 +861,8 @@ mod emit_trace_tests {
 
 #[cfg(test)]
 mod non_interactive_format_tests {
-    use super::super::{build_json_result_envelope, parse_json_input_envelope};
+    use super::super::parse_json_input_envelope;
+    use crate::agent::code_envelope::{envelope, CodeOutcome};
     use crate::agent::{AgentLoopResult, TokenUsage};
 
     fn synth_result(text: &str) -> AgentLoopResult {
@@ -879,7 +880,7 @@ mod non_interactive_format_tests {
         // contract for any tool downstream (e.g. CCPA differ) that parses
         // this envelope.
         let r = synth_result("the answer is 4");
-        let s = build_json_result_envelope(&r, std::time::Duration::from_millis(123), false);
+        let s = envelope(Some(&r), None, std::time::Duration::from_millis(123));
         let v: serde_json::Value = serde_json::from_str(&s).expect("envelope is valid JSON");
         assert_eq!(v["type"], "result");
         assert_eq!(v["subtype"], "success");
@@ -896,7 +897,8 @@ mod non_interactive_format_tests {
     #[test]
     fn json_output_envelope_marks_error_subtype_on_empty_response() {
         let r = synth_result("");
-        let s = build_json_result_envelope(&r, std::time::Duration::from_millis(1), true);
+        let outcome = CodeOutcome::empty_completion(r.iterations, r.tool_calls);
+        let s = envelope(Some(&r), Some(&outcome), std::time::Duration::from_millis(1));
         let v: serde_json::Value = serde_json::from_str(&s).expect("valid JSON");
         assert_eq!(v["subtype"], "error");
         assert_eq!(v["is_error"], true);
@@ -995,4 +997,469 @@ fn interactive_sessions_take_no_single_prompt_permit() {
     let permit = permit_single_prompt(&mut budget, /* non_interactive */ false)
         .expect("interactive startup must not be refused here");
     assert!(permit.is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Issue #2607: `apr code` with no arguments and stdin closed
+// ---------------------------------------------------------------------------
+
+/// A bare `apr code` on a non-terminal stdin has nothing to run: no prompt to
+/// answer and no way to hold a REPL. It must print help — NOT scan the disk
+/// for the largest GGUF and launch an inference server for it.
+#[test]
+fn falsify_2607_bare_invocation_on_closed_stdin_wants_help() {
+    let bare = CodeInvocation { stdin_is_terminal: false, ..CodeInvocation::default() };
+    assert!(
+        bare.wants_help(),
+        "#2607: a no-argument `apr code` with a closed stdin must print help, \
+         not auto-discover a model and spawn `apr serve`"
+    );
+}
+
+/// #2607 follow-up: the refusal must NOT swallow `echo "hi" | apr code`.
+///
+/// `run_repl` reads stdin line by line and treats EOF as `/exit`, so a pipe
+/// carrying one line has always been one REPL turn. A guard keyed on
+/// `!stdin_is_terminal` alone would have turned that working invocation into
+/// an exit-2 usage error — a narrowing #2607 never asked for. Piped bytes are
+/// an instruction; `/dev/null` is not.
+#[test]
+fn falsify_2607_piped_stdin_still_drives_the_repl() {
+    let piped = CodeInvocation {
+        stdin_is_terminal: false,
+        stdin_has_input: true,
+        ..CodeInvocation::default()
+    };
+    assert!(
+        !piped.wants_help(),
+        "#2607 follow-up: `echo \"hi\" | apr code` carries an instruction on stdin and must \
+         still run the REPL — refusing it narrows a working invocation"
+    );
+    // And the two cases must be told apart by exactly one bit, so neither can
+    // be made to pass by loosening the other.
+    let empty = CodeInvocation { stdin_has_input: false, ..piped };
+    assert!(
+        empty.wants_help(),
+        "#2607: the same shape with nothing on stdin (`apr code < /dev/null`) must refuse"
+    );
+}
+
+/// The peek must report presence of input **without consuming it** — the
+/// REPL/`-p` read that follows has to see the very same bytes. A predicate
+/// that ate the first line would make a piped prompt run an empty turn, which
+/// is a worse failure than the refusal it replaced.
+#[test]
+fn falsify_2607_reader_has_input_reports_and_preserves_bytes() {
+    use std::io::{BufRead, Read};
+
+    // Empty reader — a closed pipe or /dev/null.
+    let mut empty = std::io::BufReader::new(std::io::empty());
+    assert!(!crate::agent::code::reader_has_input(&mut empty), "empty stdin must report no input");
+
+    // Reader with bytes — a pipe carrying a prompt.
+    let mut piped = std::io::BufReader::new(std::io::Cursor::new(b"hi\nthere\n".to_vec()));
+    assert!(crate::agent::code::reader_has_input(&mut piped), "piped bytes must report input");
+
+    // ...and the peek consumed nothing.
+    let mut line = String::new();
+    piped.read_line(&mut line).expect("read_line after peek");
+    assert_eq!(line, "hi\n", "#2607: the peek must not eat the first line");
+    let mut rest = String::new();
+    piped.read_to_string(&mut rest).expect("drain after peek");
+    assert_eq!(rest, "there\n");
+}
+
+/// `/dev/null` is a character device and can never deliver a byte; a
+/// redirected regular file can. That distinction is what keeps the blocking
+/// peek unreachable for the `apr code < /dev/null` shape — and for every test
+/// harness, which hands tests exactly that.
+#[test]
+#[cfg(unix)]
+fn falsify_2607_dev_null_is_not_a_carrier_but_a_file_is() {
+    let dev_null = std::fs::metadata("/dev/null").expect("stat /dev/null");
+    assert!(
+        !crate::agent::code::kind_can_carry_input(&dev_null.file_type()),
+        "#2607: /dev/null must never be treated as a source of input"
+    );
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let file = tmp.path().join("piped.txt");
+    std::fs::write(&file, b"hi\n").expect("write");
+    let regular = std::fs::metadata(&file).expect("stat file");
+    assert!(
+        crate::agent::code::kind_can_carry_input(&regular.file_type()),
+        "#2607 follow-up: `apr code < prompt.txt` is an explicit instruction and must run"
+    );
+}
+
+/// The refusal is scoped to *bare* invocations. Every named argument is an
+/// explicit operator instruction and must still run on a pipe — otherwise the
+/// fix for #2607 would break `apr code -p "..." < /dev/null`, the documented
+/// non-interactive form, and CI usage of `--model`/`--manifest`/`--resume`.
+#[test]
+fn falsify_2607_named_arguments_still_run_on_closed_stdin() {
+    let base = CodeInvocation { stdin_is_terminal: false, ..CodeInvocation::default() };
+    for (label, inv) in [
+        ("-p", CodeInvocation { print: true, ..base }),
+        ("positional prompt", CodeInvocation { has_prompt: true, ..base }),
+        ("--model", CodeInvocation { has_model: true, ..base }),
+        ("--manifest", CodeInvocation { has_manifest: true, ..base }),
+        ("--resume", CodeInvocation { has_resume: true, ..base }),
+    ] {
+        assert!(
+            !inv.wants_help(),
+            "{label} is an explicit instruction — it must still run with stdin closed"
+        );
+    }
+    // And an interactive terminal always runs, arguments or not: that is the
+    // REPL, the whole point of `apr code`.
+    assert!(!CodeInvocation { stdin_is_terminal: true, ..CodeInvocation::default() }.wants_help());
+}
+
+/// Marker that puts this test binary in "child half" mode for the #2607
+/// stdin test below. Absent ⇒ parent half: re-exec ourselves. Present ⇒ we
+/// already own fd 0 and may make the assertion.
+const HERMETIC_STDIN_CHILD_ENV: &str = "APR_2607_HERMETIC_STDIN_CHILD";
+
+/// Full libtest path of the test below, used as the child's `--exact` filter.
+/// If it ever drifts from the real name, the child runs zero tests and the
+/// parent's `1 passed` assertion fails — the rename cannot pass silently.
+const HERMETIC_STDIN_TEST: &str =
+    "agent::code::tests::falsify_2607_cmd_code_refuses_bare_non_interactive_invocation";
+
+/// `cmd_code` itself must refuse the bare/non-interactive shape, so a library
+/// embedder cannot reach model discovery either. Asserting `is_err` is the
+/// point: the pre-#2607 build returned no error and went on to spawn a child.
+///
+/// **Hermetic by re-exec** (#2307). The guard reads *this process'* fd 0, so
+/// the assertion is only meaningful if the test owns fd 0 — and it does not.
+/// `cargo nextest` gives every test its own process with `/dev/null` on fd 0;
+/// a plain `cargo test` runs tests as *threads* of one process that inherited
+/// the caller's stdin, which under CI is a pipe or a redirected file. That
+/// divergence is exactly why this test was green on `workspace-test` and red
+/// on `make coverage`, blocking the 0.64.0 coverage measurement. So the parent
+/// half re-execs the test binary with `Stdio::null()` on fd 0 and the child
+/// half — which now provably owns fd 0 — makes the assertion. Same result
+/// under both harnesses, from a terminal, a pipe or a file.
+#[test]
+fn falsify_2607_cmd_code_refuses_bare_non_interactive_invocation() {
+    if std::env::var_os(HERMETIC_STDIN_CHILD_ENV).is_some() {
+        assert_cmd_code_refuses_bare_non_interactive();
+        return;
+    }
+    let exe = std::env::current_exe().expect("test binary must have a path to re-exec");
+    let out = std::process::Command::new(&exe)
+        .args(["--exact", HERMETIC_STDIN_TEST, "--test-threads=1"])
+        .env(HERMETIC_STDIN_CHILD_ENV, "1")
+        // The whole point: fd 0 is /dev/null in the child no matter what the
+        // harness handed us.
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap_or_else(|e| panic!("failed to re-exec {} for the #2607 check: {e}", exe.display()));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "#2607 child assertion failed ({}):\n--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}",
+        out.status
+    );
+    // Prove the child actually ran the assertion. A stale `HERMETIC_STDIN_TEST`
+    // would make libtest filter everything out and still exit 0 — a green run
+    // proving nothing, which is the class of defect this test is fixing.
+    assert!(
+        stdout.contains("1 passed"),
+        "child ran no assertion — is HERMETIC_STDIN_TEST ({HERMETIC_STDIN_TEST}) stale?\n{stdout}"
+    );
+}
+
+/// The actual #2607 assertion. Runs only in the child half above, which owns
+/// fd 0 (`/dev/null`); the preconditions restate that and fail loudly rather
+/// than pass vacuously if the re-exec ever stops delivering it.
+fn assert_cmd_code_refuses_bare_non_interactive() {
+    // A terminal on fd 0 short-circuits `CodeInvocation::from_args` one level
+    // up, so the guard could not fire and there would be nothing to assert.
+    assert!(
+        !std::io::IsTerminal::is_terminal(&std::io::stdin()),
+        "child stdin is a terminal, not /dev/null; the #2607 guard cannot be exercised here"
+    );
+    // The guard peeks stdin when — and only when — every flag already says
+    // "would refuse", and that peek blocks on a pipe with a live writer.
+    // `Stdio::null()` makes fd 0 a character device, which is refused without
+    // reading. Assert it rather than discover it as a hung merge queue.
+    #[cfg(unix)]
+    if let Ok(meta) = std::fs::metadata("/dev/stdin") {
+        assert!(
+            !crate::agent::code::kind_can_carry_input(&meta.file_type()),
+            "child stdin is a pipe/file, not /dev/null; this test would block on the #2607 peek"
+        );
+    }
+    let err =
+        cmd_code(None, PathBuf::from("."), None, vec![], false, 50, None, None, "text", "text")
+            .expect_err(
+                "#2607: bare `apr code` with a closed stdin must refuse, not launch a model",
+            );
+    let msg = err.to_string();
+    assert!(msg.contains("stdin is not a terminal"), "unexpected refusal message: {msg}");
+}
+
+/// Issue #2607, second defect. `register_task_tool` stores an `Arc` clone of
+/// the driver inside the registry, so `drop(driver)` on its own leaves the
+/// strong count at 1 and the driver's `Drop` — which is what SIGTERMs the
+/// `apr serve` child — never runs. Since the `-p` path ends in
+/// `std::process::exit` (which runs no destructors), that leaked an orphaned
+/// server holding the entire model in RSS.
+#[test]
+fn falsify_2607_dropping_driver_handle_alone_leaves_serve_child_unreaped() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct ReapFlagDriver(Arc<AtomicBool>);
+    impl Drop for ReapFlagDriver {
+        fn drop(&mut self) {
+            // Stands in for AprServeDriver::drop, which kills `apr serve`.
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    #[async_trait::async_trait]
+    impl crate::agent::driver::LlmDriver for ReapFlagDriver {
+        async fn complete(
+            &self,
+            _request: crate::agent::driver::CompletionRequest,
+        ) -> Result<crate::agent::driver::CompletionResponse, crate::agent::result::AgentError>
+        {
+            unreachable!("this driver exists only to observe its own Drop")
+        }
+        fn context_window(&self) -> usize {
+            4096
+        }
+        fn privacy_tier(&self) -> PrivacyTier {
+            PrivacyTier::Sovereign
+        }
+    }
+
+    let manifest = build_default_manifest();
+
+    // RED half: the exact sequence the pre-fix `-p` branch performed.
+    let reaped = Arc::new(AtomicBool::new(false));
+    let driver: Arc<dyn crate::agent::driver::LlmDriver> =
+        Arc::new(ReapFlagDriver(Arc::clone(&reaped)));
+    let mut tools = build_code_tools(&manifest);
+    crate::agent::task_tool::register_task_tool(&mut tools, &manifest, Arc::clone(&driver), 3);
+    assert_eq!(
+        Arc::strong_count(&driver),
+        2,
+        "the registry must hold a clone for this defect to be possible"
+    );
+    drop(driver);
+    assert!(
+        !reaped.load(Ordering::SeqCst),
+        "#2607: dropping only the local Arc must NOT be mistaken for reaping the child — \
+         if this ever holds, the registry stopped cloning the driver and this test is stale"
+    );
+    drop(tools);
+
+    // GREEN half: `release_driver` consumes the registry first, so the last
+    // handle really is the last one and `Drop` runs before `exit`.
+    let reaped = Arc::new(AtomicBool::new(false));
+    let driver: Arc<dyn crate::agent::driver::LlmDriver> =
+        Arc::new(ReapFlagDriver(Arc::clone(&reaped)));
+    let mut tools = build_code_tools(&manifest);
+    crate::agent::task_tool::register_task_tool(&mut tools, &manifest, Arc::clone(&driver), 3);
+    release_driver(tools, driver);
+    assert!(
+        reaped.load(Ordering::SeqCst),
+        "#2607: release_driver must leave no owner alive, so the `apr serve` child is killed \
+         before std::process::exit skips every destructor"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #3775: `apr code -p --output-format json` writes ONE JSON document per exit
+// ---------------------------------------------------------------------------
+
+/// A driver for the #3775 scenarios: a hard driver error, a failing tool call
+/// repeated until the loop guard blocks it, or an empty answer.
+struct ScenarioDriver {
+    scenario: String,
+}
+
+#[async_trait::async_trait]
+impl LlmDriver for ScenarioDriver {
+    async fn complete(
+        &self,
+        _request: crate::agent::driver::CompletionRequest,
+    ) -> Result<crate::agent::driver::CompletionResponse, crate::agent::result::AgentError> {
+        use crate::agent::driver::{CompletionResponse, ToolCall};
+        use crate::agent::result::{AgentError, DriverError, StopReason, TokenUsage};
+        match self.scenario.as_str() {
+            "driver_error" => Err(AgentError::Driver(DriverError::InferenceFailed(
+                "apr serve HTTP 500: Model architecture not supported for GPU-resident path".into(),
+            ))),
+            "tool_error" => Ok(CompletionResponse {
+                text: String::new(),
+                stop_reason: StopReason::ToolUse,
+                tool_calls: vec![ToolCall {
+                    id: "t1".into(),
+                    name: "file_read".into(),
+                    input: serde_json::json!({"path": "does/not/exist-3775.txt"}),
+                }],
+                usage: TokenUsage::default(),
+            }),
+            _ => Ok(CompletionResponse {
+                text: String::new(),
+                stop_reason: StopReason::EndTurn,
+                tool_calls: vec![],
+                usage: TokenUsage::default(),
+            }),
+        }
+    }
+
+    fn context_window(&self) -> usize {
+        32_768
+    }
+
+    fn privacy_tier(&self) -> PrivacyTier {
+        PrivacyTier::Sovereign
+    }
+}
+
+/// Not a test on its own: the body of the #3775 falsifiers, run in a CHILD
+/// test process so its stdout can be captured whole. Returns at once unless
+/// APR_CODE_3775_CHILD names a scenario.
+#[test]
+fn child_3775_single_prompt_json_run() {
+    let Ok(scenario) = std::env::var("APR_CODE_3775_CHILD") else {
+        return;
+    };
+    let manifest = build_default_manifest();
+    let tools = build_code_tools(&manifest);
+    let memory = crate::agent::memory::InMemorySubstrate::new();
+    let driver = ScenarioDriver { scenario };
+    let mut budget = TurnBudget::new(1);
+    let permit = permit_single_prompt(&mut budget, true)
+        .expect("one turn of budget must permit a -p run")
+        .expect("a -p run takes a permit");
+    let code = run_single_prompt(
+        &manifest, &driver, &tools, &memory, "Fix it.", None, "json", None, permit,
+    );
+    eprintln!("CHILD_EXIT_CODE={code}");
+}
+
+/// Runs `child_3775_single_prompt_json_run` for `scenario` in a fresh process;
+/// returns (the JSON documents found on its stdout, the exit code it returned).
+fn run_3775_child(scenario: &str) -> (Vec<serde_json::Value>, i32) {
+    let exe = std::env::current_exe().expect("the test binary's own path");
+    let out = std::process::Command::new(exe)
+        .args([
+            "agent::code::tests::child_3775_single_prompt_json_run",
+            "--exact",
+            "--nocapture",
+            "--test-threads=1",
+            "-q",
+        ])
+        .env("APR_CODE_3775_CHILD", scenario)
+        .output()
+        .expect("the child test process runs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let docs = stdout
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l.trim()).ok())
+        .filter(serde_json::Value::is_object)
+        .collect();
+    let code = stderr
+        .lines()
+        .find_map(|l| l.strip_prefix("CHILD_EXIT_CODE="))
+        .and_then(|c| c.trim().parse().ok())
+        .unwrap_or_else(|| panic!("the child printed no exit code; stderr:\n{stderr}"));
+    (docs, code)
+}
+
+fn assert_one_error_document(scenario: &str, want_status: &str, want_kind: &str) -> i32 {
+    let (docs, code) = run_3775_child(scenario);
+    assert_eq!(
+        docs.len(),
+        1,
+        "#3775 {scenario}: a -p json run must write exactly one JSON document to stdout, found {docs:?}"
+    );
+    let d = &docs[0];
+    assert_ne!(code, 0, "#3775 {scenario}: a failed run must not exit 0");
+    assert_eq!(d["status"], want_status, "#3775 {scenario}: {d}");
+    assert_eq!(d["is_error"], true, "#3775 {scenario}: is_error == (status != ok): {d}");
+    assert_eq!(d["error"]["kind"], want_kind, "#3775 {scenario}: {d}");
+    assert_eq!(
+        d["error"]["exit_code"], code,
+        "#3775 {scenario}: the document's exit_code must be the process's real exit code: {d}"
+    );
+    code
+}
+
+/// FALSIFIER (#3775): the serve child fails, or loads a 0-layer model and
+/// answers HTTP 500 (#3571). RED at 0.69.0: stdout was EMPTY; only stderr
+/// said "Error: driver error: …".
+#[test]
+fn falsify_3775_driver_error_writes_one_json_document() {
+    assert_eq!(assert_one_error_document("driver_error", "failed", "inference_failed"), 1);
+}
+
+/// FALSIFIER (#3775): a tool that keeps failing. Measured, not assumed: in
+/// `-p` mode the loop guard BLOCKS the third identical failing call and the
+/// turn ends with no answer text (4 iterations, 3 tool calls), not with a
+/// circuit break. That is an empty completion, a failure with exit 1. RED at
+/// 0.69.0: the run exited 0 with a document carrying no status/error fields.
+#[test]
+fn falsify_3775_tool_error_writes_one_json_document() {
+    assert_eq!(assert_one_error_document("tool_error", "failed", "empty_completion"), 1);
+}
+
+/// FALSIFIER (#3775 / #3720 done_when 3): an empty answer is a failure. RED at
+/// 0.69.0: a document with no status/error fields, and exit 0.
+#[test]
+fn falsify_3775_empty_completion_is_a_failure_document() {
+    assert_eq!(assert_one_error_document("empty", "failed", "empty_completion"), 1);
+}
+
+// ═══ #3723: `--thinking on` is passed through to apr serve, no longer refused up front ═══
+#[test]
+fn f3723_thinking_rides_every_request_as_chat_template_kwargs() {
+    use crate::agent::driver::apr_serve::apply_thinking;
+    let base = serde_json::json!({"model": "m", "messages": []});
+    for (think, want) in [(Some(true), Some(true)), (Some(false), Some(false)), (None, None)] {
+        let mut body = base.clone();
+        apply_thinking(&mut body, think);
+        assert_eq!(
+            body.get("chat_template_kwargs").and_then(|k| k["enable_thinking"].as_bool()),
+            want,
+            "think={think:?}: {body}"
+        );
+    }
+    let mut untouched = base.clone();
+    apply_thinking(&mut untouched, None);
+    assert_eq!(untouched, base, "absent --thinking sends nothing (the server default, OFF)");
+}
+
+/// The old up-front refusal is gone (#3723 retired #3978's): `--thinking on` now reaches the
+/// `apr serve` launch. With a model path that does not exist the launch fails, and the one
+/// remaining refusal -- the embedded fallback, which has no thinking-ON path -- names that.
+#[test]
+fn f3723_think_on_is_no_longer_refused_before_discovery() {
+    let err = cmd_code_with(
+        Some(PathBuf::from("/nonexistent/f3723.gguf")),
+        PathBuf::from("."),
+        None,
+        vec!["hi".into()],
+        true,
+        1,
+        None,
+        None,
+        "text",
+        "text",
+        CodeServeOptions { think: Some(true), ..Default::default() },
+    )
+    .expect_err("a nonexistent model still fails");
+    let msg = err.to_string();
+    assert!(
+        !msg.contains("apr serve has no thinking-ON path"),
+        "the up-front refusal is back: {msg}"
+    );
+    assert!(msg.contains("apr serve is unavailable") && msg.contains("embedded fallback"), "{msg}");
 }

@@ -45,7 +45,6 @@ metadata:
   - 'crates/aprender-quant/src/dequantize.rs — dequantize_q4_k_to_f32 / q5 / q6 (fix site if RED)'
   - 'crates/aprender-quant/src/roundtrip_fidelity_tests.rs — falsifiers'
 
-kind: KernelContract
 name: quant-roundtrip-fidelity
 version: 1.0.0
 scope: crates/aprender-quant — k-quant quantize/dequantize round-trip fidelity
@@ -72,23 +71,28 @@ equations:
     lean_theorem: Theorems.Quant_Bitwidth_Monotonic
 
 proof_obligations:
-- type: invariant
+- id: QRF-INV-001
+  type: invariant
   property: Q4_K round-trip within theoretical fidelity bound
   formal: max_i |dq4(q4(x))_i - x_i| <= R/15/2 * 1.30
   applies_to: all
-- type: invariant
+- id: QRF-INV-002
+  type: invariant
   property: Q5_K round-trip within theoretical fidelity bound
   formal: max_i |dq5(q5(x))_i - x_i| <= R/31/2 * 1.30
   applies_to: all
-- type: invariant
+- id: QRF-INV-003
+  type: invariant
   property: Q6_K round-trip within theoretical fidelity bound
   formal: max_i |dq6(q6(x))_i - x_i| <= R/63/2 * 1.30
   applies_to: all
-- type: invariant
+- id: QRF-INV-004
+  type: invariant
   property: Reconstructed values are finite
   formal: dequant(quant(x))_i is finite for all i
   applies_to: all
-- type: monotonicity
+- id: QRF-MON-005
+  type: monotonicity
   property: Round-trip error decreases with bit width
   formal: err_q6k <= err_q5k <= err_q4k (+ f16 tie tolerance)
   applies_to: all

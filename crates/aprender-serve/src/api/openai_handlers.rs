@@ -20,9 +20,10 @@ use axum::{
 use futures::stream::Stream;
 
 use super::{
-    build_trace_data, clean_chat_output, format_chat_messages, AppState, ChatChoice,
-    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ChatMessage, ErrorResponse,
-    FinishReason, OpenAIModel, OpenAIModelsResponse, Usage,
+    build_trace_data, clean_chat_output, format_chat_messages,
+    format_chat_messages_for_state_thinking, AppState, ChatChoice, ChatCompletionChunk,
+    ChatCompletionRequest, ChatCompletionResponse, ChatMessage, ErrorResponse, FinishReason,
+    OpenAIModel, OpenAIModelsResponse, StreamMode, Usage,
 };
 use crate::generate::{CancelToken, GenerationConfig, SamplingStrategy};
 use crate::tokenizer::BPETokenizer;
@@ -69,9 +70,14 @@ fn tokenize_chat_prompt(
     tokenizer: &BPETokenizer,
     messages: &[ChatMessage],
     model_hint: Option<&str>,
+    thinking: Option<bool>,
     state: &AppState,
 ) -> Result<Vec<u32>, Response> {
-    let prompt_text = format_chat_messages(messages, model_hint);
+    // #3723: the request's thinking mode; an ON the model's template cannot express is the
+    // client's error, answered by name.
+    let prompt_text =
+        format_chat_messages_for_state_thinking(state, messages, model_hint, thinking)
+            .map_err(|e| fail_response(state, StatusCode::BAD_REQUEST, e.to_string()))?;
     let ids = tokenizer.encode(&prompt_text);
     if ids.is_empty() {
         return Err(fail_response(
@@ -105,6 +111,58 @@ fn chat_gen_params(
     (max_tokens, temperature, eos_token_id)
 }
 
+/// EOS stop tokens for a chat request, honouring `ignore_eos` (PERF-039).
+///
+/// Every decode loop in the tree stops on `config.stop_tokens.contains(&next)`,
+/// so an EMPTY `stop_tokens` already means "never stop on a token" — the engine
+/// mechanism for ignore-EOS existed before this function did. What was missing
+/// was any way for a client to ask for it: `ignore_eos` had no wire
+/// representation at all, on either side.
+///
+/// APR-PERF-GATE-001 v2.2 §4.3.1 pins W1 at `max_tokens = 128` with ignore-EOS
+/// precisely so the work per band is fixed. `max_tokens` still bounds the loop,
+/// so `ignore_eos` cannot produce an unbounded generation.
+fn chat_stop_tokens(request: &ChatCompletionRequest, eos_token_id: u32) -> Vec<u32> {
+    if request.ignore_eos.unwrap_or(false) {
+        Vec::new()
+    } else {
+        vec![eos_token_id]
+    }
+}
+
+/// Refuse `ignore_eos: true` on a backend that cannot honour it (PERF-039).
+///
+/// `Some(response)` means the caller must return it immediately.
+///
+/// Three chat backends stop on EOS in a way that no request field reaches:
+/// `try_safetensors_cuda_backend` passes a positional `eos_id: u32` into
+/// `model.generate`, and `try_apr_transformer_backend` and `registry_fallback`
+/// build configs whose stop behaviour is the model's own. Serving those
+/// requests anyway would hand the benchmark a token budget it did not get
+/// while the receipt recorded `ignore_eos: true` — a measurement of unpinned
+/// work labelled as pinned. Fail closed instead: 501 names the backend, and
+/// the operator learns the gate cannot be run on this model rather than
+/// learning nothing.
+fn reject_unsupported_ignore_eos(
+    state: &AppState,
+    request: &ChatCompletionRequest,
+    backend: &str,
+) -> Option<Response> {
+    if request.ignore_eos.unwrap_or(false) {
+        return Some(fail_response(
+            state,
+            StatusCode::NOT_IMPLEMENTED,
+            format!(
+                "`ignore_eos` is not supported by the {backend} chat backend; it would be \
+                 silently ignored and the response would stop on EOS anyway. Refused rather \
+                 than served, so a benchmark cannot record a pinned token budget it did not \
+                 receive (APR-PERF-GATE-001 v2.2 §4.3.1)."
+            ),
+        ));
+    }
+    None
+}
+
 /// Resolve the effective top-k for a chat sampling config (PMAT-760).
 ///
 /// Honors the request's `top_k` (the documented sampling control) when set, else defaults to
@@ -113,11 +171,8 @@ fn chat_gen_params(
 /// previously hardcoded `if temperature == 0.0 { 1 } else { 40 }`, silently DROPPING
 /// request.top_k — drift from batch.rs, which honors it.
 fn resolve_chat_top_k(temperature: f32, requested: Option<usize>) -> usize {
-    if temperature == 0.0 {
-        1
-    } else {
-        requested.unwrap_or(40)
-    }
+    // #3754: one declaration of the sampling default, shared with `apr run`/`apr chat`.
+    crate::infer::sampling_top_k(temperature, requested)
 }
 
 #[cfg(test)]
@@ -191,10 +246,174 @@ fn chat_quantized_config(
         repeat_penalty: request.repeat_penalty.unwrap_or(defaults.repeat_penalty),
         repeat_last_n: request.repeat_last_n.unwrap_or(defaults.repeat_last_n),
         seed: request.seed.unwrap_or(defaults.seed),
-        stop_tokens: vec![eos_token_id],
+        stop_tokens: chat_stop_tokens(request, eos_token_id),
         trace,
         cancel: cancel.clone(),
         ..defaults
+    }
+}
+
+#[cfg(test)]
+mod perf039_ignore_eos_tests {
+    use super::{chat_quantized_config, chat_stop_tokens, ChatCompletionRequest, ChatMessage};
+    use crate::tokenizer::BPETokenizer;
+
+    fn tokenizer() -> BPETokenizer {
+        BPETokenizer::new(vec!["<unk>".to_string(), "hi".to_string()], vec![], "<unk>")
+            .expect("test tokenizer")
+    }
+
+    fn request(ignore_eos: Option<bool>) -> ChatCompletionRequest {
+        ChatCompletionRequest {
+            model: "default".to_string(),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: "hi".to_string(),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+            }],
+            ignore_eos,
+            ..Default::default()
+        }
+    }
+
+    // MUTATION TABLE for `chat_stop_tokens`. The outcome each row EXCLUDES is
+    // "the field was accepted on the wire and then dropped", which is the only
+    // failure mode that matters here: a dropped `ignore_eos` leaves EOS live
+    // while the receipt records a pinned token budget.
+    //
+    //  ignore_eos   | stop_tokens | meaning
+    //  -------------|-------------|----------------------------------------
+    //  absent       | [eos]       | unchanged from pre-PERF-039
+    //  Some(false)  | [eos]       | explicit opt-out is not an opt-in
+    //  Some(true)   | []          | every decode loop then never stops on a token
+
+    #[test]
+    fn absent_ignore_eos_keeps_eos_stopping() {
+        assert_eq!(chat_stop_tokens(&request(None), 7), vec![7]);
+    }
+
+    #[test]
+    fn explicit_false_keeps_eos_stopping() {
+        assert_eq!(chat_stop_tokens(&request(Some(false)), 7), vec![7]);
+    }
+
+    #[test]
+    fn ignore_eos_empties_the_stop_set() {
+        assert!(
+            chat_stop_tokens(&request(Some(true)), 7).is_empty(),
+            "an empty stop set is what every decode loop reads as ignore-EOS"
+        );
+    }
+
+    /// The W1 path: `chat_quantized_config` feeds `try_quantized_backend`
+    /// (CPU GGUF) and `try_cuda_backend`, which is the backend
+    /// APR-PERF-GATE-001 §4.3.1's Q4_K_M model actually runs on.
+    #[test]
+    fn quantized_chat_config_honors_ignore_eos() {
+        let tok = tokenizer();
+        let cancel = crate::generate::CancelToken::never();
+        let on = chat_quantized_config(&request(Some(true)), &tok, Some(7), false, &cancel);
+        assert!(
+            on.stop_tokens.is_empty(),
+            "W1's backend must generate exactly max_tokens"
+        );
+        let off = chat_quantized_config(&request(None), &tok, Some(7), false, &cancel);
+        assert_eq!(
+            off.stop_tokens,
+            vec![7],
+            "default behaviour must not change"
+        );
+    }
+
+    /// `ignore_eos` must survive DESERIALIZATION, not just exist as a field.
+    ///
+    /// serde ignores unknown fields by default, so before this field existed a
+    /// client POSTing `"ignore_eos": true` got a 200 and EOS-terminated output
+    /// with nothing anywhere saying the parameter had been discarded. That is
+    /// the state this test excludes.
+    #[test]
+    fn ignore_eos_deserializes_from_the_wire() {
+        let req: ChatCompletionRequest = serde_json::from_str(
+            r#"{"model":"m","messages":[{"role":"user","content":"hi"}],"ignore_eos":true,"seed":9}"#,
+        )
+        .expect("wire request must deserialize");
+        assert_eq!(req.ignore_eos, Some(true));
+        assert_eq!(req.seed, Some(9), "seed must survive the wire too");
+        let bare: ChatCompletionRequest =
+            serde_json::from_str(r#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#)
+                .expect("request without the field must still deserialize");
+        assert_eq!(bare.ignore_eos, None);
+    }
+}
+
+#[cfg(test)]
+mod perf039_ignore_eos_fail_closed_tests {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use tower::util::ServiceExt;
+
+    /// A backend that cannot honour `ignore_eos` must REFUSE, not serve.
+    ///
+    /// The test app resolves to a chat backend that stops on EOS in a way no
+    /// request field reaches. Serving the request would return 200 and
+    /// EOS-terminated text while the client believed the token count was
+    /// pinned — the exact "recorded but never compared" shape this epic
+    /// exists to remove. 501 is the outcome; the row that matters is that it
+    /// is NOT 200.
+    #[tokio::test]
+    async fn ignore_eos_on_an_unsupporting_backend_is_501_not_200() {
+        let app = crate::api::test_helpers::create_test_app_shared();
+        let body = serde_json::json!({
+            "model": "default",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": 8,
+            "ignore_eos": true
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("handler responds");
+        assert_ne!(
+            response.status(),
+            StatusCode::OK,
+            "serving `ignore_eos` on a backend that drops it reports pinned work that never happened"
+        );
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    /// The same request WITHOUT `ignore_eos` must be unaffected. Without this
+    /// row the test above would also pass on a handler that 501s everything.
+    #[tokio::test]
+    async fn the_same_request_without_ignore_eos_is_not_501() {
+        let app = crate::api::test_helpers::create_test_app_shared();
+        let body = serde_json::json!({
+            "model": "default",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": 8
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/chat/completions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("handler responds");
+        assert_ne!(response.status(), StatusCode::NOT_IMPLEMENTED);
     }
 }
 
@@ -228,12 +447,16 @@ mod pmat821_chat_handler_threading_tests {
             repeat_penalty: None,
             repeat_last_n: None,
             seed: None,
+            ignore_eos: None,
             n: crate::api::ChoiceCount::ONE,
             stream: false,
             stop: None,
             user: None,
             tools: None,
             tool_choice: None,
+            chat_template_kwargs: None,
+            think: None,
+            stream_options: None,
         }
     }
 
@@ -439,7 +662,7 @@ fn request_tool_choice(request: &ChatCompletionRequest) -> Option<crate::grammar
 
 /// Build a non-streaming ChatCompletionResponse.
 #[allow(clippy::too_many_arguments)]
-fn build_chat_response(
+pub(crate) fn build_chat_response(
     request_id: String,
     model: String,
     text: String,
@@ -451,6 +674,8 @@ fn build_chat_response(
     latency: Duration,
     tools: Option<&[super::OpenAiTool]>,
     tool_choice: Option<crate::grammar::ToolChoice>,
+    timings: Option<super::Timings>,
+    used_gpu: Option<bool>,
 ) -> Response {
     let (brick_trace, step_trace, layer_trace) = build_trace_data(
         trace_level,
@@ -477,6 +702,7 @@ fn build_chat_response(
     };
 
     Json(ChatCompletionResponse {
+        used_gpu,
         id: request_id,
         object: "chat.completion".to_string(),
         created: unix_timestamp(),
@@ -494,6 +720,7 @@ fn build_chat_response(
         brick_trace,
         step_trace,
         layer_trace,
+        timings,
     })
     .into_response()
 }
@@ -505,7 +732,7 @@ fn sse_event(value: &impl serde::Serialize) -> Option<Result<Event, Infallible>>
         .map(|data| Ok(Event::default().data(data)))
 }
 
-/// Decode a single streamed token, returning the text if non-empty.
+/// Live-stream deltas: decoded RAW, and never split inside a character.
 ///
 /// The decode is deliberately RAW. `clean_chat_output()` must never be applied
 /// per token: it opens with `text.trim_start()` and closes with `.trim()`, so
@@ -519,12 +746,49 @@ fn sse_event(value: &impl serde::Serialize) -> Option<Result<Event, Infallible>>
 /// non-streaming path, which already does it.
 ///
 /// This mirrors the same removal PMAT-759 made on `pregenerated_sse_response`.
-fn decode_token(tokenizer: &BPETokenizer, token_id: u32) -> Option<String> {
-    let text = tokenizer.decode(&[token_id]).ok()?;
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
+///
+/// Char-safe (#3987): the per-token `decode_token` this replaced decoded each
+/// token by itself, and a byte-level BPE token
+/// can be ONE byte of a multi-byte character, so an accented letter, CJK or emoji
+/// that spans two tokens streamed as two U+FFFD. `streaming_text_deltas` fixed
+/// that for the replayed path (PMAT-758) by holding a delta back while it ends in
+/// U+FFFD; this is the same rule for tokens that have not all arrived yet. The
+/// pending window is decoded as one slice, and is flushed as-is after
+/// [`Self::MAX_PENDING`] tokens or at end of stream, so a token that never
+/// completes a character still reaches the client rather than vanishing.
+pub(crate) struct LiveUtf8Deltas {
+    pending: Vec<u32>,
+}
+
+impl LiveUtf8Deltas {
+    /// A UTF-8 character is at most 4 bytes, so 4 byte-tokens always complete one.
+    const MAX_PENDING: usize = 4;
+
+    pub(crate) fn new() -> Self {
+        Self {
+            pending: Vec::new(),
+        }
+    }
+
+    /// Accept one token; the text that is now safe to send, if any.
+    pub(crate) fn push(&mut self, tokenizer: &BPETokenizer, token_id: u32) -> Option<String> {
+        self.pending.push(token_id);
+        let text = tokenizer.decode(&self.pending).ok()?;
+        if text.ends_with('\u{FFFD}') && self.pending.len() < Self::MAX_PENDING {
+            return None;
+        }
+        self.pending.clear();
+        (!text.is_empty()).then_some(text)
+    }
+
+    /// Whatever is still held back when the stream ends.
+    pub(crate) fn finish(&mut self, tokenizer: &BPETokenizer) -> Option<String> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        let text = tokenizer.decode(&self.pending).ok();
+        self.pending.clear();
+        text.filter(|t| !t.is_empty())
     }
 }
 
@@ -535,6 +799,13 @@ fn decode_token(tokenizer: &BPETokenizer, token_id: u32) -> Option<String> {
 /// multi-byte UTF-8 (emoji/CJK -> U+FFFD) and ignored request.stop on the cuda/gpu/cached
 /// chat STREAMING backends (the production GPU streaming path). All three callers passed
 /// `clean = false`, so the old `clean` param is dropped in favour of `stops`.
+///
+/// PP-27: this builder declares `stream_mode: "replayed"` on its first chunk.
+/// It is not a slower live stream — the whole generation finished before the
+/// first delta was written, so a client's inter-token gaps here measure the
+/// SSE writer, not the model. A receipt that recorded `ttft`/`itl_p95` off this
+/// path would be recording the wrong thing, which is why the mode is declared
+/// rather than inferred.
 fn pregenerated_sse_response(
     token_ids: Vec<u32>,
     tokenizer: Arc<BPETokenizer>,
@@ -542,6 +813,7 @@ fn pregenerated_sse_response(
     model_name: String,
     stops: Option<&[String]>,
     max_tokens: usize,
+    prompt_tokens: usize,
 ) -> Response {
     let completion_tokens = token_ids.len();
     let StreamedText { deltas, stopped } = streaming_text_deltas(&tokenizer, &token_ids, stops);
@@ -549,8 +821,17 @@ fn pregenerated_sse_response(
     // reason without knowing the budget it was generated under. The terminal
     // chunk now agrees with the non-streaming body for the same request.
     let finish = FinishReason::from_generation(stopped, completion_tokens, max_tokens);
+    let usage = Usage {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens: prompt_tokens + completion_tokens,
+    };
     let stream = async_stream::stream! {
-        if let Some(evt) = sse_event(&ChatCompletionChunk::initial(&request_id, &model_name)) {
+        if let Some(evt) = sse_event(&ChatCompletionChunk::initial_with_mode(
+            &request_id,
+            &model_name,
+            StreamMode::Replayed,
+        )) {
             yield evt;
         }
 
@@ -561,7 +842,15 @@ fn pregenerated_sse_response(
             }
         }
 
-        if let Some(evt) = sse_event(&ChatCompletionChunk::done(&request_id, &model_name, finish)) {
+        // PP-27: no `timings` here. This path has no prefill/decode split to
+        // report — generation was already over when the response was built.
+        if let Some(evt) = sse_event(&ChatCompletionChunk::done_with_usage(
+            &request_id,
+            &model_name,
+            finish,
+            usage,
+            None,
+        )) {
             yield evt;
         }
         yield Ok::<_, Infallible>(Event::default().data("[DONE]".to_string()));
@@ -603,12 +892,18 @@ pub(crate) fn streaming_token_sink(
 
 /// Build a true-streaming SSE response with keep-alive (tokens arrive via channel).
 ///
-/// Deltas are raw per-token decodes — see `decode_token`. The `clean` parameter
+/// Deltas are raw, char-safe decodes — see `LiveUtf8Deltas`. The `clean` parameter
 /// this function used to take is gone on purpose: two of its three call sites
 /// passed `true`, and per-token cleaning silently deleted every space and
 /// newline from the stream.
 // serde_json::json!() uses infallible unwrap
 #[allow(clippy::disallowed_methods)]
+///
+/// PP-27: this builder declares `stream_mode: "live"` on its first chunk and
+/// carries `usage` — and, when the engine reported them, the server-measured
+/// `timings` — on the terminal one. `timings_rx` is the engine's return path:
+/// a backend that cannot separate prefill from decode simply passes `None` and
+/// the terminal chunk carries no `timings` key, which is the honest reading.
 pub(crate) fn true_streaming_sse_response(
     rx: tokio::sync::mpsc::Receiver<Result<u32, String>>,
     tokenizer: Arc<BPETokenizer>,
@@ -617,6 +912,8 @@ pub(crate) fn true_streaming_sse_response(
     metrics: Arc<crate::metrics::MetricsCollector>,
     start: Instant,
     max_tokens: usize,
+    prompt_tokens: usize,
+    timings_rx: Option<tokio::sync::oneshot::Receiver<super::PhaseTimings>>,
 ) -> Response {
     use tokio_stream::wrappers::ReceiverStream;
     use tokio_stream::StreamExt;
@@ -625,16 +922,21 @@ pub(crate) fn true_streaming_sse_response(
     let mut completion_tokens = 0usize;
 
     let stream = async_stream::stream! {
-        if let Some(evt) = sse_event(&ChatCompletionChunk::initial(&request_id, &model_name)) {
+        if let Some(evt) = sse_event(&ChatCompletionChunk::initial_with_mode(
+            &request_id,
+            &model_name,
+            StreamMode::Live,
+        )) {
             yield evt;
         }
 
         tokio::pin!(token_stream);
+        let mut utf8 = LiveUtf8Deltas::new();
         while let Some(result) = token_stream.next().await {
             match result {
                 Ok(token_id) => {
                     completion_tokens += 1;
-                    if let Some(text) = decode_token(&tokenizer, token_id) {
+                    if let Some(text) = utf8.push(&tokenizer, token_id) {
                         let chunk = ChatCompletionChunk::content(&request_id, &model_name, &text);
                         if let Some(evt) = sse_event(&chunk) {
                             yield evt;
@@ -649,11 +951,37 @@ pub(crate) fn true_streaming_sse_response(
                 }
             }
         }
+        if let Some(text) = utf8.finish(&tokenizer) {
+            let chunk = ChatCompletionChunk::content(&request_id, &model_name, &text);
+            if let Some(evt) = sse_event(&chunk) {
+                yield evt;
+            }
+        }
 
         // #2375(6): a token stream that delivered the whole budget was cut off at
         // `max_tokens`; anything shorter ended on a stop/EOS token.
         let finish = FinishReason::from_generation(false, completion_tokens, max_tokens);
-        if let Some(evt) = sse_event(&ChatCompletionChunk::done(&request_id, &model_name, finish)) {
+        // The engine has finished by the time the token channel closed, so the
+        // oneshot either already carries the measurement or never will.
+        let timings = match timings_rx {
+            Some(rx) => rx
+                .await
+                .ok()
+                .and_then(|phases| phases.to_timings(prompt_tokens, completion_tokens)),
+            None => None,
+        };
+        let usage = Usage {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: prompt_tokens + completion_tokens,
+        };
+        if let Some(evt) = sse_event(&ChatCompletionChunk::done_with_usage(
+            &request_id,
+            &model_name,
+            finish,
+            usage,
+            timings,
+        )) {
             yield evt;
         }
 
@@ -693,11 +1021,16 @@ fn try_gpu_backend(
     };
     // GH-319: Use actual model architecture for chat template detection
     let arch_hint = state.model_architecture();
-    let prompt_ids =
-        match tokenize_chat_prompt(&tokenizer, &request.messages, arch_hint.as_deref(), state) {
-            Ok(ids) => ids,
-            Err(r) => return Some(r),
-        };
+    let prompt_ids = match tokenize_chat_prompt(
+        &tokenizer,
+        &request.messages,
+        arch_hint.as_deref(),
+        request.thinking(),
+        state,
+    ) {
+        Ok(ids) => ids,
+        Err(r) => return Some(r),
+    };
     let prompt_tokens = prompt_ids.len();
     let prompt_usize: Vec<usize> = prompt_ids.iter().map(|&x| x as usize).collect();
     let (max_tokens, temperature, eos_token_id) =
@@ -707,7 +1040,12 @@ fn try_gpu_backend(
         max_tokens,
         temperature,
         top_k: resolve_chat_top_k(temperature, request.top_k),
-        stop_tokens: vec![eos_token_id as usize],
+        // #3760: the OpenAI `seed` reaches the GpuModel sampler, as it does the others.
+        seed: request.seed.unwrap_or(crate::sampling::DEFAULT_SEED),
+        stop_tokens: chat_stop_tokens(request, eos_token_id)
+            .into_iter()
+            .map(|t| t as usize)
+            .collect(),
         trace: state.should_trace(trace_level),
         cancel: cancel.clone(),
     };
@@ -745,6 +1083,7 @@ fn try_gpu_backend(
             request.model.clone(),
             request.stop.as_deref(),
             max_tokens,
+            prompt_tokens,
         ));
     }
 
@@ -767,6 +1106,10 @@ fn try_gpu_backend(
         latency,
         request.tools.as_deref(),
         request_tool_choice(request),
+        // This backend does not separate prefill from decode; §3 timings are
+        // absent rather than zero.
+        None,
+        None,
     ))
 }
 
@@ -789,11 +1132,16 @@ fn try_cached_backend(
     };
     // GH-319: Use actual model architecture for chat template detection
     let arch_hint = state.model_architecture();
-    let prompt_ids =
-        match tokenize_chat_prompt(&tokenizer, &request.messages, arch_hint.as_deref(), state) {
-            Ok(ids) => ids,
-            Err(r) => return Some(r),
-        };
+    let prompt_ids = match tokenize_chat_prompt(
+        &tokenizer,
+        &request.messages,
+        arch_hint.as_deref(),
+        request.thinking(),
+        state,
+    ) {
+        Ok(ids) => ids,
+        Err(r) => return Some(r),
+    };
     let prompt_tokens = prompt_ids.len();
     let (max_tokens, temperature, eos_token_id) =
         chat_gen_params(request, &tokenizer, state.model_eos_token_id());
@@ -802,7 +1150,7 @@ fn try_cached_backend(
         max_tokens,
         temperature,
         top_k: resolve_chat_top_k(temperature, request.top_k),
-        stop_tokens: vec![eos_token_id],
+        stop_tokens: chat_stop_tokens(request, eos_token_id),
         trace: state.should_trace(trace_level),
         cancel: cancel.clone(),
         ..Default::default()
@@ -831,6 +1179,7 @@ fn try_cached_backend(
             request.model.clone(),
             request.stop.as_deref(),
             max_tokens,
+            prompt_tokens,
         ));
     }
 
@@ -853,6 +1202,10 @@ fn try_cached_backend(
         latency,
         request.tools.as_deref(),
         request_tool_choice(request),
+        // This backend does not separate prefill from decode; §3 timings are
+        // absent rather than zero.
+        None,
+        None,
     ))
 }
 
@@ -1123,4 +1476,194 @@ mod pmat801_tool_calling_tests {
 }
 
 include!("cuda_chat_backend.rs");
+include!("qwen35_chat_backend.rs");
 include!("chat_completions_stream.rs");
+
+/// #3990 WIRING: the OpenAI chat path tokenizes the GGUF's OWN template when the server
+/// retained one -- not the hand-coded family template. Without this, the helper could be
+/// correct and the handler still call the legacy formatter.
+#[cfg(test)]
+mod chat_template_wiring_3990 {
+    use super::*;
+
+    #[test]
+    fn the_openai_chat_path_tokenizes_the_ggufs_own_template_3990() {
+        let path = "/home/noah/models/qwen2.5-1.5b-instruct-q4_k_m.gguf";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("SKIP: {path} not on this host -- the wiring check did NOT run");
+            return;
+        }
+        let mapped =
+            std::sync::Arc::new(crate::gguf::MappedGGUFModel::from_path(path).expect("map"));
+        let state = AppState::demo()
+            .expect("demo state")
+            .with_mapped_gguf_model(mapped.clone());
+        let tokenizer = require_tokenizer(&state).expect("demo tokenizer");
+        let msgs = [ChatMessage {
+            role: "user".to_string(),
+            content: "Hi".to_string(),
+            ..Default::default()
+        }];
+        let official =
+            super::super::format_chat_messages_official(Some(&mapped.model), &msgs, None);
+        let legacy = format_chat_messages(&msgs, None);
+        // Qwen2.5's own template injects its default system turn; the legacy ChatML does not.
+        assert_ne!(
+            official, legacy,
+            "the probe must distinguish the two renders"
+        );
+        let got = tokenize_chat_prompt(&tokenizer, &msgs, None, None, &state).expect("tokenizes");
+        assert_eq!(
+            got,
+            tokenizer.encode(&official),
+            "the handler did not tokenize the GGUF's own template"
+        );
+    }
+
+    /// #4007: the client's `"model"` string must not choose the template. `"m"` and `"gpt-4"`
+    /// name nothing apr knows; before #3990 they got a plain, marker-less prompt and the reply
+    /// ran on into a fabricated `Human:` turn. The GGUF's own template is rendered regardless.
+    #[test]
+    fn the_clients_model_string_does_not_pick_the_template_4007() {
+        let path = "/home/noah/models/qwen2.5-1.5b-instruct-q4_k_m.gguf";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("SKIP: {path} not on this host -- the #4007 check did NOT run");
+            return;
+        }
+        let mapped =
+            std::sync::Arc::new(crate::gguf::MappedGGUFModel::from_path(path).expect("map"));
+        let state = AppState::demo()
+            .expect("demo state")
+            .with_mapped_gguf_model(mapped.clone());
+        let tokenizer = require_tokenizer(&state).expect("demo tokenizer");
+        let msgs = [ChatMessage {
+            role: "user".to_string(),
+            content: "What is the capital of France?".to_string(),
+            ..Default::default()
+        }];
+        let official =
+            super::super::format_chat_messages_official(Some(&mapped.model), &msgs, None);
+        assert!(
+            official.contains("<|im_start|>assistant\n"),
+            "the official render has ChatML turn markers: {official:?}"
+        );
+        for client_model in ["m", "gpt-4", "default", "apr"] {
+            assert_ne!(
+                format_chat_messages(&msgs, Some(client_model)),
+                official,
+                "the probe must distinguish ({client_model})"
+            );
+            let got = tokenize_chat_prompt(&tokenizer, &msgs, Some(client_model), None, &state)
+                .expect("tokenizes");
+            assert_eq!(
+                got,
+                tokenizer.encode(&official),
+                "\"model\":\"{client_model}\" chose the template (#4007)"
+            );
+        }
+    }
+}
+
+/// #3987: the live stream must not split a character across two deltas.
+/// Measured on gx10: qwen3moe `stream=true` answered 200 with U+FFFD 2/33.
+#[cfg(test)]
+mod live_utf8_deltas_3987_tests {
+    use super::LiveUtf8Deltas;
+    use crate::tokenizer::BPETokenizer;
+
+    /// ids: 0 <unk>, 1 "caf", 2 <0xC3>, 3 <0xA9> ("é" = C3 A9), 4 "Ġquick".
+    fn tok() -> BPETokenizer {
+        let vocab = ["<unk>", "caf", "<0xC3>", "<0xA9>", "Ġquick"];
+        BPETokenizer::new(
+            vocab.iter().map(|s| (*s).to_string()).collect(),
+            vec![],
+            "<unk>",
+        )
+        .expect("test tokenizer")
+    }
+
+    fn stream(ids: &[u32]) -> Vec<String> {
+        let t = tok();
+        let mut d = LiveUtf8Deltas::new();
+        let mut out: Vec<String> = ids.iter().filter_map(|&id| d.push(&t, id)).collect();
+        out.extend(d.finish(&t));
+        out
+    }
+
+    #[test]
+    fn a_two_token_character_arrives_whole() {
+        let deltas = stream(&[1, 2, 3, 4]);
+        assert_eq!(deltas.concat(), "café quick", "deltas: {deltas:?}");
+        assert!(
+            deltas.iter().all(|d| !d.contains('\u{FFFD}')),
+            "deltas: {deltas:?}"
+        );
+    }
+
+    #[test]
+    fn the_leading_space_a_token_carries_survives() {
+        assert_eq!(stream(&[4, 4]), vec![" quick", " quick"]);
+    }
+
+    #[test]
+    fn an_unfinished_character_at_end_of_stream_is_flushed_not_dropped() {
+        let deltas = stream(&[1, 2]);
+        assert_eq!(deltas.concat(), "caf\u{FFFD}", "deltas: {deltas:?}");
+    }
+
+    #[test]
+    fn bytes_that_never_complete_are_released_after_max_pending() {
+        let t = tok();
+        let mut d = LiveUtf8Deltas::new();
+        let got: Vec<Option<String>> = (0..LiveUtf8Deltas::MAX_PENDING)
+            .map(|_| d.push(&t, 3))
+            .collect();
+        assert!(
+            got[..LiveUtf8Deltas::MAX_PENDING - 1]
+                .iter()
+                .all(Option::is_none),
+            "{got:?}"
+        );
+        assert!(
+            got[LiveUtf8Deltas::MAX_PENDING - 1].is_some(),
+            "held forever: {got:?}"
+        );
+    }
+}
+
+/// #3723: `--thinking on` against a template with NO thinking mode is the client's error,
+/// named -- never an OFF answer passed off as ON.
+#[cfg(test)]
+mod thinking_on_refusal_3723 {
+    use super::*;
+
+    #[test]
+    fn thinking_on_is_refused_by_name_when_the_template_has_no_thinking_mode_3723() {
+        let path = "/home/noah/models/qwen2.5-1.5b-instruct-q4_k_m.gguf";
+        if !std::path::Path::new(path).exists() {
+            eprintln!("SKIP: {path} not on this host -- the refusal check did NOT run");
+            return;
+        }
+        let mapped =
+            std::sync::Arc::new(crate::gguf::MappedGGUFModel::from_path(path).expect("map"));
+        let state = AppState::demo()
+            .expect("demo state")
+            .with_mapped_gguf_model(mapped);
+        let tokenizer = require_tokenizer(&state).expect("demo tokenizer");
+        let msgs = [ChatMessage {
+            role: "user".to_string(),
+            content: "Hi".to_string(),
+            ..Default::default()
+        }];
+        assert!(tokenize_chat_prompt(&tokenizer, &msgs, None, Some(false), &state).is_ok());
+        let refused = tokenize_chat_prompt(&tokenizer, &msgs, None, Some(true), &state);
+        assert!(
+            refused.is_err(),
+            "Qwen2.5's template renders ON == OFF; ON must be refused"
+        );
+        assert_eq!(
+            refused.err().map(|r| r.status()),
+            Some(StatusCode::BAD_REQUEST)
+        );
+    }
+}

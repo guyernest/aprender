@@ -31,10 +31,18 @@ use aprender::text::bpe::Qwen2BpeTokenizer;
 // PMAT-181: Read EOS token from APR metadata (fixes GH-170)
 use aprender::serialization::apr::AprReader;
 // Chat template support (Toyota Way: Standardized Work)
-use aprender::text::chat_template::{
+// #3801: ONE detector. `apr chat` used to import these from aprender-core, whose
+// `TemplateFormat` has seven variants and **no `Qwen3NoThink`** — so on this path
+// no-think was not merely unselected, it was unrepresentable, and every `qwen*`
+// became ChatML. `apr serve`, `apr run --chat` and `apr qa`'s golden gate all take
+// realizar's detector and give `qwen3`/`qwen35` the no-think template; chat alone
+// left the model in thinking mode, measured emitting `<think>Okay, the user is
+// asking…` on Qwen3-1.7B. Two functions with the same name, two enums, one of
+// which could not express the right answer.
+use colored::Colorize;
+use realizar::chat_template::{
     auto_detect_template, detect_format_from_name, ChatMessage, ChatTemplateEngine, TemplateFormat,
 };
-use colored::Colorize;
 use std::io::{self, Write};
 use std::path::Path;
 use std::time::Instant;
@@ -56,10 +64,22 @@ pub(crate) struct ChatConfig {
     /// Force CPU inference (skip CUDA even if available)
     /// Default: false - GPU is preferred when available (F-GPU-134b)
     pub force_cpu: bool,
+    /// #3955: an accelerator was REQUESTED (`--gpu`, `--backend cuda|wgpu`),
+    /// derived by the same `run_accelerator_forced` `apr run` uses, so the
+    /// envelope's `requested` means the same thing on both surfaces.
+    pub accel_forced: bool,
+    /// #3794: emit a machine-readable session summary naming the backend that
+    /// actually answered. `apr run --format json` has reported
+    /// `backend: {requested, ran, fell_back}` for some time; `apr chat`
+    /// reported nothing, so a harness could not hold chat to its lane.
+    pub json: bool,
     /// Enable inference tracing (APR-TRACE-001)
     pub trace: bool,
     /// Trace output file path
     pub trace_output: Option<std::path::PathBuf>,
+    /// #3723: `--thinking on|off`, applied to every rendered turn
+    /// (`realizar::chat_template::apply_thinking_mode`). `None`: the production default.
+    pub thinking: Option<bool>,
 }
 
 impl Default for ChatConfig {
@@ -71,8 +91,11 @@ impl Default for ChatConfig {
             system: None,
             inspect: false,
             force_cpu: false, // F-GPU-134b: Default to GPU when available
+            accel_forced: false,
+            json: false,
             trace: false,
             trace_output: None,
+            thinking: None,
         }
     }
 }
@@ -120,6 +143,7 @@ pub(crate) fn run(
     system: Option<&str>,
     inspect: bool,
     force_cpu: bool,
+    accel_forced: bool,
     trace: bool,
     trace_steps: Option<&[String]>,
     trace_verbose: bool,
@@ -127,6 +151,9 @@ pub(crate) fn run(
     trace_level: &str,
     profile: bool,
     offline: bool,
+    json: bool,
+    // #3723: `--thinking on|off` (None: the production default).
+    thinking: Option<bool>,
 ) -> Result<(), CliError> {
     contract_pre_temperature_bounds!();
     contract_pre_session_state_machine!();
@@ -141,6 +168,11 @@ pub(crate) fn run(
     // re-ship that P0.
     let actual_path = resolve_chat_model(path_arg, offline)?;
     let path = actual_path.as_path();
+
+    // #3022: decide the format ONCE, here, and refuse rather than substitute. Everything
+    // downstream — the banner, the session, the tokenizer, the generator — is handed this
+    // one answer, so the banner can no longer name a format the loader did not use.
+    let format = resolve_chat_format(path)?;
 
     // GH-520: Warn on unimplemented trace/profile flags for chat mode
     if trace_steps.is_some() {
@@ -184,17 +216,40 @@ pub(crate) fn run(
         system: system.map(String::from),
         inspect,
         force_cpu,
+        accel_forced,
+        json,
         trace,
         trace_output,
+        thinking,
     };
 
-    print_welcome_banner(path, &config);
+    print_welcome_banner_for(path, format, &config);
 
     // Run the REPL
     let result = run_repl(path, &config);
     contract_post_temperature_bounds!(&());
     contract_post_session_state_machine!(&());
     result
+}
+
+/// #3794: may this chat session PRE-LOAD the model onto an accelerator?
+///
+/// One rule for all three formats, because the defect was that the gate existed
+/// nowhere and the fix has to hold in three places. `chat_session_02.rs` calls
+/// `try_init_gguf_cuda` / `try_init_apr_cuda` / `try_init_safetensors_cuda`; a
+/// regression that re-drops the check from any ONE of them is the same bug
+/// again for that format, so the predicate is shared and the table covers all
+/// three.
+///
+/// Generation already honoured `force_cpu`, so this was never a wrong-answer
+/// bug — it was VRAM held for the session's lifetime by a run that asked for
+/// none, outside `/tmp/apr-gpu.lock` and therefore invisible to `gpu-q`.
+/// Measured on an RTX 4090 with qwen2.5-coder-1.5b-q4_k_m: peak 4070 MiB under
+/// `--no-gpu` before this, 0 MiB after.
+#[must_use]
+fn cuda_preload_allowed(force_cpu: bool, format: ModelFormat) -> bool {
+    let _ = format; // every format is gated by the same rule; named so it cannot silently diverge
+    !force_cpu
 }
 
 /// Model format variants (Y14: format-agnostic)
@@ -206,18 +261,99 @@ enum ModelFormat {
     Gguf,
     /// HuggingFace SafeTensors format
     SafeTensors,
+    /// HuggingFace SafeTensors split across shards, named by a
+    /// `model.safetensors.index.json` manifest (#3022).
+    ShardedSafeTensors,
     /// Demo mode with tiny random weights
     Demo,
 }
 
-/// Detect model format from file extension (Y14: format-agnostic)
+/// Detect model format from the file NAME (Y14: format-agnostic).
+///
+/// #3022: the sharded arm is matched on the SUFFIX, before `extension()`, and that
+/// ordering is the whole fix. `Path::extension()` returns the last dot-segment, so on
+/// `model.safetensors.index.json` it is `Some("json")` — which matched no arm and fell
+/// through to `Demo`, and `apr chat` then ran the toy demo model while printing the real
+/// model's path. Any future format whose name carries more than one dot must be matched
+/// here too, not in the `match` below.
 fn detect_format(path: &Path) -> ModelFormat {
+    if path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.ends_with(".safetensors.index.json"))
+    {
+        return ModelFormat::ShardedSafeTensors;
+    }
     match path.extension().and_then(|e| e.to_str()) {
         Some("apr") => ModelFormat::Apr,
         Some("gguf") => ModelFormat::Gguf,
         Some("safetensors") => ModelFormat::SafeTensors,
         _ => ModelFormat::Demo,
     }
+}
+
+/// The ONE place `apr chat` decides what the user's file is — and the only place
+/// allowed to conclude "nothing I can load".
+///
+/// **`Demo` is never a resolution of a path the user named.** By the time this runs,
+/// `resolve_chat_model` has already proven the file exists, so every `Demo` here is a
+/// silent substitution of tiny random weights for a real model — which is exactly how
+/// #3022 read as a successful, empty 7B response: `Loaded Demo format in 0.00s (0.0 MB)`,
+/// zero tokens, **exit code 0**, under a banner printing the real model's path.
+///
+/// The magic-byte probe is not a fallback to guessing; it is the opposite. A model whose
+/// name carries an unusual extension is still a model, and reading its first 8 bytes says
+/// so with certainty (ALB-099: 8 bytes, never the whole file). Only when neither the name
+/// nor the bytes identify a format does this refuse — with a code from `error.rs`
+/// (`ModelLoadFailed`, exit 6), never by loading something else.
+///
+/// # Errors
+/// [`CliError::ModelLoadFailed`] when `path` is not a format `apr chat` can load.
+fn resolve_chat_format(path: &Path) -> Result<ModelFormat, CliError> {
+    let by_name = detect_format(path);
+    if by_name != ModelFormat::Demo {
+        return Ok(by_name);
+    }
+    if let Some(by_bytes) = format_from_leading_bytes(path) {
+        if by_bytes != ModelFormat::Demo {
+            return Ok(by_bytes);
+        }
+    }
+    Err(CliError::ModelLoadFailed(format!(
+        "{} is not a model format apr chat can load.\n  \
+         Recognised: .apr, .gguf, .safetensors, and a sharded SafeTensors index (*.safetensors.index.json).\n  \
+         apr chat will not substitute its built-in demo model for a file you named (#3022).",
+        path.display()
+    )))
+}
+
+/// `metadata.total_size` out of a `model.safetensors.index.json`, in bytes.
+///
+/// The manifest is the only place a sharded model states its own size before any shard is
+/// opened, and reporting it is what keeps the load line honest: the bytes of the index
+/// itself are ~20 KB regardless of whether it names a 0.5B or a 70B (#3022).
+fn sharded_total_size(index_bytes: &[u8]) -> Option<u64> {
+    let v: serde_json::Value = serde_json::from_slice(index_bytes).ok()?;
+    v.get("metadata")?.get("total_size")?.as_u64()
+}
+
+/// The first 8 bytes of `path`, classified — or `None` if it cannot be read.
+///
+/// Deliberately 8 bytes and not `read_to_end`: the caller may have been handed a 30 GB
+/// model, and the question ("what format is this?") is answered by the header.
+fn format_from_leading_bytes(path: &Path) -> Option<ModelFormat> {
+    use std::io::Read;
+    let mut head = [0_u8; 8];
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut filled = 0;
+    while filled < head.len() {
+        match file.read(&mut head[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(_) => return None,
+        }
+    }
+    Some(detect_format_from_bytes(&head[..filled]))
 }
 
 /// Try loading a tokenizer from a specific path, printing success/failure.
@@ -252,7 +388,17 @@ fn search_hf_cache_tokenizer(hf_cache: &Path) -> Option<Qwen2BpeTokenizer> {
             continue;
         }
         let snapshots_dir = entry.path().join("snapshots");
-        let snapshots = std::fs::read_dir(&snapshots_dir).ok()?;
+        // #3881: this was `.ok()?`, which returns None from the WHOLE function —
+        // so the FIRST `models--Qwen*` entry with an unreadable `snapshots/`
+        // ended the search and every later entry went unvisited. Measured on
+        // lambda: 20 `models--Qwen*` entries, 3 unreadable, 12 carrying a
+        // tokenizer — and `read_dir` returned an unreadable one FIRST, so the
+        // search aborted on iteration 0 and `apr chat` reported the MODEL as
+        // invalid while the right tokenizer sat three entries later. `read_dir`
+        // order is arbitrary, so this is a coin flip per host, not a fixed bug.
+        let Ok(snapshots) = std::fs::read_dir(&snapshots_dir) else {
+            continue;
+        };
         for snapshot in snapshots.flatten() {
             let tokenizer_path = snapshot.path().join("tokenizer.json");
             if tokenizer_path.exists() {
@@ -274,6 +420,47 @@ fn try_tokenizer_at(path: &Path, label: &str) -> Option<Qwen2BpeTokenizer> {
     }
 }
 
+/// The tokenizer an `.apr` carries INSIDE it (#3911).
+///
+/// `None` for any model that is not an `.apr`, cannot be opened, or embeds no
+/// vocabulary/merges — all of which are "not my business", never an error: the
+/// caller still has its own refusal to make.
+///
+/// The merges array holds `"left right"` strings, split on the FIRST space, which
+/// is how `realizar::apr::metadata::get_embedded_merges` reads the same field. Two
+/// readers of one format must agree about it, so this mirrors that split exactly
+/// rather than inventing a second interpretation.
+fn try_embedded_apr_tokenizer(model_path: &Path) -> Option<Qwen2BpeTokenizer> {
+    let reader = AprReader::open(model_path).ok()?;
+
+    let vocab: Vec<String> = reader
+        .get_metadata("tokenizer.vocabulary")?
+        .as_array()?
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+
+    let merges: Vec<(String, String)> = reader
+        .get_metadata("tokenizer.merges")?
+        .as_array()?
+        .iter()
+        .filter_map(|v| {
+            let s = v.as_str()?;
+            let mut parts = s.splitn(2, ' ');
+            Some((parts.next()?.to_string(), parts.next()?.to_string()))
+        })
+        .collect();
+
+    // Vocabulary WITHOUT merges is a decode-only tokenizer; `chat` must encode, so
+    // half an answer is not an answer. Fall through to the refusal, which names
+    // what was searched.
+    if vocab.is_empty() || merges.is_empty() {
+        return None;
+    }
+
+    Qwen2BpeTokenizer::from_vocab_merges_data(&vocab, &merges).ok()
+}
+
 /// PMAT-109: Find Qwen tokenizer from model dir, HF cache, or APR cache.
 /// Search for a Qwen tokenizer alongside the model file.
 fn find_qwen_tokenizer_sibling(model_path: &Path) -> Option<Qwen2BpeTokenizer> {
@@ -291,11 +478,54 @@ fn find_qwen_tokenizer_sibling(model_path: &Path) -> Option<Qwen2BpeTokenizer> {
 }
 
 fn find_qwen_tokenizer(model_path: &Path) -> Result<Option<Qwen2BpeTokenizer>, CliError> {
+    find_qwen_tokenizer_from(model_path, dirs::home_dir().as_deref())
+}
+
+/// `find_qwen_tokenizer` with the MACHINE-GLOBAL cache root injected (#3917).
+///
+/// The two caches below live under `$HOME`, so the function's answer depends on
+/// unrelated work the machine has done. `test_find_qwen_tokenizer_nonexistent_path`
+/// asserted `InvalidFormat` — which is the error a box WITH a Qwen cache produces,
+/// because the search succeeds on some other model's tokenizer and the load then
+/// fails. On a clean machine nothing is found and the error is
+/// `MissingCompanionFile`. The test passed on developer boxes and failed on both CI
+/// platforms, and the passing answer was the wrong one.
+///
+/// Taking `home` as a parameter rather than reading it makes the clean-machine
+/// behaviour reachable from a test, so the assertion can be about the function
+/// instead of about the machine.
+fn find_qwen_tokenizer_from(
+    model_path: &Path,
+    home: Option<&Path>,
+) -> Result<Option<Qwen2BpeTokenizer>, CliError> {
     if let Some(tok) = find_qwen_tokenizer_sibling(model_path) {
         return Ok(Some(tok));
     }
 
-    if let Some(home) = dirs::home_dir() {
+    // #3911: THE MODEL ITSELF — after the sibling files, BEFORE the machine-global
+    // caches. An `.apr` converted from GGUF embeds `tokenizer.vocabulary` AND
+    // `tokenizer.merges` (PMAT-171), which is a complete BPE tokenizer. `apr serve`
+    // has always used it; `chat` searched four FILESYSTEM locations and reported
+    // "No Qwen tokenizer found" for a model carrying one (measured on gx10:
+    // `…-q4k.apr` failed chat rc=3 while serve answered all six routes 200 on the
+    // same binary, minutes apart).
+    //
+    // THE ORDER IS THE CORRECTNESS, not a preference. The two searches below are
+    // MACHINE-GLOBAL: `~/.cache/huggingface/hub/models--Qwen--*` and
+    // `~/.apr/tokenizers/qwen2/` hold SOME Qwen tokenizer, from some other model.
+    // Using one for THIS model is a guess that happens to work while the vocabulary
+    // matches. The tokenizer inside the model is the model's own, so it must win
+    // over any cache — while an explicit sibling file, which an operator placed
+    // deliberately for this model, still wins over both.
+    //
+    // Placing it last instead (the first draft) meant it NEVER RAN on any box with
+    // a Qwen cache, and an end-to-end test on such a box passed for the wrong
+    // reason. That near-miss is why the test asserts `vocab_size`, not `is_some`.
+    if let Some(tok) = try_embedded_apr_tokenizer(model_path) {
+        return Ok(Some(tok));
+    }
+
+    if let Some(home) = home {
         if let Some(tok) = search_hf_cache_tokenizer(&home.join(".cache/huggingface/hub")) {
             return Ok(Some(tok));
         }
@@ -307,7 +537,12 @@ fn find_qwen_tokenizer(model_path: &Path) -> Result<Option<Qwen2BpeTokenizer>, C
         }
     }
 
-    Err(CliError::InvalidFormat(no_qwen_tokenizer_message(
+    // #3881: this was `InvalidFormat`, whose Display hardcodes "Invalid APR
+    // format: " and whose exit code is 4 — a judgement about the MODEL. Nothing
+    // is wrong with the model: a companion file is absent. `MissingCompanionFile`
+    // carries the message unprefixed and exits 3, the FileNotFound class. This
+    // is the same correction `InvalidInput` already made one class over.
+    Err(CliError::MissingCompanionFile(no_qwen_tokenizer_message(
         model_path,
     )))
 }
@@ -343,26 +578,6 @@ fn no_qwen_tokenizer_message(model_path: &Path) -> String {
     )
 }
 
-/// Normalize repeated punctuation (max 3 repeats of `!`, `?`, `.`).
-fn normalize_repeated_punctuation(s: &str) -> String {
-    let mut prev_char = '\0';
-    let mut repeat_count = 0;
-    let mut result = String::with_capacity(s.len());
-    for c in s.chars() {
-        if c == prev_char && matches!(c, '!' | '?' | '.') {
-            repeat_count += 1;
-            if repeat_count < 3 {
-                result.push(c);
-            }
-        } else {
-            repeat_count = 0;
-            result.push(c);
-        }
-        prev_char = c;
-    }
-    result
-}
-
 /// Check if text looks like the start of a new conversational turn.
 fn looks_like_new_turn(text: &str) -> bool {
     text.starts_with("Suggest")
@@ -395,17 +610,19 @@ fn clean_chat_response(raw: &str) -> String {
     cleaned = cleaned.replace("Ġ", " ");
     cleaned = cleaned.replace("Ċ", "\n");
 
-    cleaned = normalize_repeated_punctuation(&cleaned);
+    // VERBATIM (0.69.1 sweep, cop ruling): runs of `!`, `?`, `.` used to be capped at three here, which
+    // rewrote the model's own output ("Wait...." -> "Wait..."), so chat and run disagreed and CRUX compared
+    // chat against a reference that rewrites nothing. Only special tokens are removed.
 
-    while cleaned.contains("  ") {
-        cleaned = cleaned.replace("  ", " ");
-    }
-
-    let trimmed = cleaned.trim();
+    // WHITESPACE IS CONTENT (0.69.1 CRUX sweep, ctl-code-add RED in both thinking modes): a loop here
+    // collapsed every run of spaces to one, so Python indentation came out as a single space while
+    // llama.cpp kept four, and the whole reply was trim()med, which ate the FIRST line's indentation
+    // too. Only the blank lines around the reply and its trailing whitespace are dropped.
+    let trimmed = cleaned.trim_start_matches(['\n', '\r']).trim_end();
 
     // Stop at first line if the model started a new turn
     if let Some(first_newline) = trimmed.find('\n') {
-        let first_line = trimmed[..first_newline].trim();
+        let first_line = trimmed[..first_newline].trim_end();
         let rest = trimmed[first_newline..].trim();
         if looks_like_new_turn(rest) {
             return first_line.to_string();
@@ -437,24 +654,45 @@ fn detect_format_from_bytes(data: &[u8]) -> ModelFormat {
     ModelFormat::Demo
 }
 
-fn print_welcome_banner(path: &Path, config: &ChatConfig) {
-    let format = detect_format(path);
+/// #3990: does this model carry its OWN chat template, which `apr chat` renders in place of the
+/// family detected from its name? Read from the GGUF header prefix, never a whole-file load.
+fn declares_own_chat_template(path: &Path, format: ModelFormat) -> bool {
+    format == ModelFormat::Gguf
+        && super::model_header::gguf_header(path)
+            .is_ok_and(|h| h.metadata.contains_key("tokenizer.chat_template"))
+}
 
+/// #3990: the banner's `Chat Template` value: the model's own template when it has one, else
+/// the detected family, with the thinking mode that `--thinking` actually selects (absent = off,
+/// production's default since #3801).
+fn chat_template_banner(own: bool, family: &str, thinking: Option<bool>) -> String {
+    let on = thinking == Some(true);
+    if own {
+        let mode = if on { "on" } else { "off" };
+        format!("the model's own (tokenizer.chat_template), thinking {mode}")
+    } else if on {
+        family.replace("(thinking off)", "(thinking on)")
+    } else {
+        family.to_string()
+    }
+}
+
+#[cfg(test)]
+fn print_welcome_banner(path: &Path, config: &ChatConfig) {
+    print_welcome_banner_for(path, detect_format(path), config);
+}
+
+fn print_welcome_banner_for(path: &Path, format: ModelFormat, config: &ChatConfig) {
     // Detect chat template format from model name (Toyota Way: Visual Control)
     let model_name = path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("unknown");
     let template_format = detect_format_from_name(model_name);
-    let template_name = match template_format {
-        TemplateFormat::ChatML => "ChatML",
-        TemplateFormat::Llama2 => "LLaMA2",
-        TemplateFormat::Mistral => "Mistral",
-        TemplateFormat::Phi => "Phi",
-        TemplateFormat::Alpaca => "Alpaca",
-        TemplateFormat::Custom => "Custom",
-        TemplateFormat::Raw => "Raw",
-    };
+    // #3801: ONE spelling of the name. This was a second copy of
+    // `template_format_name`, and two copies of a match over an enum are how a
+    // new variant gets handled in one place and not the other.
+    let template_name = crate::chat::realizar_chat::template_format_name(template_format);
 
     match format {
         ModelFormat::Apr => {
@@ -483,6 +721,14 @@ fn print_welcome_banner(path: &Path, config: &ChatConfig) {
                 "Using SafeTensors with mmap (Native Library Mandate)".cyan()
             );
         }
+        ModelFormat::ShardedSafeTensors => {
+            output::section("Model Chat (Sharded SafeTensors)");
+            println!();
+            println!(
+                "{}",
+                "Using a sharded SafeTensors index (model.safetensors.index.json)".cyan()
+            );
+        }
         ModelFormat::Demo => {
             output::section("Chat Demo (Tiny Model)");
             println!();
@@ -495,7 +741,13 @@ fn print_welcome_banner(path: &Path, config: &ChatConfig) {
     }
     println!();
     output::kv("Model", path.display());
-    output::kv("Chat Template", template_name);
+    // #3990: name what is RENDERED. A GGUF with its own template is rendered with it, so the
+    // family guessed from the file name is only the fallback, and the mode is `--thinking`.
+    let own = declares_own_chat_template(path, format);
+    output::kv(
+        "Chat Template",
+        chat_template_banner(own, template_name, config.thinking),
+    );
     output::kv("Temperature", config.temperature);
     output::kv("Top-P", config.top_p);
     output::kv("Max Tokens", config.max_tokens);
@@ -526,3 +778,331 @@ fn print_welcome_banner(path: &Path, config: &ChatConfig) {
 include!("chat_session.rs");
 include!("chat_generate_session.rs");
 include!("chat_04.rs");
+
+/// #3794: the case table for `cuda_preload_allowed`.
+#[cfg(test)]
+mod pmat3794_chat_cuda_preload_gate {
+    use super::{cuda_preload_allowed, ModelFormat};
+
+    const FORMATS: &[(ModelFormat, &str)] = &[
+        (
+            ModelFormat::Gguf,
+            "try_init_gguf_cuda — the format #3794 measured",
+        ),
+        (ModelFormat::Apr, "try_init_apr_cuda"),
+        (ModelFormat::SafeTensors, "try_init_safetensors_cuda"),
+    ];
+
+    /// The defect: `apr chat --no-gpu` uploaded the weights anyway.
+    #[test]
+    fn force_cpu_preloads_no_accelerator_for_any_format() {
+        let leaked: Vec<String> = FORMATS
+            .iter()
+            .filter(|(f, _)| cuda_preload_allowed(true, *f))
+            .map(|(f, site)| format!("\n  - {f:?} ({site})"))
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "#3794 REGRESSION: --no-gpu / force_cpu would still initialise CUDA for \
+             {} of {} formats, holding VRAM outside /tmp/apr-gpu.lock for a run that \
+             asked for none (measured 4070 MiB peak before the fix):{}",
+            leaked.len(),
+            FORMATS.len(),
+            leaked.join("")
+        );
+    }
+
+    /// The over-correction: the fix must not disable the accelerator outright.
+    #[test]
+    fn without_force_cpu_the_accelerator_is_still_preloaded() {
+        let blocked: Vec<String> = FORMATS
+            .iter()
+            .filter(|(f, _)| !cuda_preload_allowed(false, *f))
+            .map(|(f, site)| format!("\n  - {f:?} ({site})"))
+            .collect();
+        assert!(
+            blocked.is_empty(),
+            "#3794 OVER-CORRECTION: the default (no --no-gpu) stopped pre-loading the \
+             accelerator for {} of {} formats — the fix is to honour the flag, not to \
+             remove the GPU path:{}",
+            blocked.len(),
+            FORMATS.len(),
+            blocked.join("")
+        );
+    }
+}
+
+// #3881 — one unreadable HuggingFace cache entry ended the WHOLE tokenizer search.
+//
+// `search_hf_cache_tokenizer` opened each `models--Qwen*/snapshots` with
+// `std::fs::read_dir(&snapshots_dir).ok()?`, and `?` on an `Option` returns from
+// the FUNCTION, not the loop. So the first entry whose `snapshots/` could not be
+// read ended the search and every later entry went unvisited.
+//
+// Measured on lambda: 20 `models--Qwen*` entries, 3 with an unreadable
+// `snapshots/`, 12 carrying a `tokenizer.json` — and `read_dir` returned an
+// unreadable one FIRST, so the search died on iteration 0 while the tokenizer
+// for the model being loaded sat a few entries later. `apr chat` then exited 4
+// reporting the MODEL as invalid.
+//
+// THE ANTI-VACUITY PROBLEM: `read_dir` order is arbitrary, so a fixture that
+// merely CONTAINS a broken entry proves nothing — the good one may be visited
+// first and the test passes on both the broken and the fixed code. This module
+// therefore CONSTRUCTS the ordering and REFUSES to run if it cannot: a fixture
+// that could not be built is reported as a failure, never as a pass.
+#[cfg(test)]
+mod hf_cache_search_survives_an_unreadable_entry_3881 {
+    use super::search_hf_cache_tokenizer;
+    use std::fs;
+    use std::path::Path;
+
+    /// The smallest JSON `Qwen2BpeTokenizer::from_file` accepts.
+    const MINIMAL_TOKENIZER: &str = r#"{"model":{"vocab":{"a":0,"b":1},"merges":[]}}"#;
+
+    fn broken_entry(hub: &Path, name: &str) {
+        // Present, matches `models--Qwen*`, and has NO readable `snapshots/`.
+        fs::create_dir_all(hub.join(format!("models--Qwen--{name}"))).expect("mkdir broken");
+    }
+
+    fn good_entry(hub: &Path, name: &str) {
+        let snap = hub
+            .join(format!("models--Qwen--{name}"))
+            .join("snapshots")
+            .join("deadbeef");
+        fs::create_dir_all(&snap).expect("mkdir good");
+        fs::write(snap.join("tokenizer.json"), MINIMAL_TOKENIZER).expect("write tokenizer");
+    }
+
+    /// Index of the first broken entry and of the good entry in `read_dir` order.
+    fn order(hub: &Path, good: &str) -> (Option<usize>, Option<usize>) {
+        let mut first_broken = None;
+        let mut good_at = None;
+        for (i, e) in fs::read_dir(hub).expect("read hub").flatten().enumerate() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if !name.starts_with("models--Qwen") {
+                continue;
+            }
+            if name.ends_with(good) {
+                good_at.get_or_insert(i);
+            } else if first_broken.is_none() {
+                first_broken = Some(i);
+            }
+        }
+        (first_broken, good_at)
+    }
+
+    #[test]
+    fn a_broken_entry_before_a_good_one_does_not_end_the_search() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let hub = tmp.path();
+
+        good_entry(hub, "Good-With-Tokenizer");
+        // Add broken entries until one of them is visited BEFORE the good one.
+        // Bounded, and the bound failing is an ENV failure, not a pass.
+        let mut constructed = false;
+        for n in 0..64 {
+            broken_entry(hub, &format!("Broken-{n:03}"));
+            if let (Some(b), Some(g)) = order(hub, "Good-With-Tokenizer") {
+                if b < g {
+                    constructed = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            constructed,
+            "FIXTURE NOT CONSTRUCTED: could not get a broken entry ahead of the good one \
+             in read_dir order after 64 attempts. This test cannot judge the defect it \
+             exists for, so it fails rather than passing vacuously."
+        );
+
+        assert!(
+            search_hf_cache_tokenizer(hub).is_some(),
+            "FALSIFIED #3881: the search returned None although a readable tokenizer \
+             exists — an unreadable entry visited first ended the whole search"
+        );
+    }
+
+    /// The negative control: with NO good entry the search must still return
+    /// None. Without this, a fix that returned `Some` unconditionally would
+    /// pass the test above.
+    #[test]
+    fn a_cache_with_no_tokenizer_still_returns_none() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for n in 0..4 {
+            broken_entry(tmp.path(), &format!("Broken-{n}"));
+        }
+        assert!(
+            search_hf_cache_tokenizer(tmp.path()).is_none(),
+            "a cache with no tokenizer must not report one"
+        );
+    }
+}
+
+/// #3911: `find_qwen_tokenizer` must consult the MODEL, not only the filesystem.
+///
+/// Hermetic on purpose — it writes a synthetic `.apr` carrying an embedded
+/// vocabulary and merges, so it needs no downloaded model, no GPU and no network,
+/// and it runs in CI where the real fixture (`qwen2.5-coder-1.5b-instruct-q4k.apr`)
+/// does not exist.
+#[cfg(test)]
+mod embedded_tokenizer_tests {
+    use super::*;
+    use aprender::serialization::apr::AprWriter;
+    use serde_json::json;
+    use std::path::PathBuf;
+
+    fn write_apr(dir: &std::path::Path, name: &str, vocab: &[&str], merges: &[&str]) -> PathBuf {
+        let mut w = AprWriter::new();
+        w.set_metadata("architecture", json!("qwen2"));
+        if !vocab.is_empty() {
+            w.set_metadata("tokenizer.vocabulary", json!(vocab));
+        }
+        if !merges.is_empty() {
+            w.set_metadata("tokenizer.merges", json!(merges));
+        }
+        // A tensor, because an APR with none is a different kind of file.
+        w.add_tensor_f32("token_embd.weight", vec![2, 2], &[0.0, 1.0, 2.0, 3.0]);
+        let path = dir.join(name);
+        w.write(&path).expect("synthetic apr writes");
+        path
+    }
+
+    /// Id 0 is a SENTINEL no real Qwen vocabulary contains. That is what makes the
+    /// assertion below able to fail: see the comment at its use.
+    const SENTINEL: &str = "ZZ_EMBEDDED_FIXTURE_TOKEN";
+
+    fn vocab_fixture() -> Vec<&'static str> {
+        vec![
+            SENTINEL,
+            "a",
+            "b",
+            "ab",
+            "<|im_start|>",
+            "<|im_end|>",
+            "<|endoftext|>",
+        ]
+    }
+
+    /// THE GUARANTEE. A model with NO sibling tokenizer still resolves, because the
+    /// tokenizer is inside it. Before #3911 this returned
+    /// `MissingCompanionFile("No Qwen tokenizer found …")` for a model carrying one.
+    #[test]
+    fn an_apr_with_an_embedded_tokenizer_and_no_sibling_resolves() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let model = write_apr(dir.path(), "m.apr", &vocab_fixture(), &["a b"]);
+
+        // ANTI-VACUITY: the pass must not be able to come from the sibling branch.
+        // A fixture that has the file whose absence is the bug proves nothing.
+        assert!(
+            !dir.path().join("m.tokenizer.json").exists(),
+            "the fixture must have NO sibling tokenizer"
+        );
+        assert!(
+            !dir.path().join("tokenizer.json").exists(),
+            "the fixture directory must have no bare tokenizer.json either"
+        );
+
+        let tok = find_qwen_tokenizer(&model)
+            .expect("a model carrying vocab+merges must resolve without a sibling")
+            .expect("must be Some");
+
+        // THE DISCRIMINATOR, and the reason this assertion is not `is_some()`.
+        //
+        // `find_qwen_tokenizer` also searches two MACHINE-GLOBAL caches —
+        // `~/.cache/huggingface/hub/models--Qwen--*/…` and
+        // `~/.apr/tokenizers/qwen2/tokenizer.json`. On any box that ever pulled a
+        // Qwen model those exist, so `is_some()` PASSES WITH THE EMBEDDED BRANCH
+        // DELETED. Measured: the planted mutant passed 3/3 against `is_some()`.
+        //
+        // `vocab_size()` does NOT discriminate either, and that cost a second
+        // round: it reports the CONFIG's `vocab_size` (151936 by default), not the
+        // number of tokens loaded — so the fixture and a real cache report the same
+        // number. The only thing that separates them is CONTENT.
+        //
+        // Id 0 of this fixture is a sentinel string no Qwen vocabulary contains, so
+        // decoding it can only succeed if the embedded vocabulary was the one
+        // loaded.
+        assert_eq!(
+            tok.decode(&[0]),
+            SENTINEL,
+            "id 0 must decode to this fixture's sentinel — anything else means a \
+             machine-global Qwen cache answered and the embedded branch never ran"
+        );
+    }
+
+    /// Vocabulary WITHOUT merges is a DECODE-ONLY tokenizer, and `chat` encodes.
+    /// Half an answer must not be accepted as a whole one — the refusal still names
+    /// what it searched.
+    #[test]
+    fn vocabulary_without_merges_is_not_accepted_as_a_tokenizer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let model = write_apr(dir.path(), "m.apr", &vocab_fixture(), &[]);
+        assert!(
+            try_embedded_apr_tokenizer(&model).is_none(),
+            "vocab alone cannot encode, so it must not satisfy the embedded branch"
+        );
+    }
+
+    /// An `.apr` embedding nothing is "not mine", never an error from this helper —
+    /// the caller still owns the refusal.
+    #[test]
+    fn an_apr_embedding_no_tokenizer_returns_none_rather_than_erroring() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let model = write_apr(dir.path(), "m.apr", &[], &[]);
+        assert!(try_embedded_apr_tokenizer(&model).is_none());
+    }
+}
+
+/// #3990: the welcome banner named the family guessed from the FILE NAME and "thinking off"
+/// even when the model's own template was rendered with `--thinking on` (83's smoke on
+/// c08437cdd: "Qwen3NoThink (thinking off)" above a reply that reasoned).
+#[cfg(test)]
+mod chat_template_banner_3990 {
+    use super::*;
+
+    #[test]
+    fn the_banner_names_what_is_rendered_and_the_effective_mode_3990() {
+        let family = "Qwen3NoThink (thinking off)";
+        assert_eq!(
+            chat_template_banner(true, family, Some(true)),
+            "the model's own (tokenizer.chat_template), thinking on"
+        );
+        assert_eq!(
+            chat_template_banner(true, family, None),
+            "the model's own (tokenizer.chat_template), thinking off"
+        );
+        assert_eq!(
+            chat_template_banner(true, family, Some(false)),
+            "the model's own (tokenizer.chat_template), thinking off"
+        );
+        assert_eq!(
+            chat_template_banner(false, family, Some(true)),
+            "Qwen3NoThink (thinking on)"
+        );
+        assert_eq!(chat_template_banner(false, family, None), family);
+    }
+
+    /// REAL FILE: the Qwen3.5 GGUF from the smoke declares its own template; a path that is
+    /// not a GGUF does not. SKIP by name when the file is absent.
+    #[test]
+    fn a_gguf_with_a_template_is_detected_from_its_header_3990() {
+        let path = Path::new("/home/noah/models/Qwen3.5-0.8B-Q4_K_M.gguf");
+        if !path.exists() {
+            eprintln!(
+                "SKIP: {} not on this host -- the header check did NOT run",
+                path.display()
+            );
+            return;
+        }
+        assert!(declares_own_chat_template(path, ModelFormat::Gguf));
+        assert!(
+            !declares_own_chat_template(path, ModelFormat::Apr),
+            "only a GGUF's header is consulted"
+        );
+        assert!(!declares_own_chat_template(
+            Path::new("/nonexistent/x.gguf"),
+            ModelFormat::Gguf
+        ));
+    }
+}

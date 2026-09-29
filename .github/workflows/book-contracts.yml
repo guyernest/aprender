@@ -1,3 +1,5 @@
+# #3073 (operator rule 2026-09-10: no GitHub-hosted runners): every job runs on the
+# clean-room pool; X64 because the mdBook/tool installs below fetch x86_64 builds.
 name: Book Contract Enforcement
 
 on:
@@ -31,6 +33,11 @@ on:
       - "crates/aprender-core/src/**"
       - "scripts/book-gate.sh"
       - ".github/workflows/book-contracts.yml"
+  # #3676 rule 3 (scripts/check_workflow_path_filters.sh): a path filter is a
+  # claim that nothing outside these paths can break this gate; the nightly run
+  # re-checks the claim every day. Set ~5h early for the dispatch delay (#3292).
+  schedule:
+    - cron: '45 22 * * *'
 
 permissions:
   contents: read
@@ -43,13 +50,32 @@ jobs:
   # Job 1: All chapter examples compile
   chapter-examples-compile:
     name: Chapter Examples Compile
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, clean-room]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: "."
+      # NO rust-cache: cache-bin false was never the fix.
+      #
+      # It skips cleanBin and NOTHING else. rust-cache's save step also runs
+      # cleanRegistry, unconditionally, deleting ${CARGO_HOME}/registry/src -- the
+      # extracted crate sources every OTHER job on the box is compiling from.
+      # All 16 clean-room listeners share ONE HOME. Measured on intel
+      # 2026-09-19 (infra#775): eight save steps in 100 minutes, every crate
+      # directory reborn the second one of them finished, and an infra cargo
+      # kani build killed mid-crate with `could not parse/generate dep info ...
+      # No such file or directory` -- the aprender#2822 signature.
+      #
+      # THE CI-REAPER IS NOT THE ONLY CAUSE OF THAT MESSAGE. aprender#2822
+      # attributes it to the reaper; in the measured case the reaper had last
+      # run 27 minutes earlier and its next run logged swept=0. Check the clock
+      # before naming it: `journalctl -u ci-reaper.service` and a grep for
+      # `Post Run Swatinem/rust-cache` over the runners' _diag/Worker_*.log.
+      #
+      # On a persistent runner ~/.cargo persists by itself, so the restore was a
+      # no-op and the save was the whole effect. Only a job-private CARGO_HOME
+      # would make the action safe: --target-dir, cargo install --root and a fresh HOME
+      # do not, since cargo reads sources from ${CARGO_HOME} whatever the target
+      # dir is. infra's shared-cargo-home-guard BLOCKs the action here now.
       - name: Build all 27 chapter examples
         run: |
           for ch in ch01_hello_apr ch02_tensors ch03_apr_format ch04_supervised \
@@ -67,14 +93,33 @@ jobs:
   # Job 2: All chapter examples run with exit 0
   chapter-examples-run:
     name: Chapter Examples Run
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, clean-room]
     needs: chapter-examples-compile
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: "."
+      # NO rust-cache: cache-bin false was never the fix.
+      #
+      # It skips cleanBin and NOTHING else. rust-cache's save step also runs
+      # cleanRegistry, unconditionally, deleting ${CARGO_HOME}/registry/src -- the
+      # extracted crate sources every OTHER job on the box is compiling from.
+      # All 16 clean-room listeners share ONE HOME. Measured on intel
+      # 2026-09-19 (infra#775): eight save steps in 100 minutes, every crate
+      # directory reborn the second one of them finished, and an infra cargo
+      # kani build killed mid-crate with `could not parse/generate dep info ...
+      # No such file or directory` -- the aprender#2822 signature.
+      #
+      # THE CI-REAPER IS NOT THE ONLY CAUSE OF THAT MESSAGE. aprender#2822
+      # attributes it to the reaper; in the measured case the reaper had last
+      # run 27 minutes earlier and its next run logged swept=0. Check the clock
+      # before naming it: `journalctl -u ci-reaper.service` and a grep for
+      # `Post Run Swatinem/rust-cache` over the runners' _diag/Worker_*.log.
+      #
+      # On a persistent runner ~/.cargo persists by itself, so the restore was a
+      # no-op and the save was the whole effect. Only a job-private CARGO_HOME
+      # would make the action safe: --target-dir, cargo install --root and a fresh HOME
+      # do not, since cargo reads sources from ${CARGO_HOME} whatever the target
+      # dir is. infra's shared-cargo-home-guard BLOCKs the action here now.
       - name: Run all 27 chapter examples
         run: |
           PASS=0; FAIL=0
@@ -100,20 +145,39 @@ jobs:
   # Job 3: Integration tests
   book-integration-tests:
     name: Book Integration Tests
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, clean-room]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: "."
+      # NO rust-cache: cache-bin false was never the fix.
+      #
+      # It skips cleanBin and NOTHING else. rust-cache's save step also runs
+      # cleanRegistry, unconditionally, deleting ${CARGO_HOME}/registry/src -- the
+      # extracted crate sources every OTHER job on the box is compiling from.
+      # All 16 clean-room listeners share ONE HOME. Measured on intel
+      # 2026-09-19 (infra#775): eight save steps in 100 minutes, every crate
+      # directory reborn the second one of them finished, and an infra cargo
+      # kani build killed mid-crate with `could not parse/generate dep info ...
+      # No such file or directory` -- the aprender#2822 signature.
+      #
+      # THE CI-REAPER IS NOT THE ONLY CAUSE OF THAT MESSAGE. aprender#2822
+      # attributes it to the reaper; in the measured case the reaper had last
+      # run 27 minutes earlier and its next run logged swept=0. Check the clock
+      # before naming it: `journalctl -u ci-reaper.service` and a grep for
+      # `Post Run Swatinem/rust-cache` over the runners' _diag/Worker_*.log.
+      #
+      # On a persistent runner ~/.cargo persists by itself, so the restore was a
+      # no-op and the save was the whole effect. Only a job-private CARGO_HOME
+      # would make the action safe: --target-dir, cargo install --root and a fresh HOME
+      # do not, since cargo reads sources from ${CARGO_HOME} whatever the target
+      # dir is. infra's shared-cargo-home-guard BLOCKs the action here now.
       - name: Run book_contracts tests
         run: cargo test -p aprender-core --test book_contracts
 
   # Job 4: Contract enforcement (no files without contracts)
   contract-enforcement:
     name: Contract Enforcement
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, clean-room]
     steps:
       - uses: actions/checkout@v7
       - name: Every chapter has a contract
@@ -131,7 +195,7 @@ jobs:
         run: |
           FAIL=0
           for f in book/src/chapters/ch*.md; do
-            if ! head -1 "$f" | grep -q "PCU:"; then
+            if ! grep -q "PCU:" <<< "$(head -1 "$f")" ; then
               echo "::error::No PCU frontmatter: $f"
               FAIL=1
             fi
@@ -145,7 +209,7 @@ jobs:
           FAIL=0
           for md in $(find book/src -name "*.md" -not -name "SUMMARY.md"); do
             hdr=$(head -1 "$md")
-            if echo "$hdr" | grep -q 'PCU:'; then
+            if grep -q 'PCU:' <<< "$hdr" ; then
               CONTRACT=$(echo "$hdr" | grep -oE 'contract:[[:space:]]*[^ |]+' | sed 's/^contract:[[:space:]]*//')
               if [ -z "$CONTRACT" ]; then
                 echo "::error::$md has PCU header but no contract: field"
@@ -173,7 +237,7 @@ jobs:
   # Job 5: Namespace discipline
   namespace-discipline:
     name: Namespace Discipline
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, clean-room]
     steps:
       - uses: actions/checkout@v7
       - name: No legacy imports in chapter examples
@@ -214,7 +278,7 @@ jobs:
   # Job 6: SUMMARY.md integrity
   summary-integrity:
     name: SUMMARY.md Integrity
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, clean-room]
     steps:
       - uses: actions/checkout@v7
       - name: No dead links in SUMMARY.md

@@ -32,7 +32,6 @@ metadata:
   - 'crates/aprender-train/src/autograd/precision/conversions.rs — delegates to trueno::f32_to_f16'
   - 'half::f16::from_f32 — the IEEE-754 binary16 RNE reference oracle'
 
-kind: KernelContract
 name: trueno-f16-rne
 version: 1.0.0
 scope: trueno::f32_to_f16 IEEE round-to-nearest-even (== half::f16::from_f32)
@@ -55,7 +54,8 @@ equations:
     lean_theorem: Theorems.F32_To_F16_RNE
 
 proof_obligations:
-- type: invariant
+- id: TFR-INV-001
+  type: invariant
   property: f32_to_f16 is bit-identical to half::f16::from_f32 across the f32 domain
   formal: |
     For all x sampled across all 256 f32 exponents x strided mantissas x both signs,

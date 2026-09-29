@@ -277,6 +277,17 @@ falsification_tests: []
     #[path = "validator_tests_extra.rs"]
     mod extra;
 
+    /// CRUX competitive-research metadata domains (aprender#2555).
+    #[path = "crux_intake_tests.rs"]
+    mod crux_intake;
+
+    #[path = "validator_tests_top_level.rs"]
+    mod top_level;
+
+    /// PMAT-3091: `applies_to: not_applicable` + `na_reason`/`na_owner` (SCHEMA-021..023).
+    #[path = "validator_tests_na.rs"]
+    mod na;
+
     // ── PMAT-741 BeatBenchmark validator (BEAT-001..007) ──────────────────────
 
     /// Wrap a `beat:` block body in a valid beat-benchmark metadata envelope so

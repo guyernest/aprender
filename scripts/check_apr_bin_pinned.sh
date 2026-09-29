@@ -170,7 +170,12 @@ PATHRES='(command[[:space:]]+-v[[:space:]]+apr|which[[:space:]]+apr|type[[:space
 # run -- the guard reported "every reference is pinned" while two were not.
 # OPEN itself is left ALONE: it backs BARE_APR, whose 62-case table has been
 # gotten wrong five times, and widening it is not this change's business.
-OPEN_PV="(${OPEN}|(^|[[:space:];&|(])(if|elif|while|until|then|do|else)[[:space:]]+)"
+# Split across two lines (with the same resulting string) because a
+# same-line "while ... then" substring, even fully inside a quoted regex
+# literal, trips bashrs's naive SC2135 "use do not then" heuristic.
+OPEN_PV_KW="if|elif|while|until"
+OPEN_PV_KW="${OPEN_PV_KW}|then|do|else"
+OPEN_PV="(${OPEN}|(^|[[:space:];&|(])(${OPEN_PV_KW})[[:space:]]+)"
 BARE_PV="${OPEN_PV}[[:space:]]*@?[[:space:]]*${WRAP}*pv[[:space:]]+[a-z\"'\$/~.-]"
 PATHRES_PV='(command[[:space:]]+-v[[:space:]]+pv|which[[:space:]]+pv|type[[:space:]]+(-[A-Za-z]+[[:space:]]+)?pv|require_tool[[:space:]]+pv)([[:space:]]|[;)&|]|$)'
 
@@ -239,7 +244,44 @@ emit_lines() {
             # the mutation ENGAGED (line 352 rewritten, guard still rc=0), not by
             # reading the code. A filter upstream of a correct pattern is the
             # same class as a correct pattern that is never run.
-            awk '/apr|pv/ { printf "%d:%s\n", NR, $0 }' "$f"
+            # A heredoc BODY is data, not an execution surface -- unless the
+            # opener feeds it to a shell. check_ladder_output_judged.sh's case
+            # table captures REAL terminal output in `cat <<'T'` fixtures, and
+            # one captured line reads "apr serve ready (2.0s)" -- a RECORDING of
+            # apr's own output, which this guard reported as an unpinned
+            # invocation. The alternative to fixing it here is asking a guard's
+            # author to mangle a fixture to satisfy a guard, and a mangled
+            # fixture is no longer a faithful capture.
+            #
+            # `bash <<'EOF'` / `ssh host <<EOF` bodies DO execute, so they stay
+            # in scope. Narrowing a filter is the dangerous direction (#3620:
+            # a filter upstream of a correct pattern is the same class as a
+            # correct pattern that is never run), so BOTH directions are surface
+            # probes: heredoc-data must stay GREEN, heredoc-exec must go RED.
+            # A `#`-comment mentioning <<EOF does not open a heredoc, or one
+            # stray comment would blind the scan until a line matched its word.
+            awk '
+                inhere {
+                    probe = $0
+                    if (dash) { sub(/^[ \t]+/, "", probe) }
+                    if (probe == delim) { inhere = 0; next }
+                    if (!exec_here) { next }
+                }
+                !inhere && $0 !~ /^[ \t]*#/ && /<<-?[ \t]*[\047\042]?[A-Za-z_][A-Za-z0-9_]*[\047\042]?/ {
+                    tail = $0
+                    sub(/.*<<-?[ \t]*/, "", tail)
+                    gsub(/[\047\042]/, "", tail)
+                    if (match(tail, /^[A-Za-z_][A-Za-z0-9_]*/)) {
+                        delim = substr(tail, 1, RLENGTH)
+                        dash = ($0 ~ /<<-/)
+                        pre = " " $0
+                        sub(/<<.*/, "", pre)
+                        exec_here = (pre ~ /[ \t;&|(=]((ba|z|k|da)?sh|eval|ssh|su|sudo|env)[ \t]/ || pre ~ /docker[ \t]+run/)
+                        inhere = 1
+                    }
+                }
+                /apr|pv/ { printf "%d:%s\n", NR, $0 }
+            ' "$f"
             ;;
     esac
 }
@@ -519,7 +561,7 @@ if [ "${1:-}" = "--self-test" ]; then
     # -- per-surface mutation ----------------------------------------------
     TMPROOT=$(mktemp -d)
     cleanup_selftest() {
-        if [ -n "${TMPROOT:-}" ] && [ "$TMPROOT" != / ] && [ -d "$TMPROOT" ]; then
+        if [ -n "$TMPROOT" ] && [ "$TMPROOT" != / ] && [ -d "$TMPROOT" ]; then
             rm -rf "$TMPROOT"
         fi
     }
@@ -588,6 +630,34 @@ APR="$(which apr)"
         '#!/usr/bin/env bash
 APR="${APR:-/home/noah/.cargo/bin/apr}"'
 
+    # A heredoc a shell RUNS is still an execution surface. This is the
+    # direction a heredoc filter can LOSE, so it is asserted before the
+    # green one: if only the green case existed, deleting the exec_here
+    # test would pass the self-test.
+    surface_probe 'heredoc-exec' 'scripts/remote.sh' \
+        '#!/usr/bin/env bash
+ssh host <<EOF
+apr qa model.apr
+EOF'
+
+    # ...and a heredoc body fed to a NON-shell consumer is a RECORDING, not a
+    # call. This is the live instance that prompted the filter:
+    # check_ladder_output_judged.sh's case table captures real terminal output,
+    # one line of which is `apr serve ready (2.0s)`.
+    heredoc_dir=$(mk_tree)
+    cat > "$heredoc_dir/scripts/fixture.sh" <<'FIXTURE'
+#!/usr/bin/env bash
+cap_code_json() { cat <<'T'
+Launched apr serve on port 19745 (pid 2085384)
+apr serve ready (2.0s)
+T
+}
+FIXTURE
+    if ! (cd "$heredoc_dir" && MIN_EXPECTED=1 bash scripts/check_apr_bin_pinned.sh >/dev/null 2>&1); then
+        printf 'SURFACE-PROBE FAIL [heredoc-data]: guard flagged captured output inside a `cat <<T` fixture\n' >&2
+        fails=$((fails + 1))
+    fi
+
     # A skill's PROSE is not an execution surface; only its bash fences are.
     # This asserts the fence filter, so the guard cannot start policing English.
     prose_dir=$(mk_tree)
@@ -603,7 +673,7 @@ APR="${APR:-/home/noah/.cargo/bin/apr}"'
         printf '\nself-test FAILED with %s case(s).\n' "$fails" >&2
         exit 1
     fi
-    printf 'self-test OK: %s regex cases and 9 surface probes.\n' \
+    printf 'self-test OK: %s regex cases and 11 surface probes.\n' \
         "$(( ${#must_match_bare[@]} + ${#must_not_match_bare[@]} + ${#must_match_abs[@]} \
              + ${#must_not_match_abs[@]} + ${#must_match_pathres[@]} + ${#must_not_match_pathres[@]} \
              + ${#must_match_pv[@]} + ${#must_not_match_pv[@]} \
