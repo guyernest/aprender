@@ -26,8 +26,11 @@ Setting both sources is refused, as is setting neither. The S3 layout is content
 
 **The weights are never baked into the package.** Spikes 021 and 026 measured baked weights
 7-18x worse on cold start than an S3 fetch at 10,240 MB. At cold start the object is
-fetched by 16-way 64 MiB ranged GETs, with 5 attempts per part (8 s each) and a 25 s
-overall deadline, **straight into one pre-sized in-memory buffer**. Lambda's scratch disk
+fetched by 16-way 64 MiB ranged GETs, with 5 attempts per part (8 s each) and a 10.739 s
+overall deadline, **straight into one pre-sized in-memory buffer**. That deadline is the 30 s
+gateway cap minus the post-download work measured on the 10,240 MB tier (sha256 + load ladder
++ the largest classify, 15.261 s) and the contract's 4 s margin. The download is also capped at
+the invocation's remaining time minus that 19.261 s reserve. Lambda's scratch disk
 is 512 MB and cargo-pmcp cannot raise it, so a 0.85 GB artifact cannot be staged there.
 A length over the decide-apr-v1 cap is refused before the buffer is allocated.
 
@@ -72,15 +75,15 @@ printed.
 
 ## Deployed
 
-Live on pmcp.run as **`aprender-mcp-decide`** since 2026-09-27. The outcome is
-`deployed-passed`. The record is
-`.planning/phases/08-laya-decision-model-local-fine-tune-and-thin-mcp-server/08-LIVE-DEPLOY-EVIDENCE.json`.
+Live on pmcp.run as **`aprender-mcp-decide`** since 2026-09-27, on the 10,240 MB tier since
+2026-09-28 (plan 08-30). The outcome is `deployed-passed`. The record is
+`.planning/phases/08-laya-decision-model-local-fine-tune-and-thin-mcp-server/08-LIVE-REDEPLOY-EVIDENCE.json`.
 
 | | |
 |---|---|
 | Endpoint | `https://aprender-mcp-decide.us-east.true-mcp.com/mcp` (POST only) |
 | Auth | Off, by the owner's decision (the cost risk was accepted). No token or header is needed |
-| Tier | 3,008 MB, arm64 |
+| Tier | 10,240 MB, arm64 |
 | Task | Abortion stance (TweetEval abortion target, "legalization of abortion"), labels `none`, `against`, `favor` |
 | Model | `laya-stance-64.apr`, sha256 `24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a` |
 
@@ -115,19 +118,15 @@ Every response carries `model.artifact_sha256`. It must equal
 verifies before it parses a byte. `examples/probe.rs --expect-sha256 <that>` checks it, together
 with the single `classify` tool and the label order.
 
-### Limits on the 3 GB tier
+### Limits on the 10,240 MB tier
 
-The door refuses anything over these limits (`contracts/decide-tool-boundary-v1.yaml` 2.0.0):
-- **2 texts** or fewer per call.
-- **120 built tokens** or fewer per call. One short tweet builds about 65-72 tokens, so two real
-  sentences often do not fit in one call.
-- **Cold call: about 25-31 s.** The first call after idle loads 846 MB from S3.
-  - The 4 verified cold samples measured 24.2-29.4 s at the client.
-  - An external cold call took 31.05 s end to end and still answered 200.
-  - Budget for a response near or over 30 s, and retry on a gateway timeout.
-- **Warm call: about 1.4-2.2 s.**
-
-The 10,240 MB target tier (1024 tokens, 8 texts) returns when the account's memory limit is raised.
+The door refuses anything over these limits (`contracts/decide-tool-boundary-v1.yaml`):
+- **8 texts** or fewer per call.
+- **800 built tokens** or fewer per call.
+- **Cold call: 22.6-27.0 s** at the client, over 8 proven-cold samples of the two maximal
+  requests (2 texts or 8 texts, 800 built tokens each). The first call after idle loads 846 MB
+  from S3 (8.9-9.1 s of it). The worst sample left 2.99 s under the 30 s gateway cap.
+- **Warm call: 0.87-0.98 s** (10 calls).
 
 ### Claim scope
 

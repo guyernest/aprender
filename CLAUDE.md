@@ -257,13 +257,11 @@ gate now certifies margin and calibration on held-out data drawn like the tenant
 does NOT certify robustness to a shifted input population." It is in-distribution calibration,
 not shift robustness: this eval set was chosen after the SemEval-2016 test split failed the gate
 (spike 027), and that split is kept as a reported shift probe, where the same model's ECE is
-0.1896. The model is live on pmcp.run as `aprender-mcp-decide` (plans 08-17/08-18, final
-outcome deployed-passed), on the 3 GB tier only: 3,008 MB, at most 2 texts and 120 built tokens
-per call. The 10,240 MB tier (1024 tokens, 8 texts) is the target once AWS raises the account
-limit. The cold margin is thin, not comfortable: the worst verified cold sample took 29.35 s at
-the client against the 30 s gateway cap, and an external cold call took 31.05 s end to end
-(D-ITEM-08-17-E); warm calls take about 1.4-2.2 s. Records: `08-GATE-RUN-EVIDENCE.json` and
-`08-LIVE-DEPLOY-EVIDENCE.json` in the Phase 8 planning directory.
+0.1896. The model is live on pmcp.run as `aprender-mcp-decide` on the 10,240 MB tier (plan
+08-30, deployed-passed): at most 8 texts and 800 built tokens per call. Eight proven-cold samples
+of the two maximal requests took 22.6-27.0 s at the client against the 30 s gateway cap, so the
+worst left 2.99 s; ten warm calls took 0.87-0.98 s. Records: `08-GATE-RUN-EVIDENCE.json` and
+`08-LIVE-REDEPLOY-EVIDENCE.json` in the Phase 8 planning directory.
 
 The served artifact is `.apr` (`contracts/decide-apr-v1.yaml`), so the SafeTensors carve-out
 above is NOT widened: safetensors is read only by the back-office packer (`aprender_decide::pack`,
