@@ -4,6 +4,11 @@ metadata:
   created: '2026-09-25'
   author: PAIML Engineering
   kind: kernel
+  # ONT-7 (plan 08-33): the boundary holds in the committed tree. Its bounds are priced for a Lambda
+  # memory tier, which the closed qualifier set (host_class, toolchain, backend, features) cannot
+  # express, so no qualifier is claimed here.
+  valid_under:
+    world: committed
   description: >
     THE TOOL BOUNDARY both decision MCP servers are held to: `aprender-mcp-decide` (stdio, local
     .apr path only) and `aprender-mcp-decide-lambda` (pmcp.run default Lambda, the .apr fetched
@@ -556,32 +561,32 @@ proof_obligations:
 
   - type: bound
     property: 'The server Rust bounds are equal to the contract constants, not merely similar to them'
-    formal: 'MIN_TEXTS == constants.classify_min_texts AND MAX_TEXTS == constants.classify_max_texts AND MAX_TEXT_BYTES == constants.classify_max_text_bytes AND MAX_TOTAL_TOKENS == constants.classify_max_total_tokens AND MAX_IN_FLIGHT == constants.classify_max_in_flight AND MAX_PENDING == constants.classify_max_pending'
+    formal: 'MIN_TEXTS == constants.classify_min_texts ∧ MAX_TEXTS == constants.classify_max_texts ∧ MAX_TEXT_BYTES == constants.classify_max_text_bytes ∧ MAX_TOTAL_TOKENS == constants.classify_max_total_tokens ∧ MAX_IN_FLIGHT == constants.classify_max_in_flight ∧ MAX_PENDING == constants.classify_max_pending'
     applies_to: all
 
   - type: bound
     property: 'The declared token budget does not exceed the budget derived from the Lambda envelope'
-    formal: 'classify_max_total_tokens * tier_ms_per_token_at_512 + cold_start_budget_ms + probe_budget_ms + margin_ms <= api_gateway_timeout_ms (at 10 240 MB: 800 x 12 + 15000 + 1100 + 4000 = 29700 <= 30000)'
+    formal: 'classify_max_total_tokens * tier_ms_per_token_at_512 + cold_start_budget_ms + probe_budget_ms + margin_ms ≤ api_gateway_timeout_ms (at 10 240 MB: 800 x 12 + 15000 + 1100 + 4000 = 29700 ≤ 30000)'
     applies_to: all
 
   - type: invariant
     property: 'Every accepted request satisfies all three request bounds, checked in order count -> bytes -> tokens'
-    formal: 'forall req: accepted(req) implies classify_count_bound(req) AND classify_text_bytes_bound(req) AND classify_token_budget(req)'
+    formal: '∀ req: accepted(req) ⇒ classify_count_bound(req) ∧ classify_text_bytes_bound(req) ∧ classify_token_budget(req)'
     applies_to: all
 
   - type: ordering
     property: 'Response probabilities are ordered by the task criteria, never by map iteration'
-    formal: 'forall resp, i: resp.results[i].probabilities[k] is the probability of resp.labels[k], and resp.labels == task.criteria in document order'
+    formal: '∀ resp, i: resp.results[i].probabilities[k] is the probability of resp.labels[k], and resp.labels == task.criteria in document order'
     applies_to: all
 
   - type: bound
     property: 'Admission never exceeds the pending bound'
-    formal: 'forall t: running(t) + waiting(t) <= classify_max_pending AND running(t) <= classify_max_in_flight'
+    formal: '∀ t: running(t) + waiting(t) ≤ classify_max_pending ∧ running(t) ≤ classify_max_in_flight'
     applies_to: all
 
   - type: safety
     property: 'No refusal message contains caller text'
-    formal: 'forall req, e = refuse(req): forall t in req.texts, len_chars(t) >= refusal_echo_min_chars AND t distinctive: not substring(t, e.message)'
+    formal: '∀ req, e = refuse(req): ∀ t in req.texts, len_chars(t) ≥ refusal_echo_min_chars ∧ t distinctive: not substring(t, e.message)'
     applies_to: all
 
 falsification_tests:

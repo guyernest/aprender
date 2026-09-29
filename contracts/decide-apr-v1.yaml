@@ -4,6 +4,10 @@ metadata:
   created: '2026-09-25'
   author: PAIML Engineering
   kind: kernel
+  # ONT-7 (plan 08-33): the artifact schema and its load ladder hold in the committed tree; no
+  # backend, host or feature qualifies the claim.
+  valid_under:
+    world: committed
   description: >
     The `decide-apr-v1` ARTIFACT SCHEMA (D-17) and the single declaration of the D-05 task schema:
     what a decision-model .apr contains, where each item lives, what a loader must check — in
@@ -716,32 +720,32 @@ proof_obligations:
 
   - type: ordering
     property: 'Task criteria document order is the label index in every build shape'
-    formal: 'forall bytes, backing in {preserve_order, sorted}: labels(parse_task_backing(bytes)) == document_order(bytes)'
+    formal: '∀ bytes, backing in {preserve_order, sorted}: labels(parse_task_backing(bytes)) == document_order(bytes)'
     applies_to: all
 
   - type: bound
     property: 'No index allocation exceeds what the header''s index extent can hold'
-    formal: 'forall header h accepted at rung 2: h.tensor_count <= max_tensor_count AND h.tensor_count * 20 <= h.data_offset - h.tensor_index_offset'
+    formal: '∀ header h accepted at rung 2: h.tensor_count ≤ max_tensor_count ∧ h.tensor_count * 20 ≤ h.data_offset - h.tensor_index_offset'
     applies_to: all
 
   - type: bound
     property: 'An artifact larger than max_artifact_bytes is refused before the reader allocates it'
-    formal: 'forall stream: bytes_read <= max_artifact_bytes + 1'
+    formal: '∀ stream: bytes_read ≤ max_artifact_bytes + 1'
     applies_to: all
 
   - type: determinism
     property: 'Packing is byte-deterministic across processes and map backings'
-    formal: 'forall inputs: pack_A(inputs) == pack_B(inputs)'
+    formal: '∀ inputs: pack_A(inputs) == pack_B(inputs)'
     applies_to: all
 
   - type: roundtrip
     property: 'Pack then load recovers every tensor and blob exactly'
-    formal: 'forall run: unpack(pack(run)).tensors == run.tensors AND unpack(pack(run)).blobs == run.blobs'
+    formal: '∀ run: unpack(pack(run)).tensors == run.tensors ∧ unpack(pack(run)).blobs == run.blobs'
     applies_to: all
 
   - type: soundness
     property: 'A verified decider exists only after every rung passed'
-    formal: 'forall d: VerifiedDecider => rungs_1_to_7_passed(d)'
+    formal: '∀ d: VerifiedDecider ⇒ rungs_1_to_7_passed(d)'
     applies_to: all
 
 falsification_tests:

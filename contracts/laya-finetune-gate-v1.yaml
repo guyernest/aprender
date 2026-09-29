@@ -4,6 +4,10 @@ metadata:
   created: '2026-09-25'
   author: PAIML Engineering
   kind: kernel
+  # ONT-7 (plan 08-33): the fail-closed gate's claims hold in the committed tree; no backend, host or
+  # feature qualifies the claim.
+  valid_under:
+    world: committed
   description: >
     THE TRAINING-SIDE CLAIMS of the Laya decision model (Phase 8, D-03..D-08) and the D-19 demo
     cell: the device rule, the declared base, the fine-tune recipe, the task and training-row
@@ -827,17 +831,17 @@ proof_obligations:
 
   - type: bound
     property: 'Gate thresholds are read from this contract and a report carrying other thresholds is refused'
-    formal: 'forall report r: r.thresholds != (gate_min_macro_f1_margin, gate_max_ece, ece_bins) implies refuse(r)'
+    formal: '∀ report r: r.thresholds ≠ (gate_min_macro_f1_margin, gate_max_ece, ece_bins) ⇒ refuse(r)'
     applies_to: all
 
   - type: soundness
     property: 'pass is decided on recomputed metrics from verified probabilities'
-    formal: 'forall run: accepted_pass(run) == gate(recompute(verified(eval_probs)), recompute(verified(zero_shot_probs)))'
+    formal: '∀ run: accepted_pass(run) == gate(recompute(verified(eval_probs)), recompute(verified(zero_shot_probs)))'
     applies_to: all
 
   - type: bound
     property: 'The applied temperature is within Laya''s clamp range'
-    formal: 'calibration_temp_min <= T_applied <= calibration_temp_max'
+    formal: 'calibration_temp_min ≤ T_applied ≤ calibration_temp_max'
     applies_to: all
 
   - type: independence
@@ -847,32 +851,32 @@ proof_obligations:
 
   - type: invariant
     property: 'The shipped checkpoint is the declared seed (legacy rule: recipe.json without seed_selection)'
-    formal: 'no seed_selection implies shipped.seed == declared_seed'
+    formal: 'no seed_selection ⇒ shipped.seed == declared_seed'
     applies_to: all
 
   - type: invariant
     property: 'Under seed_selection the shipped checkpoint is the median-ECE seed by the declared rank key and tie-break, and pass is that seed''s pass (1.4.0)'
-    formal: 'seed_selection implies shipped == sort_by((floor(ece_post(s) x rank_scale), s), variance_seeds)[1] AND pass == gate(ft_shipped, zs) AND sha256(checkpoint) == per_seed[shipped].model_safetensors_sha256'
+    formal: 'seed_selection ⇒ shipped == sort_by((floor(ece_post(s) x rank_scale), s), variance_seeds)[1] ∧ pass == gate(ft_shipped, zs) ∧ sha256(checkpoint) == per_seed[shipped].model_safetensors_sha256'
     applies_to: all
 
   - type: independence
     property: 'The shift probe never enters the gate (1.4.0)'
-    formal: 'gate_pass(run) == gate_pass(run without shift.jsonl) AND shift_probe.gate_clause == false'
+    formal: 'gate_pass(run) == gate_pass(run without shift.jsonl) ∧ shift_probe.gate_clause == false'
     applies_to: all
 
   - type: safety
     property: 'No legacy run is deploy-eligible under 1.4.0'
-    formal: 'no seed_selection implies not deploy_eligible (SeedPolicyMissing, decided after the re-scores and the gate)'
+    formal: 'no seed_selection ⇒ not deploy_eligible (SeedPolicyMissing, decided after the re-scores and the gate)'
     applies_to: all
 
   - type: independence
     property: 'Early stopping, the restored epoch and the temperature are chosen without eval data'
-    formal: 'best_epoch, t_applied = f(train fit rows, calibration slice) AND eval-probs computed after the checkpoint is fixed'
+    formal: 'best_epoch, t_applied = f(train fit rows, calibration slice) ∧ eval-probs computed after the checkpoint is fixed'
     applies_to: all
 
   - type: safety
     property: 'A synthetic-fixture run is never deployable'
-    formal: 'variant == synthetic-fixture implies not deploy_eligible'
+    formal: 'variant == synthetic-fixture ⇒ not deploy_eligible'
     applies_to: all
 
 falsification_tests:

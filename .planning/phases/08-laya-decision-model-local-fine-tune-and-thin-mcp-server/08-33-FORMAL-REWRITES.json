@@ -91,6 +91,153 @@
    "old": "window in {63, 65} implies rel_rms(first_local) > 1.0e-3 AND rel_rms(first_global) <= 1.0e-3",
    "new": "window in {63, 65} ⇒ rel_rms(first_local) > 1.0e-3 ∧ rel_rms(first_global) ≤ 1.0e-3",
    "method": "substitution"
+  },
+  {
+   "contract": "decide-apr-v1",
+   "path": "proof_obligations[0]",
+   "old": "forall bytes, backing in {preserve_order, sorted}: labels(parse_task_backing(bytes)) == document_order(bytes)",
+   "new": "∀ bytes, backing in {preserve_order, sorted}: labels(parse_task_backing(bytes)) == document_order(bytes)",
+   "method": "substitution"
+  },
+  {
+   "contract": "decide-apr-v1",
+   "path": "proof_obligations[1]",
+   "old": "forall header h accepted at rung 2: h.tensor_count <= max_tensor_count AND h.tensor_count * 20 <= h.data_offset - h.tensor_index_offset",
+   "new": "∀ header h accepted at rung 2: h.tensor_count ≤ max_tensor_count ∧ h.tensor_count * 20 ≤ h.data_offset - h.tensor_index_offset",
+   "method": "substitution"
+  },
+  {
+   "contract": "decide-apr-v1",
+   "path": "proof_obligations[2]",
+   "old": "forall stream: bytes_read <= max_artifact_bytes + 1",
+   "new": "∀ stream: bytes_read ≤ max_artifact_bytes + 1",
+   "method": "substitution"
+  },
+  {
+   "contract": "decide-apr-v1",
+   "path": "proof_obligations[3]",
+   "old": "forall inputs: pack_A(inputs) == pack_B(inputs)",
+   "new": "∀ inputs: pack_A(inputs) == pack_B(inputs)",
+   "method": "substitution"
+  },
+  {
+   "contract": "decide-apr-v1",
+   "path": "proof_obligations[4]",
+   "old": "forall run: unpack(pack(run)).tensors == run.tensors AND unpack(pack(run)).blobs == run.blobs",
+   "new": "∀ run: unpack(pack(run)).tensors == run.tensors ∧ unpack(pack(run)).blobs == run.blobs",
+   "method": "substitution"
+  },
+  {
+   "contract": "decide-apr-v1",
+   "path": "proof_obligations[5]",
+   "old": "forall d: VerifiedDecider => rungs_1_to_7_passed(d)",
+   "new": "∀ d: VerifiedDecider ⇒ rungs_1_to_7_passed(d)",
+   "method": "substitution"
+  },
+  {
+   "contract": "decide-tool-boundary-v1",
+   "path": "proof_obligations[0]",
+   "old": "MIN_TEXTS == constants.classify_min_texts AND MAX_TEXTS == constants.classify_max_texts AND MAX_TEXT_BYTES == constants.classify_max_text_bytes AND MAX_TOTAL_TOKENS == constants.classify_max_total_tokens AND MAX_IN_FLIGHT == constants.classify_max_in_flight AND MAX_PENDING == constants.classify_max_pending",
+   "new": "MIN_TEXTS == constants.classify_min_texts ∧ MAX_TEXTS == constants.classify_max_texts ∧ MAX_TEXT_BYTES == constants.classify_max_text_bytes ∧ MAX_TOTAL_TOKENS == constants.classify_max_total_tokens ∧ MAX_IN_FLIGHT == constants.classify_max_in_flight ∧ MAX_PENDING == constants.classify_max_pending",
+   "method": "substitution"
+  },
+  {
+   "contract": "decide-tool-boundary-v1",
+   "path": "proof_obligations[1]",
+   "old": "classify_max_total_tokens * tier_ms_per_token_at_512 + cold_start_budget_ms + probe_budget_ms + margin_ms <= api_gateway_timeout_ms (at 10 240 MB: 800 x 12 + 15000 + 1100 + 4000 = 29700 <= 30000)",
+   "new": "classify_max_total_tokens * tier_ms_per_token_at_512 + cold_start_budget_ms + probe_budget_ms + margin_ms ≤ api_gateway_timeout_ms (at 10 240 MB: 800 x 12 + 15000 + 1100 + 4000 = 29700 ≤ 30000)",
+   "method": "substitution"
+  },
+  {
+   "contract": "decide-tool-boundary-v1",
+   "path": "proof_obligations[2]",
+   "old": "forall req: accepted(req) implies classify_count_bound(req) AND classify_text_bytes_bound(req) AND classify_token_budget(req)",
+   "new": "∀ req: accepted(req) ⇒ classify_count_bound(req) ∧ classify_text_bytes_bound(req) ∧ classify_token_budget(req)",
+   "method": "substitution"
+  },
+  {
+   "contract": "decide-tool-boundary-v1",
+   "path": "proof_obligations[3]",
+   "old": "forall resp, i: resp.results[i].probabilities[k] is the probability of resp.labels[k], and resp.labels == task.criteria in document order",
+   "new": "∀ resp, i: resp.results[i].probabilities[k] is the probability of resp.labels[k], and resp.labels == task.criteria in document order",
+   "method": "substitution"
+  },
+  {
+   "contract": "decide-tool-boundary-v1",
+   "path": "proof_obligations[4]",
+   "old": "forall t: running(t) + waiting(t) <= classify_max_pending AND running(t) <= classify_max_in_flight",
+   "new": "∀ t: running(t) + waiting(t) ≤ classify_max_pending ∧ running(t) ≤ classify_max_in_flight",
+   "method": "substitution"
+  },
+  {
+   "contract": "decide-tool-boundary-v1",
+   "path": "proof_obligations[5]",
+   "old": "forall req, e = refuse(req): forall t in req.texts, len_chars(t) >= refusal_echo_min_chars AND t distinctive: not substring(t, e.message)",
+   "new": "∀ req, e = refuse(req): ∀ t in req.texts, len_chars(t) ≥ refusal_echo_min_chars ∧ t distinctive: not substring(t, e.message)",
+   "method": "substitution"
+  },
+  {
+   "contract": "laya-finetune-gate-v1",
+   "path": "proof_obligations[0]",
+   "old": "forall report r: r.thresholds != (gate_min_macro_f1_margin, gate_max_ece, ece_bins) implies refuse(r)",
+   "new": "∀ report r: r.thresholds ≠ (gate_min_macro_f1_margin, gate_max_ece, ece_bins) ⇒ refuse(r)",
+   "method": "substitution"
+  },
+  {
+   "contract": "laya-finetune-gate-v1",
+   "path": "proof_obligations[1]",
+   "old": "forall run: accepted_pass(run) == gate(recompute(verified(eval_probs)), recompute(verified(zero_shot_probs)))",
+   "new": "∀ run: accepted_pass(run) == gate(recompute(verified(eval_probs)), recompute(verified(zero_shot_probs)))",
+   "method": "substitution"
+  },
+  {
+   "contract": "laya-finetune-gate-v1",
+   "path": "proof_obligations[2]",
+   "old": "calibration_temp_min <= T_applied <= calibration_temp_max",
+   "new": "calibration_temp_min ≤ T_applied ≤ calibration_temp_max",
+   "method": "substitution"
+  },
+  {
+   "contract": "laya-finetune-gate-v1",
+   "path": "proof_obligations[4]",
+   "old": "no seed_selection implies shipped.seed == declared_seed",
+   "new": "no seed_selection ⇒ shipped.seed == declared_seed",
+   "method": "substitution"
+  },
+  {
+   "contract": "laya-finetune-gate-v1",
+   "path": "proof_obligations[5]",
+   "old": "seed_selection implies shipped == sort_by((floor(ece_post(s) x rank_scale), s), variance_seeds)[1] AND pass == gate(ft_shipped, zs) AND sha256(checkpoint) == per_seed[shipped].model_safetensors_sha256",
+   "new": "seed_selection ⇒ shipped == sort_by((floor(ece_post(s) x rank_scale), s), variance_seeds)[1] ∧ pass == gate(ft_shipped, zs) ∧ sha256(checkpoint) == per_seed[shipped].model_safetensors_sha256",
+   "method": "substitution"
+  },
+  {
+   "contract": "laya-finetune-gate-v1",
+   "path": "proof_obligations[6]",
+   "old": "gate_pass(run) == gate_pass(run without shift.jsonl) AND shift_probe.gate_clause == false",
+   "new": "gate_pass(run) == gate_pass(run without shift.jsonl) ∧ shift_probe.gate_clause == false",
+   "method": "substitution"
+  },
+  {
+   "contract": "laya-finetune-gate-v1",
+   "path": "proof_obligations[7]",
+   "old": "no seed_selection implies not deploy_eligible (SeedPolicyMissing, decided after the re-scores and the gate)",
+   "new": "no seed_selection ⇒ not deploy_eligible (SeedPolicyMissing, decided after the re-scores and the gate)",
+   "method": "substitution"
+  },
+  {
+   "contract": "laya-finetune-gate-v1",
+   "path": "proof_obligations[8]",
+   "old": "best_epoch, t_applied = f(train fit rows, calibration slice) AND eval-probs computed after the checkpoint is fixed",
+   "new": "best_epoch, t_applied = f(train fit rows, calibration slice) ∧ eval-probs computed after the checkpoint is fixed",
+   "method": "substitution"
+  },
+  {
+   "contract": "laya-finetune-gate-v1",
+   "path": "proof_obligations[9]",
+   "old": "variant == synthetic-fixture implies not deploy_eligible",
+   "new": "variant == synthetic-fixture ⇒ not deploy_eligible",
+   "method": "substitution"
   }
  ]
 }
