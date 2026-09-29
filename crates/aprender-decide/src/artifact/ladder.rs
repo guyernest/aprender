@@ -274,7 +274,7 @@ fn header_version_refused() {
 /// Replace blob `name` with `new` AND re-pin its manifest sha256 — the artifact's author
 /// controls both, so the blob hash alone is not a bound on what the blob declares.
 fn swap_blob(bytes: &[u8], name: &str, new: Vec<u8>) -> Vec<u8> {
-    let sha = crate::pack::sha256_hex(&new);
+    let sha = crate::digest::sha256_hex(&new);
     let swapped = edit_tensor(bytes, name, |data| *data = new);
     edit_manifest(&swapped, |m| {
         for blob in m["blobs"].as_array_mut().expect("manifest blobs") {
@@ -780,7 +780,7 @@ fn forge(
         let mut v: Value = serde_json::from_slice(&recipe_bytes).expect("recipe JSON");
         set(&mut v, recipe);
         recipe_bytes = serde_json::to_vec(&v).expect("recipe re-serializes");
-        let sha = Value::from(crate::pack::sha256_hex(&recipe_bytes));
+        let sha = Value::from(crate::digest::sha256_hex(&recipe_bytes));
         pins.push(("/blobs/4/sha256".into(), sha.clone()));
         pins.push(("/recipe_id".into(), sha.clone()));
         report_edits.push(("/recipe_id".into(), sha));
@@ -790,7 +790,7 @@ fn forge(
         let mut v: Value = serde_json::from_slice(&report_bytes).expect("report JSON");
         set(&mut v, &report_edits);
         report_bytes = serde_json::to_vec(&v).expect("report re-serializes");
-        let sha = Value::from(crate::pack::sha256_hex(&report_bytes));
+        let sha = Value::from(crate::digest::sha256_hex(&report_bytes));
         pins.push(("/blobs/5/sha256".into(), sha.clone()));
         pins.push(("/gate/report_sha256".into(), sha));
     }
@@ -1388,7 +1388,7 @@ fn probe_mismatch() {
 
 /// Swap blob `name` for `new` (data AND its `[len]` shape) and re-pin its manifest sha256.
 fn swap_blob_sized(bytes: &[u8], name: &str, new: &[u8]) -> Vec<u8> {
-    let sha = crate::pack::sha256_hex(new);
+    let sha = crate::digest::sha256_hex(new);
     let swapped = repack(bytes, |_, tensors| {
         let t = tensors
             .iter_mut()
@@ -1417,7 +1417,7 @@ fn blob_json(bytes: &[u8], name: &str) -> Value {
 /// only thing the ladder can object to is what the tokenizer DOES.
 fn with_tokenizer(bytes: &[u8], doc: &Value) -> Vec<u8> {
     let new = serde_json::to_vec(doc).expect("tokenizer re-serializes");
-    let sha = Value::from(crate::pack::sha256_hex(&new));
+    let sha = Value::from(crate::digest::sha256_hex(&new));
     let swapped = swap_blob_sized(bytes, super::TOKENIZER_BLOB, &new);
     let pin = edits(&[("/inputs_sha256/tokenizer_json", sha)]);
     forge(&swapped, &[], &pin, &pin)

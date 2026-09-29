@@ -48,10 +48,14 @@ sha2 = { workspace = true }
 # The head's residual adds, as core's encoder does them.
 rayon = { workspace = true }
 provable-contracts-macros = { workspace = true }
-# The PACK path (`pack::PackInputs::from_run_dir`) reads the run dir's
-# model.safetensors as raw bytes. Library code, so a normal dependency; the SERVED
-# path reads only .apr (servers never call `pack`), so the SafeTensors carve-out
-# stays scoped to pack time.
+# Production code reads SafeTensors only in src/pack.rs: the PACK path
+# (`pack::PackInputs::from_run_dir`) and verify's base scorer
+# (`pack::scorer_from_parts`) parse the checkpoint there. Library code, so a normal
+# dependency. The `#[cfg(test)]` fixture builder src/test_support.rs also parses the
+# tiny checkpoint; it is never compiled into a server. The LOAD path (artifact, task,
+# laya) reads only .apr bytes and calls no pack function that reads files, so the
+# SafeTensors carve-out stays scoped to the back office. Enforced by the lib test
+# `safetensors_is_read_only_by_pack`.
 safetensors = { workspace = true }
 # NFC for the verifier's split re-derivation (verify::normalize_text mirrors
 # scripts/laya_train/data.py `nfc-trim-ws-v1`). Already in the workspace lock.

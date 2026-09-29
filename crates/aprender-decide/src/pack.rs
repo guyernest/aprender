@@ -16,24 +16,28 @@
 //!
 //! # SafeTensors scope
 //!
-//! This is the only code in the crate that reads SafeTensors, and it is a PACK-time
-//! library path. The served path reads only `.apr` (servers never call `pack`), so the
-//! SafeTensors carve-out in CLAUDE.md is not widened.
+//! Production code reads SafeTensors only in src/pack.rs (this file), on the PACK-time and
+//! verify-time back-office path: [`PackInputs::from_run_dir`] parses the run
+//! dir's checkpoint, and `verify` hands the base checkpoint's bytes to
+//! [`scorer_from_parts`] here rather than parsing them itself. The one other parser in the
+//! crate is the `#[cfg(test)]` fixture builder `src/test_support.rs`, which parses the tiny
+//! checkpoint to build test artifacts and is never compiled into a server.
+//!
+//! The LOAD path (`artifact`, `task`, `laya`) reads only `.apr` bytes. It uses this
+//! module's serde record TYPES ([`Recipe`], [`GateReport`]) to parse the blobs the `.apr`
+//! carries, but calls no function here that reads a file, and it hashes through
+//! [`crate::digest`], not through this module. So the SafeTensors carve-out in CLAUDE.md
+//! is not widened. Enforced by the lib test `safetensors_is_read_only_by_pack`, which
+//! scans every `.rs` file under `src/`.
 
 use crate::artifact::{self, ArtifactError, BaseDecl, InputsSha256, ProbeRecord};
+use crate::digest::sha256_hex;
 use crate::laya::{Laya, LayaError};
 use crate::Task;
 use aprender::format::v2::{AprV2Metadata, AprV2ReaderRef, AprV2Writer, TensorDType};
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use std::fmt;
 use std::path::{Path, PathBuf};
-
-/// Lowercase-hex sha256 of `bytes`.
-#[must_use]
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
-}
 
 /// One checkpoint tensor exactly as stored: raw little-endian bytes, never re-rounded.
 #[derive(Debug, Clone, PartialEq, Eq)]

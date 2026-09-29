@@ -196,7 +196,7 @@ impl Task {
             .into_iter()
             .map(|(name, description)| Criterion { name, description })
             .collect();
-        let sha256 = crate::pack::sha256_hex(bytes);
+        let sha256 = crate::digest::sha256_hex(bytes);
         Ok(Self {
             instructions: doc.instructions,
             criteria,

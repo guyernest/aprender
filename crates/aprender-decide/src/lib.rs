@@ -43,6 +43,7 @@
 //! and load ladder).
 
 pub mod artifact;
+pub mod digest;
 pub mod laya;
 pub mod pack;
 pub mod task;
@@ -307,5 +308,91 @@ impl Decider {
     /// The method's refusal.
     pub fn classify(&self, texts: &[String]) -> Result<Vec<Decision>, DecideError> {
         self.method.classify(texts)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    /// Every `.rs` file under `dir`, recursively, sorted.
+    fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
+        let entries =
+            std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read_dir {}: {e}", dir.display()));
+        for entry in entries {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                rust_sources(&path, out);
+            } else if path.extension().is_some_and(|x| x == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// V14-d / CV5 (plan 08-31): production code reads the safetensors format only in
+    /// `src/pack.rs`.
+    ///
+    /// Scans every `.rs` file under `src/` at test time for the two needles — the crate path
+    /// and the type name — and allows them only in `src/pack.rs` and in the allowlist below.
+    /// The needles are assembled with `concat!` so this file cannot match them literally,
+    /// wherever the test lives. Two must-match controls keep the scan honest: `src/pack.rs`
+    /// must hold a needle (else the scan is blind), and every allowlisted file must still hold
+    /// one (else the allowlist entry has outlived its reason and FAILS).
+    #[test]
+    fn safetensors_is_read_only_by_pack() {
+        const NEEDLES: [&str; 2] = [concat!("safe", "tensors::"), concat!("Safe", "Tensors")];
+        const OWNER: &str = "src/pack.rs";
+        const ALLOWLIST: [(&str, &str); 1] = [(
+            "src/test_support.rs",
+            "`#[cfg(test)]` fixture builder: parses the tiny checkpoint to build test \
+             artifacts; never compiled into a server",
+        )];
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files = Vec::new();
+        rust_sources(&root.join("src"), &mut files);
+        files.sort();
+        assert!(
+            files.len() > 5,
+            "the scan found only {} files; it is not reading src/",
+            files.len()
+        );
+
+        let mut owner_hits = 0usize;
+        let mut allow_hits = [0usize; ALLOWLIST.len()];
+        let mut offenders = Vec::new();
+        for path in &files {
+            let rel = path
+                .strip_prefix(root)
+                .expect("under the manifest dir")
+                .to_string_lossy()
+                .replace('\\', "/");
+            let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
+            let hits = NEEDLES.iter().filter(|n| text.contains(*n)).count();
+            if hits == 0 {
+                continue;
+            }
+            if rel == OWNER {
+                owner_hits += hits;
+            } else if let Some(i) = ALLOWLIST.iter().position(|(f, _)| *f == rel) {
+                allow_hits[i] += hits;
+            } else {
+                offenders.push(rel);
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "production code outside {OWNER} names a safetensors needle: {offenders:?}"
+        );
+        assert!(
+            owner_hits > 0,
+            "must-match control: {OWNER} holds no needle, so the scan cannot see a reader"
+        );
+        for ((file, reason), hits) in ALLOWLIST.iter().zip(allow_hits) {
+            assert!(
+                hits > 0,
+                "allowlist entry {file} ({reason}) no longer matches; remove it"
+            );
+        }
     }
 }

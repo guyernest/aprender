@@ -42,9 +42,10 @@
 //! 7. probe replay against the stored Python values
 //! 8. mint — [`Decider`] has private fields, and this module is its only constructor.
 
+use crate::digest::sha256_hex;
 use crate::laya::temperature::{applied_temperature_f64, bucket_key};
 use crate::laya::{AgentConfig, Laya, QType};
-use crate::pack::{sha256_hex, CheckpointTensor, PackInputs};
+use crate::pack::{CheckpointTensor, PackInputs};
 use crate::{DecideError, Decider, DecisionMethod, ModelIdentity, Task, TaskError};
 use aprender::format::v2::{
     AprV2Header, AprV2Metadata, AprV2ReaderRef, AprV2Writer, TensorDType, HEADER_SIZE_V2,

@@ -62,8 +62,9 @@
 //! `synthetic-fixture` artifacts, which every verify refuses.
 
 use crate::artifact::{self, within, ArtifactError};
+use crate::digest::sha256_hex;
 use crate::laya::argmax;
-use crate::pack::{self, sha256_hex, GateCalibration, GateReport, PackError, PackInputs, Recipe};
+use crate::pack::{self, GateCalibration, GateReport, PackError, PackInputs, Recipe};
 use crate::{DecideError, Decider, Decision, DecisionMethod, Task};
 use aprender::calibration::expected_calibration_error_top_label_f64;
 use aprender::metrics::classification::{macro_f1_f64, mean_f1_over_labels_f64};

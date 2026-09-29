@@ -2,7 +2,8 @@
 //! classify, with the identity the classify response will carry.
 
 use super::{artifact_sha256_hex, ProbeRecord};
-use crate::pack::{pack_run_dir, sha256_hex, ProbesFile};
+use crate::digest::sha256_hex;
+use crate::pack::{pack_run_dir, ProbesFile};
 use crate::test_support::{f32_list, fixture_dir, max_abs, oracle, read, tolerance, within};
 use crate::{Decider, Task};
 

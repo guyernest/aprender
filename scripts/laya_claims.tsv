@@ -1,0 +1,4 @@
+claim_id	file	anchor	kind	owner	test	finding
+pack-safetensors-scope	crates/aprender-decide/src/pack.rs	Production code reads SafeTensors only in src/pack.rs (this file)	rust	aprender-decide	safetensors_is_read_only_by_pack	V14-d,CV5
+cargo-safetensors-scope	crates/aprender-decide/Cargo.toml	# Production code reads SafeTensors only in src/pack.rs: the PACK path	rust	aprender-decide	safetensors_is_read_only_by_pack	V14-d,CV5
+claude-md-safetensors-never-served	CLAUDE.md	safetensors is read only by the back-office packer (`aprender_decide::pack`,	rust	aprender-decide	safetensors_is_read_only_by_pack	V14-d,CV5

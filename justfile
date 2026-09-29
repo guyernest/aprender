@@ -3325,6 +3325,14 @@ laya-gates-selftest:
         must_fail verdict-exempt 'DRIFT: laya-verify prints a verdict and cannot be not-a-gate' env LAYA_GATES_DEPTH=1 LAYA_GATES_TSV="$W/t-exempt.tsv" just laya-gates-selftest
         must_pass one-row '^LAYA GATES ROWS OK 1 of ' env LAYA_GATES_DEPTH=1 LAYA_GATES_ONLY=edge-health-url just laya-gates-selftest
     }
+    row_claims_check() {
+        # The committed ledger with its FIRST row's anchor planted (and renamed), the rest intact: the
+        # recipe's own three self-cases must still pass (3 `self-case` lines), then the ledger fails.
+        awk -F '\t' 'BEGIN { OFS = "\t" } NR == 2 { $1 = "gates-selftest-anchor"; $3 = "planted by gates-selftest: an anchor in no file" } { print }' scripts/laya_claims.tsv > "$W/claims-anchor.tsv"
+        must_fail missing-anchor '^ANCHOR MISSING gates-selftest-anchor: ' env LAYA_CLAIMS_TSV="$W/claims-anchor.tsv" just laya-claims-check
+        [ "$(grep -c '^self-case [a-z]*: exit ' "$(logof missing-anchor)")" -eq 3 ] || red "missing-anchor: the recipe's three self-cases did not all run and fail as designed before the ledger"
+        must_pass ledger '^LAYA CLAIMS OK [0-9]+ rows' just laya-claims-check
+    }
     # ---- dispatch -------------------------------------------------------------------------------
     UNKNOWN=""
     while IFS=$'\t' read -r -u 3 gid target mf; do
@@ -3375,3 +3383,179 @@ laya-gates-selftest:
     else
         echo "LAYA GATES SELFTEST OK $TOTAL rows"
     fi
+
+# ---------------------------------------------------------------------------
+# Class D, claim honesty (plan 08-31): every normative claim the 08-19..08-30 gap round corrected or
+# enforced is a row of scripts/laya_claims.tsv, and the row names what enforces it. This branch's CI
+# strict-binding guard is vacuous (D-ITEM-08-01-A), so this ledger is also the non-vacuous check that
+# a contract's named tests exist.
+# ---------------------------------------------------------------------------
+
+# Check scripts/laya_claims.tsv (or $LAYA_CLAIMS_TSV). Header:
+#   claim_id<TAB>file<TAB>anchor<TAB>kind<TAB>owner<TAB>test<TAB>finding
+# Per row: `anchor` must occur in `file` (a fixed-string match, like `grep -F`), then by `kind`:
+#   rust      `test` is in `cargo test -p <owner> -- --list` (listed once per owner and cached); an
+#             owner `<crate>:lib` lists `--lib` only and `<crate>:test=<target>` that one target only,
+#             for a crate whose full list is too costly to build (aprender-core)
+#   just      `test` is a recipe (`just --dump`: `just --summary` hides the private `_laya-*` recipes)
+#   python    `test` appears in `just laya-train-selftest` output (run once and cached; needs uv + torch)
+#   pv        `pv validate <file>` exits 0 with `0 error(s)`, and `test` (a FALSIFY id, or `-`) is in the file
+#   evidence  `test` is `<json file>#<dotted.key>` and that key exists in that JSON file
+# An unknown kind, a malformed row or a repeated claim_id FAILS. FIRST, before the ledger itself, three
+# built-in MUST-FAIL self-cases run against temp copies of it — a missing anchor, a missing test, an
+# unknown kind — and each must exit non-zero naming its planted row, or the check fails. Prints
+# `LAYA CLAIMS OK <n> rows`. pv is `pv` on PATH, else built with cargo (the Makefile's PV_BIN).
+laya-claims-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    TSV="${LAYA_CLAIMS_TSV:-scripts/laya_claims.tsv}"
+    [ -f "$TSV" ] || { echo "LAYA CLAIMS FAILED: the ledger $TSV does not exist" >&2; exit 1; }
+    W="$(mktemp -d)"
+    trap 'rm -rf "$W"' EXIT
+    mkdir -p "$W/cache"
+    if command -v pv > /dev/null 2>&1; then export LAYA_CLAIMS_PV="pv"; else export LAYA_CLAIMS_PV="cargo run --release -q -p aprender-contracts-cli --bin pv --"; fi
+    cat > "$W/claims.py" <<'PY'
+    import json, os, re, shlex, subprocess, sys
+    HEADER = ["claim_id", "file", "anchor", "kind", "owner", "test", "finding"]
+    KINDS = ("rust", "just", "python", "pv", "evidence")
+    def rows_of(tsv):
+        lines = open(tsv, encoding="utf-8").read().split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()
+        return lines
+    def safe(s):
+        return re.sub(r"[^A-Za-z0-9_.=-]", "_", s)
+    def cached(cache, key, argv):
+        path = os.path.join(cache, safe(key))
+        if not os.path.exists(path + ".rc"):
+            p = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            open(path + ".out", "w").write(p.stdout)
+            open(path + ".rc", "w").write(str(p.returncode))
+        return int(open(path + ".rc").read()), open(path + ".out").read()
+    def rust_tests(cache, owner):
+        crate, _, sel = owner.partition(":")
+        argv = ["cargo", "test", "-q", "-p", crate]
+        if sel == "lib":
+            argv.append("--lib")
+        elif sel.startswith("test="):
+            argv += ["--test", sel[len("test="):]]
+        elif sel:
+            return None, f"owner selector {sel!r} is not lib or test=<target>"
+        rc, out = cached(cache, "rust-" + owner, argv + ["--", "--list"])
+        if rc != 0:
+            return None, f"`{' '.join(argv)} -- --list` exited {rc}"
+        return {m.group(1) for m in re.finditer(r"^(\S+): (?:test|bench)$", out, re.M)}, None
+    def check(tsv, cache):
+        lines = rows_of(tsv)
+        problems = []
+        if not lines or lines[0].split("\t") != HEADER:
+            print(f"TABLE: the first line of {tsv} is not the header {chr(9).join(HEADER)!r}")
+            return 1
+        ids, n = set(), 0
+        for i, raw in enumerate(lines[1:], 2):
+            f = raw.split("\t")
+            if len(f) != 7 or any(not x.strip() for x in f):
+                problems.append(f"TABLE: line {i} does not have seven non-empty tab-separated fields: {raw[:120]!r}")
+                continue
+            cid, path, anchor, kind, owner, test, finding = f
+            n += 1
+            if cid in ids:
+                problems.append(f"TABLE: line {i}: claim_id {cid} is repeated")
+            ids.add(cid)
+            if kind not in KINDS:
+                problems.append(f"UNKNOWN KIND {cid}: {kind!r} is not one of {', '.join(KINDS)}")
+                continue
+            if not os.path.isfile(path):
+                problems.append(f"FILE MISSING {cid}: {path}")
+                continue
+            text = open(path, encoding="utf-8").read()
+            if anchor not in text:
+                problems.append(f"ANCHOR MISSING {cid}: {path} no longer contains {anchor[:100]!r}")
+                continue
+            if kind == "rust":
+                names, err = rust_tests(cache, owner)
+                if err:
+                    problems.append(f"TEST UNLISTABLE {cid}: {err}")
+                elif not any(t == test or t.endswith("::" + test) for t in names):
+                    problems.append(f"TEST MISSING {cid}: {test} is not in the test list of {owner} ({len(names)} tests)")
+            elif kind == "just":
+                rc, out = cached(cache, "just-dump", ["just", "--dump", "--dump-format", "json"])
+                if rc != 0 or test not in json.loads(out)["recipes"]:
+                    problems.append(f"TEST MISSING {cid}: {test} is not a just recipe")
+            elif kind == "python":
+                rc, out = cached(cache, "python-selftest", ["just", "laya-train-selftest"])
+                if rc != 0 or "LAYA TRAIN SELFTEST OK" not in out:
+                    problems.append(f"TEST UNLISTABLE {cid}: `just laya-train-selftest` exited {rc} without LAYA TRAIN SELFTEST OK")
+                elif test not in out:
+                    problems.append(f"TEST MISSING {cid}: {test!r} is not in the laya-train-selftest output")
+            elif kind == "pv":
+                rc, out = cached(cache, "pv-" + path, shlex.split(os.environ["LAYA_CLAIMS_PV"]) + ["validate", path])
+                if rc != 0 or not re.search(r"^0 error\(s\)", out, re.M):
+                    problems.append(f"PV INVALID {cid}: `pv validate {path}` exited {rc} without 0 error(s)")
+                elif test != "-" and test not in text:
+                    problems.append(f"TEST MISSING {cid}: {test} is not in {path}")
+            elif kind == "evidence":
+                jpath, sep, key = test.partition("#")
+                if not sep or not key:
+                    problems.append(f"TABLE: line {i}: an evidence test is <json file>#<dotted.key>, got {test!r}")
+                    continue
+                try:
+                    node = json.load(open(jpath, encoding="utf-8"))
+                except (OSError, ValueError) as e:
+                    problems.append(f"TEST MISSING {cid}: {jpath} is not readable JSON ({e})")
+                    continue
+                for part in key.split("."):
+                    if isinstance(node, dict) and part in node:
+                        node = node[part]
+                    elif isinstance(node, list) and part.isdigit() and int(part) < len(node):
+                        node = node[int(part)]
+                    else:
+                        problems.append(f"TEST MISSING {cid}: {jpath} has no key {key}")
+                        break
+        for p in problems:
+            print(p)
+        if problems:
+            print(f"LAYA CLAIMS FAILED: {len(problems)} problem(s) in {n} rows")
+            return 1
+        print(f"LAYA CLAIMS OK {n} rows")
+        return 0
+    def plant(case, tsv, out):
+        lines = rows_of(tsv)
+        rows = [l.split("\t") for l in lines[1:]]
+        if not rows:
+            sys.exit("the ledger has no rows to plant into")
+        if case == "anchor":
+            r = rows[0]
+            r[0], r[2] = "selftest-anchor", "LAYA-CLAIMS-SELFTEST planted anchor, in no file"
+        elif case == "test":
+            # A rust row whose anchor is present, so the planted row fails on its TEST, never earlier.
+            def anchored(r):
+                return os.path.isfile(r[1]) and r[2] in open(r[1], encoding="utf-8").read()
+            r = next((r for r in rows if len(r) == 7 and r[3] == "rust" and anchored(r)), None)
+            if r is None:
+                sys.exit("the ledger has no anchored rust row to plant a missing test into")
+            r[0], r[5] = "selftest-test", "no_such_test_planted_by_laya_claims_check"
+        elif case == "kind":
+            rows.append(["selftest-kind"] + rows[0][1:3] + ["bogus"] + rows[0][4:])
+        else:
+            sys.exit(f"unknown self-case {case}")
+        open(out, "w").write("\n".join([lines[0]] + ["\t".join(r) for r in rows]) + "\n")
+    if sys.argv[1] == "check":
+        sys.exit(check(sys.argv[2], sys.argv[3]))
+    plant(sys.argv[2], sys.argv[3], sys.argv[4])
+    PY
+    # 1. The must-fail self-cases, before the ledger itself. Each shares the list cache.
+    for c in anchor:ANCHOR test:TEST kind:UNKNOWN; do
+        case_id="${c%%:*}"; want="${c#*:}"
+        python3 "$W/claims.py" plant "$case_id" "$TSV" "$W/planted-$case_id.tsv"
+        set +e; python3 "$W/claims.py" check "$W/planted-$case_id.tsv" "$W/cache" > "$W/self-$case_id.log" 2>&1; rc=$?; set -e
+        if [ "$rc" -ne 0 ] && grep -Eq "^$want (MISSING|KIND) selftest-$case_id:" "$W/self-$case_id.log"; then
+            echo "self-case $case_id: exit $rc, $(grep -E -m 1 "^$want (MISSING|KIND) selftest-$case_id:" "$W/self-$case_id.log" | cut -c 1-140)"
+        else
+            tail -5 "$W/self-$case_id.log" >&2 || true
+            echo "LAYA CLAIMS FAILED: self-case $case_id did not fail as designed (exit $rc, no '$want ... selftest-$case_id' line)" >&2
+            exit 1
+        fi
+    done
+    # 2. The ledger.
+    python3 "$W/claims.py" check "$TSV" "$W/cache"
