@@ -90,7 +90,11 @@ pub struct ColorMap {
 impl ColorMap {
     /// Create a custom colormap from an ordered list of color stops.
     pub fn new(mut stops: Vec<ColorStop>) -> Self {
-        stops.sort_by(|a, b| a.value.partial_cmp(&b.value).unwrap_or(std::cmp::Ordering::Equal));
+        stops.sort_by(|a, b| {
+            a.value
+                .partial_cmp(&b.value)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         Self { stops }
     }
 
@@ -104,23 +108,56 @@ impl ColorMap {
     /// - `0.9`: Dark green (peak vegetative vigor)
     pub fn ndvi_rdylgn() -> Self {
         Self::new(vec![
-            ColorStop { value: -0.2, rgba: [165, 0, 38, 255] },
-            ColorStop { value: 0.0, rgba: [215, 48, 39, 255] },
-            ColorStop { value: 0.2, rgba: [254, 224, 139, 255] },
-            ColorStop { value: 0.4, rgba: [166, 217, 106, 255] },
-            ColorStop { value: 0.6, rgba: [26, 152, 80, 255] },
-            ColorStop { value: 0.9, rgba: [0, 104, 55, 255] },
+            ColorStop {
+                value: -0.2,
+                rgba: [165, 0, 38, 255],
+            },
+            ColorStop {
+                value: 0.0,
+                rgba: [215, 48, 39, 255],
+            },
+            ColorStop {
+                value: 0.2,
+                rgba: [254, 224, 139, 255],
+            },
+            ColorStop {
+                value: 0.4,
+                rgba: [166, 217, 106, 255],
+            },
+            ColorStop {
+                value: 0.6,
+                rgba: [26, 152, 80, 255],
+            },
+            ColorStop {
+                value: 0.9,
+                rgba: [0, 104, 55, 255],
+            },
         ])
     }
 
     /// Blues colormap for NDWI moisture and open water.
     pub fn ndwi_blues() -> Self {
         Self::new(vec![
-            ColorStop { value: -0.5, rgba: [255, 245, 240, 255] },
-            ColorStop { value: 0.0, rgba: [198, 219, 239, 255] },
-            ColorStop { value: 0.2, rgba: [107, 174, 214, 255] },
-            ColorStop { value: 0.5, rgba: [33, 113, 181, 255] },
-            ColorStop { value: 1.0, rgba: [8, 48, 107, 255] },
+            ColorStop {
+                value: -0.5,
+                rgba: [255, 245, 240, 255],
+            },
+            ColorStop {
+                value: 0.0,
+                rgba: [198, 219, 239, 255],
+            },
+            ColorStop {
+                value: 0.2,
+                rgba: [107, 174, 214, 255],
+            },
+            ColorStop {
+                value: 0.5,
+                rgba: [33, 113, 181, 255],
+            },
+            ColorStop {
+                value: 1.0,
+                rgba: [8, 48, 107, 255],
+            },
         ])
     }
 
@@ -154,10 +191,14 @@ impl ColorMap {
                 };
 
                 return [
-                    (left.rgba[0] as f32 + t * (right.rgba[0] as f32 - left.rgba[0] as f32)).round() as u8,
-                    (left.rgba[1] as f32 + t * (right.rgba[1] as f32 - left.rgba[1] as f32)).round() as u8,
-                    (left.rgba[2] as f32 + t * (right.rgba[2] as f32 - left.rgba[2] as f32)).round() as u8,
-                    (left.rgba[3] as f32 + t * (right.rgba[3] as f32 - left.rgba[3] as f32)).round() as u8,
+                    (left.rgba[0] as f32 + t * (right.rgba[0] as f32 - left.rgba[0] as f32)).round()
+                        as u8,
+                    (left.rgba[1] as f32 + t * (right.rgba[1] as f32 - left.rgba[1] as f32)).round()
+                        as u8,
+                    (left.rgba[2] as f32 + t * (right.rgba[2] as f32 - left.rgba[2] as f32)).round()
+                        as u8,
+                    (left.rgba[3] as f32 + t * (right.rgba[3] as f32 - left.rgba[3] as f32)).round()
+                        as u8,
                 ];
             }
         }
@@ -174,7 +215,11 @@ pub fn compute_ndvi(nir: &[f32], red: &[f32], out: &mut [f32]) -> Result<(), Ima
     if nir.len() != red.len() || nir.len() != out.len() {
         return Err(ImageError::DimensionMismatch {
             expected: nir.len(),
-            got: if red.len() == nir.len() { out.len() } else { red.len() },
+            got: if red.len() == nir.len() {
+                out.len()
+            } else {
+                red.len()
+            },
         });
     }
 
@@ -197,7 +242,11 @@ pub fn compute_ndwi(nir: &[f32], swir: &[f32], out: &mut [f32]) -> Result<(), Im
     if nir.len() != swir.len() || nir.len() != out.len() {
         return Err(ImageError::DimensionMismatch {
             expected: nir.len(),
-            got: if swir.len() == nir.len() { out.len() } else { swir.len() },
+            got: if swir.len() == nir.len() {
+                out.len()
+            } else {
+                swir.len()
+            },
         });
     }
 
@@ -216,7 +265,11 @@ pub fn compute_ndwi(nir: &[f32], swir: &[f32], out: &mut [f32]) -> Result<(), Im
 }
 
 /// Compute NDWI (McFeeters 1996 for water bodies): `(GREEN - NIR) / (GREEN + NIR)`.
-pub fn compute_ndwi_mcfeeters(green: &[f32], nir: &[f32], out: &mut [f32]) -> Result<(), ImageError> {
+pub fn compute_ndwi_mcfeeters(
+    green: &[f32],
+    nir: &[f32],
+    out: &mut [f32],
+) -> Result<(), ImageError> {
     compute_ndvi(green, nir, out) // Mathematically identical structure
 }
 
@@ -261,16 +314,15 @@ pub fn compute_evi(
 /// Compute SAVI (Soil-Adjusted Vegetation Index): `(1 + L) * (NIR - RED) / (NIR + RED + L)`.
 ///
 /// Default soil adjustment coefficient `l = 0.5`.
-pub fn compute_savi(
-    nir: &[f32],
-    red: &[f32],
-    l: f32,
-    out: &mut [f32],
-) -> Result<(), ImageError> {
+pub fn compute_savi(nir: &[f32], red: &[f32], l: f32, out: &mut [f32]) -> Result<(), ImageError> {
     if nir.len() != red.len() || nir.len() != out.len() {
         return Err(ImageError::DimensionMismatch {
             expected: nir.len(),
-            got: if red.len() == nir.len() { out.len() } else { red.len() },
+            got: if red.len() == nir.len() {
+                out.len()
+            } else {
+                red.len()
+            },
         });
     }
 

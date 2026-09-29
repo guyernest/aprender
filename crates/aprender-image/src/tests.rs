@@ -1134,28 +1134,19 @@ fn test_falsify_spectral_001_bounds() {
 
     for (i, &v) in ndvi.iter().enumerate() {
         if !v.is_nan() {
-            assert!(
-                (-1.0..=1.0).contains(&v),
-                "NDVI out of bounds at {i}: {v}"
-            );
+            assert!((-1.0..=1.0).contains(&v), "NDVI out of bounds at {i}: {v}");
         }
     }
 
     for (i, &v) in evi.iter().enumerate() {
         if !v.is_nan() {
-            assert!(
-                (-1.0..=1.0).contains(&v),
-                "EVI out of bounds at {i}: {v}"
-            );
+            assert!((-1.0..=1.0).contains(&v), "EVI out of bounds at {i}: {v}");
         }
     }
 
     for (i, &v) in savi.iter().enumerate() {
         if !v.is_nan() {
-            assert!(
-                (-1.0..=1.0).contains(&v),
-                "SAVI out of bounds at {i}: {v}"
-            );
+            assert!((-1.0..=1.0).contains(&v), "SAVI out of bounds at {i}: {v}");
         }
     }
 }
@@ -1195,7 +1186,17 @@ fn test_falsify_spectral_004_stats_monotonicity() {
     use crate::spectral::*;
 
     let values = vec![
-        f32::NAN, 0.05, 0.12, 0.34, 0.45, 0.55, 0.65, 0.72, 0.81, 0.95, f32::NAN,
+        f32::NAN,
+        0.05,
+        0.12,
+        0.34,
+        0.45,
+        0.55,
+        0.65,
+        0.72,
+        0.81,
+        0.95,
+        f32::NAN,
     ];
 
     let stats = compute_stats(&values);
@@ -1256,4 +1257,3 @@ fn test_imagebuf_spectral_extensions() {
     // Pixel (1,0): (0.2 - 0.2) / 0.4 = 0.0
     assert!(ndvi.data()[2].abs() < 1e-6);
 }
-

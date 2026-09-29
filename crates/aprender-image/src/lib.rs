@@ -50,9 +50,8 @@ pub use histogram::{cumulative_histogram, equalize, histogram};
 pub use morphology::{closing, dilate, erode, opening};
 pub use resize::{resize, Interpolation};
 pub use spectral::{
-    classify_health, compute_evi, compute_ndvi, compute_ndwi, compute_ndwi_mcfeeters,
-    compute_savi, compute_stats, render_overlay_rgba, ColorMap, ColorStop, SpectralIndex,
-    SpectralStats,
+    classify_health, compute_evi, compute_ndvi, compute_ndwi, compute_ndwi_mcfeeters, compute_savi,
+    compute_stats, render_overlay_rgba, ColorMap, ColorStop, SpectralIndex, SpectralStats,
 };
 
 /// Image operations trait for `ImageBuf` method dispatch.
