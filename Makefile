@@ -352,7 +352,7 @@ tier3:
 # "0 error(s), 0 warning(s)". Nothing is already red, so wiring the whole list
 # cannot make tier3 fail for a defect this phase did not cause, and 8 s is well
 # inside tier3's 1-5 minute budget. Had any contract been red, the narrow
-# `$(PV_BIN) validate contracts/setfit-encoder-conformance-v1.yaml` form would
+# `$(PV_CARGO_RUN) validate contracts/setfit-encoder-conformance-v1.yaml` form would
 # have been used instead and the red contracts surfaced as their own finding.
 	@echo "Validating provable contracts (incl. the Phase 1 setfit gate, D-26)..."
 	@$(MAKE) contract-validate
@@ -2396,7 +2396,7 @@ contract-audit: ## Audit binding coverage (equations -> implementations)
 # (`make contract-audit-phase2 > /tmp/cap2.log 2>&1; rc=$$?`, never through a
 # pipe — CLAUDE.md rule 1): rc=0, 24/24 equations bound for
 # contrastive-pair-protocol-v1 and 1/1 for tweet-eval-stance-benchmark-v1.
-# Wall time 9 s cold (pv is rebuilt by $(PV_BIN)), then 1 s / 0 s / 1 s over
+# Wall time 9 s cold (pv is rebuilt by $(PV_CARGO_RUN)), then 1 s / 0 s / 1 s over
 # three warm runs — nothing against tier3's 1-5 minute budget, and tier3 has
 # already built pv via `contract-validate` two lines earlier.
 #
@@ -2413,7 +2413,7 @@ contract-audit-phase2: ## Audit Phase 2 binding coverage (BLOCKING, wired into t
 	@unbound=""; \
 	for contract in $(PHASE2_CONTRACTS); do \
 		echo "  $$contract"; \
-		$(PV_BIN) audit "$$contract" --binding $(BINDING); \
+		$(PV_CARGO_RUN) audit "$$contract" --binding $(BINDING); \
 		status=$$?; \
 		if [ "$$status" -ne 0 ]; then \
 			unbound="$$unbound $$contract"; \
@@ -2456,7 +2456,7 @@ contract-audit-phase2: ## Audit Phase 2 binding coverage (BLOCKING, wired into t
 #
 # THE `set +e` AROUND THE AUDIT IS LOAD-BEARING, and it is a correction to the
 # shape copied from the Phase 2 target. This Makefile sets `.SHELLFLAGS := -e -c`
-# (line 40), so a failing `$(PV_BIN) audit` inside the loop body ABORTS the whole
+# (line 40), so a failing `$(PV_CARGO_RUN) audit` inside the loop body ABORTS the whole
 # recipe before `status=$$?` on the next line can run: `unbound` never
 # accumulates, the remaining contracts are never audited, and the summarising
 # "FAIL: unbound equations remain in:" line is unreachable. Reproduced directly:
@@ -2474,7 +2474,7 @@ contract-audit-phase3: ## Audit Phase 3 binding coverage (BLOCKING, wired into t
 	for contract in $(PHASE3_CONTRACTS); do \
 		echo "  $$contract"; \
 		set +e; \
-		$(PV_BIN) audit "$$contract" --binding $(BINDING); \
+		$(PV_CARGO_RUN) audit "$$contract" --binding $(BINDING); \
 		status=$$?; \
 		set -e; \
 		if [ "$$status" -ne 0 ]; then \
@@ -2502,7 +2502,7 @@ define audit_phase_bindings_pending_ok
 		echo "  $$contract"; \
 		audited=$$((audited + 1)); \
 		set +e; \
-		$(PV_BIN) audit "$$contract" --binding $(BINDING); \
+		$(PV_CARGO_RUN) audit "$$contract" --binding $(BINDING); \
 		status=$$?; \
 		set -e; \
 		if [ "$$status" -ne 0 ]; then \
@@ -2530,7 +2530,7 @@ endef
 #
 # THE `set +e` AND THE `status=$$?` ON ITS OWN LINE ARE BOTH LOAD-BEARING, and both
 # are copied from contract-audit-phase3 rather than from contract-audit-phase2. This
-# Makefile sets `.SHELLFLAGS := -e -c` (line 40), so a failing `$(PV_BIN) audit`
+# Makefile sets `.SHELLFLAGS := -e -c` (line 40), so a failing `$(PV_CARGO_RUN) audit`
 # inside the loop body would ABORT the whole recipe before `status=$$?` could run:
 # `unbound` would never accumulate and the summarising FAIL line would be
 # unreachable. And the status is read from `$$?` directly, NEVER through a pipe —
@@ -2569,7 +2569,7 @@ contract-audit-phase4: ## Audit Phase 4 binding coverage (BLOCKING, wired into t
 # THE `set +e`, THE `status=$$?` ON ITS OWN LINE, AND THE `audited` COUNTER ARE ALL
 # LOAD-BEARING, and all three are copied from contract-audit-phase4 rather than from
 # contract-audit-phase2. This Makefile sets `.SHELLFLAGS := -e -c` (line 40), so a failing
-# `$(PV_BIN) audit` inside the loop body would ABORT the whole recipe before `status=$$?`
+# `$(PV_CARGO_RUN) audit` inside the loop body would ABORT the whole recipe before `status=$$?`
 # could run: `unbound` would never accumulate and the summarising FAIL line would be
 # unreachable. The status is read from `$$?` directly, NEVER through a pipe — CLAUDE.md
 # Verification rule 1, the defect that made the repo-wide `contract-audit` print 132
@@ -2633,7 +2633,7 @@ contract-audit-phase5: ## Audit Phase 5 binding coverage (BLOCKING, wired into t
 		audited=$$((audited + 1)); \
 		log="target/contract-audit-phase5-$$audited.log"; \
 		set +e; \
-		$(PV_BIN) audit "$$contract" --binding $(BINDING) > "$$log" 2>&1; \
+		$(PV_CARGO_RUN) audit "$$contract" --binding $(BINDING) > "$$log" 2>&1; \
 		status=$$?; \
 		set -e; \
 		cat "$$log"; \
@@ -2708,7 +2708,7 @@ contract-audit-phase5: ## Audit Phase 5 binding coverage (BLOCKING, wired into t
 #
 # THE `set +e`, THE `status=$$?` ON ITS OWN LINE, AND THE `audited` COUNTER are copied from
 # contract-audit-phase5 and are load-bearing for the same reasons: this Makefile sets
-# `.SHELLFLAGS := -e -c`, so a failing `$(PV_BIN) audit` would abort the recipe before the
+# `.SHELLFLAGS := -e -c`, so a failing `$(PV_CARGO_RUN) audit` would abort the recipe before the
 # status could be read, and a status must never be read through a pipe (CLAUDE.md rule 1).
 # Every non-vacuity guard is copied too — an empty $(PHASE6_CONTRACTS), a log with no
 # `Total equations:` summary, and a resolver that resolved ZERO rows all FAIL rather than
@@ -2728,7 +2728,7 @@ contract-audit-phase6: ## Audit Phase 6 binding coverage + source resolution (BL
 		audited=$$((audited + 1)); \
 		log="target/contract-audit-phase6-$$audited.log"; \
 		set +e; \
-		$(PV_BIN) audit "$$contract" --binding $(BINDING) > "$$log" 2>&1; \
+		$(PV_CARGO_RUN) audit "$$contract" --binding $(BINDING) > "$$log" 2>&1; \
 		status=$$?; \
 		set -e; \
 		cat "$$log"; \
@@ -2961,7 +2961,7 @@ contract-audit-phase8: contract-audit-phase8-selftest ## Audit Phase 8 binding c
 		audited=$$((audited + 1)); \
 		log="target/contract-audit-phase8-$$audited.log"; \
 		set +e; \
-		$(PV_BIN) audit "$$contract" --binding $(BINDING) > "$$log" 2>&1; \
+		$(PV_CARGO_RUN) audit "$$contract" --binding $(BINDING) > "$$log" 2>&1; \
 		status=$$?; \
 		set -e; \
 		awk -v x="$$exempt_line" 'x != "" && index($$0, x) { print "EXEMPT (live, see deferred-items.md): " $$0; next } { print }' "$$log"; \
