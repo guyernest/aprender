@@ -1,0 +1,96 @@
+{
+ "schema": "laya-formal-rewrites-v1",
+ "base": "3c0f2cf00312756edb6810b888c8cbeecaafc9be",
+ "rules": [
+  [
+   "\\bfor all\\b",
+   "∀"
+  ],
+  [
+   "\\bforall\\b",
+   "∀"
+  ],
+  [
+   "\\bexists!",
+   "∃!"
+  ],
+  [
+   "\\bexists\\b",
+   "∃"
+  ],
+  [
+   "\\bimplies\\b",
+   "⇒"
+  ],
+  [
+   "=>",
+   "⇒"
+  ],
+  [
+   "<=",
+   "≤"
+  ],
+  [
+   ">=",
+   "≥"
+  ],
+  [
+   "!=",
+   "≠"
+  ],
+  [
+   "&&",
+   "∧"
+  ],
+  [
+   "\\bAND\\b",
+   "∧"
+  ],
+  [
+   "\\|\\|",
+   "∨"
+  ],
+  [
+   "\\bOR\\b",
+   "∨"
+  ],
+  [
+   "\\bnot_in\\b",
+   "∉"
+  ],
+  [
+   "\\biff\\b",
+   "↔"
+  ]
+ ],
+ "entries": [
+  {
+   "contract": "laya-parity-v1",
+   "path": "proof_obligations[0]",
+   "old": "forall r in fixtures: ids_rust(r) == ids_oracle(r) AND markers_rust(r) == markers_oracle(r)",
+   "new": "∀ r in fixtures: ids_rust(r) == ids_oracle(r) ∧ markers_rust(r) == markers_oracle(r)",
+   "method": "substitution"
+  },
+  {
+   "contract": "laya-parity-v1",
+   "path": "proof_obligations[1]",
+   "old": "forall r: max_k |p_rust - p_oracle| <= 1.0e-5 AND argmax equal",
+   "new": "∀ r: max_k |p_rust - p_oracle| ≤ 1.0e-5 ∧ argmax equal",
+   "method": "substitution"
+  },
+  {
+   "contract": "laya-parity-v1",
+   "path": "proof_obligations[2]",
+   "old": "forall l: rel_rms(l) <= 1.0e-3",
+   "new": "∀ l: rel_rms(l) ≤ 1.0e-3",
+   "method": "substitution"
+  },
+  {
+   "contract": "laya-parity-v1",
+   "path": "proof_obligations[3]",
+   "old": "window in {63, 65} implies rel_rms(first_local) > 1.0e-3 AND rel_rms(first_global) <= 1.0e-3",
+   "new": "window in {63, 65} ⇒ rel_rms(first_local) > 1.0e-3 ∧ rel_rms(first_global) ≤ 1.0e-3",
+   "method": "substitution"
+  }
+ ]
+}

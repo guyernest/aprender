@@ -4,6 +4,11 @@ metadata:
   created: '2026-09-25'
   author: PAIML Engineering
   kind: kernel
+  # ONT-7 (plan 08-33): the world this contract's bars hold in is the committed tree; no qualifier
+  # is claimed here (the aarch64-only measurement is recorded in the qa_gate below, not restated
+  # as a restriction of the contract).
+  valid_under:
+    world: committed
   description: >
     The FROZEN correctness bar for the Laya decision model's chain torch -> .apr -> Rust (D-13,
     D-17): the reusable ModernBERT encoder in aprender-core (`aprender::models::modernbert`, plan
@@ -212,22 +217,22 @@ proof_obligations:
 
   - type: equivalence
     property: 'The Rust builder reproduces Laya''s ids and markers exactly'
-    formal: 'forall r in fixtures: ids_rust(r) == ids_oracle(r) AND markers_rust(r) == markers_oracle(r)'
+    formal: '∀ r in fixtures: ids_rust(r) == ids_oracle(r) ∧ markers_rust(r) == markers_oracle(r)'
     applies_to: all
 
   - type: equivalence
     property: 'Served probabilities agree with the oracle within 1e-5 and the label exactly'
-    formal: 'forall r: max_k |p_rust - p_oracle| <= 1.0e-5 AND argmax equal'
+    formal: '∀ r: max_k |p_rust - p_oracle| ≤ 1.0e-5 ∧ argmax equal'
     applies_to: all
 
   - type: bound
     property: 'Each encoder layer agrees within the relative rms bar'
-    formal: 'forall l: rel_rms(l) <= 1.0e-3'
+    formal: '∀ l: rel_rms(l) ≤ 1.0e-3'
     applies_to: all
 
   - type: soundness
     property: 'The window rung discriminates: an off-by-one window fails the first local layer only'
-    formal: 'window in {63, 65} implies rel_rms(first_local) > 1.0e-3 AND rel_rms(first_global) <= 1.0e-3'
+    formal: 'window in {63, 65} ⇒ rel_rms(first_local) > 1.0e-3 ∧ rel_rms(first_global) ≤ 1.0e-3'
     applies_to: all
 
   - type: bound

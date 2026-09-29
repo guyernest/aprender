@@ -1,0 +1,35 @@
+{
+  "schema": "laya-hygiene-evidence-v1",
+  "plan": "08-33",
+  "base": "3c0f2cf00312756edb6810b888c8cbeecaafc9be",
+  "before": {
+    "measured_on": "HEAD c028b4eec (tracked tree identical to 3c0f2cf00 for contracts/ and crates/), aarch64 macOS, rustc 1.93.0, pv built from this tree",
+    "fragments_run_verbatim": {
+      "336-aprender-contracts-cli-ont2b-sigma-gate": {"result": "6 passed; 2 failed", "failed": ["the_repo_corpus_passes_the_sigma_gate", "the_gate_mode_reports_only_the_named_gate"], "rule": "PV-ONT-004 formal_prose rose 1464 -> 1569"},
+      "338-aprender-contracts-cli-ont4b-shapes-gate": {"result": "10 passed; 1 failed", "failed": ["the_tracked_repo_graph_is_fresh"], "rule": "contracts/contracts.nt differs from a fresh extraction"},
+      "455-aprender-contracts-cli-ont7-valid-under-gate": {"result": "11 passed; 2 failed", "failed": ["the_row_probe_passes_on_the_repo_corpus", "the_full_lint_run_computes_valid_under"], "rule": "PV-ONT-016 contracts_without_valid_under 398 > baseline 386"}
+    },
+    "the_five_reds_of_08_32": ["ont2b: the_repo_corpus_passes_the_sigma_gate", "ont2b: the_gate_mode_reports_only_the_named_gate", "ont4b: the_tracked_repo_graph_is_fresh", "ont7: the_row_probe_passes_on_the_repo_corpus", "ont7: the_full_lint_run_computes_valid_under"],
+    "hidden_reds": {
+      "aprender_contracts_lib": {"result": "1665 passed; 6 failed; 5 ignored", "failed": ["lint::gates::tests::validate_gate_passes", "lint::tests::lint_passes_on_real_contracts", "lint::tests::lint_findings_on_failure", "lint::tests::every_gate_verdict_agrees_with_passed_and_skipped_on_the_real_corpus", "lint::tests::valid_under_is_computed_when_validation_passes_and_skipped_when_it_fails", "lint::strict_test_binding::tests::no_contract_cites_more_nonexistent_tests_than_its_baseline"]},
+      "aprender_contracts_validate_contracts": {"result": "8 passed; 2 failed", "failed": ["validate_all_contracts", "contract_data_integrity"], "detail": "contract_data_integrity 445 against its shrink-only ceiling 444"},
+      "pv_validate": "2 of 1850 artifacts fail: SCHEMA-018 neon-blis-v1 (top-level kind), PROVABILITY-001 spectral-indices-v1 (kernel by default, no kani_harnesses)",
+      "pv_lint_contracts": "stops at the validate gate (passed=false); every later gate is skipped",
+      "check_contract_test_binding": "prints 'VACUOUS: strict-test-binding gate was SKIPPED (contract validation failed); nothing was measured.'",
+      "book_coverage": "PASSING (1 passed; 0 failed): D-ITEM-08-32-A was resolved by the upstream merge"
+    },
+    "gate_numbers": {"formal_prose": 1569, "formal_prose_baseline": 1464, "contracts_without_valid_under": 398, "contracts_without_valid_under_baseline": 386, "contract_data_integrity": 445, "contract_data_integrity_ceiling": 444, "strict_binding_chronos_bolt_parity_dangling": 9, "strict_binding_chronos_bolt_parity_baseline": 0}
+  },
+  "after": null,
+  "premise_corrections": [
+    "The fragment runner is NO FAIL-FAST (scripts/ci_run_explicit_test_commands.sh, PMAT-3587; ci/sections.yml does not pass --fail-fast): fragments 510 (shard 1) and 520 (shard 2) run on their shards whatever else is red, so the reds of 336/338/455 do not by themselves 'block' them; 08-32's blocking premise was too strong.",
+    "book_coverage is GREEN on HEAD: the upstream merge brought upstream's fix (the walker now uses is_contract_yaml), so D-ITEM-08-32-A is resolved; 08-32's 'refreshed after the merge: unchanged' was wrong.",
+    "The class is larger than the five tests of 08-32: two more contracts fail pv validate (which masks every later pv lint gate and the strict test-binding guard), aprender-contracts --lib has six reds and --test validate_contracts two, none of which 08-32's regression could see because it never ran -p aprender-contracts, and once validate passes a further red appears (nine dangling test citations in chronos-bolt-parity-v1 against a baseline of 0)."
+  ],
+  "baseline_integrity": null,
+  "refs": {
+    "origin_branch_at_start": "3c0f2cf00312756edb6810b888c8cbeecaafc9be",
+    "head_at_start": "c028b4eec24c2c023d3f6ed249022342f128b2b8",
+    "upstream_tip": "2817c6d97bcb2b5a295cef76a98fe5d5844883a9"
+  }
+}
