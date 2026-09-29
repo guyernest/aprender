@@ -183,8 +183,8 @@ fn token_budget_fits_the_envelope() {
 
 /// The count bound is reachable inside the budget: `classify_max_texts` rows of the
 /// served task's SHORTEST built row fit `classify_max_total_tokens`. A larger count would
-/// be admitted by precheck and always refused by the budget (v2.0.0, 3 008 MB tier:
-/// 2 x 57 = 114 <= 120; 8 texts would need 456).
+/// be admitted by precheck and always refused by the budget (v7.0.0, 10 240 MB tier:
+/// 8 x 57 = 456 <= 800; the superseded 3 008 MB tier's 2 x 57 = 114 <= 120).
 #[test]
 fn max_texts_fit_the_budget_at_the_shortest_row() {
     let texts = constant_u64(TOOL_CONTRACT, "classify_max_texts");
@@ -246,7 +246,7 @@ fn empty_texts_refused_naming_min_texts() {
 
 /// FALSIFY-DECIDE-TOOL-001: N + 1 = classify_max_texts + 1 texts is refused naming
 /// classify_max_texts and the observed count. The count comes from the contract, so the
-/// test holds at every tier (v1.0.0's 9 texts at 10 240 MB, 3 at 3 008 MB).
+/// test holds at every tier (9 texts at 10 240 MB, 3 at the superseded 3 008 MB tier).
 #[test]
 fn one_over_max_texts_refused_naming_max_texts() {
     let n = constant_usize("classify_max_texts") + 1;
@@ -431,8 +431,8 @@ proptest! {
         rows in proptest::collection::vec((0usize..=33, 0usize..=20), 0..=9),
     ) {
         // Every field that shapes the draw is pinned here, not inherited from CONTRACTED:
-        // with the 3 008 MB tier's 2 texts, 2 x 20 built tokens never reaches 64 and the
-        // token branch of the order would go untested.
+        // a tier's count and budget decide which branches the draw can reach (at 3 008 MB's
+        // 2 texts, 2 x 20 built tokens never reached 64 and the token branch went untested).
         let limits = ClassifyLimits {
             max_texts: 8,
             max_text_bytes: 32,
@@ -863,7 +863,7 @@ async fn response_labels_follow_task_order() {
         "Why was I billed twice?",
         "I cannot reset my password.",
     ];
-    // As many as the SERVED count bound admits (tier policy: 2 at 3 008 MB).
+    // As many as the SERVED count bound admits (tier policy: 8 at 10 240 MB, all three).
     let n = texts.len().min(ClassifyLimits::CONTRACTED.max_texts);
     let response = ClassifyService::served(Arc::clone(&model))
         .call(args(&texts[..n]))
@@ -1205,22 +1205,38 @@ async fn hostile_case(id: &str) -> Option<Vec<String>> {
             )]
         }
         "built_tokens_total" => {
-            // classify_max_texts texts, each under the byte bound, whose BUILT rows sum past
-            // the contracted budget (the tiny window truncates each to max_len).
+            // classify_max_texts texts, each under the byte bound, whose BUILT rows are each
+            // the tiny window (it truncates every one to max_len). At the contracted 10 240 MB
+            // tier (v7.0.0: 8 texts, 800 tokens) they total 8 x 64 = 512, so no legal count of
+            // the tiny fixture reaches the contracted budget: the case keeps the contracted
+            // count and byte bound and lowers ONLY the budget to one under that total, which
+            // is still the served door (ClassifyService::call -> classify_blocking ->
+            // check_token_budget) refusing by name.
             let long = "The customer has written several times about the parcel. ".repeat(20);
             assert!(long.len() <= c.max_text_bytes);
             let texts = vec![long; c.max_texts];
             let built: usize = built_lengths(&texts).iter().sum();
+            let budget = c.max_total_tokens.min(built - 1);
             assert!(
-                built > c.max_total_tokens,
-                "the hostile case must exceed the budget: {built} <= {}",
-                c.max_total_tokens
+                built > budget,
+                "the hostile case must exceed the budget: {built} <= {budget}"
             );
+            let door = if budget == c.max_total_tokens {
+                service
+            } else {
+                ClassifyService::with_limits(
+                    model(),
+                    ClassifyLimits {
+                        max_total_tokens: budget,
+                        ..c
+                    },
+                )
+            };
             vec![rejection_message(
-                &service
+                &door
                     .call(ClassifyArgs { texts })
                     .await
-                    .expect_err("over the contracted budget"),
+                    .expect_err("over the budget"),
             )]
         }
         "served_task_min_row" => {
@@ -1458,11 +1474,12 @@ fn tool_description_lists_labels_in_order_with_guidance() {
 /// (`agent.max_len`) and the tier's `classify_max_total_tokens`, so the description never
 /// promises `truncated: true` where the budget refuses every text long enough to be cut.
 ///
-/// Both branches over the REAL tiny artifact (window 64): the contracted budget (120) admits
+/// Both branches over the REAL tiny artifact (window 64): the contracted budget (800) admits
 /// a full-window row, so the truncation sentence is served; a budget of one token less than
-/// the window (63) cannot, so the refusal sentence is served instead. Then the two tiers the
-/// contract prices for Laya-en's 512-token window, on the pure helper: 3 008 MB (120) refuses,
-/// 10 240 MB (1024) truncates. The labels segment the Lambda probe parses is unchanged.
+/// the window (63) cannot, so the refusal sentence is served instead. Then Laya-en's 512-token
+/// window on the pure helper: the contracted 10 240 MB tier (800, v7.0.0) truncates, and the
+/// superseded 3 008 MB tier (120) refuses. The labels segment the Lambda probe parses is
+/// unchanged.
 #[test]
 fn description_truncation_sentence_matches_tier() {
     const TRUNCATES: &str = "Long texts are truncated by the model itself to its window, and \
@@ -1523,18 +1540,28 @@ fn description_truncation_sentence_matches_tier() {
         );
     }
 
-    // Laya-en (window 512 = row_max_tokens) at the contract's two priced tiers.
+    // Laya-en (window 512 = row_max_tokens): the contracted 10 240 MB tier (v7.0.0) serves
+    // the truncation promise; the superseded 3 008 MB tier (2 texts / 120) served the refusal.
     let laya = usize::try_from(constant_u64(TOOL_CONTRACT, "row_max_tokens")).expect("fits");
-    let at_3008 = truncation_sentence(laya, &contracted);
     assert!(
-        at_3008.contains("120-token request budget is refused")
-            && !at_3008.contains("truncated: true"),
-        "3 008 MB: {at_3008}"
+        laya <= contracted.max_total_tokens,
+        "Laya-en's window fits the contracted budget"
     );
-    let at_10240 = ClassifyLimits {
-        max_texts: 8,
-        max_total_tokens: 1024,
+    assert_eq!(
+        truncation_sentence(laya, &contracted),
+        TRUNCATES,
+        "10 240 MB (contracted): a full 512-token row fits {} tokens",
+        contracted.max_total_tokens
+    );
+    let at_3008 = ClassifyLimits {
+        max_texts: 2,
+        max_total_tokens: 120,
         ..contracted
     };
-    assert_eq!(truncation_sentence(laya, &at_10240), TRUNCATES, "10 240 MB");
+    let refused = truncation_sentence(laya, &at_3008);
+    assert!(
+        refused.contains("120-token request budget is refused")
+            && !refused.contains("truncated: true"),
+        "3 008 MB (superseded): {refused}"
+    );
 }

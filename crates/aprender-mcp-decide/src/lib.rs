@@ -119,13 +119,13 @@ pub struct ClassifyLimits {
 
 impl ClassifyLimits {
     /// The contracted bounds (`contracts/decide-tool-boundary-v1.yaml` `constants`), priced
-    /// for the contract's `lambda_memory_mb` tier (3 008 MB since v2.0.0: at most 2 texts and
-    /// 120 built tokens; the 10 240 MB target tier is 8 and 1024). The contract derives them.
+    /// for the contract's `lambda_memory_mb` tier (10 240 MB since v7.0.0: at most 8 texts and
+    /// 800 built tokens; the superseded 3 008 MB tier was 2 and 120). The contract derives them.
     pub const CONTRACTED: Self = Self {
         min_texts: 1,
-        max_texts: 2,
+        max_texts: 8,
         max_text_bytes: 16_384,
-        max_total_tokens: 120,
+        max_total_tokens: 800,
         max_in_flight: 1,
         max_pending: 4,
     };
@@ -510,9 +510,10 @@ impl ClassifyResponse {
 ///
 /// A truncated text builds a row of exactly `max_len` tokens (the artifact's
 /// `agent.max_len`). When that row fits `classify_max_total_tokens`, truncation is
-/// reachable and the sentence promises it. When it does not — Laya-en's 512-token window at
-/// the 3 008 MB tier's 120-token budget — every text long enough to be truncated is refused
-/// by the budget first, so the sentence says that instead of promising `truncated: true`.
+/// reachable and the sentence promises it (Laya-en's 512-token window at the contracted
+/// 10 240 MB tier's 800-token budget). When it does not — the same window at the superseded
+/// 3 008 MB tier's 120-token budget — every text long enough to be truncated is refused by
+/// the budget first, so the sentence says that instead of promising `truncated: true`.
 #[must_use]
 pub fn truncation_sentence(max_len: usize, limits: &ClassifyLimits) -> String {
     if max_len <= limits.max_total_tokens {

@@ -2112,9 +2112,12 @@ bindings:
 # signature COPIED FROM SOURCE (not 08-01's pre-code guesses: the code says `Decider` /
 # `ArtifactError`, and `read_decide_apr_bytes_bounded` takes `declared_len: Option<u64>`).
 # `make contract-audit-phase8` refuses any BIND- line and resolves every row below to a
-# definition site in the file its module_path names. The live row `accepted_region_cold` is
-# `implemented` because the FINAL live record (08-LIVE-DEPLOY-EVIDENCE.json, `final: true`)
-# says deployed-passed; on any other live outcome it would be `partial`.
+# definition site in the file its module_path names. The live row `accepted_region_cold` was
+# `implemented` on the FINAL 3 008 MB record (08-LIVE-DEPLOY-EVIDENCE.json, `final: true`,
+# deployed-passed). decide-tool-boundary-v1 7.0.0 moved the tier to 10 240 MB, which re-opens it:
+# it is `partial` until plan 08-30's live record at 10 240 MB (08-LIVE-REDEPLOY-EVIDENCE.json)
+# passes, and `make contract-audit-phase8 PHASE8_LIVE_EXEMPT=decide-tool-boundary-v1.yaml:accepted_region_cold`
+# admits exactly that finding meanwhile.
 - contract: decide-tool-boundary-v1.yaml
   equation: classify_count_bound
   module_path: aprender_mcp_decide
@@ -2169,8 +2172,8 @@ bindings:
   module_path: aprender_mcp_decide_lambda::probe
   function: build_maximal_request
   signature: 'fn build_maximal_request(model: &crate::Model, limits: &aprender_mcp_decide::ClassifyLimits, shape: MaximalShape) -> Result<(Vec<String>, usize), MaximalError>'
-  status: implemented
-  notes: 'LIVE, deployed-passed (plans 08-17/08-18; FINAL record .planning/phases/08-laya-decision-model-local-fine-tune-and-thin-mcp-server/08-LIVE-DEPLOY-EVIDENCE.json, final: true). At lambda_memory_mb 3008 on pmcp.run, `just laya-deploy-verify` took 4 cold samples, each proven cold by its CloudWatch load line (performed_load=true for its own probe id) and each the maximal request this builder produced as the instance''s first POST: 2 CONCENTRATED (1 text, 120 built tokens) at 28527 and 28501 ms and 2 DISTRIBUTED (2 texts, 120 built tokens) at 29350 and 24168 ms, client-side through the edge; max 29350 ms < api_gateway_timeout_ms 30000. Thin margin (650 ms), the S3 download dominating the load, and a 31.05 s external cold call are recorded as D-ITEM-08-17-E. The builder landed in plan 08-07; plan 08-12 flipped this row from pending on the record (FALSIFY-DECIDE-TOOL-009).'
+  status: partial
+  notes: 'RE-OPENED by decide-tool-boundary-v1 7.0.0 (tier 3 008 MB -> 10 240 MB, plan 08-30): partial until the 10 240 MB live record (.planning/phases/08-laya-decision-model-local-fine-tune-and-thin-mcp-server/08-LIVE-REDEPLOY-EVIDENCE.json) passes both shapes. SUPERSEDED TIER: LIVE, deployed-passed (plans 08-17/08-18; FINAL record .planning/phases/08-laya-decision-model-local-fine-tune-and-thin-mcp-server/08-LIVE-DEPLOY-EVIDENCE.json, final: true). At lambda_memory_mb 3008 on pmcp.run, `just laya-deploy-verify` took 4 cold samples, each proven cold by its CloudWatch load line (performed_load=true for its own probe id) and each the maximal request this builder produced as the instance''s first POST: 2 CONCENTRATED (1 text, 120 built tokens) at 28527 and 28501 ms and 2 DISTRIBUTED (2 texts, 120 built tokens) at 29350 and 24168 ms, client-side through the edge; max 29350 ms < api_gateway_timeout_ms 30000. Thin margin (650 ms), the S3 download dominating the load, and a 31.05 s external cold call are recorded as D-ITEM-08-17-E. The builder landed in plan 08-07; plan 08-12 flipped this row from pending on the record (FALSIFY-DECIDE-TOOL-009).'
 # ---- Phase 8: laya-finetune-gate-v1 (training-side claims D-03..D-08) ----
 # Equations Rust can re-verify bind to the RUST verifier (aprender_decide::verify), because Rust
 # lib tests are what CI runs; the Python-only training equations bind to the justfile recipe

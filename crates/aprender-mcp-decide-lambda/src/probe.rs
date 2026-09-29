@@ -594,9 +594,10 @@ fn largest_within(
 /// the last are `max_text_bytes` long and truncated to a full row; the last is too when
 /// the budget is a whole number of rows, and otherwise is sized to the remainder, so the
 /// total is the largest value not over the budget. For Laya-en (max_len 512) at the
-/// 3 008 MB tier (budget 120) that is ONE text of 120 built tokens; at the 10 240 MB tier
-/// (budget 1024) it was 2 full rows. DISTRIBUTED is `max_texts` texts whose built rows
-/// total the largest value not over the budget.
+/// contracted 10 240 MB tier (budget 800, v7.0.0) that is 2 texts, one full 512-token row
+/// and one sized to the remaining 288; at the superseded 3 008 MB tier (budget 120) it was
+/// ONE text of 120 built tokens. DISTRIBUTED is `max_texts` texts whose built rows total
+/// the largest value not over the budget.
 ///
 /// # Errors
 ///

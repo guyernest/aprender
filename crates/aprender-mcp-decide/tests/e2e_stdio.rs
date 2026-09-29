@@ -282,9 +282,9 @@ fn the_tiny_decide_server_classifies_over_live_stdio() {
         .iter()
         .map(|r| r["state"].as_str().expect("state"))
         .collect();
-    // The SERVED count bound is tier policy (decide-tool-boundary-v1: 2 texts at 3 008 MB),
-    // so the rows go in contract-sized batches; each fixture row is at most 64 tokens, and
-    // two of them fit the budget. The results are re-joined in input order.
+    // The SERVED count bound is tier policy (decide-tool-boundary-v1: 8 texts at 10 240 MB),
+    // so the rows go in contract-sized batches; each fixture row is at most 64 tokens, so a
+    // full batch fits the budget. The results are re-joined in input order.
     let batch = aprender_mcp_decide::ClassifyLimits::CONTRACTED.max_texts;
     let outs: Vec<serde_json::Value> = texts
         .chunks(batch)
@@ -469,12 +469,20 @@ fn pipelined_calls_are_serialized_not_refused() {
 
 /// `refusal_names_bound` over the SHIPPED transport (plan 08-28, B-iserror): every bound
 /// refusal the live stdio server can produce — both count bounds, the argument shape, the
-/// unknown key, the per-text byte bound and the token budget — arrives as a successful
-/// `tools/call` result with `isError: true` and its message as the one text content (the
-/// shape [`refusal`] asserts), never as JSON-RPC -32603. Each message names the contract and
-/// its key and carries none of the caller's 12-character distinctive text. A classify on
-/// the same connection afterwards still succeeds: an in-band refusal leaves the server
-/// serving.
+/// unknown key, the per-text byte bound and, where the fixture can reach it, the token
+/// budget — arrives as a successful `tools/call` result with `isError: true` and its message
+/// as the one text content (the shape [`refusal`] asserts), never as JSON-RPC -32603. Each
+/// message names the contract and its key and carries none of the caller's 12-character
+/// distinctive text. A classify on the same connection afterwards still succeeds: an in-band
+/// refusal leaves the server serving.
+///
+/// The token budget is reachable over the served binary only when `max_texts` full-window
+/// rows of the tiny fixture (64 tokens each) exceed `classify_max_total_tokens`. At the
+/// contracted 10 240 MB tier (decide-tool-boundary-v1 7.0.0: 8 texts, 800 tokens) they do
+/// not (8 x 64 = 512), so instead of sending a request no legal count can build, the test
+/// proves the unreachability: `max_texts` full-window texts are CLASSIFIED. The budget
+/// refusal is the same `tool_rejected` value (`error_taxonomy_budget_rejected_model_internal`)
+/// whose wire mapping the other five cases prove.
 #[test]
 fn bound_refusals_are_iserror_results_over_live_stdio() {
     const SECRET: &str = "ZQXJ-e2e-4kq";
@@ -484,8 +492,10 @@ fn bound_refusals_are_iserror_results_over_live_stdio() {
 
     let over_count = vec![SECRET; limits.max_texts + 1];
     let over_bytes = format!("{SECRET} {}", "y".repeat(limits.max_text_bytes));
-    // Two texts whose built rows are each the tiny 64-token window: 128 > 120.
+    // A text whose built row is the tiny fixture's full 64-token window.
     let window_filler = format!("{SECRET} {}", "parcel ".repeat(200));
+    let window = 64;
+    let budget_reachable = limits.max_texts * window > limits.max_total_tokens;
     let mut unknown_key = serde_json::Map::new();
     unknown_key.insert("texts".to_string(), serde_json::json!([SECRET]));
     unknown_key.insert(SECRET.to_string(), serde_json::json!(1));
@@ -507,11 +517,28 @@ fn bound_refusals_are_iserror_results_over_live_stdio() {
             "classify_max_text_bytes",
             serde_json::json!({ "texts": [over_bytes] }),
         ),
-        (
-            "classify_max_total_tokens",
-            serde_json::json!({ "texts": [window_filler, window_filler] }),
-        ),
     ];
+    let mut cases = cases.to_vec();
+    if budget_reachable {
+        cases.push((
+            "classify_max_total_tokens",
+            serde_json::json!({ "texts": vec![window_filler.as_str(); limits.max_texts] }),
+        ));
+    } else {
+        // Unreachable at this tier, and measured so: the most a legal count can build is
+        // classified, every row at the full window and truncated.
+        let full =
+            payload(&client.call(
+                serde_json::json!({ "texts": vec![window_filler.as_str(); limits.max_texts] }),
+            ));
+        let results = full["results"].as_array().expect("results");
+        assert_eq!(results.len(), limits.max_texts);
+        for r in results {
+            assert_eq!(r["tokens"], window, "a full-window row: {r}");
+            assert_eq!(r["truncated"], true, "{r}");
+        }
+    }
+    let refusals = cases.len();
     for (key, arguments) in cases {
         let message = refusal(&client.call(arguments));
         assert!(
@@ -525,7 +552,10 @@ fn bound_refusals_are_iserror_results_over_live_stdio() {
     }
     let out = payload(&client.call(serde_json::json!({ "texts": ["Where is my parcel?"] })));
     assert_eq!(out["results"].as_array().map(Vec::len), Some(1));
-    println!("refusal_names_bound over live stdio: 6 bound refusals, each an isError result");
+    println!(
+        "refusal_names_bound over live stdio: {refusals} bound refusals, each an isError result \
+         (token budget reachable with the tiny fixture: {budget_reachable})"
+    );
 }
 
 #[test]
@@ -545,9 +575,9 @@ fn a_real_decide_model_classifies_over_live_stdio() {
     assert_eq!(tools.len(), 1, "one model, one tool: {tools:?}");
     assert_eq!(tools[0]["name"], aprender_mcp_decide::TOOL_NAME);
 
-    // One text per call: at the 3 008 MB tier two real sentences exceed the 120-token
-    // budget together (each builds to about 70 tokens), and this leg proves the served
-    // model, not the batch bound.
+    // One text per call: this leg proves the served model, not the batch bound (at the
+    // superseded 3 008 MB tier two real sentences, about 70 built tokens each, exceeded the
+    // 120-token budget together).
     let mut out = payload(&client.call(serde_json::json!({
         "texts": ["I think this policy is a terrible idea and should be scrapped."]
     })));

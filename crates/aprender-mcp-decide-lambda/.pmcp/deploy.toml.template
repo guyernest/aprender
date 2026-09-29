@@ -54,13 +54,12 @@ name = "UNSET-run-just-laya-deploy-config"
 # memory size, `lambda_memory_mb`, and a test asserts this value equals it
 # (FALSIFY-DECIDE-TOOL-007): Lambda sells CPU in proportion to memory, so another size
 # silently re-prices every request. Change the contract first, then this line.
-# 3008 MB (~1.7 vCPU) is the ceiling of the account this deploys to until AWS Support
-# approves more; the budget there is 2 texts / 120 built tokens. D-18's target is the
-# maximum, 10240 MB (6 vCPU, budget 8 texts / 1024 tokens), because memory buys vCPUs
-# and the cost per request is flat (aws-mcp-model-hosting.md). Peak RSS is the
-# artifact bytes plus the widened f32 model: 2.60-2.65 GB measured locally, about
-# 350 MB under 3008 MB before Linux/Lambda overhead, which is unmeasured.
-memory_mb = 3008
+# 10240 MB (6 vCPU) since decide-tool-boundary-v1 7.0.0 (plan 08-30, the owner's
+# restore-10240-tier decision): D-18's tier, because memory buys vCPUs and the cost per
+# request is flat (aws-mcp-model-hosting.md); the budget there is 8 texts / 800 built
+# tokens. The superseded 3008 MB tier (the account's former ceiling) was 2 texts / 120.
+# Peak memory measured live at 3008 MB was 2481-2483 MB (Lambda Max Memory Used, 08-17).
+memory_mb = 10240
 # Matches the API Gateway HTTP API's own 30-second integration timeout, which cannot be
 # raised. A larger number would only be a longer wait for a response the gateway has
 # already given up on. The loader's DOWNLOAD_DEADLINE (25 s) sits inside it.
