@@ -97,7 +97,38 @@
     ],
     "contract_audits": "contract-audit-phase 2,3,4,5,8 exit 0; phase 6 reads exactly its nine unbound BIND-001 equations (D-ITEM-08-32-D), unchanged",
     "claims_ledger": "just laya-claims-check: LAYA CLAIMS OK 133 rows",
-    "owner_crate_tests": "aprender-forecast lib 239 passed 0 failed 15 ignored (the five cited tests are still tests, ignored with the unarmed reason); aprender-mcp-chronos, aprender-decide, aprender-mcp-decide, aprender-mcp-decide-lambda, apr-format lib green; aprender-train lib 7647 passed, 21 failed, all in gpu::guard/ledger/wait and all Linux /proc (D-ITEM-08-33-E; crates/aprender-train is byte-identical to the base)"
+    "owner_crate_tests": "aprender-forecast lib 239 passed 0 failed 15 ignored (the five cited tests are still tests, ignored with the unarmed reason); aprender-mcp-chronos, aprender-decide, aprender-mcp-decide, aprender-mcp-decide-lambda, apr-format lib green; aprender-train lib 7647 passed, 21 failed, all in gpu::guard/ledger/wait and all Linux /proc (D-ITEM-08-33-E; crates/aprender-train is byte-identical to the base)",
+    "planted_violations": {
+      "method": "a scratch export of HEAD; a copy of contracts/ with ONE planted violation in laya-parity-v1.yaml; the working tree is never mutated; every planted case is paired with an untouched control that must pass",
+      "controls_pass": [
+        "sigma gate on the untouched copy (Pass)",
+        "valid-under gate on the untouched copy (Pass)",
+        "pv extract --check on the untouched copy (exit 0)"
+      ],
+      "must_fail": [
+        {
+          "category": "formal vocabulary",
+          "plant": "a prose formal on one obligation",
+          "result": "sigma gate Fail with PV-ONT-004"
+        },
+        {
+          "category": "world",
+          "plant": "removing a kernel's valid_under",
+          "result": "valid-under gate Fail with PV-ONT-016"
+        },
+        {
+          "category": "schema",
+          "plant": "a top-level `kind: KernelContract`",
+          "result": "pv validate non-zero with SCHEMA-018"
+        },
+        {
+          "category": "graph",
+          "plant": "changing a contract's metadata.kind",
+          "result": "pv extract --check exit 1"
+        }
+      ],
+      "verify_run": "the Task 4 verify payload of 08-33-PLAN.md run to exit 0 (two lines adapted, see the SUMMARY deviations)"
+    }
   },
   "premise_corrections": [
     "The fragment runner is NO FAIL-FAST (scripts/ci_run_explicit_test_commands.sh, PMAT-3587; ci/sections.yml does not pass --fail-fast): fragments 510 (shard 1) and 520 (shard 2) run on their shards whatever else is red, so the reds of 336/338/455 do not by themselves 'block' them; 08-32's blocking premise was too strong.",
