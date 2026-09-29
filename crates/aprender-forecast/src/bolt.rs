@@ -1395,11 +1395,11 @@ mod parity {
     }
 
     /// FALSIFY-CHRONOS-001 / -004 / -005: the full Peyton Manning ladder on the ARCH-selected bar.
-    #[test]
     #[cfg_attr(
         not(chronos_weights),
         ignore = "CHRONOS_MODEL_DIR unset or has no model.safetensors — run `just fetch-chronos-tiny` to arm"
     )]
+    #[test]
     fn peyton_ladder_matches_oracle_f32() {
         let y = peyton();
         let fwd = ladder_rungs("peyton", &y);
@@ -1429,11 +1429,11 @@ mod parity {
     }
 
     /// FALSIFY-CHRONOS-003: the two shorter series, barred RELATIVE to their own scale.
-    #[test]
     #[cfg_attr(
         not(chronos_weights),
         ignore = "CHRONOS_MODEL_DIR unset or has no model.safetensors — run `just fetch-chronos-tiny` to arm"
     )]
+    #[test]
     fn air_and_short100_ladders_match_oracle() {
         let peyton = peyton();
         let (_, air_y) = read_csv("air_passengers.csv");
@@ -1464,11 +1464,11 @@ mod parity {
     /// FALSIFY-CHRONOS-008 / -009: the 365-step rollout AND the control that pins which pipeline
     /// the oracle came from. Without the control the rung would prove only that SOME rollout was
     /// implemented.
-    #[test]
     #[cfg_attr(
         not(chronos_weights),
         ignore = "CHRONOS_MODEL_DIR unset or has no model.safetensors — run `just fetch-chronos-tiny` to arm"
     )]
+    #[test]
     fn rollout_365_matches_oracle_and_median_only_does_not() {
         let m = model();
         let cfg = &m.bolt.cfg;
@@ -1536,11 +1536,11 @@ mod parity {
     }
 
     /// FALSIFY-CHRONOS-006 / -007: the six edge probes, `constant` on the absolute bar.
-    #[test]
     #[cfg_attr(
         not(chronos_weights),
         ignore = "CHRONOS_MODEL_DIR unset or has no model.safetensors — run `just fetch-chronos-tiny` to arm"
     )]
+    #[test]
     fn edge_probes_match_oracle() {
         let m = model();
         let probes = load_json("chronos_probes.json");

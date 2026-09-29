@@ -13,7 +13,6 @@ metadata:
     for every shape (7.4 GFLOP/s on an Apple M4 Pro against 100+ for faer). The 8x6 NEON
     kernel honours the existing packing contract, so no packing or blocking constant changes.
 
-kind: KernelContract
 name: neon-blis
 version: "1.0.0"
 scope: "crates/aprender-compute/src/blis/"

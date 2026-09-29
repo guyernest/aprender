@@ -33,6 +33,18 @@ not fixed by it.
   could not be satisfied by this plan; the "does not name the new contract" clause was verified in
   a run where the gate actually measured.
 
+- **CLOSED 2026-09-29 by plan 08-33 (status: closed).** Cause 1: spectral-indices-v1 now declares
+  `kani_harnesses` KANI-SPECTRAL-001..004 in the branch's DECLARED, NOT EXECUTED convention (each names its
+  existing `test_falsify_spectral_00n_*` test; cargo-kani is not installed, no proof is claimed), a
+  `metadata.kind: kernel` and a `metadata.valid_under` world, at version 1.1.0 (the bump `pv diff` suggested),
+  and neon-blis-v1's dead top-level `kind:` is gone, so `pv validate contracts` reports 0 failed of 1850 and
+  `pv lint contracts` runs every armed gate. Cause 2: chronos-bolt-parity-v1's nine dangling citations were five
+  existing tests whose `#[test]` sat above a four-line `#[cfg_attr(not(chronos_weights), ignore = ...)]`, which
+  the resolver's line-based harvest does not see through; `#[test]` now sits directly above `fn` in
+  aprender-forecast (bolt.rs x4, chronos.rs x1). The guard measures 27 dangling references, equal to the
+  baseline sum of 27 (scripts/contract_test_binding_baseline.txt), with no contract above its own line; the
+  baseline file is byte-identical to upstream's 2817c6d97. Evidence: 08-33-HYGIENE-EVIDENCE.json.
+
 ### D-ITEM-08-01-B: README CLI command count is stale (FALSIFY-README-003)
 
 - **Found during:** 08-01 Task 1 (`bash scripts/check_readme_claims.sh`).
@@ -928,13 +940,18 @@ raw candidates AL8, C2-8, D2-5 and A2-7 map to those refuted verdicts.
   binding.yaml nor the schema parser. `just laya-gap-regression` skips it by exact name and prints the skip; the
   contract-cycle guard (`certify_on_real_contracts`, `verify_pipeline_on_real_contracts`,
   `verify_pipeline_json_on_real_contracts`) runs by name and passes. Not in CI's explicit `--test` line.
-  status: open
+  status: closed (2026-09-29, plan 08-33: resolved by the upstream merge)
   **Owner:** the aprender-contracts maintainers (skip non-contract YAML in the test, or move binding.yaml).
   **Re-open trigger:** book_coverage added to a required CI line.
   **Refreshed 2026-09-29 (08-32 close-out):** after the upstream merge the failure is unchanged (binding.yaml
   still has no `metadata:`); it is one of the five local failures in 08-CI-RUN-EVIDENCE.json (B5). Upstream's
   contract-hygiene gates that now sit beside it ARE in CI's Integration-tests step, and they are the subject
   of plan 08-33; this one is not (it is not in any explicit-test-commands.d fragment).
+  **Correction 2026-09-29 (plan 08-33):** the "unchanged" refresh above was wrong. `cargo test -p
+  aprender-contracts-cli --test book_coverage` is GREEN on HEAD (1 passed; 0 failed): the upstream merge brought
+  upstream's fix (the test's walker now uses `is_contract_yaml`, which skips `binding.yaml`). The "five local
+  failures" of B5 were therefore four contract-hygiene reds plus the stale graph, not book_coverage. The stale
+  `book_coverage` exemption in the regression recipe is removed by plan 08-34.
 - **The gap regression skips apr-format `golden_v2_f32_writer_is_byte_identical` by exact name** (the 08-20
   entry above, still open); every other apr-format test runs and must pass.
 
@@ -1080,9 +1097,16 @@ contract-hygiene gates before the decide integration fragments 510/520. Evidence
   contracts without `metadata.valid_under` 386 -> 398 (+12); (iii) `pv validate` errors: neon-blis-v1
   (`kind:` at top level instead of under `metadata:`) and spectral-indices-v1 (no `kani_harnesses`);
   (iv) `the_tracked_repo_graph_is_fresh` (regenerate); (v) = D-ITEM-08-32-A.
-  status: decided; planned as 08-33
-  **Owner decision (2026-09-29):** "Repair all (new gap plan)". The repair is not done in 08-32 and its plan is
-  not written here.
+  status: repaired locally by 08-33 (committed, NOT pushed); closes when 08-34 observes workspace-test green
+  **Owner decision (2026-09-29):** "Repair all (new gap plan)". Plan 08-33 did it and read the class, not the
+  probe: (i) `formal_prose` 1569 -> 1464 (= baseline, 105 formals in 11 contracts, ledger
+  08-33-FORMAL-REWRITES.json); (ii) `contracts_without_valid_under` 398 -> 386 (= baseline; twelve worlds
+  declared, kind kernel written out where it was a default); (iii) `pv validate contracts` 2 failed -> 0
+  (neon-blis-v1 lost its dead top-level `kind:`; spectral-indices-v1 gained declared-not-executed kani harnesses
+  and its world at 1.1.0); (iv) `contracts/contracts.nt` regenerated; the hidden reds behind the five
+  (aprender-contracts --lib x6, validate_contracts x2, chronos-bolt-parity-v1's nine dangling citations) are
+  closed too. Nothing was loosened: the baselines and every gate source are byte-identical to 2817c6d97.
+  The numbers and the planted-violation proofs are in 08-33-HYGIENE-EVIDENCE.json.
   **Owner:** plan 08-33 (the orchestrator plans it next).
   **Re-open trigger:** 08-33 does not bring the five failures to zero, or upstream tightens a baseline again.
 - **D-ITEM-08-32-C: 17 of the 19 Phase 3/4 "SetFit tests (feature-gated)" CI legs were not re-homed.**
@@ -1134,3 +1158,31 @@ contract-hygiene gates before the decide integration fragments 510/520. Evidence
 - **Scrub note.** SHAs cited in 08-01..08-32 SUMMARY and evidence files written before the scrub are pre-scrub;
   resolve them via `08-SCRUB-COMMIT-MAP.tsv`. Entries above that cite `d37f2fefc` or `4dcf9b21f` are upstream
   commits and did not change.
+
+### Found during plan 08-33
+
+- **D-ITEM-08-33-A: neon-blis-v1 is a registry-flagged kernel contract, not a proven kernel.** SCHEMA-018 was
+  repaired by deleting its dead top-level `kind: KernelContract` (upstream migrated 72 files identically;
+  `metadata.registry: true` governs). It has no proof obligations, falsification tests or kani harnesses and no
+  `metadata.kind` was added, because `kernel` would demand them: new claims.
+  status: open (owner decision)
+  **Owner:** the aprender-compute maintainers. **Options:** leave as a registry contract, or write the proof
+  obligations and falsification tests for the NEON 8x6 kernel and declare it a kernel.
+  **Re-open trigger:** any gate that starts to count registry contracts.
+- **D-ITEM-08-33-B: kind alternatives for contracts that sit oddly as `kernel`.** To stay non-loosening, all
+  twelve kernel-kind contracts without a world keep `kind: kernel` and gained `valid_under: {world: committed}`.
+  setfit-benchmark-claims-v1 (a benchmark-claims contract) and tweet-eval-stance-benchmark-v1 (a
+  dataset-evaluation contract) are the two that fit least; the tool-boundary contracts (decide, forecast) and
+  the artifact-schema contract (decide-apr-v1) are candidates for `pattern` or `schema`. Reclassifying exits
+  PROVABILITY-001 and the provability invariant they satisfy today, so it is an owner option, not done here.
+  status: open (owner option)
+  **Owner:** the owner of each contract's phase. **Re-open trigger:** a contract author wanting to drop the
+  kani/falsification obligations, or upstream adding a claims-shaped kind.
+- **D-ITEM-08-33-E: the aprender-train GPU-ledger tests fail on macOS (Linux `/proc`).** `cargo test -p
+  aprender-train --lib` on this macOS host: 7647 passed, 21 failed, every failure in `gpu::guard`,
+  `gpu::ledger` and `gpu::wait` (`VramLedger::is_alive` checks `/proc/<pid>/stat`, ledger.rs:77-79, so a
+  reservation reads as dead and `total_reserved` returns 0). `crates/aprender-train` is byte-identical between
+  3c0f2cf00 and HEAD; no test there reads a contract's `formal` or `valid_under`. Same class as D-ITEM-08-32-E.
+  status: open
+  **Owner:** aprender-train maintainers. **Re-open trigger:** a Linux CI run failing them, or a macOS gate that
+  includes them.

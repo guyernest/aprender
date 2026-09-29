@@ -631,11 +631,11 @@ mod parity {
     /// The series is deliberately SHORT (200 points): `forwards` and `rollouts` depend only on
     /// the horizon, so a 2905-point context would cost 46 full-length forwards to assert the same
     /// two integers.
-    #[test]
     #[cfg_attr(
         not(chronos_weights),
         ignore = "CHRONOS_MODEL_DIR unset or has no model.safetensors — run `just fetch-chronos-tiny` to arm"
     )]
+    #[test]
     fn door_reports_warning_and_forwards_for_365() {
         let model = load_model_from_dir(&armed_dir()).expect("the armed weights must load");
         let (ds, y) = peyton_tail(200);
