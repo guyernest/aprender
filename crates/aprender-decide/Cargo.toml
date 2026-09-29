@@ -10,6 +10,13 @@ description = "Method-neutral decision models (Laya first) over aprender-core"
 keywords = ["classification", "decision", "laya", "modernbert", "aprender"]
 categories = ["science"]
 readme = "README.md"
+# NOT published (D-14, owner decision `publish-false`, 2026-09-29, plan 08-31): a crate name
+# becomes permanent at its first crates.io publish, and this one is not confirmed yet. The
+# crate stays in-tree and CI-tested; it leaves the publishable set, so the release cascade
+# (scripts/cascade-publish.sh TIERS) need not carry it. Reversible: delete this line and add
+# the crate to TIERS after aprender-core once the name is confirmed. Its dependents
+# aprender-mcp-decide and aprender-mcp-decide-lambda are publish = false already.
+publish = false
 
 # Library only. There is deliberately NO [[bin]] and no src/main.rs: serving is a
 # transport concern of the thin decide servers (D-15), and FALSIFY-MONO-011 allows

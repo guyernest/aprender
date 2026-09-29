@@ -495,10 +495,19 @@ impl Laya {
     }
 }
 
-/// Index of the first maximum (numpy `argmax`); NaN never wins. Shared with the
-/// verifier, which must re-derive the served decision with the SAME rule.
+/// Index of the first maximum; NaN never wins (IN-01, plan 08-31). The fold starts
+/// at the first element that compares equal to itself (so not NaN): a NaN at index 0
+/// can no longer hold the running maximum, and every comparison against a NaN is
+/// false, so no later NaN displaces it. Ties keep the earlier index. An empty or
+/// all-NaN slice returns 0, as before. Pinned by `laya::tests::argmax_nan_never_wins`.
+/// Shared with the verifier, which must re-derive the served decision with the SAME
+/// rule.
 pub(crate) fn argmax<T: PartialOrd>(p: &[T]) -> usize {
-    (0..p.len()).fold(0, |m, i| if p[i] > p[m] { i } else { m })
+    #[allow(clippy::eq_op)] // `x == x` is the generic NaN test for a PartialOrd element
+    let Some(start) = p.iter().position(|x| x == x) else {
+        return 0;
+    };
+    (start + 1..p.len()).fold(start, |m, i| if p[i] > p[m] { i } else { m })
 }
 
 impl DecisionMethod for Laya {

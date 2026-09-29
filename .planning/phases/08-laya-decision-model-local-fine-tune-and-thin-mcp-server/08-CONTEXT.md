@@ -90,6 +90,7 @@ Not in this phase: a training MCP server, Kev/Jev ports, multilingual or `typed-
   builder, temperature buckets on top of core's ModernBERT). Kev/Jev are deferred. The name is deliberately not
   `llm-`: Laya is an encoder.
   — **Reversibility:** one-way — a crate name becomes permanent once published to crates.io; confirm before the first publish.
+  — **Amended 2026-09-29 (user, plan 08-31 Task 2 decision `publish-false`):** aprender-decide is `publish = false` until the crate name is confirmed; it stays in-tree and CI-tested and is not added to the release cascade's TIERS. `scripts/check_cascade_covers_all_crates.sh` no longer lists it (its remaining offender, aprender-contrastive-data, is not Phase 8's and is deferred). Reversible: drop the key and add the crate to TIERS after aprender-core when the name is confirmed. Nothing was published.
 - **D-15:** Servers follow the setfit/chronos pairs: **`aprender-mcp-decide`** (stdio, pmcp) and
   **`aprender-mcp-decide-lambda`** (bootstrap). Both join the thin-server `[[bin]]` list in
   `crates/aprender-core/tests/monorepo_invariants.rs` (FALSIFY-MONO-011) — no baseline change is expected.

@@ -335,3 +335,46 @@ fn tokenizer_truncation_and_padding_are_disabled() {
         );
     }
 }
+
+/// IN-01 (plan 08-31): `argmax`'s "NaN never wins" doc is true. Before the fix the
+/// fold seeded index 0, so `[NaN, 0.9]` returned 0 (every `>` against NaN is false).
+#[test]
+fn argmax_nan_never_wins() {
+    let nan = f32::NAN;
+    assert_eq!(
+        super::argmax(&[nan, 0.9_f32]),
+        1,
+        "a NaN at index 0 must not win"
+    );
+    assert_eq!(
+        super::argmax(&[0.2_f32, nan, 0.9]),
+        2,
+        "a NaN in the middle is skipped"
+    );
+    assert_eq!(
+        super::argmax(&[nan, nan, 0.1_f32, 0.7, nan]),
+        3,
+        "leading and trailing NaN"
+    );
+    assert_eq!(
+        super::argmax(&[0.5_f32, 0.5, 0.1]),
+        0,
+        "ties keep the first index"
+    );
+    assert_eq!(
+        super::argmax(&[f64::NAN, 0.4_f64, 0.4]),
+        1,
+        "ties after a NaN keep the first real index"
+    );
+    assert_eq!(
+        super::argmax(&[nan, nan]),
+        0,
+        "all-NaN returns 0, as before"
+    );
+    assert_eq!(super::argmax::<f32>(&[]), 0, "empty returns 0, as before");
+    assert_eq!(
+        super::argmax(&[0.1_f32, 0.3, 0.2]),
+        1,
+        "the ordinary case is unchanged"
+    );
+}

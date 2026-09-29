@@ -3394,10 +3394,15 @@ laya-gates-selftest:
 # Check scripts/laya_claims.tsv (or $LAYA_CLAIMS_TSV). Header:
 #   claim_id<TAB>file<TAB>anchor<TAB>kind<TAB>owner<TAB>test<TAB>finding
 # Per row: `anchor` must occur in `file` (a fixed-string match, like `grep -F`), then by `kind`:
-#   rust      `test` is in `cargo test -p <owner> -- --list` (listed once per owner and cached); an
-#             owner `<crate>:lib` lists `--lib` only and `<crate>:test=<target>` that one target only,
-#             for a crate whose full list is too costly to build (aprender-core)
-#   just      `test` is a recipe (`just --dump`: `just --summary` hides the private `_laya-*` recipes)
+#   rust      every name in `test` (one, or several joined by `,`) is in `cargo test -p <owner> --
+#             --list` (listed once per owner and cached); an owner `<crate>:lib` lists `--lib` only and
+#             `<crate>:test=<target>` that one target only, so a contract command's `--lib` / `--test`
+#             selector is checked as written (and aprender-core's full list is never built). A name
+#             matches a listed test exactly or as its `::`-suffix, never as a substring: cargo's
+#             substring filter runs zero tests on a stale name and passes, which is the defect this
+#             check exists to see
+#   just      every name in `test` (one, or several joined by `,`) is a recipe (`just --dump`:
+#             `just --summary` hides the private `_laya-*` recipes)
 #   python    `test` appears in `just laya-train-selftest` output (run once and cached; needs uv + torch)
 #   pv        `pv validate <file>` exits 0 with `0 error(s)`, and `test` (a FALSIFY id, or `-`) is in the file
 #   evidence  `test` is `<json file>#<dotted.key>` and that key exists in that JSON file
@@ -3476,12 +3481,15 @@ laya-claims-check:
                 names, err = rust_tests(cache, owner)
                 if err:
                     problems.append(f"TEST UNLISTABLE {cid}: {err}")
-                elif not any(t == test or t.endswith("::" + test) for t in names):
-                    problems.append(f"TEST MISSING {cid}: {test} is not in the test list of {owner} ({len(names)} tests)")
+                else:
+                    gone = [x for x in test.split(",") if not x or not any(t == x or t.endswith("::" + x) for t in names)]
+                    if gone:
+                        problems.append(f"TEST MISSING {cid}: {', '.join(gone)} not in the test list of {owner} ({len(names)} tests)")
             elif kind == "just":
                 rc, out = cached(cache, "just-dump", ["just", "--dump", "--dump-format", "json"])
-                if rc != 0 or test not in json.loads(out)["recipes"]:
-                    problems.append(f"TEST MISSING {cid}: {test} is not a just recipe")
+                gone = [x for x in test.split(",") if rc != 0 or x not in json.loads(out)["recipes"]]
+                if gone:
+                    problems.append(f"TEST MISSING {cid}: {', '.join(gone)} not a just recipe")
             elif kind == "python":
                 rc, out = cached(cache, "python-selftest", ["just", "laya-train-selftest"])
                 if rc != 0 or "LAYA TRAIN SELFTEST OK" not in out:

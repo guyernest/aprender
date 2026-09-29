@@ -5,8 +5,9 @@
 //! case under `tests/ui/` tries a second minting path and must fail to compile with the
 //! error recorded in its `.stderr`.
 //!
-//! This integration target is dark in CI until `.github/workflows/ci.yml`'s explicit
-//! `--test` line adds `-p aprender-decide --test ui` (plan 08-12).
+//! This integration target runs in CI: `.github/workflows/ci.yml`'s explicit
+//! integration `--test` line carries `cargo test -p aprender-decide --test ui`
+//! (added by plan 08-12; header corrected by plan 08-31, IN-04).
 
 #[test]
 fn decider_has_no_second_minting_path() {

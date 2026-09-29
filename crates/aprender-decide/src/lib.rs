@@ -395,4 +395,23 @@ mod tests {
             );
         }
     }
+
+    /// D-14 (owner decision `publish-false`, 2026-09-29, plan 08-31): the crate name becomes
+    /// permanent at its first crates.io publish, so the crate stays `publish = false` until the
+    /// name is confirmed. Reversing the decision is deliberate: delete the manifest line, add the
+    /// crate to scripts/cascade-publish.sh TIERS after aprender-core, and delete this test.
+    #[test]
+    fn publish_is_false_until_the_crate_name_is_confirmed() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let manifest = std::fs::read_to_string(&path).expect("read the crate manifest");
+        let package = manifest
+            .split("\n[")
+            .next()
+            .expect("the manifest opens with [package]");
+        assert!(
+            package.lines().any(|l| l.trim() == "publish = false"),
+            "{} [package] must carry `publish = false` (D-14): the crate name is not confirmed",
+            path.display()
+        );
+    }
 }

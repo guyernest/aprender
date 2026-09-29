@@ -785,32 +785,65 @@ wire-code side note (08-28), V4-b and any redeploy (08-30), D-14 publication (08
   pair makes Rust see an overlap Python did not, so verify refuses late; it never admits a leak). The fix
   is pinning one Unicode version for both sides, a workspace dependency decision. Re-open on an honest run
   refused for such a pair, or on any unicode-normalization / Python upgrade.
+  status: open
+  **Owner:** a workspace-dependency plan (pin one Unicode version for Rust and Python). Final status 08-31: still deferred.
 - **V14-b** (PLAUSIBLE) and **CV3** (the contract-audit-phase8 resolver re-implements what `pv
   verify-bindings` should do): extending pv is its own ticket (CLAUDE.md contract rule, option 2). The
   shell resolver gains a must-match / must-not-match table in 08-22. Re-open when pv resolves module paths.
+  status: open
+  **Owner:** an aprender-contracts (pv) ticket. Final status 08-31: still deferred; the 08-22 ERE case table
+  (`make contract-audit-phase8-selftest`, gate row resolver-ere) is the interim guard.
 - **R1** (`normalize_text` duplicates aprender-contrastive-data's normalized hash): quality only; reuse
   would add a cross-crate dependency edge.
+  status: open
+  **Owner:** a /simplify follow-up. Re-open if the two hashes ever disagree (verify refuses late). Final status 08-31: still deferred.
 - **R3 / AL6** (contract-audit-phase8 is a copy of the phase-6 target): a Makefile refactor spanning a
   non-Phase-8 target.
+  status: open
+  **Owner:** a Makefile refactor plan. Re-open when either audit target changes again. Final status 08-31: still deferred.
 - **R4 / AL4** (third copy of the loopback proxy; an in-process router instead): architectural and shared
   with the chronos and setfit Lambda crates; its own plan.
+  status: open
+  **Owner:** a thin-server architecture plan (all three Lambda crates). Re-open on a fourth copy. Final status 08-31: still deferred.
 - **R7** (fixtures.py re-implements `data.calibration_split`): regenerating the tiny fixture moves the
   committed goldens (laya_tiny.apr.sha256) for no behaviour change.
+  status: open
+  **Owner:** a fixtures-owning plan, together with the laya_tiny ece_pre drift found in 08-29 (below). Final status 08-31: still deferred.
 - **R8 remainder** (bucket naming x4, the duplicated eligibility parse in laya-upload): refactor only; the
   sha256 helper part is fixed in 08-22.
+  status: open
+  **Owner:** a /simplify follow-up. Final status 08-31: the sha256 part closed in 08-22; the rest still deferred.
 - **S2, S3, S5, S7, S8** (redundant re-hash in check_inputs, the lambda build_server alias, duplicated
   report fields, write-only fields, hand-copied NaN-max): simplification only, no defect; a /simplify
   follow-up.
+  status: open
+  **Owner:** a /simplify follow-up. Final status 08-31: S1 closed for pack (08-31 Task 1 removed
+  `pack::sha256_hex`; `crate::digest::sha256_hex` is the one helper) but the Lambda crate's re-export
+  `pub use aprender_decide::artifact::artifact_sha256_hex as sha256_hex` is still a second public name
+  (simplification only); S6's stale docs and the lock-named test closed in 08-24, its code simplifications
+  still deferred; S2, S3, S5, S7, S8 still deferred.
 - **EF2..EF8** (per-element F16 widening, double finiteness scan, per-row forwards, full embedding widen,
   double pack probe, verify materialising the checkpoint, base read twice): owner is the perf plan that
   already owns D-ITEM-08-17-C / -E; re-open if any cold sample comes within 1 s of the 30 s cap.
+  status: open
+  **Owner:** the perf plan that owns D-ITEM-08-17-C. Final status 08-31: still deferred; the 10,240 MB
+  samples (worst 27,015 ms) leave 2,985 ms, so the 1 s trigger has not fired.
 - **CV6** (twelve new functions above complexity 10): with D-ITEM-08-12-A (the verify.rs split).
+  status: open
+  **Owner:** the verify.rs split refactor (D-ITEM-08-12-A). Final status 08-31: still deferred.
 - **V2-a residual** (apr-format's MAX_METADATA_SIZE is unenforced for non-decide consumers): shared reader
   policy that could refuse legitimate large-metadata APR files; the decide ladder bounds it at rung 2.
+  status: open
+  **Owner:** an apr-format reader-policy plan. Re-open when a non-decide consumer reads untrusted APR files.
+  Final status 08-31: still deferred.
 - **Guard offenders that are not Phase 8's**, so the next CI run's red is attributed: hand-rolled argv in
   aprender-mcp-chronos, aprender-mcp-forecast, aprender-mcp-setfit, aprender-mcp-setfit-train; cascade
   TIERS missing aprender-contrastive-data. D-ITEM-08-01-A (strict-binding vacuity) stays open; the Phase 8
   contracts' test references are checked by `just laya-claims-check` from 08-31.
+  status: open
+  **Final status 08-31:** Phase 8's own share of all three guards is closed (parser: 08-23; duplicate
+  `bootstrap` bin: 08-22; cascade TIERS: 08-31 `publish-false`). The offenders above are not Phase 8's and
+  are itemised with owners in the final-status section at the end of this file.
 
 ### Not open (refuted by the /code-review max verdicts)
 
@@ -847,7 +880,11 @@ raw candidates AL8, C2-8, D2-5 and A2-7 map to those refuted verdicts.
   `tests::lambda_request_rows_are_swept` (plan 08-24). The contract's own header says `test` is "the test
   that runs the row's hostile case". Plan 08-24 does not own the contract; repointing both rows (and the
   frame_http `note:`) is a contract edit for whichever plan next versions decide-tool-boundary-v1.
-  status: open
+  status: resolved
+  **Resolved by:** plan 08-28 (commit 890b769e9, decide-tool-boundary-v1 5.0.0): both rows now name
+  `tests::lambda_request_rows_are_swept` first, and the frame_http `note:` says the hostile case runs there.
+  Plan 08-31 ledgers both rows (`tool-bound.frame_http`, `tool-bound.probe_id_header` in
+  scripts/laya_claims.tsv), so a renamed test fails `just laya-claims-check`.
 
 ### Found during plan 08-29 (out of scope)
 
@@ -880,3 +917,131 @@ raw candidates AL8, C2-8, D2-5 and A2-7 map to those refuted verdicts.
   or a re-measure where a second term exceeds its price. Levers: the sha2 `asm` backend (D-ITEM-08-17-C,
   3.5 s of software sha256) and re-pricing (b) from these samples.
   status: open
+
+## Gap round 08-19..08-32: final status (plan 08-31, 2026-09-29)
+
+Every finding of `08-REVIEW.md` (1 critical, 9 warnings, 8 info) and `08-CODE-REVIEW-FINDINGS.md` (the
+ea940faec list, the V-verdicts and the raw candidates) after plans 08-19..08-31. A finding is **closed**
+(the plan that closed it and the test or gate that keeps it closed; where the claim is ledgered, its
+`claim_id` in `scripts/laya_claims.tsv`, which `just laya-claims-check` checks), **decided** (an owner
+decision and its date), **refuted**, or **still open** (a list entry below with its reason, owner and
+re-open trigger). Plan 08-32 (`just laya-gap-regression`, the first CI run of Phase 8 code) is the
+round's last plan and is not yet run.
+
+### Closed: 08-REVIEW.md
+
+| Finding | Closed by | Kept closed by (ledger claim_id) |
+|---|---|---|
+| CR-01 | ea940faec (verify: `ArtifactNotFromRun`), 08-19 (load: `check_manifest_bindings`, rung 4 (e)), 08-21 (verify: base identity, base-dir pins, `run_field_bindings`) | FALSIFY-DECIDE-APR-013, apr.manifest.bindings, apr.verify_checks.2, gate.run_field_bindings |
+| WR-01 | 08-20 (apr-format reader: names strictly increasing), 08-26 (`DuplicateTensor`, rung 4) | apr-bound.duplicate_names_reader, apr-bound.duplicate_names_ladder, apr.load_ladder.rung4-unique-and-bound |
+| WR-02 | 08-21 (`verify_run` is `cfg(test) pub(crate)`; no production caller, so clippy's dead-code lint refuses a second door) | the compiler |
+| WR-03 | 08-28 A-derive (owner, 2026-09-28); live since the 08-30 redeploy | mcp.description.truncation-sentence, FALSIFY-DECIDE-TOOL-005, context.D-09.amendment-08-28 |
+| WR-04 | 08-20 | apr-bound.layer_row_length@aprender-core:lib |
+| WR-05 | 08-29 (`data.jsonl_lines` == Rust `str::lines`) | py.data.jsonl-lines |
+| WR-06 | 08-24 (`watch_loopback` exits 1) | lambda.readme.lazy-load |
+| WR-07 | 08-22 (grant check reads attached policies, refuses wildcards / NotAction / any other S3 grant) | coverage.iam-read-only; gate rows grant-check, grant-listing-failure |
+| WR-08 | 08-21 (`slice_need`) | decide.verify.slice-fraction |
+| WR-09 | 08-29 (`contract.number`, k written as a float) | gate.rescore_noise.k-float |
+| IN-01 | 08-31 (argmax folds from the first non-NaN element) | decide.argmax.nan-never-wins |
+| IN-02 | 08-26 (inspect runs rungs 1-4 on a bounded read) | apr-bound.inspect_read |
+| IN-03 | 08-25 (exact labels-segment parse) | lambda.probe.labels-segment |
+| IN-04 | 08-25 (deploy.toml.template), 08-31 (tests/ui.rs header) | lambda.template.tell, decide.ui.runs-in-ci, ci.integration-line.ui |
+| IN-05 | 08-23 (aprender-mcp-decide), 08-24 (Lambda lib and bootstrap). **Remainder open:** examples/probe.rs (the 08-24 entry above) | planted-unwrap clippy checks recorded in 08-23 / 08-24 |
+| IN-06 | 08-24 | `tests::proxied_response_has_one_cors_origin` |
+| IN-07 | 08-20 | `safetensors = { workspace = true }` in crates/aprender-core/Cargo.toml |
+| IN-08 | 08-29 (`REFUSED early-stopping`, exit 2) | py.train.early-stopping-refusal |
+
+### Closed: 08-CODE-REVIEW-FINDINGS.md
+
+- **In ea940faec** (the list at the top of that file): V11-d, V4-a (its red-side proof is 08-24 mutation
+  M7), V7-c, V1-a, V2-a (decide rung 2; the reader residual is deferred above), V5-a (no echo), V3-a,
+  V3-b, V5-d, V10-a, V10-c, V13-b, V6-a, and V6-c in part (finished by 08-21).
+- **In the round:** V8-c, V8-d, V6-b, V6-c, V6-d, V12-b (08-21); V11-a, V11-b, V11-c, V14-a (08-22);
+  V5-c (08-23); V3-c, V3-d, V4-c (08-24); V12-a, V12-c for the probe CLI (08-25); V1-b, V9-a, V9-b,
+  V9-d, V12-c for pack_laya (08-26); V6-e, V7-a, V7-b (08-27); V5-a's wire-code side note (B-iserror)
+  and V5-b (the admission claim restated to the measured serial dispatch) (08-28); V13-a, V13-c, V13-d
+  (08-29); V4-b and the SKIPPED #14 (08-30, by the owner decisions below); V10-b, V2-b, V2-c (08-20).
+- **V14-c** (Phase 8 added one offender to each of three CI-required guards): the parser offender
+  aprender-mcp-decide (08-23), the duplicate `bootstrap` bin (08-22, allowlist intent line) and the
+  cascade offender aprender-decide (08-31, `publish = false`; ledger decide.cargo.publish-false and the
+  gate row cascade-guard, which now runs a case) are all closed. The guards' other offenders are not
+  Phase 8's (below).
+- **V14-d:** the behaviour half was refuted; the comment half ("servers never call pack") closed in 08-31
+  Task 1 (`crate::digest`, `safetensors_is_read_only_by_pack`; ledger pack-safetensors-scope,
+  cargo-safetensors-scope, claude-md-safetensors-never-served).
+- **Raw candidates that are not a verdict:** R2 (08-24: no second copy of rung 1's cap arithmetic; the
+  `load_model_from_path` alias is S-group simplification), R5 / AL2 / S4 (08-21), R6 (08-25), R8's
+  sha256 part and D3-4 (08-22), AL3 / AL5 (08-20), AL7 / D3-1 / C2-7 (08-22), A4-6 (08-24), A4-7
+  (08-28), A4-8 (08-23; the stdio frame is the accepted row frame_stdio), A2-6 (08-22), D3-5, C2-4,
+  C2-6 (08-29), CV1 (08-22), CV4 (08-22), CV5 (08-31), EF1 / AL1 / B1 (ea940faec), B2 (= V3-b). Every
+  other raw candidate is marked `=` a verdict in that file and carries the verdict's status.
+- **Refuted, not open:** V8-a, V8-b, V12-d, V4-d, V9-c, V9-e and V14-d's behaviour half; the raw
+  candidates AL8, C2-8, D2-5 and A2-7 map to them.
+- **D-ITEM-08-17-E** is resolved (its own status line, plan 08-30: the 3,008 MB tier is superseded); the
+  close-out list line above predates that.
+
+### Decided by the owner inside the round
+
+| Item | Decision id (verbatim) | Date | Record |
+|---|---|---|---|
+| WR-03 and V5-a's wire-code side note | `A-derive B-iserror` | 2026-09-28 | 08-CONTEXT D-09 amendment; ledger context.D-09.amendment-08-28 |
+| V4-b, the redeploy | `redeploy-and-measure` | 2026-09-28 | 08-CONTEXT D-18; 08-LIVE-REDEPLOY-EVIDENCE.json `decision` |
+| the tier | `restore-10240-tier` | 2026-09-28 | 08-CONTEXT D-18; evidence `tier_decision` |
+| pmcp.run's MemorySize cap | `raise-pmcp-run-cap`, then `retry-after-cap-confirmed` | 2026-09-28 | 08-30 SUMMARY |
+| the deadline and the budget | `keep-800-apply-10739`: 800 built tokens / 8 texts kept on the acceptance rule (every cold sample < 30 s) although the per-term-max rule gives 648 tokens; DOWNLOAD_DEADLINE 10,739 ms; the stop-guard's reference set corrected to this tier's own downloads (max 9,065 ms), because the 3,008 MB downloads (13,494-17,831 ms) came from a superseded tier | 2026-09-28 | 08-CONTEXT D-18; evidence `deadline_decision`; ledger tool.648-vs-800, context.D-18.keep-800-apply-10739 |
+| D-14, publication of aprender-decide | `publish-false` | 2026-09-29 | 08-CONTEXT D-14 amendment; `publish = false` in crates/aprender-decide/Cargo.toml; ledger decide.cargo.publish-false, context.D-14.amendment-08-31 |
+
+Deployed facts at the end of the round: aprender-mcp-decide is live on pmcp.run at 10,240 MB serving
+b615d8244, at most 8 texts and 800 built tokens per call (decide-tool-boundary-v1 9.0.0), bound
+refusals are `isError` tool results (08-28, live since the 08-30 redeploy), DOWNLOAD_DEADLINE 10,739 ms,
+auth off by the owner's decision (D-ITEM-08-18-A). Nothing was published to crates.io.
+
+### Still open after the round
+
+Tracked above with their own status lines, not repeated here: the planning-time deferrals (V13-e, V14-b /
+CV3, R1, R3 / AL6, R4 / AL4, R7, R8 remainder, the S group, EF2..EF8, CV6, V2-a residual),
+D-ITEM-08-01-A (strict-binding vacuity; Phase 8's three contracts are now covered by
+`just laya-claims-check`, which lists every test their FALSIFY commands and bounds tables name),
+IN-05's remainder (examples/probe.rs), the apr-format golden_v2 writer drift (08-20), the rebuild on
+every `cargo run -p aprender-decide` (08-22), the laya_tiny `ece_pre` fixture drift (08-29),
+D-ITEM-08-30-A (/tmp) and D-ITEM-08-30-B (648 vs 800). New entries:
+
+- **tokenizer_pipeline is accepted, not bounded (08-26).** The ladder bounds the tokenizer blob's bytes
+  and pins its digest, but not what a tokenizer.json pipeline does: a normalizer can declare an expanding
+  replacement. Only a VERIFIED artifact is bound to Laya-en's pinned tokenizer (verify, the base pin).
+  status: open
+  **Reason:** bounding it needs an allowlist of pipeline components, which is a design decision.
+  **Owner:** the user (a pipeline-allowlist decision), then a decide-apr-v1 plan.
+  **Re-open trigger:** any server loading an artifact that did not pass `pack_laya verify`, or a second
+  tokenizer family.
+- **`cargo clippy -p aprender-decide --test laya_parity -- -D warnings` fails on aprender-compute's
+  warnings (08-22).** Without `--no-deps` clippy lints the path dependency; aprender-decide's own
+  targets are clean with `--no-deps`.
+  status: open
+  **Reason:** pre-existing, not Phase 8's code (aprender-compute).
+  **Owner:** an aprender-compute lint plan (the toolchain-ceiling gate, CLAUDE.md "Linting", is the place
+  it would surface).
+  **Re-open trigger:** CI or `make tier2` running a dependency-inclusive clippy over aprender-decide.
+- **aprender-core's clippy baseline holds one error: `src/demo/reliable/performance.rs:126:5`
+  unreachable expression (08-27).** Measured on the unmodified tree before 08-27 touched aprender-core.
+  status: open
+  **Reason:** pre-existing, outside every Phase 8 file.
+  **Owner:** aprender-core maintainers.
+  **Re-open trigger:** `cargo clippy -p aprender-core --lib -- -D warnings` becoming a required gate.
+- **Hand-rolled argv parsers in aprender-mcp-chronos, aprender-mcp-forecast, aprender-mcp-setfit and
+  aprender-mcp-setfit-train** (`check_no_hand_rolled_parsers.sh`, re-run 2026-09-29: 36 binary crates
+  scanned, 4 hand-rolled, exit 1; aprender-mcp-decide is not among them since 08-23).
+  status: open
+  **Reason:** not Phase 8's crates (the SetFit and forecasting servers of earlier phases); the next CI
+  run's red on this guard is theirs.
+  **Owner:** the phases that own those servers; the fix shape is 08-23's (a clap derive `Cli`).
+  **Re-open trigger:** the guard is CI-required, so it is red until they are fixed.
+- **aprender-contrastive-data is publishable but absent from the release cascade's TIERS**
+  (`check_cascade_covers_all_crates.sh`, re-run 2026-09-29 after `publish-false`: 74 publishable crates,
+  R1 lists only aprender-contrastive-data, exit 1).
+  status: open
+  **Reason:** not Phase 8's crate; whether it publishes (and the same one-way name question D-14 answered
+  for aprender-decide) is its owner's call.
+  **Owner:** the aprender-contrastive-data owner.
+  **Re-open trigger:** the guard is CI-required, so it is red until it is added to TIERS or marked
+  `publish = false`.
