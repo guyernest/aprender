@@ -1,6 +1,6 @@
 contract: decide-tool-boundary
 metadata:
-  version: 8.0.0
+  version: 9.0.0
   created: '2026-09-25'
   author: PAIML Engineering
   kind: kernel
@@ -104,6 +104,14 @@ metadata:
     re-deriving; (b) below and the classify_token_budget invariant now show the priced and the
     measured terms side by side and say exactly that. `pv diff` classifies the invariant edit
     MAJOR, hence 8.0.0.
+
+    v9.0.0 (plan 08-30 Task 3, 2026-09-28; no constant moved). Records that `accepted_region_cold`
+    was falsified LIVE at 10 240 MB and held: deployed-passed, 8 proven-cold samples, 4 per shape
+    over two deploys (the second after the Lambda loader's download deadline became 10 739 ms and
+    started honouring the invocation deadline), 22 647-27 015 ms client-side against the
+    30 000 ms cap; FINAL record 08-LIVE-REDEPLOY-EVIDENCE.json (`live`, final: true). The binding
+    row is `implemented` again and FALSIFY-DECIDE-TOOL-009 names that record. `pv diff`
+    classifies the invariant edit MAJOR, hence 9.0.0.
 
     THE 10 240 MB TIER (v7.0.0, THE CONTRACTED TIER). 10 240 MB is 6 vCPU. Every term below is a
     MEASUREMENT: the spike-026 records at this very tier (Graviton2, three forced cold starts,
@@ -539,7 +547,7 @@ equations:
       - 'the claim holds only for the tier it was measured at: samples taken at a memory size other than lambda_memory_mb say nothing about this contract'
       - 'a sample counts as COLD only with independent evidence that the request performed the model load: the server''s load log line correlated to the probe''s request id. A sample without that evidence is warm and does not count toward this claim'
       - 'EVERY recorded cold sample must pass — a best-of-N is not an accepted region (the Phase 7 accepted-region lesson: a limit is only as good as the worst request it admits)'
-      - 'RE-OPENED by v7.0.0 (the tier moved to 10 240 MB): plan 08-30 measures it live at lambda_memory_mb 10240 with `just laya-deploy-verify` (>= 2 proven-cold samples per shape, record .planning/phases/08-laya-decision-model-local-fine-tune-and-thin-mcp-server/08-LIVE-REDEPLOY-EVIDENCE.json); until that record passes, the binding row is partial and the samples below are the superseded tier''s'
+      - 'MEASURED LIVE at lambda_memory_mb 10240 by plan 08-30 (v9.0.0; re-opened by v7.0.0 when the tier moved): deployed-passed, `just laya-deploy-verify` over two deploys took 8 proven-cold samples, 4 per shape (CONCENTRATED 27015, 25076, 25092, 25305 ms; DISTRIBUTED 22922, 22647, 22855, 23116 ms client-side), every one under api_gateway_timeout_ms; worst 27015 ms, 2985 ms under the cap. FINAL record .planning/phases/08-laya-decision-model-local-fine-tune-and-thin-mcp-server/08-LIVE-REDEPLOY-EVIDENCE.json (`live`, final: true); the binding row is implemented on it. The 800-token budget is accepted by THIS rule alone, not by its per-term derivation (two priced cold terms were exceeded, classify_token_budget invariants), so a cold sample at or over the cap re-opens this equation and the budget with it'
       - 'SUPERSEDED TIER RECORD: falsified LIVE by plans 08-17/08-18 (`just laya-deploy-verify`; the procedure was 08-11''s until its HOLD): deployed-passed at lambda_memory_mb 3008, 4 proven-cold samples (2 per shape) all under api_gateway_timeout_ms, max 29350 ms client-side; FINAL record .planning/phases/08-laya-decision-model-local-fine-tune-and-thin-mcp-server/08-LIVE-DEPLOY-EVIDENCE.json (final: true). The maximal request is built by aprender_mcp_decide_lambda::probe::build_maximal_request (plan 08-07); plan 08-12 flipped the binding to implemented on that record. The 650 ms margin is thin and a 31.05 s external cold call was observed (D-ITEM-08-17-E): a re-measure at any other tier or artifact re-opens this equation'
     preconditions:
       - 'the deployed artifact passed decide-apr-v1 deploy_eligibility'
@@ -637,7 +645,7 @@ falsification_tests:
   - id: FALSIFY-DECIDE-TOOL-009
     rule: 'The maximal legal classify completes under the API Gateway cap on a cold instance, for both shapes and every cold sample'
     prediction: 'At lambda_memory_mb 10240, every recorded cold sample of the CONCENTRATED (2 texts, <= 800 built tokens: one full 512 row and the remainder) and DISTRIBUTED (8 texts, <= 800 built tokens) shapes, each proven cold by its load log line, completes under 30000 ms as the instance''s first POST.'
-    implemented_by: 'plan 08-30, LIVE at 10 240 MB (v7.0.0; no unit-test surface: it needs a cold pmcp.run Lambda), recorded in the evidence file below. SUPERSEDED TIER: plans 08-17/08-18, outcome deployed-passed at 3008 MB (08-LIVE-DEPLOY-EVIDENCE.json): CONCENTRATED 28527 and 28501 ms, DISTRIBUTED 29350 and 24168 ms, each proven cold by its CloudWatch load line; plan 08-12 replaced the LIVE-PENDING marker with this harness and the evidence path'
+    implemented_by: 'plan 08-30, LIVE at 10 240 MB (no unit-test surface: it needs a cold pmcp.run Lambda): deployed-passed, 8 proven-cold samples in the evidence file below (CONCENTRATED 27015, 25076, 25092 and 25305 ms; DISTRIBUTED 22922, 22647, 22855 and 23116 ms), each proven cold by its CloudWatch load line and the invocation''s platform.report init duration. SUPERSEDED TIER: plans 08-17/08-18, outcome deployed-passed at 3008 MB (08-LIVE-DEPLOY-EVIDENCE.json): CONCENTRATED 28527 and 28501 ms, DISTRIBUTED 29350 and 24168 ms, each proven cold by its CloudWatch load line; plan 08-12 replaced the LIVE-PENDING marker with this harness and the evidence path'
     test_harness: 'just laya-deploy-verify models/decide/laya-stance-64.apr aprender-mcp-decide'
     evidence: '.planning/phases/08-laya-decision-model-local-fine-tune-and-thin-mcp-server/08-LIVE-REDEPLOY-EVIDENCE.json'
     if_fails: 'The token budget admits a request the envelope cannot serve cold: lower classify_max_total_tokens (re-deriving it here first) or move the tier, never raise the margin after the fact.'
@@ -662,10 +670,10 @@ qa_gate:
     and runs in CI once plan 08-06 lands its tests; the accepted-region check is LIVE and is run by
     `just laya-deploy-verify` against a cold pmcp.run instance, never by a libtest assertion (plans
     08-17/08-18: deployed-passed at 3 008 MB; re-opened at 10 240 MB by v7.0.0 and measured by plan
-    08-30). Every binding was `implemented` from plan 08-12; v7.0.0 sets accepted_region_cold to
-    `partial` until plan 08-30's live record at 10 240 MB passes, and until then
-    `make contract-audit-phase8` admits exactly that one BIND-002 through PHASE8_LIVE_EXEMPT and
-    refuses any other BIND- line.
+    08-30). Every binding was `implemented` from plan 08-12; v7.0.0 set accepted_region_cold to
+    `partial` until plan 08-30's live record at 10 240 MB passed. It passed (v9.0.0: 8 proven-cold
+    samples, all under the cap), the row is `implemented` again, and `make contract-audit-phase8`
+    runs with PHASE8_LIVE_EXEMPT unset and refuses every BIND- line.
   checks:
     - 'contract schema validity (pv validate, zero errors) and non-zero pv status counts'
     - 'every Rust boundary constant asserted EQUAL to this file'

@@ -550,7 +550,9 @@ not fixed by it.
 
 ### D-ITEM-08-17-E: the 3 GB cold load runs 21.4-25.8 s, 650 ms under the gateway cap at worst
 
-- status: open (input to 08-18 and 08-12)
+- status: resolved (2026-09-28, plan 08-30: the 3,008 MB tier is superseded; its lever "the 10 GB
+  tier" was taken and measured: at 10,240 MB the download fell to 8927-9139 ms and 8 proven-cold samples
+  ran 22,647-27,015 ms, 2,985 ms under the cap at worst. The successor risk is D-ITEM-08-30-B)
 - **What:** all four cold samples passed (< 30000 ms), which makes the outcome deployed-passed. But:
   - The worst sample was 29350 ms end-to-end.
   - load_ms was 21411-25813 against the contract's 17000 ms 3 GB extrapolation.
@@ -866,4 +868,15 @@ raw candidates AL8, C2-8, D2-5 and A2-7 map to those refuted verdicts.
   boundary is priced for, unless the model is baked into a container image or mounted from EFS. The memory
   half of that note became the `restore-10240-tier` decision (decide-tool-boundary-v1 7.0.0); the /tmp half
   is a separate hosting change with its own measurement.
+  status: open
+
+- **D-ITEM-08-30-B: the 10,240 MB budget is accepted on the whole-request rule, not on its per-term derivation.**
+  Measured at 10,240 MB (08-LIVE-REDEPLOY-EVIDENCE.json `live`, 8 proven-cold samples): build including the
+  probe replay ran 2808-2928 ms against its 2404 ms price (404-524 ms over on every sample), and gateway
+  overhead ran 2751 ms once against its 896 ms price. The per-term-max re-derivation gives 648 tokens, below the
+  declared 800. The owner kept 800 / 8 texts (`keep-800-apply-10739`, 08-CONTEXT.md D-18) because every cold
+  sample finished under 30 s (worst 27,015 ms, 2,985 ms slack); decide-tool-boundary-v1 8.0.0 states both.
+  Re-open trigger: any cold sample at or over 30,000 ms (containment first), a Graviton generation change,
+  or a re-measure where a second term exceeds its price. Levers: the sha2 `asm` backend (D-ITEM-08-17-C,
+  3.5 s of software sha256) and re-pricing (b) from these samples.
   status: open
