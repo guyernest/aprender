@@ -67,5 +67,30 @@
     "reading": "build_ms fell by 1446-1602 ms, which is one sha pass on this host (sha_ms 1488-1546): the live binary hashes the buffer twice (sha256_hex, then load_model_from_bytes) and HEAD once (load_model_from_hashed). The ladder rungs added since (08-19 manifest bindings, 08-26 duplicate-tensor scan and probe-row pre-check, 08-21 typed policy) cost at most tens of ms here (ladder = build - second hash: live 624-735 ms, HEAD 629-689 ms).",
     "lambda_projection_not_a_measurement": "live sha_ms 2655-3511 and build_ms 5193-7538 (08-LIVE-DEPLOY-EVIDENCE cold_samples) put the live ladder at ~2.5-4.0 s after its second hash; HEAD should therefore cut ~2.7-3.5 s from every cold start (sha + build ~5.2-7.5 s instead of 7.8-11.0 s). Only a live cold sample can confirm this."
   },
-  "decision": null
+  "decision": {
+    "choice": "redeploy-and-measure",
+    "date": "2026-09-28",
+    "decided_by": "the user (project owner), answering the 08-30 Task 2 blocking checkpoint:decision (reply: \"You can now redeploy.\")",
+    "orchestrator_stop_guard": "kept: if the step-3 derivation DOWNLOAD_DEADLINE = min(25 s, 30 s - R) falls below the max measured download_ms across the cold samples (this round's and 08-17/08-18's 13494-17831 ms), that constant is NOT deployed; the plan stops for the owner with the measured terms, the derived value and the options. Any cold sample >= 30000 ms runs `just laya-teardown` and stops."
+  },
+  "owner_note_10gb": {
+    "recorded_on": "2026-09-28",
+    "note": "the owner reports the account can now run a 10,240 MB Lambda and configure /tmp ephemeral storage up to 10 GB, and suggests local storage may load faster than the S3 path",
+    "acted_on": false,
+    "why_not_this_round": "this round stays at the contracted 3,008 MB tier: moving tiers changes decide-tool-boundary-v1's priced bounds (8 texts / 1024 tokens at 10,240 MB), a separately scoped change",
+    "caveats": [
+      "/tmp is per execution environment and EMPTY on every cold start: it helps warm reuse, not cold loads, unless the model is baked into a container image or mounted from EFS",
+      "the expected cold gain at 10,240 MB is the extra vCPU (sha256 + build scale with CPU; spike 026 measured the download at about 9 s there): to be measured, not asserted"
+    ],
+    "read_only_check": {
+      "command": "aws service-quotas list-service-quotas --service-code lambda --region us-east-1 (read-only, one call)",
+      "rc": 0,
+      "result": "no function-memory quota is exposed by Service Quotas (69 Lambda quotas listed, none for MemorySize); 08-17 found get-account-settings exposes none either. The 10,240 MB permission is therefore NOT verifiable by a read-only API; only an update or create at that size would show it, and the function's memory / storage configuration was NOT changed",
+      "adjacent_observation_not_a_measurement": "the same listing shows L-14320ECE 'Network bandwidth per execution environment' = 625.0 (adjustable; unit not stated in the listing). If that is Mbit/s, 846196868 bytes need at least ~10.8 s whatever the memory size, so a tier move would not shrink the download term below that; unverified"
+    },
+    "tracked_in": [
+      "08-CONTEXT.md D-18 amendment 2026-09-28 (follow-up)",
+      "deferred-items.md D-ITEM-08-30-A"
+    ]
+  }
 }
