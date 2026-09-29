@@ -4,8 +4,8 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: "Laya Decision Model: Local Fine-Tune and Thin MCP Server"
 status: executing
-stopped_at: "Completed 08-31-PLAN.md (class D: 133-row claims ledger + laya-claims-check; D-14 publish-false; argmax NaN fix; gap-round final statuses; next 08-32)"
-last_updated: "2026-09-29T05:08:01.828Z"
+stopped_at: "Executed 08-32-PLAN.md with its CI must-have UNMET (workspace-test has not run: PR #4634 workflow runs are action_required; upstream contract-hygiene gates block fragments 510/520 until 08-33). Next: plan 08-33 (contract-hygiene repair), then Phase 8 verification"
+last_updated: "2026-09-29T19:35:02.000Z"
 last_activity: 2026-09-28
 last_activity_desc: Phase 08 execution started
 state_head: 23a640e6ad264679e9a90d3e8b25d9330a87d0df
@@ -13,7 +13,7 @@ progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 124
-  completed_plans: 123
+  completed_plans: 124
 milestone_name: milestone
 ---
 
@@ -29,8 +29,8 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 08 (Laya Decision Model: Local Fine-Tune and Thin MCP Server) — EXECUTING
-Plan: 31 of 32 complete (08-01..08-31; 08-25 ran before 08-24 by wave order; Wave 21 done) — gap round 08-19..08-32 executing (`--gaps-only`, waves 17-22, sequential on the main tree: worktree base-check degraded, HEAD d6d3157c7 != origin/HEAD)
-Status: Executing Phase 08 gap round (class-wide: provenance, input bounds, gate honesty, claim honesty, Rust-Python agreement) — 08-31 COMPLETE (class D closed as a gate: scripts/laya_claims.tsv 133 rows, `just laya-claims-check` OK, 5 gate mutants RED, python kind exercised; D-14 owner decision publish-false 2026-09-29: aprender-decide is publish = false, cascade guard no longer lists it (aprender-contrastive-data remains, not Phase 8's), pinned by publish_is_false_until_the_crate_name_is_confirmed and gate row cascade-guard; argmax NaN never wins (IN-01); tests/ui.rs header (IN-04); deferred-items.md gap-round final statuses for every 08-REVIEW / 08-CODE-REVIEW-FINDINGS finding; nothing published); live: aprender-mcp-decide at 10,240 MB serving b615d8244, 8 texts / 800 built tokens, isError refusals; Phase 8 NOT complete; next Wave 22 (08-32)
+Plan: 32 of 32 executed (08-01..08-32; 08-25 ran before 08-24 by wave order; Wave 22 done) — gap round 08-19..08-32 executed (`--gaps-only`, waves 17-22, sequential on the main tree). 08-32's must-have "workspace-test = success on the pushed head" is UNMET; plan 08-33 (contract-hygiene repair) is decided and to be planned next
+Status: Phase 08 gap round EXECUTED, phase NOT complete — 08-32 done with an unmet must-have: Task 1 `just laya-gap-regression` PASS (classes A-E + regression, pre-merge; real-artifact legs OK on the merged tree: laya-verify-suite max_abs 3.841e-6, laya-verify deploy_eligible true sha 24a44d7e seed 17); Task 2: history scrubbed (backup ref backup/pre-scrub-08-32, map 08-SCRUB-COMMIT-MAP.tsv), upstream main merged (0d24db9c5, 301 commits, 46 conflicts), draft PR paiml/aprender#4634 opened (head 30bc2baaa at the runs) — all its workflow runs are action_required (fork PR needs a paiml maintainer approval; pull-only access) and pr-review-quorum fails on a missing review receipt (paiml process). workspace-test has NOT run; locally upstream's shrink-only contract-hygiene gates fail (389 passed, 5 failed: formal vocabulary +105 of which Phase 8 25, valid_under +12, neon-blis-v1 / spectral-indices-v1 pv errors, stale contract graph, binding.yaml book page) and would stop CI before decide fragments 510/520. Owner decisions: "Repair all (new gap plan)" -> decided; planned as 08-33; "Defer to deferred-items" for the 17 SetFit CI legs (D-ITEM-08-32-C); "Keep one draft for CI" (#4634 stays one draft; split into reviewable PRs after phase verification). Evidence: 08-CI-RUN-EVIDENCE.json. Next: plan 08-33, maintainer approval, then Phase 8 verification
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
 consensus findings were incorporated and six of Gemini's were rejected with in-plan rationale
@@ -244,6 +244,7 @@ pending F-10 in Phase 5.)
 | Phase 08 P28 | 22min | 3 tasks | 7 files |
 | Phase 08 P30 | 3h50m | 3 tasks | 17 files |
 | Phase 08 P31 | 2h14m | 3 tasks | 13 files |
+| Phase 08 P32 | ~12h wall | 2 tasks (CI must-have unmet) | 10 files own + 46 merge conflicts |
 
 ## Accumulated Context
 
@@ -468,6 +469,7 @@ Recent decisions affecting current work:
 - [Phase 08]: 08-30: owner keep-800-apply-10739 - decide-tool-boundary-v1 keeps 8 texts / 800 tokens at 10,240 MB on the acceptance rule (8 proven-cold samples 22.6-27.0 s < 30 s) although the per-term-max rule gives 648; contract 9.0.0 shows priced vs measured; s3::DOWNLOAD_DEADLINE 10739 ms derived from the samples; download_budget(remaining, reserve) honours the invocation deadline (V4-b); accepted_region_cold implemented; live at 10,240 MB serving b615d8244
 - [Phase 08]: 08-31: owner decision publish-false (D-14, 2026-09-29) - aprender-decide is publish = false until the crate name is confirmed; not in the cascade TIERS; kept by publish_is_false_until_the_crate_name_is_confirmed and gate row cascade-guard; nothing published
 - [Phase 08]: 08-31: class D ledger scripts/laya_claims.tsv (133 rows) derives its FALSIFY and untrusted_input_bounds rows from the contracts' own cargo commands, one row per owner target, each named test matched exactly (never cargo's substring filter); a corrected claim needs a ledger row in the same commit
+- [Phase 08]: 08-32: owner decisions "Scrub, then push", "Yes, draft PR", "Merge upstream main in", "Keep one draft for CI" (#4634 one draft purely for CI evidence; split into reviewable PRs after phase verification), "Defer to deferred-items" (17 SetFit CI legs, D-ITEM-08-32-C) and "Repair all (new gap plan)" (upstream contract-hygiene gates; decided; planned as 08-33). pmcp stays at 2.19.3 (D-ITEM-08-32-G). The plan's CI must-have (workspace-test success on the pushed head) is UNMET and recorded as such in 08-CI-RUN-EVIDENCE.json
 
 ### Pending Todos
 
@@ -583,8 +585,8 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-29T05:07:51.894Z
-Stopped at: Completed 08-31-PLAN.md (class D: 133-row claims ledger + laya-claims-check; D-14 publish-false; argmax NaN fix; gap-round final statuses; next 08-32)
+Last session: 2026-09-29T19:35:02.000Z
+Stopped at: Executed 08-32-PLAN.md, CI must-have UNMET (see Current Position); next plan 08-33 (contract-hygiene repair), then Phase 8 verification
 Resume file: None
 
 ## Accumulated Context
