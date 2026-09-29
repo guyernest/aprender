@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: "Laya Decision Model: Local Fine-Tune and Thin MCP Server"
 status: executing
-stopped_at: "Executed 08-32-PLAN.md with its CI must-have UNMET (workspace-test has not run: PR #4634 workflow runs are action_required; upstream contract-hygiene gates block fragments 510/520 until 08-33). Next: plan 08-33 (contract-hygiene repair), then Phase 8 verification"
-last_updated: "2026-09-29T19:35:02.000Z"
+stopped_at: "Completed 08-33-PLAN.md (contract-hygiene repair, local commits, NOT pushed). Next: plan 08-34 (CI audit, push, maintainer approval, CI evidence)"
+last_updated: "2026-09-29T21:46:01.311Z"
 last_activity: 2026-09-28
 last_activity_desc: Phase 08 execution started
-state_head: 23a640e6ad264679e9a90d3e8b25d9330a87d0df
+state_head: 3b75bfd7450ffcc5d2ac052c3575152bac343207
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 126
-  completed_plans: 124
+  completed_plans: 125
 milestone_name: milestone
 ---
 
@@ -29,8 +29,8 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 08 (Laya Decision Model: Local Fine-Tune and Thin MCP Server) — EXECUTING
-Plan: 32 of 34 executed (08-01..08-32; 08-25 ran before 08-24 by wave order; Wave 22 done) — gap round 08-19..08-32 executed (`--gaps-only`, waves 17-22, sequential on the main tree). 08-32's must-have "workspace-test = success on the pushed head" is UNMET; plans 08-33 (contract-hygiene repair, wave 23) and 08-34 (CI audit + push + maintainer-approved CI evidence, wave 24, autonomous: false) are planned and NOT yet executed; Phase 8 is not complete
-Status: Phase 08 gap round EXECUTED, phase NOT complete — 08-32 done with an unmet must-have: Task 1 `just laya-gap-regression` PASS (classes A-E + regression, pre-merge; real-artifact legs OK on the merged tree: laya-verify-suite max_abs 3.841e-6, laya-verify deploy_eligible true sha 24a44d7e seed 17); Task 2: history scrubbed (backup ref backup/pre-scrub-08-32, map 08-SCRUB-COMMIT-MAP.tsv), upstream main merged (0d24db9c5, 301 commits, 46 conflicts), draft PR paiml/aprender#4634 opened (head 30bc2baaa at the runs) — all its workflow runs are action_required (fork PR needs a paiml maintainer approval; pull-only access) and pr-review-quorum fails on a missing review receipt (paiml process). workspace-test has NOT run; locally upstream's shrink-only contract-hygiene gates fail (389 passed, 5 failed: formal vocabulary +105 of which Phase 8 25, valid_under +12, neon-blis-v1 / spectral-indices-v1 pv errors, stale contract graph, binding.yaml book page) and would stop CI before decide fragments 510/520. Owner decisions: "Repair all (new gap plan)" -> decided; planned as 08-33; "Defer to deferred-items" for the 17 SetFit CI legs (D-ITEM-08-32-C); "Keep one draft for CI" (#4634 stays one draft; split into reviewable PRs after phase verification). Evidence: 08-CI-RUN-EVIDENCE.json. Next: plan 08-33, maintainer approval, then Phase 8 verification
+Plan: 33 of 34 executed (08-01..08-33; 08-25 ran before 08-24 by wave order; Wave 23 done) — gap round 08-19..08-32 executed (`--gaps-only`, waves 17-22, sequential on the main tree). 08-32's must-have "workspace-test = success on the pushed head" is UNMET; plan 08-33 (contract-hygiene repair, wave 23) is EXECUTED locally (committed, NOT pushed; upstream's hygiene gates green at their baselines, see 08-33-SUMMARY.md); plan 08-34 (CI audit + push + maintainer-approved CI evidence, wave 24, autonomous: false) is planned and NOT yet executed; Phase 8 is not complete
+Status: Phase 08 gap round EXECUTED, phase NOT complete — 08-33 DONE locally (2026-09-29, local commits e465421c4..3b75bfd74, NOT pushed): 13 contracts repaired, formal_prose 1569 -> 1464 and contracts_without_valid_under 398 -> 386 (both at their shrink-only baselines, none touched), pv validate 0 of 1850 failed, graph regenerated from a clean clone (this working tree's untracked .claude/worktrees pollute pv extract), aprender-contracts-cli 394 passed 0 failed in a clean clone, laya-claims OK 133 rows; next 08-34 (CI-order audit, push, maintainer approval, CI evidence). 08-32 done with an unmet must-have: Task 1 `just laya-gap-regression` PASS (classes A-E + regression, pre-merge; real-artifact legs OK on the merged tree: laya-verify-suite max_abs 3.841e-6, laya-verify deploy_eligible true sha 24a44d7e seed 17); Task 2: history scrubbed (backup ref backup/pre-scrub-08-32, map 08-SCRUB-COMMIT-MAP.tsv), upstream main merged (0d24db9c5, 301 commits, 46 conflicts), draft PR paiml/aprender#4634 opened (head 30bc2baaa at the runs) — all its workflow runs are action_required (fork PR needs a paiml maintainer approval; pull-only access) and pr-review-quorum fails on a missing review receipt (paiml process). workspace-test has NOT run; locally upstream's shrink-only contract-hygiene gates fail (389 passed, 5 failed: formal vocabulary +105 of which Phase 8 25, valid_under +12, neon-blis-v1 / spectral-indices-v1 pv errors, stale contract graph, binding.yaml book page) and would stop CI before decide fragments 510/520. Owner decisions: "Repair all (new gap plan)" -> decided; planned as 08-33; "Defer to deferred-items" for the 17 SetFit CI legs (D-ITEM-08-32-C); "Keep one draft for CI" (#4634 stays one draft; split into reviewable PRs after phase verification). Evidence: 08-CI-RUN-EVIDENCE.json. Next: plan 08-33, maintainer approval, then Phase 8 verification
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
 consensus findings were incorporated and six of Gemini's were rejected with in-plan rationale
@@ -245,6 +245,7 @@ pending F-10 in Phase 5.)
 | Phase 08 P30 | 3h50m | 3 tasks | 17 files |
 | Phase 08 P31 | 2h14m | 3 tasks | 13 files |
 | Phase 08 P32 | ~12h wall | 2 tasks (CI must-have unmet) | 10 files own + 46 merge conflicts |
+| Phase 08 P33 | 39 min | 4 tasks | 19 files |
 
 ## Accumulated Context
 
@@ -585,8 +586,8 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-29T19:35:02.000Z
-Stopped at: Executed 08-32-PLAN.md, CI must-have UNMET (see Current Position); next plan 08-33 (contract-hygiene repair), then Phase 8 verification
+Last session: 2026-09-29T21:46:01.136Z
+Stopped at: Completed 08-33-PLAN.md (contract-hygiene repair, local commits, NOT pushed). Next: plan 08-34 (CI audit, push, maintainer approval, CI evidence)
 Resume file: None
 
 ## Accumulated Context
