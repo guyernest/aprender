@@ -4,16 +4,16 @@ milestone: v1.0
 current_phase: 08
 current_phase_name: "Laya Decision Model: Local Fine-Tune and Thin MCP Server"
 status: executing
-stopped_at: "Completed 08-28-PLAN.md (classify claim honesty: owner decision A-derive B-iserror; tier-derived truncation sentence, bound refusals as isError tool results measured on stdio + HTTP, refusal_names_bound 12-char minimum, admission restated to pmcp serial dispatch; decide-tool-boundary-v1 6.0.0; not deployed, plan 08-30 decides)"
-last_updated: "2026-09-28T22:45:22.267Z"
+stopped_at: "Completed 08-30-PLAN.md (live redeploy at 10,240 MB, keep-800-apply-10739: DOWNLOAD_DEADLINE 10739 ms + invocation-deadline budget; 8 proven-cold samples 22.6-27.0 s; decide-tool-boundary-v1 9.0.0, accepted_region_cold implemented)"
+last_updated: "2026-09-29T02:53:01.127Z"
 last_activity: 2026-09-28
 last_activity_desc: Phase 08 execution started
-state_head: dfc682dc6effe388a5a002559041a686a85eff91
+state_head: 8473ea04d28eecce4f154c52dba7e5950f7b3a2e
 progress:
   total_phases: 9
   completed_phases: 1
   total_plans: 124
-  completed_plans: 121
+  completed_plans: 122
 milestone_name: milestone
 ---
 
@@ -29,8 +29,8 @@ See: .planning/PROJECT.md (updated 2026-08-07)
 ## Current Position
 
 Phase: 08 (Laya Decision Model: Local Fine-Tune and Thin MCP Server) — EXECUTING
-Plan: 29 of 32 complete (08-01..08-29; 08-25 ran before 08-24 by wave order; Wave 19 done) — gap round 08-19..08-32 executing (`--gaps-only`, waves 17-22, sequential on the main tree: worktree base-check degraded, HEAD d6d3157c7 != origin/HEAD)
-Status: Executing Phase 08 gap round (class-wide: provenance, input bounds, gate honesty, claim honesty, Rust-Python agreement) — 08-28 COMPLETE (class D served-tool half; owner decision `A-derive B-iserror`, D-09 amendment 'gap round 08-28': the served description's truncation sentence is derived from the artifact's agent max_len vs classify_max_total_tokens (tiny fixture at the contracted tier byte-identical; Laya-en at 3 008 MB now says refused / send a shorter excerpt); every bound refusal is pmcp::Error::tool_rejected, measured on the wire as a successful tools/call result with isError true over live stdio and the Lambda HTTP loopback (was JSON-RPC -32603), model/internal failures stay -32603; refusal_names_bound quantifies over distinctive texts of >= refusal_echo_min_chars 12 (A4-7); classify_admission restated to pmcp 2.19.3's serial dispatch, pinned by pipelined_calls_are_serialized_not_refused; decide-tool-boundary-v1 6.0.0; 17 mutations RED, one survivor fixed; probe.rs untouched; NOTHING DEPLOYED — the live Lambda serves the old surface until plan 08-30); Phase 8 NOT complete; next Wave 20, then Waves 21-22
+Plan: 30 of 32 complete (08-01..08-30; 08-25 ran before 08-24 by wave order; Wave 20 done) — gap round 08-19..08-32 executing (`--gaps-only`, waves 17-22, sequential on the main tree: worktree base-check degraded, HEAD d6d3157c7 != origin/HEAD)
+Status: Executing Phase 08 gap round (class-wide: provenance, input bounds, gate honesty, claim honesty, Rust-Python agreement) — 08-30 COMPLETE (V4-b closed LIVE: owner decisions redeploy-and-measure, restore-10240-tier, keep-800-apply-10739; aprender-mcp-decide redeployed at 10,240 MB serving b615d8244, 8 texts / 800 built tokens; 8 proven-cold maximal samples 22,647-27,015 ms < 30,000 (worst slack 2,985 ms), warm 866-980 ms; s3::DOWNLOAD_DEADLINE 10739 ms derived from the samples + download_budget honouring the invocation deadline; decide-tool-boundary-v1 9.0.0, accepted_region_cold implemented, contract-audit-phase8 green without PHASE8_LIVE_EXEMPT; per-term derivation gives 648 < 800, accepted on the whole-request rule, D-ITEM-08-30-B open); Phase 8 NOT complete; next Waves 21-22 (08-31, 08-32)
 Phase 05 is PLANNED — 13 plans in 8 waves, verification passed, then REPLANNED 2026-08-17
 against `05-REVIEWS.md` (codex + gemini). The replan is targeted, not from scratch: eight
 consensus findings were incorporated and six of Gemini's were rejected with in-plan rationale
@@ -242,6 +242,7 @@ pending F-10 in Phase 5.)
 | Phase 08 P27 | 55min | 3 tasks | 12 files |
 | Phase 08 P29 | 25 min | 3 tasks | 9 files |
 | Phase 08 P28 | 22min | 3 tasks | 7 files |
+| Phase 08 P30 | 3h50m | 3 tasks | 17 files |
 
 ## Accumulated Context
 
@@ -463,6 +464,7 @@ Recent decisions affecting current work:
 - [Phase 08]: 08-29: every contract number the Python back office reads goes through contract.number (no coercion); rescore-noise.json k is written as a float, the value Rust compares bit for bit
 - [Phase 08]: 08-28: owner decision A-derive B-iserror (D-09 amendment 'gap round 08-28'): the served truncation sentence is derived from the artifact's agent max_len vs classify_max_total_tokens, and every bound refusal is pmcp::Error::tool_rejected (an isError tool result on the wire, measured over stdio and the Lambda HTTP loopback); model/internal failures stay JSON-RPC -32603; effective only at the next deploy (plan 08-30)
 - [Phase 08]: 08-28: refusal_names_bound quantifies over distinctive caller texts of at least refusal_echo_min_chars (12, a decide-tool-boundary-v1 constant the test reads); the old any-non-empty-text clause was unsatisfiable (A4-7)
+- [Phase 08]: 08-30: owner keep-800-apply-10739 - decide-tool-boundary-v1 keeps 8 texts / 800 tokens at 10,240 MB on the acceptance rule (8 proven-cold samples 22.6-27.0 s < 30 s) although the per-term-max rule gives 648; contract 9.0.0 shows priced vs measured; s3::DOWNLOAD_DEADLINE 10739 ms derived from the samples; download_budget(remaining, reserve) honours the invocation deadline (V4-b); accepted_region_cold implemented; live at 10,240 MB serving b615d8244
 
 ### Pending Todos
 
@@ -578,8 +580,8 @@ Items acknowledged and carried forward from project scope:
 
 ## Session Continuity
 
-Last session: 2026-09-28T22:45:22.012Z
-Stopped at: Completed 08-28-PLAN.md (classify claim honesty: A-derive B-iserror implemented and pinned; decide-tool-boundary-v1 6.0.0; not deployed)
+Last session: 2026-09-29T02:52:53.919Z
+Stopped at: Completed 08-30-PLAN.md (live at 10,240 MB serving b615d8244; decide-tool-boundary-v1 9.0.0; accepted_region_cold implemented; next 08-31)
 Resume file: None
 
 ## Accumulated Context
