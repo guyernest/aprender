@@ -919,5 +919,19 @@
    "apr-format golden_v2_f32_writer_is_byte_identical (CLASS B, deferred-items 08-20; it passed in this round's unified-mode apr-format run, so the skip may be stale: not changed here)"
   ]
  },
- "push": null
+ "push": {
+  "remote_before": "3c0f2cf00312756edb6810b888c8cbeecaafc9be",
+  "code_head": "524c80203d9fac763c3f22f243d4d80d49e1686d",
+  "pushed_head": "cb084692a222e5a2b821d4d92a01a604893a6fb3",
+  "method": "git push origin gsd/phase-2-contract-gate, fast-forward, no force",
+  "remote_after": "cb084692a222e5a2b821d4d92a01a604893a6fb3",
+  "pr": "https://github.com/paiml/aprender/pull/4634",
+  "pr_state": {
+   "isDraft": true,
+   "mergeStateStatus": "BEHIND",
+   "headRefOid": "cb084692a222e5a2b821d4d92a01a604893a6fb3"
+  },
+  "scan": "derived 5 identifier tokens from the local scrub history, positive control matched 34 pre-scrub lines, 5223 added lines over 19 commits scanned: 0 derived-identifier hits, 0 generic identifier/credential hits, 0 unexpected e-mail addresses, no workflow/ci/baseline path in the range; the token file was a temp file outside the repository and was deleted",
+  "evidence_commits_local_only": "this record's push object (E2) and Task 3's record (E3) stay local: pushing a docs-only commit restarts the ~90 minute CI and voids the maintainer approval for P"
+ }
 }
