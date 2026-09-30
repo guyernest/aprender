@@ -868,6 +868,56 @@
    "method": "discovery: git grep of the 35 non-test source files that hold both serde_json map constructs (json!, Value::Object, serde_json::Map, to_value, HashMap<String, Value>) and hashing (Sha256, blake3, crc32, DefaultHasher), plus pmat query 'serde_json Map key order canonical sorted hash golden', plus a unified-mode nextest run (preserve_order confirmed engaged by cargo tree -f) of aprender-contracts-cli, aprender-contracts, apr-format, aprender-decide, aprender-mcp-decide(-lambda), aprender-forecast: 2878 passed, 0 failed. NOT run in unified mode: apr-cli's setfit_parity and setfit_cli_lifecycle integration targets (they need the setfit+inference features and the disk headroom was not there); they build their artifact through site 1."
   }
  ],
- "regression": null,
+ "regression": {
+  "head_sha": "524c80203d9fac763c3f22f243d4d80d49e1686d",
+  "command": "lockf -k /tmp/aprender-laya-real-weights.lock just laya-gap-regression (background, logged)",
+  "lines": [
+   "PASS CLASS A",
+   "PASS CLASS B",
+   "PASS CLASS C",
+   "PASS CLASS D",
+   "PASS CLASS E",
+   "PASS HYGIENE",
+   "PASS REGRESSION",
+   "LAYA GAP REGRESSION OK"
+  ],
+  "stage_evidence": [
+   "ok manifest-and-run-fields: 4 passed",
+   "ok served-fields: 1 passed",
+   "ok lambda-probe: 12 passed",
+   "ok artifact-bounds: 1 passed",
+   "ok request-bounds: 1 passed",
+   "ok lambda-request-rows: 1 passed",
+   "ok apr-format: 104 passed",
+   "skipped apr-format: golden_v2_f32_writer_is_byte_identical (deferred-items 08-20, pre-existing writer/fixture drift)",
+   "ok modernbert: 24 passed",
+   "ok gates-selftest: LAYA GATES SELFTEST OK 29 rows (FULL-tier must-pass cases SKIPPED: upload-eligibility (the DRY_RUN upload of the deployed artifact (laya-verify, multi",
+   "ok contract-audit-phase8: Phase 8 binding audit: 4 contract(s) audited, no binding finding outside PHASE8_LIVE_EXEMPT=''",
+   "ok claims-check: LAYA CLAIMS OK 133 rows",
+   "ok numeric-replay: 1 passed",
+   "ok train-selftest: METRICS SELFTEST OK (5 frozen cases replayed within 1e-06; 23 numeric cases bit for bit)",
+   "ok pv-lint: Result: PASS",
+   "ok graph-fresh: \"check\": []",
+   "ok contracts-lib: 1671 passed",
+   "ok contracts-corpus: 10 passed",
+   "ok decide-crates: 254 passed",
+   "ok clippy: -D warnings clean on the three decide crates and apr-format",
+   "ok fmt: rustfmt --check clean",
+   "ok pv-decide-tool-boundary-v1: 0 error(s), 0 warning(s)",
+   "ok pv-laya-finetune-gate-v1: 0 error(s), 0 warning(s)",
+   "ok pv-laya-parity-v1: 0 error(s), 0 warning(s)",
+   "ok pv-decide-apr-v1: 0 error(s), 0 warning(s)",
+   "ok invariants: 31 passed",
+   "ok contract-cycle: 3 passed",
+   "ok contracts-cli: 394 passed",
+   "ok verify-suite: LAYA VERIFY SUITE OK",
+   "ok laya-verify: deploy_eligible true, sha256 24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a, shipped_seed 17"
+  ],
+  "claims": "LAYA CLAIMS OK 133 rows",
+  "host_note": "run on macOS; the aprender-contracts-cli suite ran on a clean clone at HEAD (394 passed, 0 failed) because untracked .claude/worktrees falsify the tracked-graph freshness test in a working tree; HYGIENE's graph-fresh ran on the same clone; a planted stale graph turned HYGIENE red (FAIL HYGIENE graph-fresh: exit 1) with pv lint still PASS",
+  "skipped_by_name": [
+   "apr-format golden_v2_f32_writer_is_byte_identical (CLASS B, deferred-items 08-20; it passed in this round's unified-mode apr-format run, so the skip may be stale: not changed here)"
+  ]
+ },
  "push": null
 }
