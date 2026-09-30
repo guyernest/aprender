@@ -19,7 +19,7 @@ MUST_FAIL - malformed, or at/over the bar. Every one of these printed OK
   BAD   under    [-1]           bar=2.0    wanted MUST_FAIL, got MUST_PASS (rc=0):   case-table OK: -1 < 2.0
   ok    under    [1e3]          bar=2.0    MUST_FAIL
   BAD   under    [1 2]          bar=2.0    wanted MUST_FAIL, got MUST_PASS (rc=0):   case-table OK: 1 2 < 2.0
-  BAD   under    [1.5]         bar=2.0    wanted MUST_FAIL, got MUST_PASS (rc=0):   case-table OK: 1.5 < 2.0
+  BAD   under    [1.5\r]         bar=2.0    wanted MUST_FAIL, got MUST_PASS (rc=0):   case-table OK: 1.5\r < 2.0
 
 The OTHER direction. forecast-pool-ratio's bar is 'best >= 2.0', not
 '< 2.0'; reusing the under-mode there would INVERT a gate, so the mode is
