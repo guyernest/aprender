@@ -922,16 +922,40 @@
  "push": {
   "remote_before": "3c0f2cf00312756edb6810b888c8cbeecaafc9be",
   "code_head": "524c80203d9fac763c3f22f243d4d80d49e1686d",
-  "pushed_head": "cb084692a222e5a2b821d4d92a01a604893a6fb3",
+  "pushed_head": "dad7f6a5e0a09763cb633e770fd6b11554064d10",
   "method": "git push origin gsd/phase-2-contract-gate, fast-forward, no force",
-  "remote_after": "cb084692a222e5a2b821d4d92a01a604893a6fb3",
+  "remote_after": "dad7f6a5e0a09763cb633e770fd6b11554064d10",
   "pr": "https://github.com/paiml/aprender/pull/4634",
   "pr_state": {
    "isDraft": true,
-   "mergeStateStatus": "BEHIND",
-   "headRefOid": "cb084692a222e5a2b821d4d92a01a604893a6fb3"
+   "headRefOid": "dad7f6a5e0a09763cb633e770fd6b11554064d10"
   },
   "scan": "derived 5 identifier tokens from the local scrub history, positive control matched 34 pre-scrub lines, 5223 added lines over 19 commits scanned: 0 derived-identifier hits, 0 generic identifier/credential hits, 0 unexpected e-mail addresses, no workflow/ci/baseline path in the range; the token file was a temp file outside the repository and was deleted",
-  "evidence_commits_local_only": "this record's push object (E2) and Task 3's record (E3) stay local: pushing a docs-only commit restarts the ~90 minute CI and voids the maintainer approval for P"
+  "evidence_commits_local_only": "this record's push object (E2) and Task 3's record (E3) stay local: pushing a docs-only commit restarts the ~90 minute CI and voids the maintainer approval for P",
+  "superseded_pushed_head": "cb084692a222e5a2b821d4d92a01a604893a6fb3",
+  "superseded_reason": "pr-review-quorum Arm 4 failed on runners whose git is older than 2.40 (git_patch_id.py port): the diff carried two bare CR bytes in .planning/phases/06-native-time-series-forecasting-stack/.tdd-evidence/06-16-t2-naive-validator-run.txt, bytes.splitlines() splits on a bare CR and git does not, so the port produced two patch-ids ('no single patch-id in the reimpl output'). Nothing had been approved on the superseded head.",
+  "remote_before_repush": "cb084692a222e5a2b821d4d92a01a604893a6fb3",
+  "repush_fix": "dad7f6a5e (docs, .planning only): each bare CR in that file is now the two characters backslash and r",
+  "patch_id_proof": {
+   "subject_range": "merge-base(upstream/main, HEAD)=2817c6d97 .. head, PR 4634, prpid_diff pinned diff",
+   "before_cb084692a_plus_E2": {
+    "native": "bd45371403",
+    "reimpl": [
+     "54f62862da",
+     "8d64664f86"
+    ],
+    "reimpl_rc": 1
+   },
+   "after_F": {
+    "native": "fa35df0f2a",
+    "reimpl": "fa35df0f2a",
+    "full_40_hex_equal": true,
+    "both_rc": 0
+   },
+   "planted_control": "a dangling commit on F with the two bare CR bytes restored: reimpl yields two ids again (54f62862da, 8d64664f86), native one (bd45371403); the working tree was never touched",
+   "bare_cr_scan": "the whole git diff 2817c6d97..head held exactly 2 bare CR bytes, both in that one file; none left",
+   "arm4_self_test": "not runnable on this host: minisign is not on PATH"
+  },
+  "scan_repush": "derived 5 tokens, positive control matched 34 lines, 16 added lines over 2 commits: 0 derived hits, 0 generic hits, 0 unexpected e-mail addresses, no workflow/ci/baseline path; temp file outside the repo, deleted"
  }
 }
