@@ -3343,6 +3343,14 @@ laya-gates-selftest:
         must_fail stage-exit '^FAIL CLASS A manifest-and-run-fields: exit 101' env PATH="$S:$PATH" GAP_SHIM_MODE=fail LAYA_GAP_ONLY=A just laya-gap-regression
         if grep -q 'LAYA GAP' "$(logof zero-match)" "$(logof stage-exit)"; then red "a failing class still printed a LAYA GAP OK line"; fi
         must_fail unknown-class "^FAIL LAYA_GAP_ONLY: unknown class 'F'" env LAYA_GAP_ONLY=F just laya-gap-regression
+        # HYGIENE must FAIL when its first gate exits non-zero (the cargo shim's `fail` mode drives `pv lint`)...
+        must_fail hygiene-stage-exit '^FAIL HYGIENE pv-lint: exit 101' env PATH="$S:$PATH" GAP_SHIM_MODE=fail LAYA_GAP_ONLY=HYGIENE just laya-gap-regression
+        # ...and when the tracked graph reads stale: a `pv` shim answers lint PASS but `extract --check` exits 1,
+        # so a stale graph cannot ride through on the lint verdict (the real pv is measured in the 08-34 evidence).
+        local P="$W/pvshim"; mkdir -p "$P"
+        printf '#!/bin/sh\ncase "$1" in lint) echo "armed meet: Pass"; echo "Result: PASS"; exit 0 ;; extract) echo "shim: the tracked graph differs from a fresh extraction" >&2; exit 1 ;; esac\nexit 2\n' > "$P/pv"
+        chmod +x "$P/pv"
+        must_fail hygiene-stale-graph '^FAIL HYGIENE graph-fresh: exit 1' env PATH="$P:$PATH" LAYA_GAP_ONLY=HYGIENE just laya-gap-regression
         must_pass class-a '^LAYA GAP STAGES OK \(A; not the full regression\)' env LAYA_GAP_ONLY=A just laya-gap-regression
         grep -q '^PASS CLASS A$' "$(logof class-a)" || red "class-a: no PASS CLASS A line"
     }
@@ -3593,17 +3601,28 @@ laya-claims-check:
 #   CLASS D  just laya-claims-check
 #   CLASS E  the bit-for-bit numeric replay (Rust side) and laya-train-selftest (Python side, with
 #            METRICS SELFTEST OK and the PYTHON REFUSALS sweep line)
+#   HYGIENE  the contract-hygiene class 08-32's regression never reached (plan 08-34): `pv lint contracts`
+#            (Result: PASS), `pv extract contracts --check` on a clean export of the tracked tree (graph
+#            freshness, see below), and the aprender-contracts lib and corpus tests. 08-32 reported PASS
+#            while six of those lib tests and two corpus tests were red.
 #   REGRESSION  the three decide crates' tests, clippy -D warnings, fmt, pv validate on the four Phase 8
 #            contracts, monorepo_invariants + readme_contract, the aprender-contracts-cli tests (the
-#            contract-cycle guard), laya-verify-suite (real weights, every LEG OK, the ladder rung
-#            MEASURED) and laya-verify of the deployed artifact from the MAIN checkout
-#            (deploy_eligible true, the pinned sha256 below, shipped seed 17).
+#            contract-cycle guard, then the WHOLE crate with nothing skipped, on the clean export),
+#            laya-verify-suite (real weights, every LEG OK, the ladder rung MEASURED) and laya-verify of
+#            the deployed artifact from the MAIN checkout (deploy_eligible true, the pinned sha256
+#            below, shipped seed 17).
+# The clean export: `pv extract` and `cargo test -p aprender-contracts-cli` walk every directory except
+# target/.git/.lake/node_modules, so untracked agent worktrees (.claude/worktrees) make the tracked graph
+# read as stale in a working tree (`the_tracked_repo_graph_is_fresh`): a host artifact CI's checkout
+# cannot reproduce. Both graph-sensitive checks therefore run on `git ls-files` exported to
+# <target>/laya-gap-export, which is what a clean checkout holds. Nothing is skipped by name.
 # Every stage logs to one temp dir (printed first). A stage whose exit is non-zero, whose evidence line
 # is absent, or whose named-test run passes a different number of tests than it names prints
 # `FAIL <CLASS> <stage>: <why> (log <path>)` and the recipe exits 1: a name filter that matches nothing
 # exits 0 in cargo (REVIEW CR-02), so the passed count is the check, never the exit status alone.
-# Success prints `PASS CLASS A` .. `PASS CLASS E`, `PASS REGRESSION` and `LAYA GAP REGRESSION OK`.
-# LAYA_GAP_ONLY=<A,B,C,D,E,REGRESSION> runs only those classes and prints `LAYA GAP STAGES OK`, never
+# Success prints `PASS CLASS A` .. `PASS CLASS E`, `PASS HYGIENE`, `PASS REGRESSION` and
+# `LAYA GAP REGRESSION OK`.
+# LAYA_GAP_ONLY=<A,B,C,D,E,HYGIENE,REGRESSION> runs only those classes and prints `LAYA GAP STAGES OK`, never
 # the full OK line (row gap-regression of scripts/laya_gates.tsv uses it). The default run reads real
 # weights (laya-gates-selftest's armed leg, laya-verify-suite, laya-verify), so run it under the host's
 # real-weights lock (`lockf -k /tmp/aprender-laya-real-weights.lock just laya-gap-regression`); it does
@@ -3612,7 +3631,7 @@ laya-gap-regression:
     #!/usr/bin/env bash
     set -euo pipefail
     ONLY="${LAYA_GAP_ONLY:-}"
-    CLASSES="A B C D E REGRESSION"
+    CLASSES="A B C D E HYGIENE REGRESSION"
     for c in ${ONLY//,/ }; do
         case " $CLASSES " in *" $c "*) ;; *) echo "FAIL LAYA_GAP_ONLY: unknown class '$c' (known: $CLASSES)" >&2; exit 1 ;; esac
     done
@@ -3656,6 +3675,22 @@ laya-gap-regression:
         for re in "$@"; do need "$stage" "$re"; done
         echo "  ok $stage: $(grep -Eo -m 1 -- "$1.*" "$LOG" | cut -c 1-150)"
     }
+    # The pv the HYGIENE and REGRESSION stages drive, resolved once. `--manifest-path` lets it run from
+    # any directory (the graph check runs from the clean export).
+    TOP="$(git rev-parse --show-toplevel)"
+    if command -v pv > /dev/null 2>&1; then PV=(pv); else PV=(cargo run --release -q --manifest-path "$TOP/Cargo.toml" -p aprender-contracts-cli --bin pv --); fi
+    # export_tree: X = a fresh export of the TRACKED tree (`git ls-files`) inside the cargo target dir (a
+    # stable path, so cargo reuses its fingerprints run to run; target/ is skipped by every tree walker).
+    X=""
+    TARGET=""
+    export_tree() {
+        TARGET="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')" \
+            || fail export "cargo metadata gave no target directory" /dev/null
+        X="$TARGET/laya-gap-export"
+        rm -rf "$X"; mkdir -p "$X"
+        (cd "$TOP" && git ls-files -z | tar --null -T - -cf -) | tar -x -C "$X" || fail export "the tracked tree could not be exported" /dev/null
+    }
+    trap '[ -z "$X" ] || rm -rf "$X"' EXIT
     if wanted A; then
         CLS="CLASS A"
         tests manifest-and-run-fields 4 -p aprender-decide --lib -- --exact \
@@ -3700,6 +3735,19 @@ laya-gap-regression:
         evidence train-selftest '^METRICS SELFTEST OK ' '^PYTHON REFUSALS swept=[1-9]' '^LAYA TRAIN SELFTEST OK$'
         echo "PASS CLASS E"
     fi
+    if wanted HYGIENE; then
+        CLS="HYGIENE"
+        run pv-lint "${PV[@]}" lint contracts
+        evidence pv-lint '^Result: PASS' '^armed meet: Pass'
+        # Graph freshness: the tracked contracts.nt/shapes.ttl equal a fresh extraction, on the clean export.
+        export_tree
+        run graph-fresh bash -c 'cd "$1" && shift && exec "$@"' _ "$X" "${PV[@]}" extract contracts --check
+        evidence graph-fresh '"check": \[\]'
+        rm -rf "$X"
+        tests contracts-lib + -p aprender-contracts --lib
+        tests contracts-corpus + -p aprender-contracts --test validate_contracts
+        echo "PASS HYGIENE"
+    fi
     if wanted REGRESSION; then
         CLS="REGRESSION"
         tests decide-crates + -p aprender-decide -p aprender-mcp-decide -p aprender-mcp-decide-lambda
@@ -3708,20 +3756,21 @@ laya-gap-regression:
         echo "  ok clippy: -D warnings clean on the three decide crates and apr-format"
         run fmt cargo fmt -p aprender-decide -p aprender-mcp-decide -p aprender-mcp-decide-lambda -p apr-format -p aprender-core -- --check
         echo "  ok fmt: rustfmt --check clean"
-        if command -v pv > /dev/null 2>&1; then PV=(pv); else PV=(cargo run --release -q -p aprender-contracts-cli --bin pv --); fi
         for c in contracts/decide-tool-boundary-v1.yaml contracts/laya-finetune-gate-v1.yaml contracts/laya-parity-v1.yaml contracts/decide-apr-v1.yaml; do
             run "pv-$(basename "$c" .yaml)" "${PV[@]}" validate "$c"
             evidence "pv-$(basename "$c" .yaml)" '^0 error\(s\)'
         done
         tests invariants + -p aprender-core --test monorepo_invariants --test readme_contract
         # The contract-cycle guard by name (the three tests the 08-01 dependency cycle broke, plan 08-12), then
-        # the rest of the crate. every_contract_generates_book_page is red on the pre-Phase-8 base d37f2fefc as
-        # well (it parses contracts/binding.yaml, which has no `metadata:`; deferred-items "Found during plan
-        # 08-32"), so it is skipped by its exact name and the skip is printed.
+        # the WHOLE crate with nothing skipped (plan 08-34): every_contract_generates_book_page is green since
+        # the upstream merge fixed its walker (D-ITEM-08-32-A, closed), so the old exemption hid nothing today
+        # and would have hidden a future regression of that test. The crate runs on the clean export (see the
+        # header): its the_tracked_repo_graph_is_fresh reads the tree, and untracked worktrees falsify it.
         tests contract-cycle 3 -p aprender-contracts-cli --lib -- --exact commands::certify::tests::certify_on_real_contracts \
             commands::verify_pipeline::tests::verify_pipeline_on_real_contracts commands::verify_pipeline::tests::verify_pipeline_json_on_real_contracts
-        tests contracts-cli + -p aprender-contracts-cli -- --exact --skip every_contract_generates_book_page
-        echo "  skipped contracts-cli: every_contract_generates_book_page (deferred-items 08-32, red on the pre-Phase-8 base)"
+        export_tree
+        CARGO_TARGET_DIR="$TARGET" CARGO_INCREMENTAL=0 tests contracts-cli + --manifest-path "$X/Cargo.toml" -p aprender-contracts-cli
+        rm -rf "$X"
         run verify-suite just laya-verify-suite
         evidence verify-suite '^LAYA VERIFY SUITE OK$' '^LEG OK: laya_parity$' '^LEG OK: fail_closed_vectors$' '^LEG OK: demo_run$' \
             '^LEG OK: python_records$' 'MEASURED ladder [0-9]+ blocks within bars'
