@@ -1130,6 +1130,11 @@ contract-hygiene gates before the decide integration fragments 510/520. Evidence
 - **D-ITEM-08-32-E: two tests are Linux-only and fail on macOS.** `aprender-mcp`
   `exec_marker_bin_survives_a_transient_etxtbsy` (the file is identical to upstream) and the `aprender-profile`
   crate. Both are expected green on CI's Linux runners.
+  **Rows (08-34 audit):** fragments 360 (`cargo check --workspace --benches`, aprender-profile bin test:
+  `compile_error!("renacer requires Linux")`; the same command with `--exclude aprender-profile` is rc 0) and 490
+  (the aprender-profile integration targets); `cargo build --examples --workspace` (aprender-profile example
+  `validate_golden_trace` only; rc 0 with the crate excluded); lib test `aprender-mcp`
+  `apr_bin::tests::exec_marker_bin_survives_a_transient_etxtbsy`.
   status: open
   **Reason:** platform-specific, not Phase 8's; local macOS runs of the phase regression skip or ignore them.
   **Owner:** their crates' maintainers.
@@ -1198,17 +1203,22 @@ contract-hygiene gates before the decide integration fragments 510/520. Evidence
   status: open
   **Owner:** their crates' maintainers. **Re-open trigger:** a Linux CI run failing any of them.
 - **D-ITEM-08-34-B: `aprender-core` `setfit::artifact::determinism::the_fixture_artifact_hash_matches_the_committed_golden`
-  fails in the workspace lib universe and is NOT a host limit.** The fixture artifact hashes to `7169eac8...`
-  against the committed golden `831c64c5...` whenever serde_json's `preserve_order` (unified in by pmcp) is in the
-  build, and matches the golden without it (fragment 010: `-p aprender-core --features setfit`). At upstream
-  2817c6d97 the workspace does not enable `aprender-core/setfit`, so the test is not in upstream's workspace lib
-  run (upstream CI green on 2817c6d97 and 00052c012); on this branch `aprender-mcp-setfit` enables it, so it joins
-  partition 1/3 of CI's workspace-test and is expected RED on Linux.
-  status: open, BLOCKING (found by the 08-34 audit before the push; nothing was pushed)
-  **Owner:** Phase 3/4 SetFit artifact writer. **Fix shape:** make `write_setfit_apr`'s JSON key order independent
-  of serde_json's `preserve_order` (canonicalise before serialising), or scope the golden to the unification the
-  workspace really has; either is a code change, so it needs its own plan and a new golden check under both
-  feature sets.
+  failed in the workspace lib universe and was NOT a host limit.** The fixture artifact hashed to `7169eac8...`
+  against the committed golden `831c64c5...` whenever serde_json's `preserve_order` (unified in by pmcp) was in the
+  build, and matched the golden without it (fragment 010: `-p aprender-core --features setfit`). At upstream
+  2817c6d97 the workspace does not enable `aprender-core/setfit`, so the test was not in upstream's workspace lib
+  run (upstream CI green on 2817c6d97 and 00052c012); on this branch `aprender-mcp-setfit` enables it, so it joined
+  partition 1/3 of CI's workspace-test and was expected RED on Linux.
+  status: **closed by commit 0b3ef0164** (orchestrator-authorised Rule-1 fix in plan 08-34): `write_setfit_apr`
+  canonicalises the document (recursively sorted keys) before serialising, so the bytes are the sorted ones under
+  either backing and the committed golden is unchanged. Proof: the determinism module (24 tests) green standalone
+  (`preserve_order=OFF`) and under `-p aprender-core -p aprender-mcp-setfit` (`=ON`); CI's nextest line partition 1/3
+  green for it; mutation-checked (dropping the call turns the unified mode red, removing the sort turns three tests
+  red). Not in the audit's `registered_ids`: it is no longer a red, so a recurrence is a NEW finding (BLOCKED-PHASE8),
+  never attributed.
+  **Sweep residue (not an item):** `aprender-serve` `GgufToAprConverter::to_apr_bytes` builds its header metadata with
+  `json!`, which is insertion-ordered under `preserve_order`; no hash or golden bears on it and the reader is
+  order-insensitive, so it was not changed. Re-open trigger: a pinned digest of those bytes.
 - **D-ITEM-08-34-C: `scripts/check_baseline_ratchets.sh` is red on this host for tool versions alone.** Three
   `tool_version` rows (pmat recorded 3.41.1, runner 3.15.0, twice; bashrs recorded 7.4.1, runner 6.66.3) and the
   vacuity row they cause; every ratchet row read against upstream's tip is `ok`.
