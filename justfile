@@ -3614,8 +3614,9 @@ laya-claims-check:
 # The clean export: `pv extract` and `cargo test -p aprender-contracts-cli` walk every directory except
 # target/.git/.lake/node_modules, so untracked agent worktrees (.claude/worktrees) make the tracked graph
 # read as stale in a working tree (`the_tracked_repo_graph_is_fresh`): a host artifact CI's checkout
-# cannot reproduce. Both graph-sensitive checks therefore run on `git ls-files` exported to
-# <target>/laya-gap-export, which is what a clean checkout holds. Nothing is skipped by name.
+# cannot reproduce. Both graph-sensitive checks therefore run on a clone of HEAD (plus any uncommitted
+# tracked edits) at <target>/laya-gap-export, which is what a clean checkout holds. Nothing is skipped
+# by name.
 # Every stage logs to one temp dir (printed first). A stage whose exit is non-zero, whose evidence line
 # is absent, or whose named-test run passes a different number of tests than it names prints
 # `FAIL <CLASS> <stage>: <why> (log <path>)` and the recipe exits 1: a name filter that matches nothing
@@ -3679,7 +3680,7 @@ laya-gap-regression:
     # any directory (the graph check runs from the clean export).
     TOP="$(git rev-parse --show-toplevel)"
     if command -v pv > /dev/null 2>&1; then PV=(pv); else PV=(cargo run --release -q --manifest-path "$TOP/Cargo.toml" -p aprender-contracts-cli --bin pv --); fi
-    # export_tree: X = a fresh export of the TRACKED tree (`git ls-files`) inside the cargo target dir (a
+    # export_tree: X = a fresh clone of the TRACKED tree (HEAD + tracked edits) inside the cargo target dir (a
     # stable path, so cargo reuses its fingerprints run to run; target/ is skipped by every tree walker).
     X=""
     TARGET=""
@@ -3687,8 +3688,17 @@ laya-gap-regression:
         TARGET="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')" \
             || fail export "cargo metadata gave no target directory" /dev/null
         X="$TARGET/laya-gap-export"
-        rm -rf "$X"; mkdir -p "$X"
-        (cd "$TOP" && git ls-files -z | tar --null -T - -cf -) | tar -x -C "$X" || fail export "the tracked tree could not be exported" /dev/null
+        rm -rf "$X"
+        # A clone at HEAD, not a bare copy of the files: scripts that read the tree ask git for it
+        # (parity_receipt_denominator.sh lists `git ls-files`), so the export must be a repository.
+        git clone -q --local --no-checkout "$TOP" "$X" || fail export "the clone failed" /dev/null
+        git -C "$X" checkout -q --detach "$(git -C "$TOP" rev-parse HEAD)" || fail export "the checkout failed" /dev/null
+        # Overlay the tracked edits that are not committed yet, so what is checked is what this tree holds.
+        (cd "$TOP" && git diff -z --name-only --diff-filter=AM HEAD) > "$X/../laya-gap-export.edits"
+        if [ -s "$X/../laya-gap-export.edits" ]; then
+            (cd "$TOP" && tar --null -T "$X/../laya-gap-export.edits" -cf -) | tar -x -C "$X" || fail export "the edits could not be overlaid" /dev/null
+        fi
+        rm -f "$X/../laya-gap-export.edits"
     }
     trap '[ -z "$X" ] || rm -rf "$X"' EXIT
     if wanted A; then
