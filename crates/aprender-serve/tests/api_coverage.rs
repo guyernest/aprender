@@ -431,6 +431,7 @@ fn test_chat_delta_skip_none_serialization() {
     let delta1 = ChatDelta {
         role: None,
         content: Some("hello".to_string()),
+        tool_calls: None,
     };
     let json1 = serde_json::to_string(&delta1).expect("should serialize");
     assert!(!json1.contains("role"));
@@ -440,6 +441,7 @@ fn test_chat_delta_skip_none_serialization() {
     let delta2 = ChatDelta {
         role: Some("assistant".to_string()),
         content: None,
+        tool_calls: None,
     };
     let json2 = serde_json::to_string(&delta2).expect("should serialize");
     assert!(json2.contains(r#""role":"assistant""#));
@@ -1169,6 +1171,7 @@ fn test_chat_completion_chunk_serialization() {
             delta: ChatDelta {
                 role: Some("assistant".to_string()),
                 content: None,
+                tool_calls: None,
             },
             finish_reason: None,
         }],
@@ -1193,6 +1196,7 @@ fn test_chat_chunk_choice_with_content() {
         delta: ChatDelta {
             role: None,
             content: Some("Hello".to_string()),
+            tool_calls: None,
         },
         finish_reason: None,
     };
@@ -1209,6 +1213,7 @@ fn test_chat_chunk_choice_with_finish_reason() {
         delta: ChatDelta {
             role: None,
             content: None,
+            tool_calls: None,
         },
         finish_reason: Some("stop".to_string()),
     };
@@ -1242,6 +1247,7 @@ fn test_chat_delta_both_fields() {
     let delta = ChatDelta {
         role: Some("assistant".to_string()),
         content: Some("Hi there".to_string()),
+        tool_calls: None,
     };
 
     let json = serde_json::to_string(&delta).expect("should serialize");
@@ -2150,6 +2156,7 @@ fn test_chat_delta_empty_strings() {
     let delta = ChatDelta {
         role: Some(String::new()),
         content: Some(String::new()),
+        tool_calls: None,
     };
 
     let json = serde_json::to_string(&delta).expect("should serialize");
@@ -2162,6 +2169,7 @@ fn test_chat_delta_only_role_none_content() {
     let delta = ChatDelta {
         role: Some("user".to_string()),
         content: None,
+        tool_calls: None,
     };
 
     let json = serde_json::to_string(&delta).expect("should serialize");
@@ -2176,6 +2184,7 @@ fn test_chat_chunk_choice_empty_delta() {
         delta: ChatDelta {
             role: None,
             content: None,
+            tool_calls: None,
         },
         finish_reason: None,
     };
@@ -2194,6 +2203,7 @@ fn test_chat_chunk_choice_all_fields() {
         delta: ChatDelta {
             role: Some("assistant".to_string()),
             content: Some("Hello".to_string()),
+            tool_calls: None,
         },
         finish_reason: Some("stop".to_string()),
     };
@@ -2218,6 +2228,7 @@ fn test_chat_completion_chunk_serialization_full() {
                 delta: ChatDelta {
                     role: Some("assistant".to_string()),
                     content: Some("Token 1".to_string()),
+                    tool_calls: None,
                 },
                 finish_reason: None,
             },
@@ -2226,6 +2237,7 @@ fn test_chat_completion_chunk_serialization_full() {
                 delta: ChatDelta {
                     role: None,
                     content: Some("Token 2".to_string()),
+                    tool_calls: None,
                 },
                 finish_reason: Some("length".to_string()),
             },
@@ -4079,6 +4091,7 @@ fn test_chat_completion_chunk_construction_patterns() {
             delta: ChatDelta {
                 role: Some("assistant".to_string()),
                 content: None,
+                tool_calls: None,
             },
             finish_reason: None,
         }],
@@ -4101,6 +4114,7 @@ fn test_chat_completion_chunk_construction_patterns() {
             delta: ChatDelta {
                 role: None,
                 content: Some("Hello".to_string()),
+                tool_calls: None,
             },
             finish_reason: None,
         }],
@@ -4122,6 +4136,7 @@ fn test_chat_completion_chunk_construction_patterns() {
             delta: ChatDelta {
                 role: None,
                 content: None,
+                tool_calls: None,
             },
             finish_reason: Some("stop".to_string()),
         }],
