@@ -51,6 +51,7 @@ impl Default for AppState {
             cached_eos_token_id: None,
             #[cfg(feature = "setfit")]
             setfit_model: None,
+            cached_serving_context: None,
             verbose: false,
             trace: false,
             model_source: None,
@@ -107,6 +108,7 @@ impl AppState {
             cached_eos_token_id: None,
             #[cfg(feature = "setfit")]
             setfit_model: None,
+            cached_serving_context: None,
             verbose: false,
             trace: false,
             model_source: None,
@@ -172,6 +174,7 @@ impl AppState {
             cached_eos_token_id: None,
             #[cfg(feature = "setfit")]
             setfit_model: None,
+            cached_serving_context: None,
             verbose: false,
             trace: false,
             model_source: None,
@@ -339,6 +342,7 @@ impl AppState {
             cached_eos_token_id: None,
             #[cfg(feature = "setfit")]
             setfit_model: None,
+            cached_serving_context: None,
             verbose: false,
             trace: false,
             model_source: None,
@@ -418,6 +422,7 @@ impl AppState {
             cached_eos_token_id: None,
             #[cfg(feature = "setfit")]
             setfit_model: None,
+            cached_serving_context: None,
             verbose: false,
             trace: false,
             model_source: None,
@@ -478,6 +483,7 @@ impl AppState {
             cached_eos_token_id: None,
             #[cfg(feature = "setfit")]
             setfit_model: None,
+            cached_serving_context: None,
             verbose: false,
             trace: false,
             model_source: None,
@@ -544,6 +550,7 @@ impl AppState {
             cached_eos_token_id: None,
             #[cfg(feature = "setfit")]
             setfit_model: None,
+            cached_serving_context: None,
             verbose: false,
             trace: false,
             model_source: None,
@@ -605,6 +612,7 @@ impl AppState {
             cached_eos_token_id: None,
             #[cfg(feature = "setfit")]
             setfit_model: None,
+            cached_serving_context: None,
             verbose: false,
             trace: false,
             model_source: None,
@@ -680,6 +688,7 @@ impl AppState {
             cached_eos_token_id: None,
             #[cfg(feature = "setfit")]
             setfit_model: None,
+            cached_serving_context: None,
             verbose: false,
             trace: false,
             model_source: None,

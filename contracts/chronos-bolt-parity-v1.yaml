@@ -4,6 +4,10 @@ metadata:
   created: '2026-09-06'
   author: PAIML Engineering
   kind: kernel
+  depends_on:
+      - attention-kernel-v1
+      - matmul-kernel-v1
+      - softmax-kernel-v1
   # ONT-7 (plan 08-33): the parity bars are asserted in the committed tree; the contract states no
   # host restriction of its own (its qa_gate records what was measured where), so no qualifier.
   valid_under:

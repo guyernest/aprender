@@ -37,6 +37,9 @@ metadata:
   created: '2026-08-07'
   author: PAIML Engineering
   kind: kernel
+  depends_on:
+      - setfit-encoder-conformance-v1
+      - contrastive-pair-protocol-v1
   # ONT-7 (plan 08-33): `kind: kernel` was the schema default and is now written out; the dataset
   # rules hold in the committed tree, so the one declared world and no qualifier.
   valid_under:

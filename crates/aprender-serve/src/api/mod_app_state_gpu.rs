@@ -66,6 +66,7 @@ impl AppState {
             cached_eos_token_id: None,
             #[cfg(feature = "setfit")]
             setfit_model: None,
+            cached_serving_context: None,
             verbose: false,
             trace: false,
             model_source: None,
@@ -127,6 +128,7 @@ impl AppState {
             cached_eos_token_id: None,
             #[cfg(feature = "setfit")]
             setfit_model: None,
+            cached_serving_context: None,
             verbose: false,
             trace: false,
             model_source: None,
@@ -196,6 +198,7 @@ impl AppState {
             cached_eos_token_id: None,
             #[cfg(feature = "setfit")]
             setfit_model: None,
+            cached_serving_context: None,
             verbose: false,
             trace: false,
             model_source: None,
@@ -231,6 +234,12 @@ impl AppState {
         // contention with the batch scheduler's write lock.
         let arch = Some(cuda_model.model().config.architecture.clone());
         let eos = cuda_model.model().config.eos_token_id;
+        // D5: cached for the same reason as `arch` — the pre-flight length check
+        // must not wait on the scheduler's write lock.
+        let serving_context = crate::gguf::dense_session::cap_context(
+            cuda_model.model().config.context_length,
+            cuda_model.executor().max_kv_len(),
+        );
 
         let (audit_logger, audit_sink) = create_audit_state();
         Ok(Self {
@@ -269,6 +278,7 @@ impl AppState {
             cached_eos_token_id: eos,
             #[cfg(feature = "setfit")]
             setfit_model: None,
+            cached_serving_context: Some(serving_context),
             verbose: false,
             trace: false,
             model_source: None,
@@ -290,6 +300,12 @@ impl AppState {
         let tokenizer = BPETokenizer::with_merges(vocab, merges, unk)?;
         let arch = Some(cuda_model.model().config.architecture.clone());
         let eos = cuda_model.model().config.eos_token_id;
+        // D5: cached for the same reason as `arch` — the pre-flight length check
+        // must not wait on the scheduler's write lock.
+        let serving_context = crate::gguf::dense_session::cap_context(
+            cuda_model.model().config.context_length,
+            cuda_model.executor().max_kv_len(),
+        );
 
         let (audit_logger, audit_sink) = create_audit_state();
         Ok(Self {
@@ -330,6 +346,7 @@ impl AppState {
             cached_eos_token_id: eos,
             #[cfg(feature = "setfit")]
             setfit_model: None,
+            cached_serving_context: Some(serving_context),
             verbose: false,
             trace: false,
             model_source: None,
@@ -396,6 +413,7 @@ impl AppState {
             cached_eos_token_id: None,
             #[cfg(feature = "setfit")]
             setfit_model: None,
+            cached_serving_context: None,
             verbose: false,
             trace: false,
             model_source: None,
@@ -641,6 +659,7 @@ impl AppState {
             cached_eos_token_id: eos_id,
             #[cfg(feature = "setfit")]
             setfit_model: None,
+            cached_serving_context: None,
             verbose: false,
             trace: false,
             model_source: None,
@@ -705,6 +724,7 @@ impl AppState {
             cached_eos_token_id: None,
             #[cfg(feature = "setfit")]
             setfit_model: None,
+            cached_serving_context: None,
             verbose: false,
             trace: false,
             model_source: None,
@@ -802,6 +822,13 @@ impl AppState {
 
         // GpuModel doesn't carry architecture info
         None
+    }
+
+    /// D5: positions a dense CUDA serve turn can reach (model context capped
+    /// by the device KV cache), or `None` when no GGUF CUDA model is loaded.
+    #[must_use]
+    pub fn serving_context(&self) -> Option<usize> {
+        self.cached_serving_context
     }
 
     /// GH-330: Get EOS token ID from whichever model backend is loaded.

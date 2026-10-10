@@ -148,6 +148,24 @@ default_jobs() {
 GUARD_TREE_JOBS="${GUARD_TREE_JOBS:-$(default_jobs)}"
 case "$GUARD_TREE_JOBS" in ''|*[!0-9]*|0) GUARD_TREE_JOBS=1 ;; esac
 
+# A HUNG GUARD IS NAMED, NOT WAITED OUT (0.71 row 25). Rows are printed only
+# after the whole pool finishes, so one guard that never returned held the step
+# silent until the job's own deadline killed it -- 3469 s on one runner, 3572 s
+# on another -- and the log could not say which guard it was. Two mechanisms:
+#   * every check (a guard's --self-test and its run, separately) gets
+#     GUARD_TREE_GUARD_TIMEOUT seconds, then is killed and reported as
+#     `FAIL  <guard> [<row>]` with a TIMEOUT line. A timeout is a FAILURE,
+#     never a skip. Default 2400: above the slowest green guard measured
+#     (1862 s for both rows of check_ci_push_reuse.sh, x86-main, 2026-10-08),
+#     below the 3600 s the fat driver gives this section;
+#   * every GUARD_TREE_HEARTBEAT seconds (default 300) a `still running:` line
+#     on stderr names each check that has not returned, so a job killed from
+#     outside still leaves the name in the log.
+GUARD_TREE_GUARD_TIMEOUT="${GUARD_TREE_GUARD_TIMEOUT:-2400}"
+case "$GUARD_TREE_GUARD_TIMEOUT" in ''|*[!0-9]*|0) GUARD_TREE_GUARD_TIMEOUT=2400 ;; esac
+GUARD_TREE_HEARTBEAT="${GUARD_TREE_HEARTBEAT:-300}"
+case "$GUARD_TREE_HEARTBEAT" in ''|*[!0-9]*|0) GUARD_TREE_HEARTBEAT=300 ;; esac
+
 # A bare `cargo ` token: not preceded by a lowercase letter, underscore or
 # hyphen (so `sccache`, `rustc-sccache`, `cargo-ci` in a path do not count),
 # and followed by a space (so `cargo` alone, e.g. a comment fragment, does
@@ -250,7 +268,7 @@ advertises_self_test() {
 # guards exit 0 on UNMEASURED by design (a runner without the tool must not red
 # every PR), so `PASS  <guard> [run]` meant either "measured and passed" or "not
 # measured here", and the log could not say which -- main run 35561048727 showed
-# check_fleet_pv_shapes_gate.sh as a bare PASS on gx10-build, and #3567's
+# check_fleet_pv_shapes_advisory.sh as a bare PASS on gx10-build, and #3567's
 # criterion (the verdict measured inside a runner) was unobservable anywhere.
 #
 # So under a PASS row, every captured line whose FIRST token is UNMEASURED or
@@ -281,6 +299,7 @@ worker_run_one() {
     : > "$w_labels"
     w_total=0
     w_failed=0
+    w_start=$SECONDS
 
     # Same row shape, same capture-and-indent, as the serial runner it
     # replaces -- only the destination changed.
@@ -288,12 +307,25 @@ worker_run_one() {
         label="$1"
         shift
         w_total=$((w_total + 1))
-        if "$@" >"$w_cap" 2>&1; then
+        # What is running, for the heartbeat; removed when the check returns.
+        w_t0=$SECONDS
+        printf '%s\n' "$label" > "$GUARD_TREE_RUN_DIR/$w_idx.running"
+        # -k: a guard that ignores TERM is KILLed 30 s later. GNU timeout
+        # signals the guard's whole process group, so its children go too.
+        timeout -k 30 "$GUARD_TREE_GUARD_TIMEOUT" "$@" >"$w_cap" 2>&1
+        w_rc=$?
+        rm -f "${GUARD_TREE_RUN_DIR:?}/${w_idx:?}.running"
+        if [ "$w_rc" -eq 0 ]; then
             printf 'PASS  %s\n' "$label" >> "$w_rows"
             surface_pass_summary "$w_cap" >> "$w_rows"
         else
             w_failed=$((w_failed + 1))
             printf 'FAIL  %s\n' "$label" >> "$w_rows"
+            if { [ "$w_rc" -eq 124 ] || [ "$w_rc" -eq 137 ]; } && [ $((SECONDS - w_t0)) -ge "$GUARD_TREE_GUARD_TIMEOUT" ]; then
+                printf '      | guard_tree: TIMEOUT -- %s was still running after %ss (GUARD_TREE_GUARD_TIMEOUT) and was killed; its output so far:\n' \
+                    "$label" "$GUARD_TREE_GUARD_TIMEOUT" >> "$w_rows"
+                printf 'guard_tree: TIMEOUT %s after %ss -- killed\n' "$label" "$GUARD_TREE_GUARD_TIMEOUT" >&2
+            fi
             sed 's/^/      | /' "$w_cap" >> "$w_rows"
             printf '%s\n' "$label" >> "$w_labels"
         fi
@@ -306,7 +338,7 @@ worker_run_one() {
         worker_row "$w_guard [run]" bash "$w_guard"
     fi
     rm -f "$w_cap"
-    printf 'total=%d\nfailed=%d\n' "$w_total" "$w_failed" > "$w_meta.tmp"
+    printf 'total=%d\nfailed=%d\nsecs=%d\n' "$w_total" "$w_failed" "$((SECONDS - w_start))" > "$w_meta.tmp"
     mv -f "$w_meta.tmp" "$w_meta"
     return 0
 }
@@ -514,7 +546,50 @@ skip_reason() {
 # advertises_self_test and the worker are defined above, beside the
 # --internal-run-one dispatch they belong to.
 
+# #4108 (gemini review, lane 1) -- THE UNIVERSE ITSELF must be whole before it is
+# planned, and before --dry-run answers too: check_guards_are_wired.sh reads the
+# dry-run, so a guard missing there would be invisible to the wiring meta-guard (ph4). A guard tracked in git but missing from disk is dropped SILENTLY by both
+# `grep -L` (no-cargo) and `grep -l` (cargo-only): it lands in neither universe, is
+# never planned, and the planned/accounted check below cannot see what was never
+# planned. So every tracked guard must exist, and a failed listing is fatal.
+if ! tracked="$(git ls-files 'scripts/check_*.sh')"; then
+    printf 'FAIL  guard_tree [universe]\n'
+    printf '      | guard_tree: git ls-files failed -- the guard universe is unknown, so no run is a verdict.\n'
+    printf '0 checks, 1 failed\n'
+    exit 1
+fi
+missing=""
+while IFS= read -r g; do
+    # present AND readable: grep -L/-l skips an unreadable file exactly as it skips a
+    # missing one (ph5 lane 1), so both are refused here, before any subset is computed
+    [ -n "$g" ] && { [ ! -f "$g" ] || [ ! -r "$g" ]; } && missing="${missing}${g} "
+done <<<"$tracked"
+if [ -n "$missing" ]; then
+    printf 'FAIL  guard_tree [universe]\n'
+    printf '      | guard_tree: tracked guard(s) missing from disk or unreadable: %s-- they would be dropped from every universe unseen.\n' "$missing"
+    printf '0 checks, 1 failed\n'
+    exit 1
+fi
+
 guards="$(universe_for_subset)"
+# #4108 (ph9 review, gemini lane) -- the subset's own listing can come back SHORT with nothing
+# to say so: `grep -L`/`grep -l` report a file they failed to read on stderr and their exit
+# status tracks the match, not the listing (why `|| exit 1` was declined), and the
+# planned/accounted check below cannot see a guard that was never listed. The two cargo
+# subsets PARTITION the tracked universe, so their sizes must sum to it: a guard lost by
+# either listing is a count short, whichever subset this run asked for.
+if [ "$subset" != all ]; then
+    n_tracked=$(grep -c . <<<"$tracked")
+    n_free=$(cargo_free_universe | grep -c .)
+    n_only=$(cargo_only_universe | grep -c .)
+    if [ $((n_free + n_only)) -ne "$n_tracked" ]; then
+        printf 'FAIL  guard_tree [universe]\n'
+        printf '      | guard_tree: %d tracked guard(s), but the cargo-free (%d) and cargo-only (%d) listings cover %d -- a guard was lost from a subset, so no run is a verdict.\n' \
+            "$n_tracked" "$n_free" "$n_only" "$((n_free + n_only))"
+        printf '0 checks, 1 failed\n'
+        exit 1
+    fi
+fi
 
 RUN_DIR="$(mktemp -d)" || exit 1
 trap 'rm -rf "${RUN_DIR:?}"' EXIT
@@ -534,8 +609,14 @@ to_run=0
 #    skip_reason reads three oracles and costs nothing worth parallelising.
 PLAN="$RUN_DIR/plan"
 : > "$PLAN"
+# #4108: the plan is COUNTED IN MEMORY as it is written, because the file is not
+# the witness of itself. On lambda the scratch dir vanished mid-run, the tally
+# loop below read nothing from a missing $PLAN, and the run printed
+# "0 checks, 0 failed" and exited 0 -- `make gate` green on nothing.
+planned=0
 while IFS= read -r g; do
     [ -n "$g" ] || continue
+    planned=$((planned + 1))
     reason="$(skip_reason "$g")"
     if [ -n "$reason" ]; then
         printf 'SKIP\t%s\t%s\n' "$g" "$reason" >> "$PLAN"
@@ -554,6 +635,19 @@ if [ "$dry_run" -eq 1 ]; then
         esac
     done < "$PLAN"
     printf '%d to run, %d skipped\n' "$to_run" "$skipped"
+    # #4108 (ph5 lane 1): the dry-run answers for the whole plan or not at all -- a plan
+    # file lost before it was read back prints fewer rows, and the wiring meta-guard
+    # reads exactly these rows.
+    if [ $((to_run + skipped)) -ne "$planned" ]; then
+        printf 'FAIL  guard_tree [plan] -- the plan held %d guard(s) and the dry-run recovered %d\n' "$planned" "$((to_run + skipped))" >&2
+        exit 1
+    fi
+    # #4108 (ph9 review, sonnet lane): the dry-run's own vacuity check -- the run path fails
+    # "0 checks executed" below, and a dry-run that planned nothing answers nothing either.
+    if [ "$planned" -eq 0 ]; then
+        printf 'FAIL  guard_tree [vacuous] -- the dry-run planned 0 guard(s); an empty plan is not a dispatch list\n' >&2
+        exit 1
+    fi
     exit 0
 fi
 
@@ -581,6 +675,41 @@ while IFS="$TAB" read -r kind g reason; do
     fi
 done < "$PLAN"
 
+# THE HEARTBEAT (row 25): names every check still running, every
+# GUARD_TREE_HEARTBEAT seconds, live on stderr. It stops when the `done` file
+# appears and is waited for, never signalled: a forked subshell TERMed early
+# would run this script's EXIT trap and remove $RUN_DIR under the pool.
+# It also stops when $RUN_DIR is gone or this script is (#4108's lost scratch
+# dir): with no `done` file possible it would otherwise loop forever and hold
+# the caller's captured stdout open.
+(
+    trap - EXIT
+    parent=$$
+    last=$SECONDS
+    # Ages are counted from when this loop first saw a check's .running file
+    # (scanned every second), on this shell's own SECONDS clock: no wall-clock
+    # read (bashrs DET002), and a worker is a separate xargs process whose
+    # SECONDS is not ours. A label change on the same file restarts its age.
+    declare -A seen_t0=() seen_lbl=()
+    while [ ! -e "$RUN_DIR/done" ] && [ -d "$RUN_DIR" ] && kill -0 "$parent" 2>/dev/null; do
+        sleep 1
+        due=0
+        [ $((SECONDS - last)) -lt "$GUARD_TREE_HEARTBEAT" ] || { due=1; last=$SECONDS; }
+        for f in "$RUN_DIR"/*.running; do
+            [ -f "$f" ] || continue
+            IFS= read -r lbl < "$f" 2>/dev/null || continue
+            [ -n "$lbl" ] || continue
+            if [ "${seen_lbl[$f]-}" != "$lbl" ]; then
+                seen_lbl[$f]=$lbl
+                seen_t0[$f]=$SECONDS
+            fi
+            [ "$due" -eq 1 ] || continue
+            printf 'guard_tree: still running: %s (%ss)\n' "$lbl" "$((SECONDS - ${seen_t0[$f]}))" >&2
+        done
+    done
+) &
+heartbeat_pid=$!
+
 if [ -s "$WORKLIST" ]; then
     # `-I{}` makes xargs split on newlines only (a guard path never contains
     # one) and pass exactly one spec per process. The pool's own exit status is
@@ -595,12 +724,16 @@ while IFS= read -r spec; do
     [ -n "$spec" ] || continue
     GUARD_TREE_RUN_DIR="$RUN_DIR" bash "$SELF" "--internal-run-one=$spec" || true
 done < "$SERIAL_LIST"
+: > "$RUN_DIR/done"
+wait "$heartbeat_pid" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # 3. THE OUTPUT -- plan order, one guard's rows at a time, never interleaved.
 idx=0
+accounted=0
 while IFS="$TAB" read -r kind g reason; do
     idx=$((idx + 1))
+    accounted=$((accounted + 1))
     if [ "$kind" = SKIP ]; then
         skipped=$((skipped + 1))
         printf 'skipped: %s -- %s\n' "$g" "$reason"
@@ -653,7 +786,42 @@ while IFS="$TAB" read -r kind g reason; do
     fi
 done < "$PLAN"
 
+# #4108 -- VACUITY IS A FAILURE. Two independent witnesses, both fail-closed:
+#   (a) every guard the plan held was accounted for by the tally above -- a
+#       lost or truncated $PLAN reads as FEWER, never as a clean run;
+#   (b) at least one check executed -- "0 checks, 0 failed" answers nothing,
+#       whatever the cause (lost plan, empty universe, everything skipped).
+if [ "$accounted" -ne "$planned" ]; then
+    failed=$((failed + 1))
+    printf 'FAIL  guard_tree [plan]\n'
+    printf '      | guard_tree: the plan held %d guard(s) and %d were accounted for -- its scratch dir (%s) was lost or truncated mid-run, so this run has no verdict.\n' \
+        "$planned" "$accounted" "$RUN_DIR"
+    fail_rows="${fail_rows}guard_tree [plan]
+"
+fi
+if [ "$total" -eq 0 ]; then
+    failed=$((failed + 1))
+    printf 'FAIL  guard_tree [vacuous]\n'
+    printf '      | guard_tree: 0 checks executed (%d planned, %d skipped) -- a run that executed nothing is not a pass.\n' \
+        "$planned" "$skipped"
+    fail_rows="${fail_rows}guard_tree [vacuous]
+"
+fi
+
 printf 'dispatch: up to %d guard(s) at a time (GUARD_TREE_JOBS)\n' "$GUARD_TREE_JOBS"
+# WHERE THE WALL CLOCK WENT. The pool's wall time is set by its slowest guards,
+# and without this line a slow guard-tree is a single opaque number (#4429's
+# x86-main: 1409 s for this one step, and no way to say which guard spent it).
+idx=0
+while IFS="$TAB" read -r kind g reason; do
+    idx=$((idx + 1))
+    [ "$kind" = RUN ] || continue
+    s="$(sed -n 's/^secs=//p' "$RUN_DIR/$idx.meta" 2>/dev/null | head -1)"
+    case "${s:-}" in ''|*[!0-9]*) continue ;; esac
+    printf '%d\t%s\n' "$s" "$g"
+done < "$PLAN" | sort -rn | head -n "${GUARD_TREE_SLOWEST:-15}" | while IFS="$TAB" read -r s g; do
+    printf 'slowest: %5ds  %s\n' "$s" "$g"
+done
 printf '%d guard(s) skipped\n' "$skipped"
 printf '%d checks, %d failed\n' "$total" "$failed"
 if [ "$failed" -gt 0 ]; then

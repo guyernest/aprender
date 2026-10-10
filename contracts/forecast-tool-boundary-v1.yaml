@@ -4,6 +4,10 @@ metadata:
   created: '2026-09-06'
   author: PAIML Engineering
   kind: kernel
+  depends_on:
+      - prophet-parity-v1
+      - neuralprophet-parity-v1
+      - chronos-bolt-parity-v1
   # ONT-7 (plan 08-33): the bounds and refusals hold in the committed tree. Only obligation [20]
   # (the pool speed-up ratio) names a host (aarch64 release) and that is where it is EVALUATED, an
   # evidence note on one obligation and not a restriction of the contract, so no host_class qualifier.

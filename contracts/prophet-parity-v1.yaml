@@ -4,6 +4,8 @@ metadata:
   created: '2026-09-05'
   author: PAIML Engineering
   kind: kernel
+  depends_on:
+      - lbfgs-kernel-v1
   # ONT-7 (plan 08-33): the parity bars hold in the committed tree; no qualifier is claimed.
   valid_under:
     world: committed
