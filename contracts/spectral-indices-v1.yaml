@@ -7,6 +7,10 @@ metadata:
   # hold in the committed tree, so the one declared world and no qualifier.
   valid_under:
     world: committed
+  # The ImageBuf::ndvi / ImageBuf::ndwi forms build on the aprender-image buffer type (buf.rs), the surface
+  # CRUX-N-17 tracks for vision ops.
+  depends_on:
+  - crux-N-17-v1
   description: Multispectral satellite and drone indices (NDVI, NDWI, EVI, SAVI)
   references:
   - Rouse et al. (1974) Monitoring vegetation systems in the Great Plains with ERTS (NDVI)
