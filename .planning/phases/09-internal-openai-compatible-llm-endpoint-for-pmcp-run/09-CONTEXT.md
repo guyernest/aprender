@@ -55,11 +55,17 @@ pmcp.run, Bedrock-as-provider rows, a training or fine-tuning path.
 
 ### Server conformance fixes (upstream PRs to paiml/aprender)
 - **D-03: The null-content fix, server side** — `ChatMessage.content` in
-  `crates/aprender-serve/src/api/mod_create_demo.rs` becomes `Option<String>` with `#[serde(default)]`
-  on deserialize (an assistant message with `content` absent or `null` is accepted and rendered as
-  empty), serialization unchanged (byte-identical responses, the PMAT-801 invariant). Test: the exact
-  pmcp-agent turn-2 body from the spike-029 wire log deserializes and the loop completes. (user,
-  2026-10-15; the PMAT-801 "follow-up" the code comment promises)
+  `crates/aprender-serve/src/api/mod_create_demo.rs` accepts an assistant message whose `content` is
+  absent or `null` (deserialized as the empty string and rendered as empty), with serialization
+  unchanged (byte-identical responses, the PMAT-801 invariant). Test: the exact pmcp-agent turn-2
+  body from the spike-029 wire log deserializes and the loop completes. (user, 2026-10-15; the
+  PMAT-801 "follow-up" the code comment promises)
+  — **Amended 2026-10-15 (orchestrator, after plan-check W1):** the decision binds the observable
+  behaviour, not the field's type. Either form satisfies it: keep `pub content: String` with
+  `#[serde(default, deserialize_with = …)]` (research Pattern 2 — the idiom already on
+  `ChatCompletionRequest.temperature`, byte-identity by construction, every reader untouched), or
+  `Option<String>` with a `serialize_with` that emits `""`. The plans implement the first; the
+  upstream PR body states which form and why.
 - **D-04: Bearer auth on the GGUF router** — `AuthGate::from_env()` is wired into the GGUF /
   Qwen3.5 server's router the way `build_apr_cpu_router` already is, so `APR_API_KEY` /
   `APR_API_KEY_HASH` (`contracts/apr-serve-api-key-auth-v1.yaml`) are enforced on every route the
