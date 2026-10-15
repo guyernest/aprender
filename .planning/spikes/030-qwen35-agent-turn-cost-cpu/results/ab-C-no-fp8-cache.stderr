@@ -1,0 +1,5 @@
+[bench] ab-C-no-fp8-cache threads=6 base=http://127.0.0.1:8041/v1
+  warmup: 200 total=10.638s ttft=5.621 pt=73 ct=65
+  short rep0: 200 total=11.163s ttft=5.63 pt=73 ct=73 prefill=13.0 decode=13.2 finish=stop tools=[] rss=2248.6MB
+  tools2 rep0: 200 total=36.21s ttft=36.21 pt=421 ct=38 prefill=11.6 decode=None finish=tool_calls tools=['get_weather'] rss=2289.7MB
+  tools10 rep0: 200 total=79.135s ttft=79.135 pt=937 ct=53 prefill=11.8 decode=None finish=tool_calls tools=['convert_currency'] rss=2322.7MB

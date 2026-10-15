@@ -1,0 +1,17 @@
+[bench] 4B-t14 threads=14 base=http://127.0.0.1:8040/v1
+  warmup: 200 total=31.235s ttft=15.48 pt=72 ct=73
+  short rep0: 200 total=34.566s ttft=16.416 pt=73 ct=80 prefill=4.4 decode=4.4 finish=stop tools=[] rss=5434.6MB
+  short rep1: 200 total=35.456s ttft=17.243 pt=73 ct=80 prefill=4.2 decode=4.4 finish=stop tools=[] rss=5478.1MB
+  answer256 rep0: 200 total=71.332s ttft=14.94 pt=68 ct=256 prefill=4.6 decode=4.5 finish=length tools=[] rss=5568.1MB
+  answer256 rep1: 200 total=70.895s ttft=15.215 pt=69 ct=245 prefill=4.5 decode=4.4 finish=stop tools=[] rss=5400.6MB
+  tools2 rep0: 200 total=101.577s ttft=101.577 pt=421 ct=38 prefill=4.1 decode=None finish=tool_calls tools=['get_weather'] rss=5544.8MB
+  tools2 rep1: 200 total=103.545s ttft=103.545 pt=421 ct=38 prefill=4.1 decode=None finish=tool_calls tools=['get_weather'] rss=5528.3MB
+  tools10 rep0: 200 total=226.312s ttft=226.312 pt=937 ct=52 prefill=4.1 decode=None finish=tool_calls tools=['convert_currency'] rss=5483.2MB
+  tools10 rep1: 200 total=225.5s ttft=225.5 pt=937 ct=52 prefill=4.2 decode=None finish=tool_calls tools=['convert_currency'] rss=5551.5MB
+  long2k rep0: 200 total=468.627s ttft=461.708 pt=1891 ct=26 prefill=4.1 decode=3.8 finish=stop tools=[] rss=5495.4MB
+  turn1: total=104.393s ttft=104.393 pt=421 ct=38 prefill=4.0 finish=tool_calls text=''
+  turn2_extend: total=14.158s ttft=10.756 pt=460 ct=15 prefill=42.8 finish=stop text='The weather in Paris right now is 17°C with light rain.'
+  foreign_between: total=36.884s ttft=18.326 pt=73 ct=80 prefill=4.0 finish=stop text='An MCP (Model Context Protocol) server acts as a standardize'
+  turn2_after_foreign: total=108.293s ttft=104.933 pt=460 ct=15 prefill=4.4 finish=stop text='The weather in Paris right now is 17°C with light rain.'
+  conc2: wall=60.37s per-request=[29.793, 60.36] ttft=[16.133, 46.422] statuses=[200, 200]
+  conc4: wall=102.22s per-request=[28.991, 102.224, 72.893, 57.772] ttft=[15.607, 88.43, 59.32, 44.338] statuses=[200, 200, 200, 200]

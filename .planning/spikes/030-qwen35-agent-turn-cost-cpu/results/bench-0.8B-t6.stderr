@@ -1,0 +1,19 @@
+[bench] 0.8B-t6 threads=6 base=http://127.0.0.1:8040/v1
+  warmup: 200 total=10.011s ttft=5.582 pt=73 ct=58
+  short rep0: 200 total=11.088s ttft=5.472 pt=73 ct=74 prefill=13.3 decode=13.2 finish=stop tools=[] rss=2249.5MB
+  short rep1: 200 total=11.316s ttft=5.497 pt=73 ct=77 prefill=13.3 decode=13.2 finish=stop tools=[] rss=2285.1MB
+  answer256 rep0: 200 total=25.665s ttft=5.306 pt=70 ct=256 prefill=13.2 decode=12.5 finish=length tools=[] rss=2298.2MB
+  answer256 rep1: 200 total=22.35s ttft=5.31 pt=70 ct=223 prefill=13.2 decode=13.1 finish=stop tools=[] rss=2314.7MB
+  tools2 rep0: 200 total=35.073s ttft=35.073 pt=421 ct=38 prefill=12.0 decode=None finish=tool_calls tools=['get_weather'] rss=2327.3MB
+  tools2 rep1: 200 total=35.065s ttft=35.065 pt=421 ct=38 prefill=12.0 decode=None finish=tool_calls tools=['get_weather'] rss=2361.2MB
+  tools10 rep0: 200 total=77.348s ttft=77.348 pt=937 ct=53 prefill=12.1 decode=None finish=tool_calls tools=['convert_currency'] rss=2271.9MB
+  tools10 rep1: 200 total=78.21s ttft=78.21 pt=937 ct=53 prefill=12.0 decode=None finish=tool_calls tools=['convert_currency'] rss=2283.8MB
+  long2k rep0: 200 total=154.411s ttft=153.454 pt=1890 ct=11 prefill=12.3 decode=11.5 finish=stop tools=[] rss=2317.7MB
+  long2k rep1: 200 total=153.608s ttft=152.641 pt=1890 ct=11 prefill=12.4 decode=11.3 finish=stop tools=[] rss=2329.1MB
+  long4k rep0: 200 total=327.477s ttft=326.379 pt=3770 ct=11 prefill=11.6 decode=10.0 finish=stop tools=[] rss=2394.5MB
+  turn1: total=35.611s ttft=35.611 pt=421 ct=38 prefill=11.8 finish=tool_calls text=''
+  turn2_extend: total=5.175s ttft=3.616 pt=460 ct=17 prefill=127.2 finish=stop text='The weather in Paris is currently light rain at a temperatur'
+  foreign_between: total=11.1s ttft=5.521 pt=73 ct=74 prefill=13.2 finish=stop text='An MCP server is a web application that provides a set of fu'
+  turn2_after_foreign: total=36.501s ttft=35.183 pt=460 ct=17 prefill=13.1 finish=stop text='The weather in Paris is currently light rain at a temperatur'
+  conc2: wall=20.71s per-request=[10.318, 20.709] ttft=[5.523, 15.818] statuses=[200, 200]
+  conc4: wall=31.16s per-request=[10.302, 25.872, 20.56, 31.156] ttft=[5.521, 21.089, 15.775, 26.399] statuses=[200, 200, 200, 200]

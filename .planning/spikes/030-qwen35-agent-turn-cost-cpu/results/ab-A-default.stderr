@@ -1,0 +1,5 @@
+[bench] ab-A-default threads=6 base=http://127.0.0.1:8041/v1
+  warmup: 200 total=10.974s ttft=5.55 pt=73 ct=71
+  short rep0: 200 total=10.752s ttft=5.5 pt=73 ct=67 prefill=13.3 decode=12.8 finish=stop tools=[] rss=2251.2MB
+  tools2 rep0: 200 total=35.921s ttft=35.921 pt=421 ct=38 prefill=11.7 decode=None finish=tool_calls tools=['get_weather'] rss=2274.0MB
+  tools10 rep0: 200 total=79.226s ttft=79.226 pt=937 ct=53 prefill=11.8 decode=None finish=tool_calls tools=['convert_currency'] rss=2297.5MB

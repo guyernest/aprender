@@ -202,3 +202,32 @@ Patterns and stack choices established across spike sessions. New spikes follow 
 - **Every numeric identity ships a mutation that must break it** (025: local window 63/65 must break layer 1 only).
 - **Serverless sizing**: Lambda bills GB-seconds and scales vCPU with memory, so for a CPU-bound model the
   largest function (10,240 MB) costs the same per decision and is fastest (026: 4 GB = same GB-s, 2.4x slower).
+
+## LLM endpoint spikes (idea `internal-llm-endpoint`, 029–030)
+
+- **Spike the consumer's pin with the pin's own artifacts.** The request cited `v0.70.3`; the fork's
+  `main` was at 0.63 with no Qwen3.5. The spike ran the release tarball (`gh release download`, sha256
+  checked against the published `.sha256`) and the GGUFs the capability ladder pins by sha256
+  (`contracts/model-capability-ladder-v1.yaml`), symlinked from the Hugging Face cache into `models/`;
+  `bin/` and `models/` are gitignored, the `.sha256` file is committed beside the binary.
+- **An "OpenAI-compatible" verdict is read against the consumer's two real clients, not the spec.**
+  Read the request-shaping code of each client (pmcp.run's `openai_v1` transformer, pmcp-agent's
+  `OpenAiCompatSource`), replay their exact shapes with a stdlib probe (`tools/probe_openai.py`), bisect
+  any rejection one field at a time (`tools/bisect_422.py`), then run the real SDK loop through a
+  **wire-logging shim** (`tools/shim.py`, one JSON line per request/response) that can apply a one-line
+  fix with a flag — so the fix is proven without forking either side. `cargo pmcp agent dev` uses a
+  `NoopInvoker` that advertises no tools: seed `RunState.history` with the user turn in the store and
+  implement `ToolInvoker::list_tools` to exercise a tool loop.
+- **Throughput spikes stream.** `stream: true` on every request so TTFT (first content/tool-call delta)
+  is prefill and the delta timestamps are decode; `usage` arrives on the final chunk. Put a **nonce in
+  every prompt** or the server's session state (which extends the previous prompt) flatters the numbers;
+  then test that state on purpose: turn 1 → turn 2 extending it → one foreign request → the same turn 2
+  again. One server per (model, `RAYON_NUM_THREADS`) config, **alone on the host** (029's timings under
+  two servers were 2–3× off), warm-up once, medians of two, and a per-request budget that skips the
+  larger shapes instead of letting a 4B run block the matrix.
+- **Concurrency rows report wall AND per-request latency** (`conc2`/`conc4`); wall ≈ the sum of the
+  requests is "serialises", which one `Mutex<Session>` guarantees.
+- **The harness runs zsh**: `${h:+-H "$h"}` became one argument and silently broke an auth probe (every
+  row 200); header-passing curl loops live in a `#!/bin/bash` script. A `Monitor` filter that ends in
+  `tail -n +N` buffers on a pipe — use `tail -n 0 -f` for new lines only. A background task's
+  "exit code 0" is the wrapper's; read `rc=` from the log.

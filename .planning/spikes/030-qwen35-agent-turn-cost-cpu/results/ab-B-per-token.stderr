@@ -1,0 +1,5 @@
+[bench] ab-B-per-token threads=6 base=http://127.0.0.1:8041/v1
+  warmup: 200 total=11.166s ttft=5.548 pt=73 ct=73
+  short rep0: 200 total=11.115s ttft=5.507 pt=73 ct=74 prefill=13.3 decode=13.2 finish=stop tools=[] rss=2249.8MB
+  tools2 rep0: 200 total=35.255s ttft=35.255 pt=421 ct=38 prefill=11.9 decode=None finish=tool_calls tools=['get_weather'] rss=2289.3MB
+  tools10 rep0: 200 total=77.884s ttft=77.884 pt=937 ct=53 prefill=12.0 decode=None finish=tool_calls tools=['convert_currency'] rss=2306.2MB

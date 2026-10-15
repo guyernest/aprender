@@ -1,0 +1,19 @@
+[bench] 2B-t14 threads=14 base=http://127.0.0.1:8040/v1
+  warmup: 200 total=16.511s ttft=7.621 pt=73 ct=83
+  short rep0: 200 total=17.523s ttft=7.564 pt=73 ct=92 prefill=9.7 decode=9.2 finish=stop tools=[] rss=4648.4MB
+  short rep1: 200 total=16.469s ttft=7.529 pt=73 ct=82 prefill=9.7 decode=9.2 finish=stop tools=[] rss=4686.7MB
+  answer256 rep0: 200 total=31.298s ttft=7.25 pt=70 ct=224 prefill=9.7 decode=9.3 finish=stop tools=[] rss=4722.7MB
+  answer256 rep1: 200 total=31.809s ttft=7.609 pt=68 ct=219 prefill=8.9 decode=9.0 finish=stop tools=[] rss=4734.2MB
+  tools2 rep0: 200 total=49.414s ttft=49.414 pt=421 ct=38 prefill=8.5 decode=None finish=tool_calls tools=['get_weather'] rss=4745.9MB
+  tools2 rep1: 200 total=49.213s ttft=49.213 pt=421 ct=38 prefill=8.6 decode=None finish=tool_calls tools=['get_weather'] rss=4762.3MB
+  tools10 rep0: 200 total=109.184s ttft=109.184 pt=937 ct=52 prefill=8.6 decode=None finish=tool_calls tools=['convert_currency'] rss=4773.8MB
+  tools10 rep1: 200 total=107.303s ttft=107.303 pt=937 ct=53 prefill=8.7 decode=None finish=tool_calls tools=['convert_currency'] rss=4788.3MB
+  long2k rep0: 200 total=214.054s ttft=212.611 pt=1891 ct=12 prefill=8.9 decode=8.3 finish=stop tools=[] rss=4336.5MB
+  long2k rep1: 200 total=214.28s ttft=212.71 pt=1891 ct=12 prefill=8.9 decode=7.6 finish=stop tools=[] rss=2710.6MB
+  long4k rep0: 200 total=444.823s ttft=443.271 pt=3770 ct=12 prefill=8.5 decode=7.7 finish=stop tools=[] rss=2749.7MB
+  turn1: total=49.176s ttft=49.176 pt=421 ct=38 prefill=8.6 finish=tool_calls text=''
+  turn2_extend: total=7.589s ttft=5.24 pt=460 ct=18 prefill=87.8 finish=stop text='The weather in Paris right now is light rain with a temperat'
+  foreign_between: total=18.149s ttft=8.577 pt=73 ct=89 prefill=8.5 finish=stop text='An MCP (Model Context Protocol) server is a standardized bac'
+  turn2_after_foreign: total=51.365s ttft=49.354 pt=460 ct=18 prefill=9.3 finish=stop text='The weather in Paris right now is light rain with a temperat'
+  conc2: wall=29.39s per-request=[29.387, 14.636] ttft=[22.305, 7.838] statuses=[200, 200]
+  conc4: wall=57.92s per-request=[14.558, 29.102, 57.923, 43.498] ttft=[7.766, 22.242, 51.07, 36.651] statuses=[200, 200, 200, 200]
