@@ -1,4 +1,4 @@
 target/
 models/
 bin/
-deploy/apr
+**/deploy/apr
