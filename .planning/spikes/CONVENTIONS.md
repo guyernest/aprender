@@ -253,3 +253,19 @@ Patterns and stack choices established across spike sessions. New spikes follow 
   difference to a `max_tokens: 64` request on the same prompt; the first request in an environment
   includes the lazy model load, so derive rates from the second request onward. Client wall and the
   REPORT `Duration` disagreed by up to 46 s on long requests through the adapter — report both.
+
+## Calibration-gate and tolerance spikes (027–028)
+
+- **Measurements are not gate runs.** Every run dir carries `NOT-A-GATE-RUN.txt`; nothing a spike recommends is
+  declared until it is written into the contract before the next gate run is read (D-07).
+- **Drive the harness's own path** (`train.SeedRun.train_and_score`, `data.calibration_split` at the declared
+  seed), never a reimplementation; assert the recipe bytes hash to the failing run's before trusting a grid.
+- **Replicate near the bar.** MPS replicates moved ECE by 0.048 and flipped a FAIL to a PASS; report pass rates
+  with a CI, never a single-seed verdict.
+- **Separate slice, cap and distribution** with cheap diagnostics (prior reweighting, the untouched validation
+  split, an in-distribution held-out set built by rule). If the same checkpoints are calibrated in-distribution,
+  the failure is shift and the amendment is an eval-set decision for the operator.
+- **A tolerance against an fp32 reference needs a float64 triad** (`rust−torch32`, `rust−f64`, `torch32−f64`,
+  per row, dumped from the Rust builder's own ids and the harness's own `Scorer`, bitwise-checked against the
+  stored file). Only f64 tells "Rust is wrong" from "torch is noisy"; a larger eval set raises the max of a
+  heavy tail; keep argmax exact; compare an x86_64 re-score against committed f64 logits, not an aarch64 fp32 file.

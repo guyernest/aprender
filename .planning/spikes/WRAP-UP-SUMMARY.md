@@ -1,5 +1,77 @@
 # Spike Wrap-Up Summary
 
+## Session 5 — 2026-10-15
+
+**Spikes processed:** 5. 027 PARTIAL, 028 INVALIDATED (`llm-decision-classifier`, Laya gate and pack tolerance); 029 PARTIAL, 030 VALIDATED, 031 VALIDATED (`internal-llm-endpoint`)
+**Feature areas:** Laya calibration gate and pack tolerance · OpenAI endpoint conformance (apr serve ↔ pmcp.run) · Agent-turn cost on a CPU `apr serve` · Internal LLM endpoint on AWS (one image, priced)
+**Skill output:** `./.claude/skills/spike-findings-aprender/` (SKILL.md now 4 ideas, 21 references, sources for 30 spikes)
+
+### Processed Spikes
+
+| # | Name | Type | Verdict | Feature Area |
+|---|------|------|---------|--------------|
+| 027 | laya-calibration-slice-and-tcap | standard | PARTIAL | Laya calibration gate (`laya-calibration-gate-and-pack-tolerance.md`) |
+| 028 | laya-packability-noise-floor | standard | INVALIDATED | Laya pack tolerance (same reference) |
+| 029 | apr-serve-openai-tool-loop | standard | PARTIAL | OpenAI endpoint conformance (`openai-endpoint-conformance.md`) |
+| 030 | qwen35-agent-turn-cost-cpu | standard | VALIDATED | Agent-turn cost (`llm-endpoint-agent-turn-cost.md`) |
+| 031 | openai-endpoint-aws-hosts | comparison | VALIDATED | AWS deployment (`llm-endpoint-aws-deployment.md`) |
+
+### Key Findings
+
+**The Laya gate fails on split shift; the pack bar is below the noise floor (027, 028).** Over 24 grid runs and
+4 replicates on TweetEval stance, no cell passes the ECE clause on all three seeds at T ≤ 5 or T ≤ 10; the cap
+rarely binds for the declared early-stopping rule (slice T < 5 in 8/9 runs), and a 48-row slice halves the T spread
+without closing the gap. The same s64 checkpoints are calibrated on 459 in-distribution held-out rows (ECE
+0.05–0.07, 3/3), so the binding constraint is the SemEval train→test shift — an eval-set decision for the
+operator, not a tuning knob. MPS replicates move ECE by up to 0.048 and flipped one FAIL to PASS. The one
+gate-passing checkpoint is then refused by `just laya-pack` at 1.445e-5 against a 1e-5 bar on a row where torch
+fp32 is 6.27e-5 from float64 and Rust is 4.83e-5: Rust is the more accurate side, ECE/F1/argmax are identical to
+1e-7, and a larger eval set makes the bar harder (2.98e-5 on 459 rows). Proposed: `max(1e-5, 4 × max|torch32−f64|)`
+per checkpoint (min margin 3.2×) or a fixed 1e-4 (2.1×); keep argmax exact; the final-norm 1e-4 bar has no
+headroom on real rows. x86_64 unmeasured — compare against the committed float64 logits.
+
+**`apr serve` already is the OpenAI endpoint; one byte decides which pmcp.run client works (029).** Against the
+v0.70.3 release binary, Qwen3.5 0.8B and 4B emit correct tool calls, streamed tool calls, pick the right tool among
+ten and use tool results. The server requires `content` as a String on every message: the platform's `openai_v1`
+transformer writes `""` and passes, pmcp-agent's `OpenAiCompatSource` omits it and every SDK loop dies at turn 2
+(proven with the real `AgentEngine`, fixed through a one-line shim). `APR_API_KEY` is not enforced on the GGUF
+router; `tool_choice: required`, `max_completion_tokens` and `model` are ignored; the error envelope is a string.
+Bedrock cannot host Qwen3.5 (Custom Model Import: `Qwen3ForCausalLM`/`Qwen3MoeForCausalLM` only).
+
+**CPU prefill runs at the decode rate (030).** Alone on an M4 Pro: 0.8B 12/16 tok/s, 2B 6/9, 4B 3/4 at 6/14
+threads, flat from 73 to 3,770 prompt tokens, so an agent turn costs its prompt length — 35 s (0.8B) to 156 s (4B)
+for a two-tool turn at the Lambda thread count, 78–338 s for ten tools. Threads buy 1.35–1.5×; memory never binds
+(2.4–5.6 GB). Turn 2 extends the session state and pays only its new tokens (~10× in every config; #4274 fixed by
+0.70.3); one foreign request resets it; one `Mutex<Qwen35Session>` serialises concurrent requests; the batched CPU
+prefill is engaged and no faster than per-token; `--no-fp8-cache` is a no-op on CPU. The operator's prefix-cache
+idea is the largest lever measured: 7–15 s per turn instead of 71–156 s once the stable prefix is held.
+
+**One image serves the endpoint on Lambda, Fargate and LMI; priced on Graviton (031).** The release binary +
+Lambda Web Adapter + GGUF-from-S3 image ran on all three hosts in us-east-1 under `ze-kasher-dev` (weights staged
+HF → CodeBuild → S3 after the laptop uplink dropped twice). Default Lambda 10 GB: 0.8B on a Graviton3
+environment 40.5 s cold, 71 s and $0.0095 per two-tool turn, $0 idle; the identical 2B function landed on a
+Graviton2 (76 s cold, 246 s/turn) — the generation is a 2–3× lottery. Fargate 16 vCPU Graviton4, 4B: 39.8 s from
+`RunTask`, 131 s/turn at $0.632/h. LMI: three `c9g.16xlarge` for a 16-vCPU function, image packaging accepted,
+79 s/turn, rejects concurrent requests on high CPU, $2,335/month for one host; torn down. Session reuse survives
+every host. Decision: ship the cost/security option on default Lambda, Fargate for steady traffic, not LMI; GPU
+(`g5g`, sm_75 PTX in the arm64 CUDA release) stays the speed option, unmeasured.
+
+### Open Items Surfaced (not spiked)
+
+- Upstream aprender: relax `ChatMessage.content` to `Option<String>` (PMAT-801 follow-up); wire `AuthGate` into
+  the GGUF router; honour `tool_choice: required` and `max_completion_tokens`; check `model`; OpenAI error
+  envelope; a multi-entry token-prefix KV cache and a prefill-only request (`max_tokens: 0`) for the CPU path
+  (#4214 is the GPU analogue); a Q4_K GEMM batched CPU prefill (spike 020's 18×); surface `cpu_part` in
+  `/health`.
+- pmcp.run: an `LLMProvider` row for the internal endpoint (`openai_v1`, Bearer); pin and render tool schemas
+  to a stable prefix; route one conversation per process; raise the SDK's 60 s timeout and the gateway cap for
+  this provider; queue per conversation in the front door.
+- Laya: declare the eval-set amendment and the pack tolerance in `laya-finetune-gate-v1` / `laya-parity-v1`
+  (D-07); measure x86_64 against the committed float64 logits.
+- Hosting: GPU on `g5g` via ECS/EKS with the arm64 CUDA release binary; the Fargate scale-to-zero front door
+  (022 MCP Task) for the LLM endpoint.
+
+
 ## Session 4 — 2026-09-25
 
 **Spikes processed:** 6. 021 PARTIAL; 022, 023 VALIDATED (`mcp-model-hosting-aws`); 024, 025, 026 VALIDATED (`llm-decision-classifier`, Laya)

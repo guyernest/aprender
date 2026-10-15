@@ -1,0 +1,82 @@
+{
+ "label": "ab-B-per-token",
+ "model": "Qwen3.5-0.8B-Q4_K_M",
+ "threads": 6,
+ "base": "http://127.0.0.1:8041/v1",
+ "records": [
+  {
+   "status": 200,
+   "total_s": 11.166,
+   "ttft_s": 5.548,
+   "prompt_tokens": 73,
+   "completion_tokens": 73,
+   "finish": "stop",
+   "chunks": 73,
+   "prefill_tok_s": 13.2,
+   "decode_tok_s": 13.0,
+   "text": "An MCP server is a web application that provides a set of functions and data structures to an agent, allowing the agent to interact with the server's data and e",
+   "tool_calls": [],
+   "error": null,
+   "shape": "warmup"
+  },
+  {
+   "status": 200,
+   "total_s": 11.115,
+   "ttft_s": 5.507,
+   "prompt_tokens": 73,
+   "completion_tokens": 74,
+   "finish": "stop",
+   "chunks": 74,
+   "prefill_tok_s": 13.3,
+   "decode_tok_s": 13.2,
+   "text": "An MCP server is a web application that provides a set of functions and data structures to an MCP agent, enabling the agent to interact with the server's data a",
+   "tool_calls": [],
+   "error": null,
+   "rss_mb_after": 2249.8,
+   "rss_mb_before": 2211.5,
+   "shape": "short",
+   "rep": 0
+  },
+  {
+   "status": 200,
+   "total_s": 35.255,
+   "ttft_s": 35.255,
+   "prompt_tokens": 421,
+   "completion_tokens": 38,
+   "finish": "tool_calls",
+   "chunks": 1,
+   "prefill_tok_s": 11.9,
+   "decode_tok_s": null,
+   "text": "",
+   "tool_calls": [
+    "get_weather"
+   ],
+   "error": null,
+   "rss_mb_after": 2289.3,
+   "rss_mb_before": 2249.8,
+   "shape": "tools2",
+   "rep": 0
+  },
+  {
+   "status": 200,
+   "total_s": 77.884,
+   "ttft_s": 77.884,
+   "prompt_tokens": 937,
+   "completion_tokens": 53,
+   "finish": "tool_calls",
+   "chunks": 1,
+   "prefill_tok_s": 12.0,
+   "decode_tok_s": null,
+   "text": "",
+   "tool_calls": [
+    "convert_currency"
+   ],
+   "error": null,
+   "rss_mb_after": 2306.2,
+   "rss_mb_before": 2289.3,
+   "shape": "tools10",
+   "rep": 0
+  }
+ ],
+ "concurrency": {}
+}

@@ -1,6 +1,6 @@
 ---
 name: spike-findings-aprender
-description: Implementation blueprint from spike experiments. Requirements, proven patterns, and verified knowledge for building aprender's time-series forecasting stack (Prophet, NeuralProphet, Chronos ports; stateless forecast MCP servers; exogenous inputs — regressors and events; NEON GEMM kernel) and its Qwen3.5 LLM decision classifier (Kev few-shot vs SetFit, upstream sync, Python→GGUF→Rust handoff, batched prefill, Lambda / Lambda Managed Instances deployment; Laya ModernBERT decision model — full fine-tune quality, Rust port, Lambda) and measured AWS hosting for Rust model MCP servers (default Lambda vs Fargate scale-to-zero vs Lambda Managed Instances). Auto-loaded during implementation work.
+description: Implementation blueprint from spike experiments. Requirements, proven patterns, and verified knowledge for building aprender's time-series forecasting stack (Prophet, NeuralProphet, Chronos ports; stateless forecast MCP servers; exogenous inputs — regressors and events; NEON GEMM kernel) and its Qwen3.5 LLM decision classifier (Kev few-shot vs SetFit, upstream sync, Python→GGUF→Rust handoff, batched prefill, Lambda / Lambda Managed Instances deployment; Laya ModernBERT decision model — full fine-tune quality, Rust port, Lambda) and measured AWS hosting for Rust model MCP servers (default Lambda vs Fargate scale-to-zero vs Lambda Managed Instances), the Laya calibration gate and pack tolerance (split shift, fp32 noise floor), and the internal OpenAI-compatible LLM endpoint for pmcp.run (apr serve conformance with the platform's two clients, CPU agent-turn cost of Qwen3.5, Lambda / Fargate / LMI deployment priced per turn). Auto-loaded during implementation work.
 ---
 
 <context>
@@ -36,11 +36,20 @@ agents call — small models (SetFit, Chronos-Bolt, forecasters) and the multi-G
 and choose, per model, between default Lambda, ECS on Fargate scaled to zero, and Lambda Managed Instances on
 measured cold start, latency and idle cost rather than on assumptions.
 
+**Idea `internal-llm-endpoint`** — Offer pmcp.run agents (instructions + LLM configuration + MCP servers) a
+self-hosted LLM option: aprender's `apr serve` running an open-weights model (Qwen3.5 first) behind the same
+OpenAI `/v1/chat/completions` contract the platform already speaks to OpenAI, Anthropic and Bedrock, deployable
+as an optional component on AWS (default Lambda, Lambda Managed Instances, ECS/EKS). The operator's framing after
+030: the option for when **security or cost outrank speed**; the GPU host is the performance option. Premises
+checked against v0.70.3: the OpenAI API already ships in `apr serve`; pmcp.run's `openai_v1` transformer and
+pmcp-agent's `OpenAiCompatSource` are the two clients that define "compatible"; Bedrock cannot host Qwen3.5.
+
 Spike sessions wrapped: 2026-09-03 → 2026-09-05 (spikes 001–010, `prophet-forecast-mcp`);
 2026-09-20 (spikes 011–014, `forecast-exogenous-inputs`); 2026-09-23 (spikes 015–017, 019, 020,
 `llm-decision-classifier` — 3 VALIDATED, 2 PARTIAL; spike 018 was dropped before it was built);
 2026-09-25 (spikes 021–023 `mcp-model-hosting-aws` — 1 PARTIAL, 2 VALIDATED; 024–026 `llm-decision-classifier`
-(Laya) — 3 VALIDATED).
+(Laya) — 3 VALIDATED); 2026-10-15 (spikes 027 PARTIAL, 028 INVALIDATED, `llm-decision-classifier` Laya gate and
+pack tolerance; 029 PARTIAL, 030 VALIDATED, 031 VALIDATED, `internal-llm-endpoint`).
 </context>
 
 <requirements>
@@ -109,6 +118,10 @@ below honours the requirements of the idea it belongs to. Grouped by idea key.
   English root and `typed-decisions` checkpoints are in scope (multilingual is not). Build order 024 → 025 → 026
   (decided 2026-09-25).
 
+- **Laya's calibration gate fails on split shift, not on the cap** (spike 027, 2026-09-26): on TweetEval stance the
+  slice-fitted T calibrates in-distribution held-out rows (ECE 0.05–0.07) but not the SemEval test split, which wants
+  T 8–30; raising `TEMP_MAX` 5 → 10 rescues 1/3 runs at best. Choosing the demo's eval distribution is a user decision.
+
 ### Idea `mcp-model-hosting-aws`
 
 - **Every model is wrapped as an MCP server on the pmcp SDK** (`~/Development/mcp/sdk/rust-mcp-sdk`) so it
@@ -118,6 +131,24 @@ below honours the requirements of the idea it belongs to. Grouped by idea key.
 - **Candidate hosts are default Lambda, ECS on Fargate (scale to zero) and Lambda Managed Instances**; the
   decision is per model and may differ between small and large models (2026-09-23).
 - Measured in us-east-1 (where pmcp.run deploys), arm64, all resources tagged and torn down or left idle-free.
+
+### Idea `internal-llm-endpoint`
+
+- **The contract is pmcp.run's clients, not the OpenAI spec in the abstract**: verdicts are read from the
+  durable-agent-lambda `openai_v1` request shape and pmcp-agent's `OpenAiCompatSource`, replayed against the real
+  server (recorded 2026-10-15).
+- **Use the upstream release artifacts at the cited tag (v0.70.3) and the ladder-certified GGUFs**
+  (`contracts/model-capability-ladder-v1.yaml` sha256 pins), not a fork build; the fork's `main` is at 0.63 and has no
+  Qwen3.5.
+- **Bedrock is a provider the agent can point at (`/openai/v1`), not a host for aprender or Qwen3.5** (Custom Model
+  Import lists `Qwen3ForCausalLM` / `Qwen3MoeForCausalLM` only).
+- **The internal endpoint is the option for when security or cost outrank speed** (operator, 2026-10-15): a private,
+  scale-to-zero or fixed-cost CPU host is in scope even at 030's latencies; the GPU host is the performance option.
+- **Deploy with the decider pattern** (operator, 2026-10-15): one image / S3 weights / Lambda–Fargate–LMI, the shape
+  spikes 021–023 and 026 used for Kev and Laya.
+- **pmcp.run can pin and pre-cache an agent's tool schemas** (operator, 2026-10-15): the stable prefix (system prompt +
+  tool schemas) should be prefilled once and reused instead of re-sent per turn; 030 measured the suffix-only prefill
+  at ~10× cheaper than the whole prompt.
 </requirements>
 
 <findings_index>
@@ -143,6 +174,10 @@ below honours the requirements of the idea it belongs to. Grouped by idea key.
 
 | **AWS hosting for Rust model MCP servers (measured)** | `references/aws-mcp-model-hosting.md` | Cold start is bytes ÷ bandwidth. **Default Lambda caps S3 at ~80–95 MB/s** (Kev 3 GB: 43 s; Laya 0.84 GB: 12 s); Fargate pulls at 675–790 MB/s but spends 13–21 s provisioning (Kev: 22–30 s); **never bake weights into an image** (Lambda 800 s, Fargate 4×). LMI has no request-path cold start and the fastest CPU (0.34 s), but bills whole `c9g.8xlarge` hosts: 1 possible, 3 by default; its hosts are hidden from default `DescribeInstances` |
 | **Laya decision model (quality, adaptation)** | `references/laya-decision-model.md` | **A full fine-tune (Laya's notebook optimiser, 2–10 min on a laptop GPU) beats SetFit on stance (0.538 / 0.608 @16 / 64) and ties emotion (0.697 vs 0.705)**. Kev-4B got 0.577 on emotion. Zero-shot ≈ Kev-0.8B. Head-only adapters cannot move its shared marker scorer. Per-tenant artifact = a full 0.84 GB checkpoint; fine-tuned runs are over-confident |
+| **Laya calibration gate and pack tolerance** | `references/laya-calibration-gate-and-pack-tolerance.md` | **The ECE clause fails on SemEval train→test shift, not on the 12-row slice or the T cap**: the same s64 early-stopping checkpoints are calibrated in-distribution (ECE 0.05–0.07, 3/3); MPS replicates flip FAIL↔PASS near the bar. **The 1e-5 pack re-score bar is below fp32's own noise**: the one gate-passing checkpoint is refused at 1.45e-5 while torch fp32 is 6.3e-5 from float64 and Rust is closer; propose `max(1e-5, 4 × max\|torch32−f64\|)` (min margin 3.2×) |
+| **OpenAI endpoint conformance (apr serve ↔ pmcp.run)** | `references/openai-endpoint-conformance.md` | Tool calls, streamed tool calls, 10-tool selection and the tool-result turn work in OpenAI shape on Qwen3.5 0.8B/4B; **the server 422s an assistant turn with no/null `content`** (PMAT-801 follow-up) so pmcp-agent's loop dies at turn 2 while the platform's `openai_v1` passes; `APR_API_KEY` is not enforced on GGUF; `tool_choice: required`, `max_completion_tokens` and `model` are ignored |
+| **Agent-turn cost on a CPU `apr serve`** | `references/llm-endpoint-agent-turn-cost.md` | **Prefill runs at the decode rate**, flat from 73 to 3,770 tokens (0.8B 12/16, 2B 6/9, 4B 3/4 tok/s at 6/14 threads): a 2-tool turn is 35–156 s on six M4 threads; turn 2 extends the session (~10× cheaper), one foreign request resets it; one `Mutex<Qwen35Session>` serialises; the batched CPU prefill buys nothing. **The prefix cache is the biggest lever**, not the host |
+| **Internal LLM endpoint on AWS (one image, priced)** | `references/llm-endpoint-aws-deployment.md` | Release binary + Lambda Web Adapter + GGUF from S3 ran on Lambda, Fargate and LMI (image accepted). Lambda 0.8B on Graviton3: 40.5 s cold, **71 s and $0.0095 per 2-tool turn**, $0 idle; the 2B function landed on Graviton2 (246 s/turn) — a lottery. Fargate Graviton4 16 vCPU: 40 s from zero, 131 s/turn at $0.63/h. LMI: 3× `c9g.16xlarge` for a 16-vCPU function, throttles, $2,335/mo. Weights stage HF → CodeBuild → S3 |
 | **Laya inference in Rust** | `references/laya-rust-inference.md` | ModernBERT + head + scorer + builder in ~400 lines on `gemm_blis`: **probs 3.8e-6, ids 14/14 on the first run**; the local window is \|i−j\| ≤ 64 (proven by mutation). Safetensors and tokenizer load directly. 1.6× faster than Rust Kev-0.8B. **Spike code: aprender has no ModernBERT**, so the in-tree port, contract and CI tests are build work |
 
 ## Source Files
@@ -157,7 +192,9 @@ Not copied, to keep the skill small: parity fixtures (`fixtures/*.json`, ~10 MB,
 frozen-feature `runs/*.npz` (~200 MB), `vendor/kev` and `vendor/llama.cpp` checkouts, the
 GGUF/safetensors models (up to 3 GB each), and spike 017's 3.3 MB `kev-0.8b_fixture.json`. For 021–026, these are
 also left out: Cargo.locks, `report.html`, spike 025's 936 KB parity fixture and 20 MB ladder, the 024 `.npz`
-features and `vendor/laya`.
+features and `vendor/laya`. For 027–031: the spike-027 run dirs and `report.html`, spike 028's 2.3 MB per-row triad
+JSONs and held-out data, every `*.log` / `*.stderr` / `*.stdout`, Cargo.locks, the 57 MB `apr` release binary and
+the GGUFs (`models/` symlinks into the Hugging Face cache).
 
 ## Conventions
 
@@ -194,4 +231,9 @@ Follow it for new spikes and for porting spike code into crates.
 - 024-laya-vs-kev-few-shot
 - 025-laya-rust-forward-parity
 - 026-laya-mcp-default-lambda
+- 027-laya-calibration-slice-and-tcap
+- 028-laya-packability-noise-floor
+- 029-apr-serve-openai-tool-loop
+- 030-qwen35-agent-turn-cost-cpu
+- 031-openai-endpoint-aws-hosts
 </metadata>

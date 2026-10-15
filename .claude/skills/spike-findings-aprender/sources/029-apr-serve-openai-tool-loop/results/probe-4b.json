@@ -1,0 +1,1157 @@
+{
+ "base": "http://127.0.0.1:8030/v1",
+ "model": "Qwen3.5-4B-Q4_K_M",
+ "probes": [
+  {
+   "probe": "GET /models",
+   "verdict": "\u2713",
+   "status": 200,
+   "seconds": 0.00623016688041389,
+   "note": "ids=['default']",
+   "request": null,
+   "response": {
+    "object": "list",
+    "data": [
+     {
+      "id": "default",
+      "object": "model",
+      "created": 1792081112,
+      "owned_by": "realizar"
+     }
+    ]
+   }
+  },
+  {
+   "probe": "GET /effective-config",
+   "verdict": "\u2713",
+   "status": 200,
+   "seconds": 0.00035183411091566086,
+   "note": "ok",
+   "request": null,
+   "response": {
+    "schema_version": 1,
+    "parity": {
+     "status": "not-run",
+     "cosine": null,
+     "positions": 0,
+     "threshold": 0.98,
+     "basis": "cuda feature not compiled: no GPU gate exists in this build"
+    },
+    "server": {
+     "version": "0.70.3",
+     "build_commit": "95f64ba14",
+     "pid": 63658,
+     "started_utc": "2026-10-15T16:18:32.648Z",
+     "clock_source": "chrono::Utc::now (CLOCK_REALTIME) + std::time::Instant (CLOCK_MONOTONIC)",
+     "uptime_sec": 234.383329208
+    },
+    "compute_class": "cpu",
+    "build_features": [
+     "server",
+     "cli"
+    ],
+    "build_features_cli": [
+     "inference",
+     "training"
+    ],
+    "backend_loaded": [
+     "cpu"
+    ],
+    "model": {
+     "path": "/Users/guy/.cache/huggingface/hub/blobs/1d/1d203c2196991da08bc5b191ab4727516f476f3167e3276f75a0c5257493aadb",
+     "size_bytes": 2740937888,
+     "format": "gguf",
+     "quantization": "Q4_K",
+     "architecture": "qwen35",
+     "context_length": 4096,
+     "model_max_context_length": 262144,
+     "content_hash": null,
+     "parameter_count": 4205751296,
+     "loaded": true
+    },
+    "offload": {
+     "gpu_layers_requested": "none",
+     "gpu_layers_resolved": 0,
+     "gpu_layers_total": 32,
+     "offload_policy": "all_or_nothing",
+     "autofit_applied": [],
+     "explicit_args": [
+      "backend"
+     ]
+    },
+    "scheduler": null,
+    "cuda": null,
+    "kv": null,
+    "lock_contended": false
+   }
+  },
+  {
+   "probe": "chat plain",
+   "verdict": "\u2713",
+   "status": 200,
+   "seconds": 21.74922233307734,
+   "note": "fields=['choices', 'created', 'id', 'model', 'object', 'usage'] usage={'prompt_tokens': 55, 'completion_tokens': 39, 'total_tokens': 94} finish=stop",
+   "request": {
+    "model": "Qwen3.5-4B-Q4_K_M",
+    "messages": [
+     {
+      "role": "system",
+      "content": "You are a helpful assistant for an operations team. Use the tools when a question needs live data; otherwise answer directly. Be concise."
+     },
+     {
+      "role": "user",
+      "content": "In one sentence, what does an MCP server do?"
+     }
+    ],
+    "max_tokens": 256,
+    "temperature": 0.2
+   },
+   "response": {
+    "id": "chatcmpl-q4k-1792081347032",
+    "object": "chat.completion",
+    "created": 1792081368,
+    "model": "Qwen3.5-4B-Q4_K_M",
+    "choices": [
+     {
+      "index": 0,
+      "message": {
+       "role": "assistant",
+       "content": "An MCP (Model Context Protocol) server acts as a bridge that allows AI models to securely access and interact with external tools, data sources, and systems by exposing their capabilities through a standardized interface."
+      },
+      "finish_reason": "stop"
+     }
+    ],
+    "usage": {
+     "prompt_tokens": 55,
+     "completion_tokens": 39,
+     "total_tokens": 94
+    }
+   }
+  },
+  {
+   "probe": "tools auto -> tool_call",
+   "verdict": "\u2713",
+   "status": 200,
+   "seconds": 108.74151837499812,
+   "note": "finish=tool_calls id=call_0 type=function name=get_weather args={'city': 'Paris', 'unit': 'celsius'} args_is_str=True",
+   "request": {
+    "model": "Qwen3.5-4B-Q4_K_M",
+    "messages": [
+     {
+      "role": "system",
+      "content": "You are a helpful assistant for an operations team. Use the tools when a question needs live data; otherwise answer directly. Be concise."
+     },
+     {
+      "role": "user",
+      "content": "What's the weather in Paris right now?"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the current weather for a city.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string",
+          "description": "City name, e.g. 'Paris'"
+         },
+         "unit": {
+          "type": "string",
+          "enum": [
+           "celsius",
+           "fahrenheit"
+          ]
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "add",
+       "description": "Add two numbers and return the sum.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "a": {
+          "type": "number"
+         },
+         "b": {
+          "type": "number"
+         }
+        },
+        "required": [
+         "a",
+         "b"
+        ]
+       }
+      }
+     }
+    ],
+    "tool_choice": "auto",
+    "max_tokens": 256,
+    "temperature": 0.0
+   },
+   "response": {
+    "id": "chatcmpl-q4k-1792081368781",
+    "object": "chat.completion",
+    "created": 1792081477,
+    "model": "Qwen3.5-4B-Q4_K_M",
+    "choices": [
+     {
+      "index": 0,
+      "message": {
+       "role": "assistant",
+       "content": "",
+       "tool_calls": [
+        {
+         "id": "call_0",
+         "type": "function",
+         "function": {
+          "name": "get_weather",
+          "arguments": "{\"city\":\"Paris\",\"unit\":\"celsius\"}"
+         }
+        }
+       ]
+      },
+      "finish_reason": "tool_calls"
+     }
+    ],
+    "usage": {
+     "prompt_tokens": 410,
+     "completion_tokens": 38,
+     "total_tokens": 448
+    }
+   }
+  },
+  {
+   "probe": "tool result -> final answer",
+   "verdict": "\u2717",
+   "status": 422,
+   "seconds": 0.0013322499580681324,
+   "note": "finish=None tool_calls=False content=\"\"",
+   "request": {
+    "model": "Qwen3.5-4B-Q4_K_M",
+    "messages": [
+     {
+      "role": "system",
+      "content": "You are a helpful assistant for an operations team. Use the tools when a question needs live data; otherwise answer directly. Be concise."
+     },
+     {
+      "role": "user",
+      "content": "What's the weather in Paris right now?"
+     },
+     {
+      "role": "assistant",
+      "tool_calls": [
+       {
+        "id": "call_0",
+        "type": "function",
+        "function": {
+         "name": "get_weather",
+         "arguments": "{\"city\": \"Paris\"}"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "tool_call_id": "call_0",
+      "content": "{\"city\": \"Paris\", \"temperature_c\": 17, \"condition\": \"light rain\"}"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the current weather for a city.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string",
+          "description": "City name, e.g. 'Paris'"
+         },
+         "unit": {
+          "type": "string",
+          "enum": [
+           "celsius",
+           "fahrenheit"
+          ]
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "add",
+       "description": "Add two numbers and return the sum.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "a": {
+          "type": "number"
+         },
+         "b": {
+          "type": "number"
+         }
+        },
+        "required": [
+         "a",
+         "b"
+        ]
+       }
+      }
+     }
+    ],
+    "tool_choice": "auto",
+    "max_tokens": 256,
+    "temperature": 0.0
+   },
+   "response": {
+    "error": "Invalid request body. Check that the JSON structure matches the expected schema."
+   }
+  },
+  {
+   "probe": "tool_choice=required",
+   "verdict": "\u2717",
+   "status": 200,
+   "seconds": 130.81604991597123,
+   "note": "finish=stop got_call=False want_call=True err=",
+   "request": {
+    "model": "Qwen3.5-4B-Q4_K_M",
+    "messages": [
+     {
+      "role": "user",
+      "content": "Say hello."
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the current weather for a city.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string",
+          "description": "City name, e.g. 'Paris'"
+         },
+         "unit": {
+          "type": "string",
+          "enum": [
+           "celsius",
+           "fahrenheit"
+          ]
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "add",
+       "description": "Add two numbers and return the sum.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "a": {
+          "type": "number"
+         },
+         "b": {
+          "type": "number"
+         }
+        },
+        "required": [
+         "a",
+         "b"
+        ]
+       }
+      }
+     }
+    ],
+    "tool_choice": "required",
+    "max_tokens": 256,
+    "temperature": 0.0
+   },
+   "response": {
+    "id": "chatcmpl-q4k-1792081477524",
+    "object": "chat.completion",
+    "created": 1792081608,
+    "model": "Qwen3.5-4B-Q4_K_M",
+    "choices": [
+     {
+      "index": 0,
+      "message": {
+       "role": "assistant",
+       "content": "Hello! How can I help you?"
+      },
+      "finish_reason": "stop"
+     }
+    ],
+    "usage": {
+     "prompt_tokens": 376,
+     "completion_tokens": 8,
+     "total_tokens": 384
+    }
+   }
+  },
+  {
+   "probe": "tool_choice=none",
+   "verdict": "\u2713",
+   "status": 200,
+   "seconds": 116.88000862509944,
+   "note": "finish=stop got_call=False want_call=False err=",
+   "request": {
+    "model": "Qwen3.5-4B-Q4_K_M",
+    "messages": [
+     {
+      "role": "user",
+      "content": "What's the weather in Paris?"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the current weather for a city.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string",
+          "description": "City name, e.g. 'Paris'"
+         },
+         "unit": {
+          "type": "string",
+          "enum": [
+           "celsius",
+           "fahrenheit"
+          ]
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "add",
+       "description": "Add two numbers and return the sum.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "a": {
+          "type": "number"
+         },
+         "b": {
+          "type": "number"
+         }
+        },
+        "required": [
+         "a",
+         "b"
+        ]
+       }
+      }
+     }
+    ],
+    "tool_choice": "none",
+    "max_tokens": 256,
+    "temperature": 0.0
+   },
+   "response": {
+    "id": "chatcmpl-q4k-1792081608341",
+    "object": "chat.completion",
+    "created": 1792081725,
+    "model": "Qwen3.5-4B-Q4_K_M",
+    "choices": [
+     {
+      "index": 0,
+      "message": {
+       "role": "assistant",
+       "content": "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n<parameter=unit>\ncelsius\n</parameter>\n</function>\n</tool_call>"
+      },
+      "finish_reason": "stop"
+     }
+    ],
+    "usage": {
+     "prompt_tokens": 380,
+     "completion_tokens": 38,
+     "total_tokens": 418
+    }
+   }
+  },
+  {
+   "probe": "10 tools -> picks convert_currency",
+   "verdict": "\u2713",
+   "status": 200,
+   "seconds": 268.8791084168479,
+   "note": "finish=tool_calls name=convert_currency args={\"amount\":250,\"from\":\"EUR\",\"to\":\"USD\"} prompt_tokens=926",
+   "request": {
+    "model": "Qwen3.5-4B-Q4_K_M",
+    "messages": [
+     {
+      "role": "system",
+      "content": "You are a helpful assistant for an operations team. Use the tools when a question needs live data; otherwise answer directly. Be concise."
+     },
+     {
+      "role": "user",
+      "content": "Convert 250 euros to US dollars."
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the current weather for a city.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string",
+          "description": "City name, e.g. 'Paris'"
+         },
+         "unit": {
+          "type": "string",
+          "enum": [
+           "celsius",
+           "fahrenheit"
+          ]
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "add",
+       "description": "Add two numbers and return the sum.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "a": {
+          "type": "number"
+         },
+         "b": {
+          "type": "number"
+         }
+        },
+        "required": [
+         "a",
+         "b"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "list_orders",
+       "description": "List orders for a customer id.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "customer_id": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "customer_id"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "get_order",
+       "description": "Fetch one order by id.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "order_id": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "order_id"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "create_ticket",
+       "description": "Open a support ticket.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "subject": {
+          "type": "string"
+         },
+         "body": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "subject",
+         "body"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "search_docs",
+       "description": "Full-text search in the documentation.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "query": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "query"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "get_stock_price",
+       "description": "Current price of a stock ticker.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "ticker": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "ticker"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "convert_currency",
+       "description": "Convert an amount between currencies.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "amount": {
+          "type": "number"
+         },
+         "from": {
+          "type": "string"
+         },
+         "to": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "amount",
+         "from",
+         "to"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "send_email",
+       "description": "Send an email.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "to": {
+          "type": "string"
+         },
+         "subject": {
+          "type": "string"
+         },
+         "body": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "to",
+         "subject",
+         "body"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "get_time",
+       "description": "Current time in an IANA timezone.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "timezone": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "timezone"
+        ]
+       }
+      }
+     }
+    ],
+    "tool_choice": "auto",
+    "max_tokens": 256,
+    "temperature": 0.0
+   },
+   "response": {
+    "id": "chatcmpl-q4k-1792081725221",
+    "object": "chat.completion",
+    "created": 1792081994,
+    "model": "Qwen3.5-4B-Q4_K_M",
+    "choices": [
+     {
+      "index": 0,
+      "message": {
+       "role": "assistant",
+       "content": "",
+       "tool_calls": [
+        {
+         "id": "call_0",
+         "type": "function",
+         "function": {
+          "name": "convert_currency",
+          "arguments": "{\"amount\":250,\"from\":\"EUR\",\"to\":\"USD\"}"
+         }
+        }
+       ]
+      },
+      "finish_reason": "tool_calls"
+     }
+    ],
+    "usage": {
+     "prompt_tokens": 926,
+     "completion_tokens": 52,
+     "total_tokens": 978
+    }
+   }
+  },
+  {
+   "probe": "stream + tools",
+   "verdict": "\u2713",
+   "status": 200,
+   "seconds": 97.18583916686475,
+   "note": "ctype=text/event-stream events=3 tool_call_deltas=1 finish=['tool_calls'] done=True",
+   "request": {
+    "model": "Qwen3.5-4B-Q4_K_M",
+    "messages": [
+     {
+      "role": "user",
+      "content": "What is 17 plus 25? Use the tool."
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the current weather for a city.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string",
+          "description": "City name, e.g. 'Paris'"
+         },
+         "unit": {
+          "type": "string",
+          "enum": [
+           "celsius",
+           "fahrenheit"
+          ]
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "add",
+       "description": "Add two numbers and return the sum.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "a": {
+          "type": "number"
+         },
+         "b": {
+          "type": "number"
+         }
+        },
+        "required": [
+         "a",
+         "b"
+        ]
+       }
+      }
+     }
+    ],
+    "tool_choice": "auto",
+    "stream": true,
+    "max_tokens": 256,
+    "temperature": 0.0
+   },
+   "response": {
+    "events": [
+     {
+      "id": "chatcmpl-q4k-1792081994100",
+      "object": "chat.completion.chunk",
+      "created": 1792081994,
+      "model": "Qwen3.5-4B-Q4_K_M",
+      "choices": [
+       {
+        "index": 0,
+        "delta": {
+         "role": "assistant"
+        },
+        "finish_reason": null
+       }
+      ],
+      "stream_mode": "live"
+     },
+     {
+      "id": "chatcmpl-q4k-1792081994100",
+      "object": "chat.completion.chunk",
+      "created": 1792082091,
+      "model": "Qwen3.5-4B-Q4_K_M",
+      "choices": [
+       {
+        "index": 0,
+        "delta": {
+         "tool_calls": [
+          {
+           "index": 0,
+           "id": "call_0",
+           "type": "function",
+           "function": {
+            "name": "add",
+            "arguments": "{\"a\":17,\"b\":25}"
+           }
+          }
+         ]
+        },
+        "finish_reason": null
+       }
+      ]
+     },
+     {
+      "id": "chatcmpl-q4k-1792081994100",
+      "object": "chat.completion.chunk",
+      "created": 1792082091,
+      "model": "Qwen3.5-4B-Q4_K_M",
+      "choices": [
+       {
+        "index": 0,
+        "delta": {},
+        "finish_reason": "tool_calls"
+       }
+      ],
+      "usage": {
+       "prompt_tokens": 387,
+       "completion_tokens": 36,
+       "total_tokens": 423
+      }
+     }
+    ],
+    "done": true
+   }
+  },
+  {
+   "probe": "stream plain",
+   "verdict": "\u2713",
+   "status": 200,
+   "seconds": 18.444577750051394,
+   "note": "events=44 done=True usage_in_stream=True text=\"Here is the count from one to ten in words:\\n\\n1. One\\n2. Two\\n3. Three\\n4. Fou",
+   "request": {
+    "model": "Qwen3.5-4B-Q4_K_M",
+    "messages": [
+     {
+      "role": "user",
+      "content": "Count from one to ten in words."
+     }
+    ],
+    "stream": true,
+    "max_tokens": 64,
+    "temperature": 0.0
+   },
+   "response": {
+    "n_events": 44,
+    "first": [
+     {
+      "id": "chatcmpl-q4k-1792082091286",
+      "object": "chat.completion.chunk",
+      "created": 1792082091,
+      "model": "Qwen3.5-4B-Q4_K_M",
+      "choices": [
+       {
+        "index": 0,
+        "delta": {
+         "role": "assistant"
+        },
+        "finish_reason": null
+       }
+      ],
+      "stream_mode": "live"
+     },
+     {
+      "id": "chatcmpl-q4k-1792082091286",
+      "object": "chat.completion.chunk",
+      "created": 1792082096,
+      "model": "Qwen3.5-4B-Q4_K_M",
+      "choices": [
+       {
+        "index": 0,
+        "delta": {
+         "content": "Here"
+        },
+        "finish_reason": null
+       }
+      ]
+     }
+    ],
+    "last": [
+     {
+      "id": "chatcmpl-q4k-1792082091286",
+      "object": "chat.completion.chunk",
+      "created": 1792082109,
+      "model": "Qwen3.5-4B-Q4_K_M",
+      "choices": [
+       {
+        "index": 0,
+        "delta": {
+         "content": " Ten"
+        },
+        "finish_reason": null
+       }
+      ]
+     },
+     {
+      "id": "chatcmpl-q4k-1792082091286",
+      "object": "chat.completion.chunk",
+      "created": 1792082109,
+      "model": "Qwen3.5-4B-Q4_K_M",
+      "choices": [
+       {
+        "index": 0,
+        "delta": {},
+        "finish_reason": "stop"
+       }
+      ],
+      "usage": {
+       "prompt_tokens": 20,
+       "completion_tokens": 52,
+       "total_tokens": 72
+      }
+     }
+    ]
+   }
+  },
+  {
+   "probe": "extra OpenAI fields tolerated",
+   "verdict": "\u2713",
+   "status": 200,
+   "seconds": 4.974874791922048,
+   "note": "err=ok",
+   "request": {
+    "model": "Qwen3.5-4B-Q4_K_M",
+    "messages": [
+     {
+      "role": "user",
+      "content": "Hi"
+     }
+    ],
+    "max_tokens": 16,
+    "stream_options": {
+     "include_usage": true
+    },
+    "parallel_tool_calls": false,
+    "n": 1,
+    "user": "spike",
+    "response_format": {
+     "type": "text"
+    },
+    "seed": 7,
+    "top_p": 0.9,
+    "presence_penalty": 0.0,
+    "frequency_penalty": 0.0,
+    "logit_bias": {},
+    "metadata": {
+     "x": "y"
+    },
+    "store": false
+   },
+   "response": {
+    "id": "chatcmpl-q4k-1792082109731",
+    "object": "chat.completion",
+    "created": 1792082114,
+    "model": "Qwen3.5-4B-Q4_K_M",
+    "choices": [
+     {
+      "index": 0,
+      "message": {
+       "role": "assistant",
+       "content": "Hello! How can I help you today?"
+      },
+      "finish_reason": "stop"
+     }
+    ],
+    "usage": {
+     "prompt_tokens": 13,
+     "completion_tokens": 9,
+     "total_tokens": 22
+    }
+   }
+  },
+  {
+   "probe": "max_completion_tokens honoured",
+   "verdict": "\u2717",
+   "status": 200,
+   "seconds": 62.08340675011277,
+   "note": "completion_tokens=256 finish=length",
+   "request": {
+    "model": "Qwen3.5-4B-Q4_K_M",
+    "messages": [
+     {
+      "role": "user",
+      "content": "Write 200 words about rivers."
+     }
+    ],
+    "max_completion_tokens": 12
+   },
+   "response": {
+    "id": "chatcmpl-q4k-1792082114706",
+    "object": "chat.completion",
+    "created": 1792082176,
+    "model": "Qwen3.5-4B-Q4_K_M",
+    "choices": [
+     {
+      "index": 0,
+      "message": {
+       "role": "assistant",
+       "content": "Rivers are the lifeblood of the Earth, winding their way through continents and shaping the very landscape they traverse. From the icy, glacial-fed sources of the Andes to the salt-laden deltas where they meet the ocean, these flowing arteries connect distant ecosystems and sustain countless forms of life. Their journey is a testament to nature's relentless energy, carving canyons over millennia and depositing fertile silt that nourishes some of the world's most productive agricultural lands.\n\nBeyond their ecological importance, rivers hold profound cultural significance for humanity. For centuries, civilizations have risen along their banks, relying on them for drinking water, irrigation, and transportation. Ancient cities like Cairo, Baghdad, and Rome were founded on rivers, becoming hubs of trade, culture, and innovation. The stories told by river travelers, the songs sung by fishermen, and the myths woven around their mysteries reflect a deep human connection to these flowing bodies of water.\n\nMoreover, rivers act as vital corridors for biodiversity, supporting fish populations and providing habitats for countless species of plants and animals. They filter pollutants and regulate local climates, playing a crucial role in maintaining environmental balance. However, as human activity increases, many rivers face threats from pollution, damming, and over-extraction. Protecting these vital"
+      },
+      "finish_reason": "length"
+     }
+    ],
+    "usage": {
+     "prompt_tokens": 21,
+     "completion_tokens": 256,
+     "total_tokens": 277
+    }
+   }
+  },
+  {
+   "probe": "error envelope {error:{message,type}}",
+   "verdict": "\u2717",
+   "status": 422,
+   "seconds": 0.0007338339928537607,
+   "note": "{\"error\": \"Invalid request body. Check that the JSON structure matches the expected schema.\"}",
+   "request": {
+    "model": "Qwen3.5-4B-Q4_K_M",
+    "messages": "not-a-list"
+   },
+   "response": {
+    "error": "Invalid request body. Check that the JSON structure matches the expected schema."
+   }
+  },
+  {
+   "probe": "foreign model id",
+   "verdict": "\u2139",
+   "status": 200,
+   "seconds": 4.288875084137544,
+   "note": "served_as=gpt-4o-mini status=200",
+   "request": {
+    "model": "gpt-4o-mini",
+    "messages": [
+     {
+      "role": "user",
+      "content": "Hi"
+     }
+    ],
+    "max_tokens": 8
+   },
+   "response": {
+    "id": "chatcmpl-q4k-1792082176790",
+    "object": "chat.completion",
+    "created": 1792082181,
+    "model": "gpt-4o-mini",
+    "choices": [
+     {
+      "index": 0,
+      "message": {
+       "role": "assistant",
+       "content": "Hello! How can I help you today"
+      },
+      "finish_reason": "length"
+     }
+    ],
+    "usage": {
+     "prompt_tokens": 13,
+     "completion_tokens": 8,
+     "total_tokens": 21
+    }
+   }
+  },
+  {
+   "probe": "no Authorization header",
+   "verdict": "\u2139",
+   "status": 200,
+   "seconds": 2.285689082928002,
+   "note": "accepted (no auth at the server; the front door must enforce it)",
+   "request": null,
+   "response": null
+  }
+ ]
+}

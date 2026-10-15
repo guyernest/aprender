@@ -525,7 +525,7 @@ Clippy's lint set is **not monotonic**: the #2370 tree is clean on 1.93/1.96/1.9
 - `docs/BEATS.md` - the public beat scoreboard. Gated against `contracts/` by
   `crates/aprender-core/tests/readme_contract.rs`
 
-## Spike Findings (forecasting stack, LLM decision classifier)
+## Spike Findings (forecasting stack, LLM decision classifier, internal LLM endpoint)
 
 - **Spike findings for aprender** (implementation patterns, constraints, gotchas) → `Skill("spike-findings-aprender")`
 
@@ -533,8 +533,12 @@ Spikes on the forecasting stack (Prophet / NeuralProphet ports, stateless `forec
 Chronos zero-shot ports and server, NEON GEMM kernel, and exogenous inputs — external regressors,
 events, and the no-argument bitwise-invariance release gate) and on the Kev / Qwen3.5 decision
 classifier (few-shot vs SetFit, upstream sync, Python→GGUF→Rust handoff, batched prefill, Lambda and
-Lambda Managed Instances deployment, and the Laya ModernBERT decision model) and on measured AWS hosting for
-Rust model MCP servers (default Lambda, Fargate scale-to-zero, Lambda Managed Instances) are packaged as implementation blueprints in
+Lambda Managed Instances deployment, and the Laya ModernBERT decision model — its calibration gate under
+split shift and the fp32 noise floor behind the pack tolerance) and on measured AWS hosting for
+Rust model MCP servers (default Lambda, Fargate scale-to-zero, Lambda Managed Instances) and on the
+internal OpenAI-compatible LLM endpoint for pmcp.run (`apr serve` conformance with the platform's two
+clients, the CPU agent-turn cost of Qwen3.5, and the one-image Lambda / Fargate / LMI deployment priced
+per turn) are packaged as implementation blueprints in
 `.claude/skills/spike-findings-aprender/`. The wrapped spike list is the skill's own
 `## Processed Spikes` section — re-derive the count from there, don't trust this sentence. Load the
 skill before building any of that; the raw experiments stay in `.planning/spikes/` (`MANIFEST.md`,

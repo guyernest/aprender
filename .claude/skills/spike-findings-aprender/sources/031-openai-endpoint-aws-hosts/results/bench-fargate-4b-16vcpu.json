@@ -1,0 +1,146 @@
+{
+ "label": "fargate-4b-16vcpu",
+ "kind": "http",
+ "target": "http://44.195.81.40:8080/v1",
+ "model": "Qwen3.5-4B-Q4_K_M",
+ "records": [
+  {
+   "status": 200,
+   "total_s": 16.339,
+   "ttft_s": 16.339,
+   "prompt_tokens": 73,
+   "completion_tokens": 1,
+   "finish": "length",
+   "prefill_tok_s": 4.5,
+   "decode_tok_s": null,
+   "text": "An",
+   "tool_calls": [],
+   "error": null,
+   "shape": "short_1tok"
+  },
+  {
+   "status": 200,
+   "total_s": 30.314,
+   "ttft_s": 16.26,
+   "prompt_tokens": 73,
+   "completion_tokens": 64,
+   "finish": "length",
+   "prefill_tok_s": 4.5,
+   "decode_tok_s": 4.5,
+   "text": "An MCP (Model Context Protocol) server acts as a standardized interface that allows AI agents to securely connect to external data sources, tools, and hardware.",
+   "tool_calls": [],
+   "error": null,
+   "shape": "short_64tok"
+  },
+  {
+   "status": 200,
+   "total_s": 94.386,
+   "ttft_s": 94.386,
+   "prompt_tokens": 421,
+   "completion_tokens": 1,
+   "finish": "length",
+   "prefill_tok_s": 4.5,
+   "decode_tok_s": null,
+   "text": "<tool_call>",
+   "tool_calls": [],
+   "error": null,
+   "shape": "tools2_1tok"
+  },
+  {
+   "status": 200,
+   "total_s": 131.196,
+   "ttft_s": 131.196,
+   "prompt_tokens": 421,
+   "completion_tokens": 38,
+   "finish": "tool_calls",
+   "prefill_tok_s": 3.2,
+   "decode_tok_s": null,
+   "text": "",
+   "tool_calls": [
+    "get_weather"
+   ],
+   "error": null,
+   "shape": "tools2_turn1"
+  },
+  {
+   "status": 200,
+   "total_s": 10.868,
+   "ttft_s": 10.868,
+   "prompt_tokens": 460,
+   "completion_tokens": 1,
+   "finish": "length",
+   "prefill_tok_s": 42.3,
+   "decode_tok_s": null,
+   "text": "The",
+   "tool_calls": [],
+   "error": null,
+   "shape": "turn2_extend_1tok"
+  },
+  {
+   "status": 200,
+   "total_s": 5.315,
+   "ttft_s": 1.911,
+   "prompt_tokens": 460,
+   "completion_tokens": 15,
+   "finish": "stop",
+   "prefill_tok_s": 240.7,
+   "decode_tok_s": 4.4,
+   "text": "The weather in Paris right now is 17\u00b0C with light rain.",
+   "tool_calls": [],
+   "error": null,
+   "shape": "turn2_extend_64tok"
+  },
+  {
+   "status": 200,
+   "total_s": 114.314,
+   "ttft_s": 114.314,
+   "prompt_tokens": 937,
+   "completion_tokens": 1,
+   "finish": "length",
+   "prefill_tok_s": 8.2,
+   "decode_tok_s": null,
+   "text": "<tool_call>",
+   "tool_calls": [],
+   "error": null,
+   "shape": "tools10_1tok"
+  },
+  {
+   "status": 200,
+   "total_s": 23.162,
+   "ttft_s": 16.348,
+   "prompt_tokens": 73,
+   "completion_tokens": 32,
+   "finish": "length",
+   "prefill_tok_s": 4.5,
+   "decode_tok_s": 4.5,
+   "text": "An MCP (Model Context Protocol) server acts as a standardized bridge that allows AI agents to securely connect to external data sources, tools, and APIs. Agents",
+   "tool_calls": [],
+   "error": null,
+   "shape": "conc2_0"
+  },
+  {
+   "status": 200,
+   "total_s": 45.975,
+   "ttft_s": 39.126,
+   "prompt_tokens": 73,
+   "completion_tokens": 32,
+   "finish": "length",
+   "prefill_tok_s": 1.9,
+   "decode_tok_s": 4.5,
+   "text": "An MCP (Model Context Protocol) server acts as a standardized bridge that allows AI agents to securely connect to external data sources, tools, and APIs. Agents",
+   "tool_calls": [],
+   "error": null,
+   "shape": "conc2_1"
+  },
+  {
+   "shape": "conc2_wall",
+   "total_s": 45.981
+  }
+ ],
+ "derived": {
+  "prefill_tok_s_short": 4.47,
+  "decode_tok_s": 4.51,
+  "prefill_tok_s_tools2": 4.46,
+  "turn2_extend_vs_turn1_1tok": "10.868s vs 94.386s"
+ }
+}

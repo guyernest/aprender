@@ -1,0 +1,162 @@
+{
+ "label": "lambda-0.8b",
+ "kind": "lambda",
+ "target": "llm-spike-031-lambda-0-8b",
+ "model": "Qwen3.5-0.8B-Q4_K_M",
+ "records": [
+  {
+   "status": 200,
+   "total_s": 40.518,
+   "duration_ms": 29744.28,
+   "billed_ms": 39728.0,
+   "max_mem_mb": 2296,
+   "init_ms": 9983.53,
+   "prompt_tokens": 73,
+   "completion_tokens": 1,
+   "finish": "length",
+   "text": "An",
+   "tool_calls": [],
+   "cost_usd": 0.005297,
+   "shape": "cold_short_1tok"
+  },
+  {
+   "status": 200,
+   "total_s": 11.3,
+   "duration_ms": 11190.66,
+   "billed_ms": 11191.0,
+   "max_mem_mb": 2338,
+   "prompt_tokens": 73,
+   "completion_tokens": 1,
+   "finish": "length",
+   "text": "An",
+   "tool_calls": [],
+   "cost_usd": 0.001492,
+   "shape": "short_1tok"
+  },
+  {
+   "status": 200,
+   "total_s": 21.15,
+   "duration_ms": 20947.88,
+   "billed_ms": 20948.0,
+   "max_mem_mb": 2341,
+   "prompt_tokens": 73,
+   "completion_tokens": 64,
+   "finish": "length",
+   "text": "An MCP server is a web application that provides a set of functions and data structures to an agent, allowing the agent to interact with the server's data and e",
+   "tool_calls": [],
+   "cost_usd": 0.002793,
+   "shape": "short_64tok"
+  },
+  {
+   "status": 200,
+   "total_s": 64.651,
+   "duration_ms": 64540.61,
+   "billed_ms": 64541.0,
+   "max_mem_mb": 2355,
+   "prompt_tokens": 421,
+   "completion_tokens": 1,
+   "finish": "length",
+   "text": "<tool_call>",
+   "tool_calls": [],
+   "cost_usd": 0.008606,
+   "shape": "tools2_1tok"
+  },
+  {
+   "status": 200,
+   "total_s": 71.143,
+   "duration_ms": 71046.84,
+   "billed_ms": 71047.0,
+   "max_mem_mb": 2362,
+   "prompt_tokens": 421,
+   "completion_tokens": 38,
+   "finish": "tool_calls",
+   "text": "",
+   "tool_calls": [
+    "get_weather"
+   ],
+   "cost_usd": 0.009473,
+   "shape": "tools2_turn1"
+  },
+  {
+   "status": 200,
+   "total_s": 7.339,
+   "duration_ms": 7246.19,
+   "billed_ms": 7247.0,
+   "max_mem_mb": 2362,
+   "prompt_tokens": 460,
+   "completion_tokens": 1,
+   "finish": "length",
+   "text": "The",
+   "tool_calls": [],
+   "cost_usd": 0.000966,
+   "shape": "turn2_extend_1tok"
+  },
+  {
+   "status": 200,
+   "total_s": 3.918,
+   "duration_ms": 3822.6,
+   "billed_ms": 3823.0,
+   "max_mem_mb": 2362,
+   "prompt_tokens": 460,
+   "completion_tokens": 17,
+   "finish": "stop",
+   "text": "The weather in Paris is currently light rain with a temperature of 17\u00b0C.",
+   "tool_calls": [],
+   "cost_usd": 0.00051,
+   "shape": "turn2_extend_64tok"
+  },
+  {
+   "status": 200,
+   "total_s": 99.837,
+   "duration_ms": 146265.58,
+   "billed_ms": 146266.0,
+   "max_mem_mb": 2371,
+   "prompt_tokens": 936,
+   "completion_tokens": 1,
+   "finish": "length",
+   "text": "<tool_call>",
+   "tool_calls": [],
+   "cost_usd": 0.019502,
+   "shape": "tools10_1tok"
+  },
+  {
+   "status": 200,
+   "total_s": 117.82,
+   "duration_ms": 16291.5,
+   "billed_ms": 24077.0,
+   "max_mem_mb": 2292,
+   "init_ms": 7785.16,
+   "prompt_tokens": 73,
+   "completion_tokens": 32,
+   "finish": "length",
+   "text": "An MCP server is a software component that allows an application to communicate with a web service by using a protocol, typically JSON, to exchange data. An age",
+   "tool_calls": [],
+   "cost_usd": 0.00321,
+   "shape": "conc2_0"
+  },
+  {
+   "status": 200,
+   "total_s": 16.069,
+   "duration_ms": 15966.14,
+   "billed_ms": 15967.0,
+   "max_mem_mb": 2371,
+   "prompt_tokens": 73,
+   "completion_tokens": 32,
+   "finish": "length",
+   "text": "An MCP server is a web application that provides a set of functions and data structures to an MCP agent, enabling the agent to interact with the server's data a",
+   "tool_calls": [],
+   "cost_usd": 0.002129,
+   "shape": "conc2_1"
+  },
+  {
+   "shape": "conc2_wall",
+   "total_s": 117.897
+  }
+ ],
+ "derived": {
+  "prefill_tok_s_short": 6.46,
+  "decode_tok_s": 6.4,
+  "prefill_tok_s_tools2": 6.51,
+  "turn2_extend_vs_turn1_1tok": "7.339s vs 64.651s"
+ }
+}

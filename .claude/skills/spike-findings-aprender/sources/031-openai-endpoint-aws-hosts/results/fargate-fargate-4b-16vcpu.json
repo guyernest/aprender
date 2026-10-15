@@ -1,0 +1,30 @@
+{
+ "label": "fargate-4b-16vcpu",
+ "taskdef": "arn:aws:ecs:us-east-1:816069129666:task-definition/llm-spike-031-fargate-4b:1",
+ "task": "af191c27e09e45809b02667056c02b38",
+ "vcpu": 16,
+ "mem_gb": 32,
+ "threads": 16,
+ "az": "us-east-1a",
+ "timeline_s": {
+  "run_task": 0.0,
+  "pull_started": 23.12,
+  "pull_stopped": 27.41,
+  "container_started": 30.55,
+  "port_open_model_ready": 39.83
+ },
+ "bench": "results/bench-fargate-4b-16vcpu.json",
+ "server_log": [
+  "[entry] t=5ms start pid=1 apr=apr 0.70.3 (95f64ba14)",
+  "[entry] t=12ms host: nproc=16 threads=16 cpu_part=0xd4f model_name=",
+  "[entry] t=17ms mem: total_kb=64646200 cgroup_max=9223372036854771712",
+  "[entry] t=19ms env: MODEL_S3_URI=s3://llm-spike-031-816069129666/Qwen3.5-4B-Q4_K_M.gguf PLATFORM=fargate AWS_LAMBDA_FUNCTION_MEMORY_SIZE=unset",
+  "[entry] t=20ms s3 pull start",
+  "[entry] t=6281ms s3 pull done bytes=2740937888",
+  "[entry] t=6282ms apr serve start",
+  "Model ready: Qwen3.5 hybrid, 32 layers resident on the CPU, declared context 262144 tokens"
+ ],
+ "cost_usd_for_session": 0.1252,
+ "price_per_hour_usd": 0.632,
+ "ip": "44.195.81.40"
+}
