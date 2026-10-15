@@ -1,0 +1,9 @@
+{
+  "base": "http://127.0.0.1:8131/v1",
+  "model": "Qwen3.5-4B-Q4_K_M",
+  "task": "What is 17 plus 25? Use the add tool, then answer in one sentence.",
+  "outcome": "Completed",
+  "detail": "IterationResult { assistant_message: TurnMessage { role: Assistant, content: [Text { text: \"17 plus 25 equals 42.\", meta: None }] }, tool_results_message: None, is_final: true }",
+  "elapsed_s": 110.894878792,
+  "trace_debug": "DecisionTrace { steps: [DecisionStep { iteration: 0, is_end_turn: false, is_final: false, tool_call_ids: [\"call_0\"], limit: Some(Continue) }, DecisionStep { iteration: 1, is_end_turn: true, is_final: true, tool_call_ids: [], limit: None }], outcome: Some(Completed) }"
+}

@@ -1,0 +1,7 @@
+  422 A assistant{tool_calls, no content} + tool{tool_call_id}
+  422 B assistant{content:null, tool_calls} + tool
+  200 C assistant{content:'', tool_calls} + tool
+  200 D assistant{content:text} + tool{tool_call_id}
+  200 E assistant{content:text} + tool{no tool_call_id}
+  200 F assistant{content:'', tool_calls} only
+  200 G assistant{content:text} + user{result}

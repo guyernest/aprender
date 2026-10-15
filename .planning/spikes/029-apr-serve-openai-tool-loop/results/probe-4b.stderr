@@ -1,0 +1,15 @@
+  ✓ GET /models: 200 0.01s ids=['default']
+  ✓ GET /effective-config: 200 0.00s ok
+  ✓ chat plain: 200 21.75s fields=['choices', 'created', 'id', 'model', 'object', 'usage'] usage={'prompt_tokens': 55, 'completion_tokens': 39, 'total_tokens': 94} finish=stop
+  ✓ tools auto -> tool_call: 200 108.74s finish=tool_calls id=call_0 type=function name=get_weather args={'city': 'Paris', 'unit': 'celsius'} args_is_str=True
+  ✗ tool result -> final answer: 422 0.00s finish=None tool_calls=False content=""
+  ✗ tool_choice=required: 200 130.82s finish=stop got_call=False want_call=True err=
+  ✓ tool_choice=none: 200 116.88s finish=stop got_call=False want_call=False err=
+  ✓ 10 tools -> picks convert_currency: 200 268.88s finish=tool_calls name=convert_currency args={"amount":250,"from":"EUR","to":"USD"} prompt_tokens=926
+  ✓ stream + tools: 200 97.19s ctype=text/event-stream events=3 tool_call_deltas=1 finish=['tool_calls'] done=True
+  ✓ stream plain: 200 18.44s events=44 done=True usage_in_stream=True text="Here is the count from one to ten in words:\n\n1. One\n2. Two\n3. Three\n4. Fou
+  ✓ extra OpenAI fields tolerated: 200 4.97s err=ok
+  ✗ max_completion_tokens honoured: 200 62.08s completion_tokens=256 finish=length
+  ✗ error envelope {error:{message,type}}: 422 0.00s {"error": "Invalid request body. Check that the JSON structure matches the expected schema."}
+  ℹ foreign model id: 200 4.29s served_as=gpt-4o-mini status=200
+  ℹ no Authorization header: 200 2.29s accepted (no auth at the server; the front door must enforce it)

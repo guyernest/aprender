@@ -1,0 +1,460 @@
+[
+ {
+  "variant": "A assistant{tool_calls, no content} + tool{tool_call_id}",
+  "status": 422,
+  "seconds": 0.008368500042706728,
+  "request": {
+   "model": "Qwen3.5-0.8B-Q4_K_M",
+   "messages": [
+    {
+     "role": "user",
+     "content": "What's the weather in Paris right now?"
+    },
+    {
+     "role": "assistant",
+     "tool_calls": [
+      {
+       "id": "call_0",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": "{\"city\": \"Paris\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_0",
+     "content": "{\"city\": \"Paris\", \"temperature_c\": 17, \"condition\": \"light rain\"}"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ],
+   "max_tokens": 96,
+   "temperature": 0.0
+  },
+  "response": {
+   "error": "Invalid request body. Check that the JSON structure matches the expected schema."
+  }
+ },
+ {
+  "variant": "B assistant{content:null, tool_calls} + tool",
+  "status": 422,
+  "seconds": 0.0003441248554736376,
+  "request": {
+   "model": "Qwen3.5-0.8B-Q4_K_M",
+   "messages": [
+    {
+     "role": "user",
+     "content": "What's the weather in Paris right now?"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "call_0",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": "{\"city\": \"Paris\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_0",
+     "content": "{\"city\": \"Paris\", \"temperature_c\": 17, \"condition\": \"light rain\"}"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ],
+   "max_tokens": 96,
+   "temperature": 0.0
+  },
+  "response": {
+   "error": "Invalid request body. Check that the JSON structure matches the expected schema."
+  }
+ },
+ {
+  "variant": "C assistant{content:'', tool_calls} + tool",
+  "status": 200,
+  "seconds": 48.573314583161846,
+  "request": {
+   "model": "Qwen3.5-0.8B-Q4_K_M",
+   "messages": [
+    {
+     "role": "user",
+     "content": "What's the weather in Paris right now?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_0",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": "{\"city\": \"Paris\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_0",
+     "content": "{\"city\": \"Paris\", \"temperature_c\": 17, \"condition\": \"light rain\"}"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ],
+   "max_tokens": 96,
+   "temperature": 0.0
+  },
+  "response": {
+   "id": "chatcmpl-q4k-1792081465981",
+   "object": "chat.completion",
+   "created": 1792081514,
+   "model": "Qwen3.5-0.8B-Q4_K_M",
+   "choices": [
+    {
+     "index": 0,
+     "message": {
+      "role": "assistant",
+      "content": "The weather in Paris is currently **light rain** with a temperature of **17\u00b0C**."
+     },
+     "finish_reason": "stop"
+    }
+   ],
+   "usage": {
+    "prompt_tokens": 316,
+    "completion_tokens": 19,
+    "total_tokens": 335
+   }
+  }
+ },
+ {
+  "variant": "D assistant{content:text} + tool{tool_call_id}",
+  "status": 200,
+  "seconds": 49.45618737488985,
+  "request": {
+   "model": "Qwen3.5-0.8B-Q4_K_M",
+   "messages": [
+    {
+     "role": "user",
+     "content": "What's the weather in Paris right now?"
+    },
+    {
+     "role": "assistant",
+     "content": "Calling get_weather."
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call_0",
+     "content": "{\"city\": \"Paris\", \"temperature_c\": 17, \"condition\": \"light rain\"}"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ],
+   "max_tokens": 96,
+   "temperature": 0.0
+  },
+  "response": {
+   "id": "chatcmpl-q4k-1792081514555",
+   "object": "chat.completion",
+   "created": 1792081564,
+   "model": "Qwen3.5-0.8B-Q4_K_M",
+   "choices": [
+    {
+     "index": 0,
+     "message": {
+      "role": "assistant",
+      "content": "It's currently light rain in Paris. The temperature is 17\u00b0C."
+     },
+     "finish_reason": "stop"
+    }
+   ],
+   "usage": {
+    "prompt_tokens": 320,
+    "completion_tokens": 16,
+    "total_tokens": 336
+   }
+  }
+ },
+ {
+  "variant": "E assistant{content:text} + tool{no tool_call_id}",
+  "status": 200,
+  "seconds": 3.4213937919121236,
+  "request": {
+   "model": "Qwen3.5-0.8B-Q4_K_M",
+   "messages": [
+    {
+     "role": "user",
+     "content": "What's the weather in Paris right now?"
+    },
+    {
+     "role": "assistant",
+     "content": "Calling get_weather."
+    },
+    {
+     "role": "tool",
+     "content": "{\"city\": \"Paris\", \"temperature_c\": 17, \"condition\": \"light rain\"}"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ],
+   "max_tokens": 96,
+   "temperature": 0.0
+  },
+  "response": {
+   "id": "chatcmpl-q4k-1792081564012",
+   "object": "chat.completion",
+   "created": 1792081567,
+   "model": "Qwen3.5-0.8B-Q4_K_M",
+   "choices": [
+    {
+     "index": 0,
+     "message": {
+      "role": "assistant",
+      "content": "It's currently light rain in Paris. The temperature is 17\u00b0C."
+     },
+     "finish_reason": "stop"
+    }
+   ],
+   "usage": {
+    "prompt_tokens": 320,
+    "completion_tokens": 16,
+    "total_tokens": 336
+   }
+  }
+ },
+ {
+  "variant": "F assistant{content:'', tool_calls} only",
+  "status": 200,
+  "seconds": 49.08089220803231,
+  "request": {
+   "model": "Qwen3.5-0.8B-Q4_K_M",
+   "messages": [
+    {
+     "role": "user",
+     "content": "What's the weather in Paris right now?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_0",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": "{\"city\": \"Paris\"}"
+       }
+      }
+     ]
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ],
+   "max_tokens": 96,
+   "temperature": 0.0
+  },
+  "response": {
+   "id": "chatcmpl-q4k-1792081567433",
+   "object": "chat.completion",
+   "created": 1792081616,
+   "model": "Qwen3.5-0.8B-Q4_K_M",
+   "choices": [
+    {
+     "index": 0,
+     "message": {
+      "role": "assistant",
+      "content": "I don't have access to real-time weather data, so I can't tell you the current weather in Paris. To get the latest weather conditions, I'd recommend checking a weather app or website like Weather.com, AccuWeather, or the official French weather service (CMA)."
+     },
+     "finish_reason": "stop"
+    }
+   ],
+   "usage": {
+    "prompt_tokens": 286,
+    "completion_tokens": 57,
+    "total_tokens": 343
+   }
+  }
+ },
+ {
+  "variant": "G assistant{content:text} + user{result}",
+  "status": 200,
+  "seconds": 47.052094417158514,
+  "request": {
+   "model": "Qwen3.5-0.8B-Q4_K_M",
+   "messages": [
+    {
+     "role": "user",
+     "content": "What's the weather in Paris right now?"
+    },
+    {
+     "role": "assistant",
+     "content": "Calling get_weather(city=Paris)."
+    },
+    {
+     "role": "user",
+     "content": "Tool result: {\"city\": \"Paris\", \"temperature_c\": 17, \"condition\": \"light rain\"}"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Weather for a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ],
+   "max_tokens": 96,
+   "temperature": 0.0
+  },
+  "response": {
+   "id": "chatcmpl-q4k-1792081616515",
+   "object": "chat.completion",
+   "created": 1792081663,
+   "model": "Qwen3.5-0.8B-Q4_K_M",
+   "choices": [
+    {
+     "index": 0,
+     "message": {
+      "role": "assistant",
+      "content": "The weather in Paris is currently light rain."
+     },
+     "finish_reason": "stop"
+    }
+   ],
+   "usage": {
+    "prompt_tokens": 318,
+    "completion_tokens": 9,
+    "total_tokens": 327
+   }
+  }
+ }
+]

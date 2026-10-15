@@ -1,0 +1,9 @@
+{
+  "base": "http://127.0.0.1:8129/v1",
+  "model": "Qwen3.5-0.8B-Q4_K_M",
+  "task": "What's the weather in Paris right now?",
+  "outcome": "Failed",
+  "detail": "completion decode error: http 422",
+  "elapsed_s": 24.431922833,
+  "trace_debug": "DecisionTrace { steps: [DecisionStep { iteration: 0, is_end_turn: false, is_final: false, tool_call_ids: [\"call_0\"], limit: Some(Continue) }], outcome: Some(Failed) }"
+}

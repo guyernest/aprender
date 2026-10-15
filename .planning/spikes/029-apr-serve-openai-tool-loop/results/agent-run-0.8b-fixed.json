@@ -1,0 +1,9 @@
+{
+  "base": "http://127.0.0.1:8130/v1",
+  "model": "Qwen3.5-0.8B-Q4_K_M",
+  "task": "What's the weather in Paris right now?",
+  "outcome": "Completed",
+  "detail": "IterationResult { assistant_message: TurnMessage { role: Assistant, content: [Text { text: \"The weather in Paris is currently light rain. The temperature is 17°C.\", meta: None }] }, tool_results_message: None, is_final: true }",
+  "elapsed_s": 11.714975583,
+  "trace_debug": "DecisionTrace { steps: [DecisionStep { iteration: 0, is_end_turn: false, is_final: false, tool_call_ids: [\"call_0\"], limit: Some(Continue) }, DecisionStep { iteration: 1, is_end_turn: true, is_final: true, tool_call_ids: [], limit: None }], outcome: Some(Completed) }"
+}

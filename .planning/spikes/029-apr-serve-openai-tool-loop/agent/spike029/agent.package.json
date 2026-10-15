@@ -1,0 +1,16 @@
+{
+  "name": "spike029",
+  "version": "1.0.0",
+  "instructions": "You are a concise, helpful assistant. Use tools when helpful.",
+  "llm": {
+    "slot": {
+      "type": "llm_provider",
+      "name": "primary-llm",
+      "tested_value": "llama3.2"
+    }
+  },
+  "max_tokens": 100000,
+  "max_iterations": 5,
+  "connectors": [],
+  "budget_defaults": []
+}

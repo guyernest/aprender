@@ -109,6 +109,33 @@ test model) and the pmcp.run deployment of the forecast servers.
 - Measured in us-east-1 (where pmcp.run deploys), arm64, all resources tagged `spike=021-023` and torn down or
   left idle-free after measuring.
 
+### internal-llm-endpoint
+Offer pmcp.run agents (instructions + LLM configuration + MCP servers) a self-hosted LLM option:
+aprender's `apr serve` running an open-weights model (Qwen3.5 first) behind the same OpenAI
+`/v1/chat/completions` contract the platform already speaks to OpenAI, Anthropic and Bedrock, so an
+agent can switch between a provider and the internal endpoint by configuration alone. Deployable as
+an optional component on AWS (default Lambda, Lambda Managed Instances, ECS/EKS). Premises checked
+against the request's own pin, v0.70.3 (2026-10-15): `apr serve run` already exposes
+`/v1/chat/completions` (SSE streaming, tool calls, streamed tool calls since 0.70.3), `/v1/completions`,
+`/v1/embeddings`, the Ollama `/api/*` routes, `/health`, `/metrics` and Bearer auth
+(`APR_API_KEY[_HASH]`, `contracts/apr-serve-api-key-auth-v1.yaml`); pmcp.run's durable agent Lambda has an
+`openai_v1` transformer and a `ProviderConfig` (endpoint + auth header), and pmcp-agent's
+`OpenAiCompatSource` posts `{base_url}/chat/completions` with `tools`/`tool_choice`/`role: tool` turns;
+Bedrock runs weights, never aprender, and its Custom Model Import lists only `Qwen3ForCausalLM` /
+`Qwen3MoeForCausalLM`, not Qwen3.5's `Qwen3_5ForCausalLM`; the 0.70.3 release gate ran on GPUs only,
+so CPU `apr serve` on Qwen3.5 is unmeasured by any release. Extends `mcp-model-hosting-aws` (hosts) and
+`llm-decision-classifier` (the Qwen3.5 path).
+
+**Requirements:**
+- **The contract is pmcp.run's clients, not the OpenAI spec in the abstract**: a verdict is read from
+  the durable-agent-lambda `openai_v1` request shape and pmcp-agent's `OpenAiCompatSource`, replayed
+  against the real server (recorded 2026-10-15 at decomposition).
+- **Use the upstream release artifacts at the cited tag (v0.70.3) and the ladder-certified GGUFs**
+  (`contracts/model-capability-ladder-v1.yaml` sha256 pins), not a fork build: the fork's `main` is at
+  0.63 and has no Qwen3.5 (recorded 2026-10-15).
+- **Bedrock is a provider the agent can point at (`/openai/v1`), not a host for aprender or Qwen3.5**
+  (recorded 2026-10-15 from the Custom Model Import architecture list).
+
 ## Spikes
 
 | # | Idea | Name | Type | Validates | Verdict | Tags |
@@ -140,3 +167,4 @@ test model) and the pmcp.run deployment of the forecast servers.
 | 026 | llm-decision-classifier | laya-mcp-default-lambda | standard | Given the Rust Laya behind a stateless pmcp `decide` tool taking a real /v1/systemone request, when run on default arm64 Lambda (10 GB and 4 GB) cold and warm, then cold start, Graviton latency, memory and cost are measured against Kev's 43 s / 1.15 s | VALIDATED ✓ (10 GB: cold 11.3–12.0 s — 846 MB F16 from S3 at 94 MB/s — vs Kev 43 s; warm tweet 0.75 s G2 / 0.49 s G3 vs Kev 1.15 s; 3.5 GB peak vs 8 GB; ≈$0.00010 vs $0.00015 per decision; 4 GB is the same GB-s price and 2.4x slower; parity ≤ 4.5e-6 through the real text API; multi-question and 512-token requests are multi-second on G2) | laya, lambda, cold-start, mcp, cost |
 | 027 | llm-decision-classifier | laya-calibration-slice-and-tcap | standard | Given TweetEval stance, when Laya en-root is fully fine-tuned on s16 and s64 (12- vs 48-row calibration slices) with the fixed 12-epoch and early-stopping recipes over seeds 13/17/23, then post-calibration ECE at T<=5 and T<=10, fitted-T vs eval-optimal T and macro-F1 margin show whether any recipe clears ECE<=0.10 with margin>=0.05 within Laya's cap | PARTIAL ⚠ (MEASUREMENTS, not gate runs. 0/12 main runs pass at T<=5 or T<=10; s64 early-stop passes T<=5 on 1/6 incl. replicates (ECE 0.143 ± 0.028), s64 4-epoch passes T<=10 on 1/3; the cap binds only for fixed-epoch recipes (slice T 12–26), early-stop slices fit T<5 in 8/9; cause is the SemEval train->test shift — same checkpoints at their slice T score ECE 0.05–0.07 on 459 in-distribution held-out rows; an MPS replicate flipped a FAIL to a PASS (margin ±0.07, ECE ±0.05); candidates for 028: s64-es12-seed17-rep, s64-r1-seed13, s16-r1-seed13) | laya, calibration, temperature-scaling, gate, distribution-shift, mps-noise |
 | 028 | llm-decision-classifier | laya-packability-noise-floor | standard | Given spike 027's candidate checkpoints, when each is re-scored over the full eval set in Rust fp32, torch fp32 and float64, then we know whether pack's 1e-5 probability bar and the ladder's 1e-4 final-block bar leave room for a gate-passing model, and if not, what noise-based bar the measurements support | INVALIDATED ✗ (the only gate-passing checkpoint, s64-es12-seed17-rep, is REFUSED RescoreDrift 1.445e-5 by `just laya-pack` while torch's own fp32 is 6.3e-5 from float64 and Rust is closer to exact; 2.98e-5 on 027's 459-row in-dist set; ECE/F1/argmax unchanged to 1e-7; final-norm 1e-4 has 0.00–0.04× headroom on real rows; proposed bar max(1e-5, 4 × max\|torch32−f64\|), min margin 3.2× on every measured checkpoint, or fixed 1e-4 at 2.1×; x86_64 unmeasured) | laya, parity, pack, rescore, fp32-noise-floor, float64-reference, tolerance |
+| 029 | internal-llm-endpoint | apr-serve-openai-tool-loop | standard | Given `apr` v0.70.3 serving the certified Qwen3.5-0.8B/4B Q4_K_M GGUFs on CPU, when pmcp.run's two OpenAI clients (pmcp-agent `OpenAiCompatSource`, durable-agent-lambda `openai_v1`) drive a tool-calling loop against `/v1/chat/completions` with real MCP tools, then the tool call is emitted (`finish_reason: tool_calls`, parseable args), the `role: tool` turn is accepted, the final answer arrives, and every contract gap is enumerated | PARTIAL ⚠ (tool calls, streamed tool calls, 10-tool selection and the tool-result turn all work in OpenAI shape on 0.8B and 4B; BUT the server 422s an assistant message with no/null `content` (PMAT-801 follow-up) so pmcp-agent's loop dies at turn 2 while the platform `openai_v1` transformer passes (writes `""`); `APR_API_KEY` is not enforced on GGUF models; `tool_choice: required` and `max_completion_tokens` ignored; `model` echoed not checked; turn N+1 reuses turn N's session KV (suffix-only prefill), one state per process) | openai-api, qwen3.5, tool-calling, pmcp-agent, apr-serve, auth |
