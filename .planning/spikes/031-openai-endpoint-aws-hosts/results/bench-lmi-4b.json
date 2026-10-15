@@ -1,0 +1,101 @@
+{
+ "label": "lmi-4b-16vcpu",
+ "kind": "lambda",
+ "target": "llm-spike-031-lmi-4b",
+ "model": "Qwen3.5-4B-Q4_K_M",
+ "records": [
+  {
+   "status": 200,
+   "total_s": 12.803,
+   "prompt_tokens": 73,
+   "completion_tokens": 1,
+   "finish": "length",
+   "text": "An",
+   "tool_calls": [],
+   "shape": "short_1tok"
+  },
+  {
+   "status": 200,
+   "total_s": 23.175,
+   "prompt_tokens": 73,
+   "completion_tokens": 64,
+   "finish": "length",
+   "text": "An MCP (Model Context Protocol) server acts as a standardized bridge that allows AI agents to securely connect to external data sources, tools, and APIs. Agents",
+   "tool_calls": [],
+   "shape": "short_64tok"
+  },
+  {
+   "status": 0,
+   "total_s": 0.103,
+   "error": "An error occurred (TooManyRequestsException) when calling the Invoke operation (reached max retries: 0): The request could not be processed because of high CPU utilization. Inspect your function metrics, and see https://docs.aws.amazon.com/lambda/latest/dg/monitoring-metrics-types.html for more deta",
+   "shape": "tools2_1tok"
+  },
+  {
+   "status": 200,
+   "total_s": 78.986,
+   "prompt_tokens": 421,
+   "completion_tokens": 38,
+   "finish": "tool_calls",
+   "text": "",
+   "tool_calls": [
+    "get_weather"
+   ],
+   "shape": "tools2_turn1"
+  },
+  {
+   "status": 200,
+   "total_s": 8.359,
+   "prompt_tokens": 460,
+   "completion_tokens": 1,
+   "finish": "length",
+   "text": "The",
+   "tool_calls": [],
+   "shape": "turn2_extend_1tok"
+  },
+  {
+   "status": 200,
+   "total_s": 3.916,
+   "prompt_tokens": 460,
+   "completion_tokens": 14,
+   "finish": "stop",
+   "text": "The weather in Paris is currently 17\u00b0C with light rain.",
+   "tool_calls": [],
+   "shape": "turn2_extend_64tok"
+  },
+  {
+   "status": 200,
+   "total_s": 165.988,
+   "prompt_tokens": 937,
+   "completion_tokens": 1,
+   "finish": "length",
+   "text": "<tool_call>",
+   "tool_calls": [],
+   "shape": "tools10_1tok"
+  },
+  {
+   "status": 0,
+   "total_s": 0.344,
+   "error": "An error occurred (TooManyRequestsException) when calling the Invoke operation (reached max retries: 0): You currently do not have sufficient capacity for the function. If this error persists, check your function version's scaling config to allocate more execution environments for it.",
+   "shape": "conc2_0"
+  },
+  {
+   "status": 200,
+   "total_s": 17.852,
+   "prompt_tokens": 73,
+   "completion_tokens": 32,
+   "finish": "length",
+   "text": "An MCP (Model Context Protocol) server acts as a standardized bridge that allows AI agents to securely connect to external data sources, tools, and APIs. Agents",
+   "tool_calls": [],
+   "shape": "conc2_1"
+  },
+  {
+   "shape": "conc2_wall",
+   "total_s": 17.854
+  }
+ ],
+ "derived": {
+  "prefill_tok_s_short": 5.7,
+  "decode_tok_s": 6.07,
+  "turn2_extend_vs_turn1_1tok": "8.359s vs 0.103s"
+ }
+}

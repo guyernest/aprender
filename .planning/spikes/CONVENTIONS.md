@@ -203,7 +203,7 @@ Patterns and stack choices established across spike sessions. New spikes follow 
 - **Serverless sizing**: Lambda bills GB-seconds and scales vCPU with memory, so for a CPU-bound model the
   largest function (10,240 MB) costs the same per decision and is fastest (026: 4 GB = same GB-s, 2.4x slower).
 
-## LLM endpoint spikes (idea `internal-llm-endpoint`, 029–030)
+## LLM endpoint spikes (idea `internal-llm-endpoint`, 029–031)
 
 - **Spike the consumer's pin with the pin's own artifacts.** The request cited `v0.70.3`; the fork's
   `main` was at 0.63 with no Qwen3.5. The spike ran the release tarball (`gh release download`, sha256
@@ -231,3 +231,25 @@ Patterns and stack choices established across spike sessions. New spikes follow 
   row 200); header-passing curl loops live in a `#!/bin/bash` script. A `Monitor` filter that ends in
   `tail -n +N` buffers on a pipe — use `tail -n 0 -f` for new lines only. A background task's
   "exit code 0" is the wrapper's; read `rc=` from the log.
+- **Deploying a release binary as an OpenAI endpoint (031)**: one arm64 image = AL2023-minimal +
+  the sha256-verified `apr` release tarball + `awscli-2` + the **Lambda Web Adapter** as an extension
+  (`AWS_LWA_READINESS_CHECK_PATH=/health`, `AWS_LWA_ASYNC_INIT=true`); the same image is a plain HTTP
+  server on Fargate and a function on Lambda / LMI (image packaging IS accepted on LMI). Invoke Lambda
+  with an API-GW v2 event (no Function URL, no public surface). Weights: **never the laptop uplink**
+  (two drops in one hour: boto3 multipart at part 17, `docker push` at 190/312 MB) — a CodeBuild ARM job
+  (`fetch_weights_codebuild.sh`) pulls from Hugging Face inside AWS, checks the ladder's sha256 pin and
+  copies to S3 in seconds (2.7 GB in 10 s). CodeBuild runs each `commands:` entry in its own shell, so a
+  helper function and its calls go in ONE `- |` block, and the project is created from
+  `--cli-input-json` (the `--source type=…,buildspec=…` shorthand cannot carry a multi-line spec).
+- **Lambda hands out Graviton2 or Graviton3 per environment** (0xd0c vs 0xd40) for identical
+  functions: a 2–3× speed factor you do not choose. Record `cpu_part` in every response or log line and
+  never compare two functions' latencies without it. Lambda function names forbid `.` (`0.8B` → `0-8b`).
+- **LMI**: `$LATEST` is `ActiveNonInvocable`, so `function_active_v2` times out after `create_function`
+  — publish a version and wait on the version's state instead; `LogType=Tail` is rejected, take wall
+  time from the client; with one environment and CPU-bound work LMI **throttles** (`TooManyRequests…
+  high CPU utilization`) rather than queueing. A 16-vCPU function landed on `c9g.16xlarge` (64 vCPU)
+  hosts, three of them at publish. Tear down in-session and re-run `census` until it is empty.
+- **Measuring a buffered Lambda endpoint**: prefill from a `max_tokens: 1` request, decode from the
+  difference to a `max_tokens: 64` request on the same prompt; the first request in an environment
+  includes the lazy model load, so derive rates from the second request onward. Client wall and the
+  REPORT `Duration` disagreed by up to 46 s on long requests through the adapter — report both.

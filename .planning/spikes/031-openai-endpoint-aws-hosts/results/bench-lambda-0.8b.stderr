@@ -1,0 +1,10 @@
+[remote_bench] lambda-0.8b -> lambda llm-spike-031-lambda-0-8b model=Qwen3.5-0.8B-Q4_K_M
+  cold_short_1tok: status=200 wall=40.518s pt=73 ct=1 ttft=None init=9983.53 dur=29744.28 mem=2296 finish=length tools=[] err=None
+  short_1tok: status=200 wall=11.3s pt=73 ct=1 ttft=None init=None dur=11190.66 mem=2338 finish=length tools=[] err=None
+  short_64tok: status=200 wall=21.15s pt=73 ct=64 ttft=None init=None dur=20947.88 mem=2341 finish=length tools=[] err=None
+  tools2_1tok: status=200 wall=64.651s pt=421 ct=1 ttft=None init=None dur=64540.61 mem=2355 finish=length tools=[] err=None
+  tools2_turn1: status=200 wall=71.143s pt=421 ct=38 ttft=None init=None dur=71046.84 mem=2362 finish=tool_calls tools=['get_weather'] err=None
+  turn2_extend_1tok: status=200 wall=7.339s pt=460 ct=1 ttft=None init=None dur=7246.19 mem=2362 finish=length tools=[] err=None
+  turn2_extend_64tok: status=200 wall=3.918s pt=460 ct=17 ttft=None init=None dur=3822.6 mem=2362 finish=stop tools=[] err=None
+  tools10_1tok: status=200 wall=99.837s pt=936 ct=1 ttft=None init=None dur=146265.58 mem=2371 finish=length tools=[] err=None
+  conc2: wall=117.90s each=[117.82, 16.069] init=[7785.16, None] status=[200, 200]

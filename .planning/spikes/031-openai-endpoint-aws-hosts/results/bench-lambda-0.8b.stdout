@@ -1,0 +1,6 @@
+{
+ "prefill_tok_s_short": 6.46,
+ "decode_tok_s": 6.4,
+ "prefill_tok_s_tools2": 6.51,
+ "turn2_extend_vs_turn1_1tok": "7.339s vs 64.651s"
+}

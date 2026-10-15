@@ -1,0 +1,26 @@
+{
+ "prefill_tok_s_short": 4.47,
+ "decode_tok_s": 4.51,
+ "prefill_tok_s_tools2": 4.46,
+ "turn2_extend_vs_turn1_1tok": "10.868s vs 94.386s"
+}
+{
+ "label": "fargate-4b-16vcpu",
+ "taskdef": "arn:aws:ecs:us-east-1:816069129666:task-definition/llm-spike-031-fargate-4b:1",
+ "task": "af191c27e09e45809b02667056c02b38",
+ "vcpu": 16,
+ "mem_gb": 32,
+ "threads": 16,
+ "az": "us-east-1a",
+ "timeline_s": {
+  "run_task": 0.0,
+  "pull_started": 23.12,
+  "pull_stopped": 27.41,
+  "container_started": 30.55,
+  "port_open_model_ready": 39.83
+ },
+ "bench": "results/bench-fargate-4b-16vcpu.json",
+ "cost_usd_for_session": 0.1252,
+ "price_per_hour_usd": 0.632,
+ "ip": "44.195.81.40"
+}

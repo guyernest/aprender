@@ -1,0 +1,12 @@
+[fargate] taskdef arn:aws:ecs:us-east-1:816069129666:task-definition/llm-spike-031-fargate-4b:1
+[fargate] ip=44.195.81.40 timeline={'run_task': 0.0, 'pull_started': 23.12, 'pull_stopped': 27.41, 'container_started': 30.55, 'port_open_model_ready': 39.83}
+[remote_bench] fargate-4b-16vcpu -> http http://44.195.81.40:8080/v1 model=Qwen3.5-4B-Q4_K_M
+  short_1tok: status=200 wall=16.339s pt=73 ct=1 ttft=16.339 init=None dur=None mem=None finish=length tools=[] err=None
+  short_64tok: status=200 wall=30.314s pt=73 ct=64 ttft=16.26 init=None dur=None mem=None finish=length tools=[] err=None
+  tools2_1tok: status=200 wall=94.386s pt=421 ct=1 ttft=94.386 init=None dur=None mem=None finish=length tools=[] err=None
+  tools2_turn1: status=200 wall=131.196s pt=421 ct=38 ttft=131.196 init=None dur=None mem=None finish=tool_calls tools=['get_weather'] err=None
+  turn2_extend_1tok: status=200 wall=10.868s pt=460 ct=1 ttft=10.868 init=None dur=None mem=None finish=length tools=[] err=None
+  turn2_extend_64tok: status=200 wall=5.315s pt=460 ct=15 ttft=1.911 init=None dur=None mem=None finish=stop tools=[] err=None
+  tools10_1tok: status=200 wall=114.314s pt=937 ct=1 ttft=114.314 init=None dur=None mem=None finish=length tools=[] err=None
+  conc2: wall=45.98s each=[23.162, 45.975] init=[None, None] status=[200, 200]
+[fargate] task stopped

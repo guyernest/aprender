@@ -1,0 +1,9 @@
+[remote_bench] lmi-4b-16vcpu -> lambda llm-spike-031-lmi-4b model=Qwen3.5-4B-Q4_K_M
+  short_1tok: status=200 wall=12.803s pt=73 ct=1 ttft=None init=None dur=None mem=None finish=length tools=[] err=None
+  short_64tok: status=200 wall=23.175s pt=73 ct=64 ttft=None init=None dur=None mem=None finish=length tools=[] err=None
+  tools2_1tok: status=0 wall=0.103s pt=None ct=None ttft=None init=None dur=None mem=None finish=None tools=None err=An error occurred (TooManyRequestsException) when calling the Invoke operation (reached max retries: 0): The request could not be processed because of high CPU utilization. Inspect your function metrics, and see https://docs.aws.amazon.com/lambda/latest/dg/monitoring-metrics-types.html for more deta
+  tools2_turn1: status=200 wall=78.986s pt=421 ct=38 ttft=None init=None dur=None mem=None finish=tool_calls tools=['get_weather'] err=None
+  turn2_extend_1tok: status=200 wall=8.359s pt=460 ct=1 ttft=None init=None dur=None mem=None finish=length tools=[] err=None
+  turn2_extend_64tok: status=200 wall=3.916s pt=460 ct=14 ttft=None init=None dur=None mem=None finish=stop tools=[] err=None
+  tools10_1tok: status=200 wall=165.988s pt=937 ct=1 ttft=None init=None dur=None mem=None finish=length tools=[] err=None
+  conc2: wall=17.85s each=[0.344, 17.852] init=[None, None] status=[0, 200]
