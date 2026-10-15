@@ -60,12 +60,18 @@ pmcp.run, Bedrock-as-provider rows, a training or fine-tuning path.
   empty), serialization unchanged (byte-identical responses, the PMAT-801 invariant). Test: the exact
   pmcp-agent turn-2 body from the spike-029 wire log deserializes and the loop completes. (user,
   2026-10-15; the PMAT-801 "follow-up" the code comment promises)
-- **D-04: Bearer auth on the GGUF router** — `AuthGate::from_env()` is wired into the GGUF
-  `create_router` path (`crates/apr-cli/src/commands/serve/routes.rs`, today `create_router(state)`
-  with no gate) the way `build_apr_cpu_router` already is, so `APR_API_KEY` / `APR_API_KEY_HASH`
-  (`contracts/apr-serve-api-key-auth-v1.yaml`) are enforced on every route the platform calls, with
-  `/health` behaviour declared, and a test that a GGUF server with the key set answers 401 without it.
-  This is a precondition for ANY HTTPS ingress (D-12).
+- **D-04: Bearer auth on the GGUF router** — `AuthGate::from_env()` is wired into the GGUF /
+  Qwen3.5 server's router the way `build_apr_cpu_router` already is, so `APR_API_KEY` /
+  `APR_API_KEY_HASH` (`contracts/apr-serve-api-key-auth-v1.yaml`) are enforced on every route the
+  platform calls, with `/health` behaviour declared, and a test that a GGUF server with the key set
+  answers 401 without it. This is a precondition for ANY HTTPS ingress (D-12).
+  — **File correction (research, 2026-10-15):** the ungated router is built in
+  `crates/apr-cli/src/commands/serve/server.rs::serve_router` (≈lines 279–290, calling
+  `realizar::api::create_router_with_config(state, config.router_config())` with no gate; reached via
+  `start_gguf_server` → `start_qwen35_server`), NOT `routes.rs::create_router` — that is the
+  SafeTensors inspection router and already has `create_router_with_auth`. The fix wraps the GGUF
+  app with `super::auth::layer(AuthGate::from_env(), app)` (`auth.rs` ≈217–225) behind a testable
+  `build_gguf_router` seam; the same omission exists at upstream/main and at v0.70.3 / v0.71.4.
 - **D-05: Remaining 029 gaps are fixed where cheap, else recorded** — `tool_choice: required`
   honoured, `max_completion_tokens` aliased to `max_tokens`, `model` compared to the loaded id,
   the error envelope shaped `{"error": {"message","type","code"}}`, `tool_choice: none` not leaking
@@ -200,8 +206,11 @@ pmcp.run, Bedrock-as-provider rows, a training or fine-tuning path.
 - `justfile` (repo root) — the deployment surface the new recipes join
 - `crates/aprender-serve/src/api/mod_create_demo.rs` — `ChatMessage` (line ~218, `content: String`,
   PMAT-801 comment), `tool_choice`, `max_tokens` handling
-- `crates/apr-cli/src/commands/serve/routes.rs` (`create_router`), `handlers.rs`
-  (`build_apr_cpu_router(state, AuthGate::from_env())`), `auth.rs` (`AuthGate`)
+- `crates/apr-cli/src/commands/serve/server.rs` (`serve_router`, `start_qwen35_server` — the
+  ungated GGUF router, per the research correction on D-04), `handler_gpu_completion.rs`
+  (`start_gguf_server`), `handlers.rs` (`build_apr_cpu_router(state, AuthGate::from_env())` — the
+  gated precedent), `auth.rs` (`AuthGate`, `layer`), `routes.rs` (`create_router_with_auth` — the
+  SafeTensors router, already gated; not the fix site)
 
 ### pmcp.run and the SDK (outside this repo — read, never commit to main)
 - `~/Development/mcp/sdk/pmcp-run/amplify/data/resource.ts` — the `LLMProvider` model (fields D-08 fills)
