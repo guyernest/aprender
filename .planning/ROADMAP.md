@@ -749,3 +749,50 @@ Plans:
 - [x] 08-32-PLAN.md — `just laya-gap-regression` (all five class sweeps + phase regression + real artifact) and the first CI run of Phase 8 code (workspace-test green) — **EXECUTED, CI MUST-HAVE UNMET (2026-09-29):** Task 1 passed; the branch was scrubbed, merged with upstream main and opened as draft PR paiml/aprender#4634, but every workflow run is `action_required` (fork PR awaiting a paiml maintainer) so `workspace-test` has NOT run, and upstream's contract-hygiene gates would stop it before the decide fragments 510/520. Decided; planned as 08-33 (repair all). Evidence: `08-CI-RUN-EVIDENCE.json`
 - [x] 08-33-PLAN.md — contract-hygiene repair (gap closure, wave 23): 105 non-vocabulary `formal:` entries, 12 missing `valid_under` worlds, neon-blis/spectral-indices validate errors, chronos `#[test]` reorder, regenerated graph; upstream's shrink-only gates green locally (committed, NOT pushed). Owner decision "Repair all (new gap plan)". **EXECUTED (2026-09-29):** formal_prose 1464 and without-world 386 (both at their baselines, untouched), 105 formals in 11 contracts by ledger, 12 worlds, `pv lint contracts` all armed gates Pass, committed locally and NOT pushed (08-34 publishes). Evidence: `08-33-HYGIENE-EVIDENCE.json`, `08-33-FORMAL-REWRITES.json`.
 - [ ] 08-34-PLAN.md — CI-order audit of all 65 fragments, HYGIENE stage in `laya-gap-regression`, secret-scanned fast-forward push, maintainer-approval checkpoint, workspace-test evidence (terminal state GREEN or BLOCKED-ATTRIBUTED; only GREEN closes 08-32's unmet must-have) (gap closure, wave 24, autonomous: false).
+
+### Phase 9: Internal OpenAI-Compatible LLM Endpoint for pmcp.run
+
+**Goal:** Productise spikes 029–031: a pmcp.run agent can select a self-hosted aprender `apr serve`
+endpoint running the smallest Qwen3.5 (0.8B Q4_K_M, ladder-pinned) by configuration alone — one
+`LLMProvider` row (`openai_v1`, Bearer) pointing at a privately deployed, authenticated default-Lambda
+endpoint built with the decider pattern — and complete a real tool-calling turn end-to-end through
+BOTH of the platform's OpenAI clients (durable-agent-lambda `openai_v1` and pmcp-agent
+`OpenAiCompatSource`). The server-side conformance gaps spike 029 enumerated (assistant `content`
+null/absent → 422; `APR_API_KEY` unenforced on the GGUF router; `tool_choice: required`,
+`max_completion_tokens` and `model` ignored; string error envelope) are fixed as small upstream PRs to
+paiml/aprender, with the deployment pinned to a release artifact that passes the spike-029 conformance
+probe. The pmcp.run-side pieces (the provider row, a per-provider timeout, the SDK's `content: ""`
+fix) are planned with the pmcp.run dev team through a shareable brief. Decisions: `09-CONTEXT.md`.
+**Requirements**: TBD
+**Requirements note**: the endpoint has no REQ-IDs in `.planning/REQUIREMENTS.md` (that document is
+the SetFit milestone's). The binding requirements are the six `internal-llm-endpoint` idea
+requirements in `.planning/spikes/MANIFEST.md` §`internal-llm-endpoint` (recorded 2026-10-15),
+transcribed as decisions in `09-CONTEXT.md`, plus the Success Criteria below.
+**Depends on:** none of Phases 1–8 functionally — an independent track like Phases 6 and 8. Reuses
+the decider deployment pattern (`crates/aprender-mcp-decide-lambda/`, spikes 021–023, 026, 031) and
+the `justfile` deployment surface. The pmcp.run-side work lives outside this repo
+(`~/Development/mcp/sdk/pmcp-run`, `~/Development/mcp/sdk/rust-mcp-sdk/crates/pmcp-agent`) and is
+delivered as PRs there, never committed to their `main` directly.
+**UI hint**: no (pmcp.run's `LLMProvider` admin page already exists; this phase adds a row, not a UI)
+**Spike evidence**: 029 PARTIAL, 030 VALIDATED, 031 VALIDATED — packaged as
+`Skill("spike-findings-aprender")`: `references/openai-endpoint-conformance.md`,
+`references/llm-endpoint-agent-turn-cost.md`, `references/llm-endpoint-aws-deployment.md`; probe,
+shim, SDK-loop driver, Dockerfile, entrypoint and deploy drivers under `sources/029-*/` and
+`sources/031-*/`; raw runs in `.planning/spikes/029-*`, `030-*`, `031-*`.
+**Success Criteria** (what must be TRUE):
+
+  1. A pmcp.run agent whose `LLMProvider` row has `transformerId: openai_v1`, an `endpointTemplate` at the internal endpoint, `authHeaderName: Authorization` and `authHeaderPrefix: "Bearer "`, with the key held only in Secrets Manager, completes a real two-tool agent turn (tool call emitted with `finish_reason: tool_calls` and parseable arguments, the `role: tool` result accepted, a grounded final answer) against the deployed Qwen3.5-0.8B endpoint through the durable-agent-lambda `openai_v1` client — with no change to the transformer and no provider-specific branch in `map_provider_row_to_config`; switching that agent back to a hosted provider is a configuration change only.
+  2. The same turn completes through pmcp-agent's `OpenAiCompatSource` + `AgentEngine` with real tools advertised (the spike-029 `agent-loop` driver, not `cargo pmcp agent dev`): the turn-2 assistant message with no `content` key is accepted by the server (upstream PR relaxing `ChatMessage.content` to `Option<String>`, merged or pending with its test) AND the SDK writes `content: ""` on assistant tool-use turns (pmcp-agent PR), so the loop does not depend on which release the endpoint runs.
+  3. The deployed endpoint is private and authenticated: the GGUF router enforces `APR_API_KEY` / `APR_API_KEY_HASH` (upstream PR wiring `AuthGate::from_env()` into the GGUF `create_router` path, with a test), a request without the Bearer key is refused with 401 through the deployed ingress, no unauthenticated public surface exists at any point, and the conformance probe (`probe_openai.py` replayed against the deployed pin) reports every spike-029 gap as fixed or explicitly carried as a known limitation in the phase's conformance record.
+  4. The deployment is reproducible from this repo with the decider pattern and the smallest model: one arm64 image (release `apr` binary at a pinned upstream tag, sha256-verified, plus the Lambda Web Adapter), the ladder-pinned Qwen3.5-0.8B Q4_K_M GGUF (sha256 `bd258782…`) staged HF → CodeBuild → S3, driven by `just` recipes that refuse an unpinned binary or an unverified GGUF; the live record captures `cpu_part`, cold start to first answer, seconds and dollars per two-tool turn and the turn-2 session reuse — measured on the deployed function, never quoted from the spike.
+  5. Every gate is green: a test per conformance fix (`cargo test -p aprender-serve --lib`, `cargo test -p apr-cli --lib`), `cargo clippy -- -D warnings` and `cargo fmt --all -- --check` on every touched crate, `pv validate` on the new conformance contract, `bashrs lint` on every new script; and the pmcp.run-side change set (provider row values, per-provider timeout, SDK `content: ""`) is delivered as reviewable PRs in their own repos with the aprender-side evidence attached in `09-PMCP-RUN-BRIEF.md`.
+
+**Branch base**: continues on `gsd/phase-2-contract-gate` per the 02-01 policy. Upstream PRs are cut
+from `upstream/main`, one small PR per fix (maintainer guidance 2026-09-29: small PRs, ~90-minute CI).
+Deployment of record uses a release artifact; a PR-branch build may back a pre-merge conformance proof
+only, labelled as such, never the deployed endpoint.
+
+**Plans**: 0 plans (run /gsd-plan-phase 9 to break down)
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 9 to break down)

@@ -596,3 +596,4 @@ Resume file: None
 
 - Phase 7 added: Tier-Resolved Door Limits — CR-01 disposition (UAT item 4, decided 2026-09-07): door bounds become a resolved profile, not hard constants, so one binary serves four deployment envelopes
 - Phase 8 added (2026-09-25): Laya Decision Model — local fine-tune and thin MCP server, productising spikes 024–026; independent track
+- Phase 9 added (2026-10-15): Internal OpenAI-Compatible LLM Endpoint for pmcp.run — productising spikes 029–031 with the smallest Qwen3.5 (0.8B) end-to-end through pmcp.run, pmcp.run-side pieces planned with its dev team (user direction at /gsd-plan-phase); independent track
