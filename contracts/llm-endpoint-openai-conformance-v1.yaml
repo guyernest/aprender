@@ -97,7 +97,7 @@ equations:
       - 'the tolerance is for an ASSISTANT message only (D-03): the same absent or null content on a user, system or tool message is still refused, so the pre-PMAT-801 422 contract survives for every other role (review round 1, MEDIUM)'
       - 'serialization is unchanged: a message that carried content "" still serializes content "", so a response-side assistant tool-call message is byte-identical to before'
       - 'this fix may be UNRELEASED at a pinned tag; a fixed probe record then reads KNOWN LIMITATION on `tool result -> final answer` with an `unreleased_at_pin` reason, and the two-tool turn is carried by the SDK-side `content: ""` fix and the platform''s own transformer — SC2 does not wait on this release'
-      - 'enforced by plan 09-02; this row (FALSIFY-LLM-CONF-001) carries no test: key until that plan writes the test'
+      - 'enforced by plan 09-02; this row (FALSIFY-LLM-CONF-001) is bound to its test: key (api::chat_message_content_tests)'
     preconditions:
       - 'the request body is valid JSON whose messages member is an array of objects with a string role'
 
@@ -181,7 +181,8 @@ falsification_tests:
   - id: FALSIFY-LLM-CONF-001
     rule: 'An assistant message with an absent or null content deserializes to content ""; a user, system or tool message with the same input is still refused (D-03). The fix may be unreleased at a pinned tag: a fixed probe record then reads KNOWN LIMITATION on `tool result -> final answer` with an `unreleased_at_pin` reason, and the two-tool turn is carried by the SDK-side `content: ""` fix and the platform''s own transformer, so SC2 does not wait on this release.'
     prediction: 'The pmcp-agent turn-2 body (an assistant message with a tool_calls array and no content key) is accepted with content "" and the tool-result turn answers 200; the same body with the content key removed from a user message is 422.'
-    implemented_by: 'plan 09-02 (the ChatMessage deserializer); the test: key is added there once the test exists (staged binding — a row whose test a later plan writes carries none)'
+    implemented_by: 'plan 09-02 (upstream commit de62ce561768fa05010ceb4d84517803c659b3ea on branch fix/chat-message-content-optional; phase-branch cherry-pick 26adb849881e9f19af1a331cd29e57f7491ff527)'
+    test: 'cargo test -p aprender-serve --lib api::chat_message_content_tests::assistant_message_without_content_parses_pmat801_followup && cargo test -p aprender-serve --lib api::chat_message_content_tests::chat_message_serialization_is_byte_identical && cargo test -p aprender-serve --lib api::chat_message_content_tests::non_assistant_message_without_content_is_refused'
     if_fails: 'pmcp-agent''s second turn is a 422, so no SDK two-tool turn can complete against the deployed endpoint without a client-side workaround.'
 
   - id: FALSIFY-LLM-CONF-002
