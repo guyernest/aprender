@@ -19,20 +19,20 @@ created: "2026-10-15"
 
 | Property | Value |
 |----------|-------|
-| **Framework** | {pytest 7.x / jest 29.x / vitest / go test / other} |
-| **Config file** | {path or "none — Wave 0 installs"} |
-| **Quick run command** | `{quick command}` |
-| **Full suite command** | `{full command}` |
-| **Estimated runtime** | ~{N} seconds |
+| **Framework** | cargo test / cargo nextest (Rust); `pv` (contracts); `bashrs` (scripts); stdlib Python probe under `python3 -I` (conformance); aws-cli `lambda invoke` (live) |
+| **Config file** | workspace `Cargo.toml` lints; `.pmat-gates.toml`; `scripts/contract_test_binding_baseline.txt` |
+| **Quick run command** | `cargo test -p aprender-serve --lib api::llm_endpoint_conformance_tests` and `cargo test -p apr-cli --lib gguf_router_auth_tests` |
+| **Full suite command** | `cargo nextest run --profile ci --workspace --lib --exclude aprender-gpu --exclude aprender-cuda-edge --exclude aprender-compute` |
+| **Estimated runtime** | quick filters: seconds once compiled; a whole crate suite (`-p aprender-serve --lib`, `-p apr-cli --lib`): minutes; image builds and live AWS calls: minutes |
 
 ---
 
 ## Sampling Rate
 
-- **After every task commit:** Run `{quick run command}`
-- **After every plan wave:** Run `{full suite command}`
+- **After every task commit:** Run the quick filter for the crate the task touched (`api::llm_endpoint_conformance_tests`, `chat_message_content_tests` or `gguf_router_auth_tests`); for script-only tasks, `bashrs lint` on the touched script and `just llm-endpoint-selftest` (AWS CALLS: 0)
+- **After every plan wave:** Run the SC5 crate suites (`cargo test -p aprender-serve --lib`, `cargo test -p apr-cli --lib`) and the CI nextest list
 - **Before `/gsd-verify-work`:** Full suite must be green
-- **Max feedback latency:** {N} seconds
+- **Max feedback latency:** 30 s for the quick filters (check 8b). **Acknowledged exceptions (plan-check 2026-10-15, nyquist warning on plans 09-01/02/03/04/07/08/10):** whole-crate test suites, the workspace `nextest list`, `docker buildx` image builds and live AWS / curl calls exceed 30 s — inherent to a deploy phase and mirrors Phase 8; every such verify still captures `rc=$?` after a redirect and carries a `<fails_when>` sibling.
 
 ---
 

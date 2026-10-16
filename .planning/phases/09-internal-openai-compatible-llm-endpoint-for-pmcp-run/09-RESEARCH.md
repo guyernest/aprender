@@ -601,17 +601,25 @@ let timeout = item.get("timeoutSecs").and_then(|v| v.as_n().ok()).and_then(|n| n
 | A4 | The LWA 0.9.1 image digest is read at build time | Stack | tag-only pin until the first build |
 | A5 | CodeBuild's `aws s3 cp --metadata sha256=…` is readable back as `Metadata.sha256` via `head-object` | Pattern 3 | fall back to re-hashing the object in the entrypoint (already planned) |
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+All six were resolved by the plan set (plan-check revision 1, 2026-10-15); each keeps its original text with the plan/section that answers it.
 
 1. **Will PV-VER-002 accept a `test:` that is a `just` recipe?**
    - What we know: the binding checker resolves cargo substring filters (`check_contract_test_binding.sh`); Phase 8 placed training-side rows in `laya_claims.tsv` kinds (`just`/`python`/`pv`/`evidence`).
    - Recommendation: bind every row to a Rust test (verdict-JSON reader for probe rows); put the recipe in `implemented_by`.
+   - **RESOLVED → plan 09-01 Task 1:** no `just` recipe is ever a `test:` value. Probe rows (007-012) bind to the Rust reader `api::llm_endpoint_conformance_tests::conformance_record_matches_contract`; `just llm-endpoint-probe` is named in `implemented_by`; live rows 013-016 use the `LIVE-PENDING` marker; rows whose tests land later carry no `test:` key (staged binding, bound by 09-02 rows 001/003 and 09-03 row 002).
 2. **Does upstream want strict `model` checking or a shaped error envelope at all?**
    - Recommendation: record both as KNOWN LIMITATIONS; raise as an issue, not a PR.
+   - **RESOLVED → plan 09-01 Task 1 (rows 009/010 as KNOWN LIMITATION) and plan 09-03 Task 1 / its PR checkpoint ("raised as an issue, not fixed"); COVERAGE.md Surface 1 records both as OPT-OUT.** Neither is on the real wire of either pmcp.run client.
 3. **`/health` gated vs exempt on the GGUF path** — contract says gated; SetFit server exempts. Recommendation: gated (`layer`), stated in the new contract, verified by the first deploy's `[entry]`/adapter timeline.
+   - **RESOLVED → gated. Plan 09-03 Task 1** (`build_gguf_router` wraps the router with `auth::layer`, not `layer_public_ops`; test `gguf_router_refuses_without_bearer` asserts 401 on `GET /health`; the seam's doc comment states the LWA 0.9.1 readiness rule — any 100-499 counts as ready); **plan 09-01** equation `bearer_gate` and row 002 state it in the contract; **plan 09-07 Task 2** reads the first deploy's `[entry]`/adapter timeline.
 4. **Reuse or tear down the spike-031 leftovers** (two functions, image, bucket with three GGUFs, roles) — a D-15 user decision; server-side copy of the 0.8B object is the cheap reuse.
+   - **RESOLVED → plan 09-07 Task 1 (the D-15 checkpoint):** options `go-dev-copy-weights` (server-side copy, leftovers untouched), `go-dev-codebuild-weights`, `go-and-teardown-spike-031`; **plan 09-06 Task 2** `llm-endpoint-weights mode=copy` and the `TEARDOWN_SPIKE_031=1` guard with the `NOT RUN — the human's call` list. Nothing is reused or deleted silently.
 5. **Reserved concurrency = 1** on the function (blast-radius cap + one-conversation-per-process) — offer at D-15; platform retries 429 via the Class-2 path.
+   - **RESOLVED → offered at D-15: plan 09-07 Task 1** option `go-dev-copy-weights` names reserved concurrency 1; **plan 09-06 Task 1** `RESERVED_CONCURRENCY` in `llm-endpoint-deploy` (`put-function-concurrency` + read-back); **plan 09-10** threat T-09-35 records the 429/Class-2 consequence in `posture`.
 6. **Where the pmcp.run org id comes from** for the secret path (`pmcp/orgs/{id}/agents/llm-keys`) — the demo agent's `organizationId`; the brief must name it.
+   - **RESOLVED → plan 09-09 Task 2** (brief §4 "The secret" states the path and names the org-id question; §10 "Review questions" asks it) and **plan 09-10 Task 1** (the data-actions checkpoint's resume-signal requires the `organizationId` before Task 2 runs).
 
 ## Environment Availability
 
@@ -630,7 +638,7 @@ let timeout = item.get("timeoutSecs").and_then(|v| v.as_n().ok()).and_then(|n| n
 | node | pmcp.run repo tooling (not needed for the brief) | ✓ | 24.19.0 | — |
 | jq | recipes | ✓ | 1.7.1 | python3 -I |
 | Upstream tags v0.70.3, v0.71.4 | diffs, pin | ✓ fetched locally | — | — |
-| A local Qwen3.5-0.8B GGUF | local probe against the image | not checked (spike 029 symlinked the HF cache) | — | pull once via `hf download` (sha256 `bd258782…`) or run the local probe inside the image with the S3 copy |
+| A local Qwen3.5-0.8B GGUF | local probe against the image | ✓ present in the HF cache (checked 2026-10-15 by plan 09-05: `~/.cache/huggingface/hub/models--unsloth--Qwen3.5-0.8B-GGUF/snapshots/6ab461498e2023f6e3c1baea90a8f0fe38ab64d0/Qwen3.5-0.8B-Q4_K_M.gguf`; the spike-029 `models/` symlink points at the same blob). Plan 09-05 Task 1 sha256-checks it against `ladder_pin.py` before any local server starts — that check, not this row, is the control | — | pull once via `hf download` (sha256 `bd258782…`) or run the local probe inside the image with the S3 copy |
 
 **Missing dependencies with no fallback:** none.
 **Missing dependencies with fallback:** `pv` (cargo fallback already encoded in the justfile).
