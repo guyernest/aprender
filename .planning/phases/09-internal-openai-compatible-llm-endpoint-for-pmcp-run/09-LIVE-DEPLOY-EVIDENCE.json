@@ -49,21 +49,69 @@
     "ephemeral_storage_mb": 10240,
     "architecture": "arm64",
     "package_type": "Image",
-    "env_var_names": ["APR_API_KEY_HASH", "MODEL_S3_URI", "MODEL_SHA256", "PLATFORM", "RAYON_NUM_THREADS"],
+    "env_var_names": [
+      "APR_API_KEY_HASH",
+      "MODEL_S3_URI",
+      "MODEL_SHA256",
+      "PLATFORM",
+      "RAYON_NUM_THREADS"
+    ],
     "log_group": "/aws/lambda/aprender-llm-endpoint-dev"
   },
   "recipe_sequence": [
-    {"step": "just llm-endpoint-up dev ze-kasher-dev", "rc": 0, "line": "UP OK aprender-llm-endpoint-dev (account 816069129666, bucket aprender-llm-endpoint-weights-816069129666-dev, repository aprender-llm-endpoint-dev)"},
-    {"step": "just llm-endpoint-weights copy dev ze-kasher-dev (first run)", "rc": 2, "line": "REFUSED s3-sha: the copied object does not carry the ladder pin as Metadata.sha256 (aws s3 cp dropped the metadata)"},
-    {"step": "recipe fix: s3api copy-object (commit 8dfa5cf65), self-test 43/43, AWS CALLS: 0", "rc": 0},
-    {"step": "just llm-endpoint-weights copy dev ze-kasher-dev (second run)", "rc": 0, "line": "WEIGHTS OK s3://aprender-llm-endpoint-weights-816069129666-dev/Qwen3.5-0.8B-Q4_K_M.gguf sha256 bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517"},
-    {"step": "just llm-endpoint-image 1 (two attempts)", "rc": 8, "line": "REFUSED push: docker push failed (Docker Desktop proxy broken pipe on layer upload)"},
-    {"step": "docker push of the recipe's own tag, repeated until it completed (5 attempts; layers already pushed persist)", "rc": 0},
-    {"step": "just llm-endpoint-image 1 (third run, push a no-op, digest recorded)", "rc": 0, "line": "PUSHED 816069129666.dkr.ecr.us-east-1.amazonaws.com/aprender-llm-endpoint-dev:cpu-v0.71.4 sha256:f291c0a7...dd15 / IMAGE OK aprender-llm-endpoint:cpu-v0.71.4 (apr apr 0.71.4 (5027da624))"},
-    {"step": "DRY_RUN=1 just llm-endpoint-deploy dev ze-kasher-dev", "rc": 0, "line": "DRY-RUN OK aprender-llm-endpoint-dev (offline rungs 1-7; account, s3-sha and digest NOT checked; apr v0.71.4, gguf bd258782...; nothing deployed)"},
-    {"step": "PREFLIGHT=1 just llm-endpoint-deploy dev ze-kasher-dev", "rc": 0, "line": "PREFLIGHT OK aprender-llm-endpoint-dev (rungs 1-10; read-only AWS calls only; apr v0.71.4; nothing deployed)"},
-    {"step": "RESERVED_CONCURRENCY=1 just llm-endpoint-deploy dev ze-kasher-dev", "rc": 0, "line": "DEPLOY OK aprender-llm-endpoint-dev (image sha256:f291c0a7...dd15, apr v0.71.4)"},
-    {"step": "just llm-endpoint-prove-401 dev ze-kasher-dev", "rc": 3, "line": "401 NOT PROVEN: statusCode=200, invoke rc=0. The deployed pin does not enforce the key; no URL may be created (D-12)"}
+    {
+      "step": "just llm-endpoint-up dev ze-kasher-dev",
+      "rc": 0,
+      "line": "UP OK aprender-llm-endpoint-dev (account 816069129666, bucket aprender-llm-endpoint-weights-816069129666-dev, repository aprender-llm-endpoint-dev)"
+    },
+    {
+      "step": "just llm-endpoint-weights copy dev ze-kasher-dev (first run)",
+      "rc": 2,
+      "line": "REFUSED s3-sha: the copied object does not carry the ladder pin as Metadata.sha256 (aws s3 cp dropped the metadata)"
+    },
+    {
+      "step": "recipe fix: s3api copy-object (commit 8dfa5cf65), self-test 43/43, AWS CALLS: 0",
+      "rc": 0
+    },
+    {
+      "step": "just llm-endpoint-weights copy dev ze-kasher-dev (second run)",
+      "rc": 0,
+      "line": "WEIGHTS OK s3://aprender-llm-endpoint-weights-816069129666-dev/Qwen3.5-0.8B-Q4_K_M.gguf sha256 bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517"
+    },
+    {
+      "step": "just llm-endpoint-image 1 (two attempts)",
+      "rc": 8,
+      "line": "REFUSED push: docker push failed (Docker Desktop proxy broken pipe on layer upload)"
+    },
+    {
+      "step": "docker push of the recipe's own tag, repeated until it completed (5 attempts; layers already pushed persist)",
+      "rc": 0
+    },
+    {
+      "step": "just llm-endpoint-image 1 (third run, push a no-op, digest recorded)",
+      "rc": 0,
+      "line": "PUSHED 816069129666.dkr.ecr.us-east-1.amazonaws.com/aprender-llm-endpoint-dev:cpu-v0.71.4 sha256:f291c0a7...dd15 / IMAGE OK aprender-llm-endpoint:cpu-v0.71.4 (apr apr 0.71.4 (5027da624))"
+    },
+    {
+      "step": "DRY_RUN=1 just llm-endpoint-deploy dev ze-kasher-dev",
+      "rc": 0,
+      "line": "DRY-RUN OK aprender-llm-endpoint-dev (offline rungs 1-7; account, s3-sha and digest NOT checked; apr v0.71.4, gguf bd258782...; nothing deployed)"
+    },
+    {
+      "step": "PREFLIGHT=1 just llm-endpoint-deploy dev ze-kasher-dev",
+      "rc": 0,
+      "line": "PREFLIGHT OK aprender-llm-endpoint-dev (rungs 1-10; read-only AWS calls only; apr v0.71.4; nothing deployed)"
+    },
+    {
+      "step": "RESERVED_CONCURRENCY=1 just llm-endpoint-deploy dev ze-kasher-dev",
+      "rc": 0,
+      "line": "DEPLOY OK aprender-llm-endpoint-dev (image sha256:f291c0a7...dd15, apr v0.71.4)"
+    },
+    {
+      "step": "just llm-endpoint-prove-401 dev ze-kasher-dev",
+      "rc": 3,
+      "line": "401 NOT PROVEN: statusCode=200, invoke rc=0. The deployed pin does not enforce the key; no URL may be created (D-12)"
+    }
   ],
   "identity": {
     "entry_apr_version_line": "apr 0.71.4 (5027da624)",
@@ -109,5 +157,597 @@
   },
   "proof_invocation_report": "REPORT RequestId: 9132b641-cedc-4dcd-a600-7fd315cb99b8 Duration: 19201.83 ms Billed Duration: 29110 ms Memory Size: 10240 MB Max Memory Used: 1522 MB Init Duration: 9907.55 ms",
   "spike_031_leftovers": "untouched",
-  "teardown_commands_not_run": ["just llm-endpoint-teardown dev ze-kasher-dev"]
+  "teardown_commands_not_run": [
+    "just llm-endpoint-teardown dev ze-kasher-dev"
+  ],
+  "cold_samples": [
+    {
+      "shape": "cold_short_1tok",
+      "status": 200,
+      "client_wall_s": 20.134,
+      "duration_ms": 11464.68,
+      "billed_ms": 18954.0,
+      "init_ms": 7489.01,
+      "max_mem_mb": 1521,
+      "cost_usd": 0.002527,
+      "cpu_part": "0xd40",
+      "prompt_tokens": 73,
+      "completion_tokens": 1,
+      "finish": "length",
+      "tool_calls": [],
+      "run": "deployed",
+      "cpu_part_source": "tail"
+    },
+    {
+      "shape": "first_cold_start_of_the_proof_invocation",
+      "run": "prove-401",
+      "status": 200,
+      "client_wall_s": null,
+      "client_wall_s_note": "the prove-401 recipe does not time the call",
+      "duration_ms": 19201.83,
+      "billed_ms": 29110.0,
+      "init_ms": 9907.55,
+      "max_mem_mb": 1522,
+      "cost_usd": 0.003881,
+      "cpu_part": "0xd40",
+      "cpu_part_source": "[entry] host: line of the function's log group",
+      "prompt_tokens": null,
+      "completion_tokens": null,
+      "finish": null,
+      "tool_calls": null,
+      "note": "the cold start after deploy; its unauthenticated POST was answered 200 (401 NOT PROVEN)"
+    }
+  ],
+  "warm": {
+    "short_1tok": [
+      {
+        "shape": "short_1tok",
+        "status": 200,
+        "client_wall_s": 12.051,
+        "duration_ms": 11260.69,
+        "billed_ms": 11261.0,
+        "init_ms": null,
+        "max_mem_mb": 1563,
+        "cost_usd": 0.001501,
+        "cpu_part": "0xd40",
+        "prompt_tokens": 73,
+        "completion_tokens": 1,
+        "finish": "length",
+        "tool_calls": [],
+        "run": "deployed",
+        "cpu_part_source": "cold-record-tail"
+      },
+      {
+        "shape": "short_1tok",
+        "status": 200,
+        "client_wall_s": 12.095,
+        "duration_ms": 11283.53,
+        "billed_ms": 11284.0,
+        "init_ms": null,
+        "max_mem_mb": 1602,
+        "cost_usd": 0.001505,
+        "cpu_part": "0xd40",
+        "prompt_tokens": 73,
+        "completion_tokens": 1,
+        "finish": "length",
+        "tool_calls": [],
+        "run": "deployed-sample2",
+        "cpu_part_source": "same execution environment as run 1 (no Init Duration in any run-2 REPORT, so no new environment started); the bench wrote null because its log lookup used a pattern that matches nothing on CloudWatch Logs (fixed in a4fccac29); the value is run 1's cold-record tail and the fixed lookup returned the same 0xd40"
+      }
+    ],
+    "short_64tok": [
+      {
+        "shape": "short_64tok",
+        "status": 200,
+        "client_wall_s": 21.542,
+        "duration_ms": 20816.48,
+        "billed_ms": 20817.0,
+        "init_ms": null,
+        "max_mem_mb": 1570,
+        "cost_usd": 0.002776,
+        "cpu_part": "0xd40",
+        "prompt_tokens": 73,
+        "completion_tokens": 64,
+        "finish": "length",
+        "tool_calls": [],
+        "run": "deployed",
+        "cpu_part_source": "cold-record-tail"
+      },
+      {
+        "shape": "short_64tok",
+        "status": 200,
+        "client_wall_s": 21.787,
+        "duration_ms": 20946.4,
+        "billed_ms": 20947.0,
+        "init_ms": null,
+        "max_mem_mb": 1602,
+        "cost_usd": 0.002793,
+        "cpu_part": "0xd40",
+        "prompt_tokens": 73,
+        "completion_tokens": 64,
+        "finish": "length",
+        "tool_calls": [],
+        "run": "deployed-sample2",
+        "cpu_part_source": "same execution environment as run 1 (no Init Duration in any run-2 REPORT, so no new environment started); the bench wrote null because its log lookup used a pattern that matches nothing on CloudWatch Logs (fixed in a4fccac29); the value is run 1's cold-record tail and the fixed lookup returned the same 0xd40"
+      }
+    ],
+    "tools2_1tok": [
+      {
+        "shape": "tools2_1tok",
+        "status": 200,
+        "client_wall_s": 66.028,
+        "duration_ms": 65263.61,
+        "billed_ms": 65264.0,
+        "init_ms": null,
+        "max_mem_mb": 1584,
+        "cost_usd": 0.008702,
+        "cpu_part": "0xd40",
+        "prompt_tokens": 421,
+        "completion_tokens": 1,
+        "finish": "length",
+        "tool_calls": [],
+        "run": "deployed",
+        "cpu_part_source": "cold-record-tail"
+      },
+      {
+        "shape": "tools2_1tok",
+        "status": 200,
+        "client_wall_s": 65.592,
+        "duration_ms": 64816.9,
+        "billed_ms": 64817.0,
+        "init_ms": null,
+        "max_mem_mb": 1602,
+        "cost_usd": 0.008642,
+        "cpu_part": "0xd40",
+        "prompt_tokens": 421,
+        "completion_tokens": 1,
+        "finish": "length",
+        "tool_calls": [],
+        "run": "deployed-sample2",
+        "cpu_part_source": "same execution environment as run 1 (no Init Duration in any run-2 REPORT, so no new environment started); the bench wrote null because its log lookup used a pattern that matches nothing on CloudWatch Logs (fixed in a4fccac29); the value is run 1's cold-record tail and the fixed lookup returned the same 0xd40"
+      }
+    ],
+    "tools2_turn1": [
+      {
+        "shape": "tools2_turn1",
+        "status": 200,
+        "client_wall_s": 72.34,
+        "duration_ms": 71451.79,
+        "billed_ms": 71452.0,
+        "init_ms": null,
+        "max_mem_mb": 1591,
+        "cost_usd": 0.009527,
+        "cpu_part": "0xd40",
+        "prompt_tokens": 421,
+        "completion_tokens": 38,
+        "finish": "tool_calls",
+        "tool_calls": [
+          "get_weather"
+        ],
+        "run": "deployed",
+        "cpu_part_source": "cold-record-tail"
+      },
+      {
+        "shape": "tools2_turn1",
+        "status": 200,
+        "client_wall_s": 71.492,
+        "duration_ms": 70682.85,
+        "billed_ms": 70683.0,
+        "init_ms": null,
+        "max_mem_mb": 1602,
+        "cost_usd": 0.009424,
+        "cpu_part": "0xd40",
+        "prompt_tokens": 421,
+        "completion_tokens": 38,
+        "finish": "tool_calls",
+        "tool_calls": [
+          "get_weather"
+        ],
+        "run": "deployed-sample2",
+        "cpu_part_source": "same execution environment as run 1 (no Init Duration in any run-2 REPORT, so no new environment started); the bench wrote null because its log lookup used a pattern that matches nothing on CloudWatch Logs (fixed in a4fccac29); the value is run 1's cold-record tail and the fixed lookup returned the same 0xd40"
+      }
+    ],
+    "turn2_extend_1tok": [
+      {
+        "shape": "turn2_extend_1tok",
+        "status": 200,
+        "client_wall_s": 8.104,
+        "duration_ms": 7297.16,
+        "billed_ms": 7298.0,
+        "init_ms": null,
+        "max_mem_mb": 1592,
+        "cost_usd": 0.000973,
+        "cpu_part": "0xd40",
+        "prompt_tokens": 460,
+        "completion_tokens": 1,
+        "finish": "length",
+        "tool_calls": [],
+        "run": "deployed",
+        "cpu_part_source": "cold-record-tail"
+      },
+      {
+        "shape": "turn2_extend_1tok",
+        "status": 200,
+        "client_wall_s": 8.052,
+        "duration_ms": 7201.29,
+        "billed_ms": 7202.0,
+        "init_ms": null,
+        "max_mem_mb": 1602,
+        "cost_usd": 0.00096,
+        "cpu_part": "0xd40",
+        "prompt_tokens": 460,
+        "completion_tokens": 1,
+        "finish": "length",
+        "tool_calls": [],
+        "run": "deployed-sample2",
+        "cpu_part_source": "same execution environment as run 1 (no Init Duration in any run-2 REPORT, so no new environment started); the bench wrote null because its log lookup used a pattern that matches nothing on CloudWatch Logs (fixed in a4fccac29); the value is run 1's cold-record tail and the fixed lookup returned the same 0xd40"
+      }
+    ],
+    "turn2_extend_64tok": [
+      {
+        "shape": "turn2_extend_64tok",
+        "status": 200,
+        "client_wall_s": 4.607,
+        "duration_ms": 3812.08,
+        "billed_ms": 3813.0,
+        "init_ms": null,
+        "max_mem_mb": 1592,
+        "cost_usd": 0.000508,
+        "cpu_part": "0xd40",
+        "prompt_tokens": 460,
+        "completion_tokens": 17,
+        "finish": "stop",
+        "tool_calls": [],
+        "run": "deployed",
+        "cpu_part_source": "cold-record-tail"
+      },
+      {
+        "shape": "turn2_extend_64tok",
+        "status": 200,
+        "client_wall_s": 4.533,
+        "duration_ms": 3817.58,
+        "billed_ms": 3818.0,
+        "init_ms": null,
+        "max_mem_mb": 1602,
+        "cost_usd": 0.000509,
+        "cpu_part": "0xd40",
+        "prompt_tokens": 460,
+        "completion_tokens": 17,
+        "finish": "stop",
+        "tool_calls": [],
+        "run": "deployed-sample2",
+        "cpu_part_source": "same execution environment as run 1 (no Init Duration in any run-2 REPORT, so no new environment started); the bench wrote null because its log lookup used a pattern that matches nothing on CloudWatch Logs (fixed in a4fccac29); the value is run 1's cold-record tail and the fixed lookup returned the same 0xd40"
+      }
+    ],
+    "tools10_1tok": [
+      {
+        "shape": "tools10_1tok",
+        "status": 200,
+        "client_wall_s": 148.819,
+        "duration_ms": 148081.62,
+        "billed_ms": 148082.0,
+        "init_ms": null,
+        "max_mem_mb": 1602,
+        "cost_usd": 0.019744,
+        "cpu_part": "0xd40",
+        "prompt_tokens": 937,
+        "completion_tokens": 1,
+        "finish": "length",
+        "tool_calls": [],
+        "run": "deployed",
+        "cpu_part_source": "cold-record-tail"
+      }
+    ]
+  },
+  "concurrency": {
+    "conc2": [
+      {
+        "shape": "conc2_0",
+        "status": 200,
+        "client_wall_s": 16.834,
+        "duration_ms": 16019.27,
+        "billed_ms": 16020.0,
+        "init_ms": null,
+        "max_mem_mb": 1602,
+        "cost_usd": 0.002136,
+        "cpu_part": "0xd40",
+        "prompt_tokens": 73,
+        "completion_tokens": 32,
+        "finish": "length",
+        "tool_calls": [],
+        "run": "deployed",
+        "cpu_part_source": "cold-record-tail"
+      },
+      {
+        "shape": "conc2_1",
+        "run": "deployed",
+        "status": 0,
+        "client_wall_s": 0.786,
+        "error": "aws rc=254: An error occurred (TooManyRequestsException) when calling the Invoke operation (reached max retries: 0): Rate Exceeded."
+      }
+    ],
+    "wall_s": 16.838,
+    "environments_observed": 1,
+    "note": "Two simultaneous requests: the first was served (200, 16.8 s), the second was refused immediately by Lambda with TooManyRequestsException (rc 254, 0.79 s) because reserved concurrency is 1. So no second execution environment was started and there is no second-environment cold start to measure on this function; one function serves one conversation at a time, and a second caller is throttled, not queued. Spike 031's second-environment figure (context only) was taken without a reserved-concurrency bound."
+  },
+  "derived": {
+    "prefill_tok_s": {
+      "short_run1": 6.06,
+      "short_run2": 6.04,
+      "tools2_run1": 6.38,
+      "tools2_run2": 6.42,
+      "tools10_run1": 6.3
+    },
+    "decode_tok_s": [
+      6.64,
+      6.5
+    ],
+    "two_tool_turn_s": [
+      72.34,
+      71.492
+    ],
+    "two_tool_turn_billed_s": [
+      71.452,
+      70.683
+    ],
+    "two_tool_turn_usd": [
+      0.009527,
+      0.009424
+    ],
+    "turn2_extend_vs_turn1_1tok": [
+      "8.104s vs 66.028s",
+      "8.052s vs 65.592s"
+    ],
+    "turn2_extend_64tok_s": [
+      4.607,
+      4.533
+    ],
+    "ten_tool_prefill_wall_s": 148.819,
+    "ten_tool_prefill_billed_s": 148.082,
+    "cold_to_first_answer_s": 20.134,
+    "demo_turn_under_120s": true,
+    "demo_turn_basis": "D-10 compares the platform client's 120 s timeout with each request. The demo two-tool turn is turn 1 (tools2_turn1, measured 72.3 s and 71.5 s wall) followed by turn 2 (the tool result extending the same conversation, 4.6 s and 4.5 s for 64 tokens): about 77 s in total, and the first request is under 120 s by itself. A cold start in front of turn 1 adds about 20 s (cold_short_1tok 20.1 s), about 92 s, still under 120 s. This holds for two tools (about 421 prompt tokens), warm session, cpu_part 0xd40.",
+    "ten_tool_turn_under_120s": false,
+    "ten_tool_note": "A ten-tool prompt (926 prompt tokens) took 148.8 s wall (tools10_1tok, one sample) and 155.1 s in the conformance probe: over 120 s. Prefill runs at about 6.3 tokens/s on this 0.8B at this tier, so a real MCP tool list this size does not fit the platform client's 120 s unless the prefix is cached from an earlier turn."
+  },
+  "no_auth_case": {
+    "statusCode": 200,
+    "second_sample_statusCode": 200,
+    "note": "bench shape no_auth_401 (POST without Authorization): 200 in both runs, equal to auth.server_401.statusCode; the pin does not gate the key"
+  },
+  "measurement_runs": [
+    {
+      "command": "just llm-endpoint-measure dev ze-kasher-dev deployed 1 1 2 0.49",
+      "result": "MEASURE OK deploy/llm-endpoint/.ids/bench-deployed-20261016T182251Z.json",
+      "spent_usd": 0.049903,
+      "budget_usd": 0.49,
+      "budget_stop": null,
+      "generated_at": "2026-10-16T18:29:22Z"
+    },
+    {
+      "command": "just llm-endpoint-measure dev ze-kasher-dev deployed-sample2 0 0 0 0.446",
+      "result": "MEASURE OK deploy/llm-endpoint/.ids/bench-deployed-sample2-20261016T182943Z.json",
+      "spent_usd": 0.025339,
+      "budget_usd": 0.446,
+      "budget_stop": null,
+      "generated_at": "2026-10-16T18:33:04Z"
+    },
+    {
+      "command": "python3 -I deploy/llm-endpoint/probe/bench.py --conformance ... --budget-usd 0.42",
+      "result": "conformance invokes=16 spent_usd=0.064479",
+      "spent_usd": 0.064479,
+      "budget_usd": 0.42,
+      "budget_stop": null
+    }
+  ],
+  "conformance_record": "deploy/llm-endpoint/probe/results/conformance-v0.71.4-deployed-invoke.json",
+  "conformance_summary": {
+    "profile": "baseline",
+    "label": "deployed",
+    "transport": "lambda-invoke",
+    "streaming": "buffered-through-adapter",
+    "crosses": [
+      "tool result -> final answer (422)",
+      "tool_choice=required",
+      "max_completion_tokens honoured (222 tokens, finish=stop)",
+      "error envelope {error:{message,type}} (422)"
+    ],
+    "informational": [
+      "foreign model id (200)",
+      "no Authorization header (200, the server is open)",
+      "cpu_part in /health (no key)"
+    ],
+    "matches_spike_029_baseline_set": true,
+    "invokes": 16,
+    "spent_usd": 0.064479,
+    "calls": [
+      {
+        "call": "GET /v1/models",
+        "status": 200,
+        "client_wall_s": 0.778,
+        "billed_ms": 2.0,
+        "init_ms": null,
+        "max_mem_mb": 1602,
+        "cost_usd": 0.0
+      },
+      {
+        "call": "GET /v1/effective-config",
+        "status": 200,
+        "client_wall_s": 0.719,
+        "billed_ms": 2.0,
+        "init_ms": null,
+        "max_mem_mb": 1602,
+        "cost_usd": 0.0
+      },
+      {
+        "call": "POST /v1/chat/completions",
+        "status": 200,
+        "client_wall_s": 14.13,
+        "billed_ms": 13296.0,
+        "init_ms": null,
+        "max_mem_mb": 1602,
+        "cost_usd": 0.001773
+      },
+      {
+        "call": "POST /v1/chat/completions",
+        "status": 200,
+        "client_wall_s": 70.436,
+        "billed_ms": 69635.0,
+        "init_ms": null,
+        "max_mem_mb": 1602,
+        "cost_usd": 0.009285
+      },
+      {
+        "call": "POST /v1/chat/completions",
+        "status": 422,
+        "client_wall_s": 0.824,
+        "billed_ms": 2.0,
+        "init_ms": null,
+        "max_mem_mb": 1602,
+        "cost_usd": 0.0
+      },
+      {
+        "call": "POST /v1/chat/completions",
+        "status": 200,
+        "client_wall_s": 60.498,
+        "billed_ms": 59722.0,
+        "init_ms": null,
+        "max_mem_mb": 1603,
+        "cost_usd": 0.007963
+      },
+      {
+        "call": "POST /v1/chat/completions",
+        "status": 200,
+        "client_wall_s": 65.541,
+        "billed_ms": 64684.0,
+        "init_ms": null,
+        "max_mem_mb": 1603,
+        "cost_usd": 0.008625
+      },
+      {
+        "call": "POST /v1/chat/completions",
+        "status": 200,
+        "client_wall_s": 155.06,
+        "billed_ms": 154171.0,
+        "init_ms": null,
+        "max_mem_mb": 1603,
+        "cost_usd": 0.020556
+      },
+      {
+        "call": "POST /v1/chat/completions",
+        "status": 200,
+        "client_wall_s": 66.308,
+        "billed_ms": 65454.0,
+        "init_ms": null,
+        "max_mem_mb": 1603,
+        "cost_usd": 0.008727
+      },
+      {
+        "call": "POST /v1/chat/completions",
+        "status": 200,
+        "client_wall_s": 11.8,
+        "billed_ms": 11039.0,
+        "init_ms": null,
+        "max_mem_mb": 1603,
+        "cost_usd": 0.001472
+      },
+      {
+        "call": "POST /v1/chat/completions",
+        "status": 200,
+        "client_wall_s": 4.323,
+        "billed_ms": 3403.0,
+        "init_ms": null,
+        "max_mem_mb": 1603,
+        "cost_usd": 0.000454
+      },
+      {
+        "call": "POST /v1/chat/completions",
+        "status": 200,
+        "client_wall_s": 38.335,
+        "billed_ms": 37494.0,
+        "init_ms": null,
+        "max_mem_mb": 1603,
+        "cost_usd": 0.004999
+      },
+      {
+        "call": "POST /v1/chat/completions",
+        "status": 422,
+        "client_wall_s": 0.744,
+        "billed_ms": 2.0,
+        "init_ms": null,
+        "max_mem_mb": 1603,
+        "cost_usd": 0.0
+      },
+      {
+        "call": "POST /v1/chat/completions",
+        "status": 200,
+        "client_wall_s": 3.8,
+        "billed_ms": 3104.0,
+        "init_ms": null,
+        "max_mem_mb": 1603,
+        "cost_usd": 0.000414
+      },
+      {
+        "call": "POST /v1/chat/completions",
+        "status": 200,
+        "client_wall_s": 2.404,
+        "billed_ms": 1583.0,
+        "init_ms": null,
+        "max_mem_mb": 1603,
+        "cost_usd": 0.000211
+      },
+      {
+        "call": "GET /health",
+        "status": 200,
+        "client_wall_s": 0.757,
+        "billed_ms": 2.0,
+        "init_ms": null,
+        "max_mem_mb": 1603,
+        "cost_usd": 0.0
+      }
+    ]
+  },
+  "cost_invocations_usd": 0.143602,
+  "cost_non_invoke_allowance_usd": 0.01,
+  "cost_non_invoke_note": "estimate, rounded up, not measured: S3 object 0.53 GB, one ECR image about 0.15 GB, CloudWatch Logs for a day. The server-side copy within us-east-1 has no transfer charge. Docker push crossed the operator uplink but incurs no AWS charge beyond storage.",
+  "cost_spent_usd": 0.153602,
+  "spike_031_context": {
+    "context_not_measurement": true,
+    "source": "spike 031 (Graviton3 0xd40, 10,240 MB, apr 0.70.3), quoted from the plan; none of these is this deployment's result",
+    "cold_to_first_answer_s": 40.5,
+    "two_tool_turn_s": 71,
+    "two_tool_turn_usd": 0.0095,
+    "ten_tool_prefill_wall_s": 100,
+    "ten_tool_prefill_billed_s": 146,
+    "turn2_vs_turn1_s": "7.3 vs 64.7",
+    "second_concurrent_request": "a second environment, 118 s cold"
+  },
+  "recommendations_not_acted_on": [
+    "prefix cache across requests",
+    "batched prefill",
+    "2B or 4B model",
+    "Fargate",
+    "a CloudWatch invocation alarm"
+  ],
+  "findings": [
+    "401 NOT PROVEN on v0.71.4: no URL; 09-08 waits on a release carrying the D-04 fix (paiml/aprender#5451)",
+    "the 10,240 MB tier admits the 0.8B: host MemTotal 10,972,280 kB, peak Max Memory Used 1,602 MB over every request; this closes the PARTIAL D-02 claim of plan 09-05",
+    "reserved concurrency 1 turns the second of two simultaneous requests into a TooManyRequestsException, not a second environment",
+    "prefill is the cost: about 6.3 tokens/s, so a ten-tool prompt is 149-155 s, over the platform's 120 s client timeout",
+    "turn-2 session reuse works through the adapter: 8.1 s against 66.0 s for the same extension without the cached prefix"
+  ],
+  "cost_ceiling_note": "cost_spent_usd (invocations plus a rounded-up allowance for storage) is within cost_ceiling_usd",
+  "recipe_defects_found_and_fixed_during_this_run": [
+    {
+      "commit": "8dfa5cf65",
+      "defect": "llm-endpoint-weights copy used aws s3 cp, which dropped Metadata.sha256; now s3api copy-object, self-test case 43"
+    },
+    {
+      "commit": "a4fccac29",
+      "defect": "bench host_info filter pattern matched nothing on CloudWatch Logs and the paginated --query prefixed None; cpu_part was null when no cold record was in the run"
+    },
+    {
+      "defect": "docker push through Docker Desktop's proxy failed with broken pipe on large layers (recipe rc 8, twice); a plain re-push of the recipe's tag completed after five attempts, then the recipe was re-run to record the digest. Not changed in the recipe; a retry loop in llm-endpoint-image is a candidate follow-up"
+    }
+  ]
 }
