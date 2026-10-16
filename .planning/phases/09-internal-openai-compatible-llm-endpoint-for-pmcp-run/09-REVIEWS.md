@@ -324,6 +324,23 @@ Before live deployment, also make ECR teardown environment-safe, make 09-07 arti
 
 ---
 
+## Orchestrator Verification of Reviewer Claims
+
+Verified 2026-10-15 against source before replanning. Verdicts rank the findings; codex's own severity labels do not.
+
+| # | Claim | Verdict | Method and evidence |
+|---|-------|---------|---------------------|
+| 1 | 09-02/09-03/09-05: single fork commit also edits phase-only contract, so cherry-pick onto upstream/main is not self-contained; 09-02 Task 2 also depends on the test file Task 1 creates | CONFIRMED | 09-02-PLAN.md Task 1 binds `contracts/llm-endpoint-openai-conformance-v1.yaml` in the same commit as the fix; Task 2 edits the Task 1 test file; checkpoint cherry-picks "exactly one fork commit" onto `upstream/main`, where that contract does not exist |
+| 2 | 09-04: Dockerfile requires `MODEL_LOCAL=/tmp/model.gguf` but acceptance says it must not contain `.gguf` | CONFIRMED | 09-04-PLAN.md lines 172-183 vs 229-234, read directly |
+| 3 | 09-12/09-08: `--manifest-path .../Cargo.branch.toml` is invalid | CONFIRMED | Throwaway crate, `cargo metadata --manifest-path Cargo.branch.toml` -> `error: the manifest-path must be a path to a Cargo.toml file` |
+| 4 | 09-09: `cargo test --lib` on durable-agent-lambda targets a nonexistent library | CONFIRMED | No `src/lib.rs`, no `[lib]`; `cargo test --lib --no-run` -> `error: no library targets found in package durable-agent-lambda` |
+| 5 | 09-10: verifier accepts two calls to the same tool and checks no wire-level SC1 properties | CONFIRMED | 09-10-PLAN.md line 174 `{'get_weather','add'} <= set(tool_calls) or len(tool_calls)>=2`; evidence schema (lines 162-168) has no finish_reason / args-parse / tool-result-accepted fields |
+| 6 | 09-06: teardown `delete-repository --force` on a repo shared across envs | CONFIRMED | 09-06-PLAN.md: repo `aprender-llm-endpoint` has no env suffix, teardown deletes it unless `KEEP_IMAGE=1` |
+| 7 | pmcp.run logs the full resolved endpoint (Function URL) | CONFIRMED | `durable-agent-lambda/src/llm/service.rs:231-235` `info!(endpoint = %endpoint, ...)` |
+| 8 | 09-07 artifact name hard-coded to v0.71.4; 09-02 deserializer widens every role; 09-06 DRY_RUN contradiction; 09-11 ambiguity guard unmutated; 09-01 `cpu_part` enforcement gap | NOT INDEPENDENTLY CHECKED | Accept as MEDIUM; planner must address or record a disposition |
+
+Replan guidance: incorporate 1-7. Reject nothing outright; row 8 items get an explicit disposition each.
+
 ## Consensus Summary
 
 Only one grounded reviewer ran, so there is no cross-reviewer consensus. Codex's verdict is **REVISE BEFORE EXECUTION**
