@@ -9,7 +9,7 @@
 |---|---|---|
 | `POST /v1/chat/completions` (non-streaming) | INTEGRATE | the only route both clients call; probed, fixed (D-03/D-05) and proven end to end (SC1/SC2) |
 | `POST /v1/chat/completions` + `tools`, `tool_choice: auto` | INTEGRATE | the two-tool and ten-tool turns; contract rows 004-007 |
-| tool-result turn (`role: tool`, `tool_call_id`) | INTEGRATE | gap 1 fix (D-03) + SDK fix (D-09); matrix in 09-05 |
+| tool-result turn (`role: tool`, `tool_call_id`) | INTEGRATE | gap 1 fix (D-03) + SDK fix (D-09); matrix in 09-12 (split from 09-05) |
 | `POST /v1/chat/completions` with `stream: true` | INTEGRATE | probed (P6/P7) buffered through the adapter so a future streaming client has a verdict; neither platform client streams today, so the Function URL stays BUFFERED (Surface 2) |
 | `max_completion_tokens` | INTEGRATE | aliased to `max_tokens` (D-05 cheap fix, plan 09-02) |
 | `tool_choice: required` | OPT-OUT | KNOWN LIMITATION — needs constrained decoding to be honest; not on the real wire of either client (D-05) |
