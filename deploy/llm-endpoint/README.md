@@ -103,25 +103,111 @@ To move to a different `apr` release or a different ladder rung:
 A re-pin invalidates every earlier record: a measurement is evidence for the identity that
 produced it and no other.
 
-## Recipes, in the D-12 order
+## Recipes (the D-12 order)
 
 | Order | Recipe | What it does |
 |---|---|---|
-| 1 | `just llm-endpoint-up` | the environment's bucket, ECR repository, roles and log group, all tagged |
+| 1 | `just llm-endpoint-up` | the environment's bucket, ECR repository, role and log group, all tagged |
 | 2 | `just llm-endpoint-weights mode=copy` or `codebuild` | stage the GGUF into the bucket (CodeBuild never crosses the operator uplink) |
 | 3 | `just llm-endpoint-image push=1` | build and push the image to the environment's repository |
 | 4 | `just llm-endpoint-deploy` | create or update the function (`DRY_RUN=1` offline, `PREFLIGHT=1` connected read-only, neither = live) |
 | 5 | `just llm-endpoint-prove-401` | invoke the deployed function without a key and prove it answers 401 |
-| 6 | `just llm-endpoint-url` | create the public URL, refused without a fresh 401 proof |
+| 6 | `just llm-endpoint-url` | create the public URL, refused without a fresh 401 proof and bounded concurrency |
 | 7 | probe | the conformance probe against the deployed function |
 | 8 | `just llm-endpoint-measure` | the D-14 measurement |
-| 9 | `just llm-endpoint-teardown` | remove what the phase created |
+| 9 | `just llm-endpoint-teardown` | remove what the phase created, without ever deleting an ECR repository |
 
-`just llm-endpoint-warm` and `just llm-endpoint-selftest` sit outside the order. The deploy
-ladder's refusals are `mode`, `env`, `pin`, `tarball`, `image`, `ladder`, `auth`, `ids`,
-`account`, `s3-sha`, `digest` and `readback`; the URL recipe's are `proof` and `concurrency`.
-Plan 09-06 owns these recipes and documents the environment-specific resource names (the
-repository is per environment, never shared) in this file.
+`just llm-endpoint-warm` (one authenticated 1-token invoke, key from `APR_PROBE_KEY`) and
+`just llm-endpoint-selftest` sit outside the order. Every recipe takes `env` (`dev` or `prod`,
+default `dev`) and `profile` (default `ze-kasher-dev`); the image, probe and measure recipes are
+owned by plans 09-04 and 09-13.
+
+### The deploy mode contract
+
+`llm-endpoint-deploy` is a fail-closed ladder of ten rungs, each printing `REFUSED <check>: ...`
+before any AWS write. Rungs 1-7 are local (`env`, `pin`, `tarball`, `image`, `ladder`, `auth`,
+`ids`); rungs 8-10 are read-only AWS calls (`account` = sts, `s3-sha` = head-object, `digest` =
+ecr describe-images).
+
+- `DRY_RUN=1` is OFFLINE static validation: rungs 1-7 only, zero AWS calls of any kind, ending
+  `DRY-RUN OK ... (offline rungs 1-7; account, s3-sha and digest NOT checked; nothing deployed)`.
+- `PREFLIGHT=1` is the CONNECTED read-only preflight: rungs 1-10, only the three read calls,
+  ending `PREFLIGHT OK ... (rungs 1-10; read-only AWS calls only; nothing deployed)`.
+- Neither flag runs rungs 1-10 and then the live create or update, then reads back memory,
+  timeout, ephemeral storage and architecture from Lambda (`REFUSED readback` on any difference).
+- Both flags together are `REFUSED mode`.
+
+`RESERVED_CONCURRENCY=<n>` applies a reserved-concurrency bound after the deploy and records the
+read-back value in `.ids/function.json`. `APR_API_KEY_HASH` comes from the environment and is only
+ever printed as the word `set`; it reaches Lambda through a mode-0600 temporary file, never argv.
+
+### Refusals per recipe
+
+| Recipe | Refusals |
+|---|---|
+| `llm-endpoint-up` | `env`, `account`, and a tolerated-by-exact-name idempotency check (`ResourceAlreadyExistsException`) |
+| `llm-endpoint-weights` | `mode`, `env`, `pin`, `ladder`, `ids`, `account`, `source-meta` (the spike source has no matching hash: use `mode=codebuild`), `codebuild`, `s3-sha` |
+| `llm-endpoint-deploy` | `mode`, `env`, `pin`, `tarball`, `image`, `ladder`, `auth`, `ids`, `account`, `s3-sha`, `digest`, `readback` |
+| `llm-endpoint-prove-401` | `env`, `function`, `event`; exits 3 with `401 NOT PROVEN` on any status but 401 |
+| `llm-endpoint-url` | `proof` (no record, not 401, another image digest, older than 24 h), `account`, `concurrency` (not 1-5 unless `ACCEPT_UNRESERVED_URL=1`, recorded as `risk_accepted`); removes the URL and both statements and exits 1 with `URL REMOVED` when the no-key re-check is not 401 |
+| `llm-endpoint-warm` | `probe-key`, `function` |
+| `llm-endpoint-teardown` | `ids`, `pin`, `account`, `contain`, `policy` (a URL statement survived `remove-permission`) |
+
+### Environment-specific names
+
+Nothing is shared across environments, so tearing one down cannot touch another:
+
+| Resource | Name |
+|---|---|
+| function, role, log group | `aprender-llm-endpoint-<env>` (log group `/aws/lambda/aprender-llm-endpoint-<env>`) |
+| ECR repository | `aprender-llm-endpoint-<env>` |
+| weights bucket | `aprender-llm-endpoint-weights-<account>-<env>` |
+| CodeBuild project and role (only for `weights codebuild`) | `aprender-llm-endpoint-weights-<env>`, `aprender-llm-endpoint-codebuild-<env>` |
+| URL statements on the function | `llm-endpoint-url-public`, `llm-endpoint-invoke-via-url` |
+
+`llm-endpoint-up` records these in the gitignored `.ids/aws.json`; the later recipes read them
+from there.
+
+### Teardown
+
+`llm-endpoint-teardown` contains first (reserved concurrency 0, read back), deletes the URL
+config, runs `remove-permission` for both statement ids and verifies `get-policy` lists neither,
+then deletes the function. Deleting a URL config does not delete the policy, which is why the
+statements are removed explicitly. It deletes only the ECR image tag this deployment recorded,
+and only while that tag still resolves to the recorded digest (`SKIPPED image` otherwise;
+`KEEP_IMAGE=1` keeps it). It never executes `aws ecr delete-repository`: it prints how many images
+the repository still holds and the command under `NOT RUN` for the human to decide. The bucket
+goes only when its sole object is the GGUF (`KEEP_BUCKET=1` keeps it), then the log group, the
+CodeBuild project and role if `weights codebuild` made them, and the function role. The spike-031
+leftovers are printed and are removed only with `TEARDOWN_SPIKE_031=1`, which still never runs
+`delete-repository`.
+
+### Cost amplification
+
+A public `AuthType NONE` URL lets anyone who knows its address buy a 10,240 MB cold start that is
+answered 401 after about 40 s, roughly $0.005 each. The bound is the combination of three
+controls: the enforced reserved concurrency (`llm-endpoint-url` refuses unless it is 1-5), the
+401 gate (no URL before `prove-401` has passed for the deployed digest) and keeping the URL out
+of git (`.ids/url.json` is gitignored and only its host is ever printed). Recommended for the
+operator and not created here: a CloudWatch invocation alarm with a notification target of your
+own choosing.
+
+### The URL is a secret-equivalent address
+
+pmcp.run's durable-agent-lambda logs the full resolved endpoint on every call
+(`llm/service.rs`), and the same URL sits in the LLMProvider row's `endpointTemplate`. Treat the
+URL as an address whose only protection is the server's bearer gate plus the concurrency bound;
+plan 09-08 records the disposition (T-09-50).
+
+### The recipes' own test
+
+`just llm-endpoint-selftest` puts an `aws` shim first on `PATH` and never reaches AWS. The
+offline cases run against a shim that logs and refuses, so the log stays empty (`AWS CALLS: 0`);
+the PREFLIGHT cases run against a shim that answers only the three read calls (`FIXTURE READS: n`);
+a negative control proves the call counter can be non-zero; the lifecycle recipes run against a
+permissive shim that logs every argv, so the tests assert which AWS calls were and were not made
+(both `remove-permission` ids, one `batch-delete-image`, no `delete-repository`, no
+`create-function-url-config` without a proof). `SELFTEST_KEEP=1` keeps the temporary directory.
 
 ## Rules
 
@@ -159,7 +245,8 @@ A record that omits any of these is not evidence:
 | entrypoint | `model-pin` | `MODEL_SHA256` is unset or not 64 hex |
 | entrypoint | `model-sha` | the pulled GGUF does not hash to `MODEL_SHA256` |
 | weights job | exit 9 | the downloaded GGUF does not hash to `GGUF_SHA256` |
-| deploy ladder | see above | plan 09-06 |
+| deploy ladder | `mode`, `env`, `pin`, `tarball`, `image`, `ladder`, `auth`, `ids`, `account`, `s3-sha`, `digest`, `readback` | see the mode contract above |
+| url recipe | `proof`, `concurrency` | no public surface without a fresh 401 for the deployed digest and bounded concurrency |
 
 ## Constraints
 

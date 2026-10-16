@@ -3836,11 +3836,11 @@ llm-endpoint-image push="0":
     if [ ! -f "$TAR" ] || [ ! -f "$TAR.sha256" ]; then
         gh release download "$APR_TAG" --repo paiml/aprender --pattern "$APR_ASSET" --pattern "$APR_ASSET.sha256" \
             --dir "$BIN" --clobber > "$IDS/download.log" 2>&1 && rc=0 || rc=$?
-        [ "$rc" -eq 0 ] || refuse download "gh release download $APR_TAG failed (rc=$rc, see $IDS/download.log)" 3
+        [ "$rc" -eq 0 ] || refuse download "gh release download $APR_TAG failed, rc=$rc, see $IDS/download.log" 3
     fi
     # (1) the release's own checksum file, checked from inside the directory it was written for
     (cd "$BIN" && shasum -a 256 -c "$APR_ASSET.sha256") > "$IDS/sha-release.log" 2>&1 && rc=0 || rc=$?
-    [ "$rc" -eq 0 ] || refuse sha-release "$APR_ASSET does not match its release .sha256 ($(tail -1 "$IDS/sha-release.log"))" 4
+    [ "$rc" -eq 0 ] || refuse sha-release "$APR_ASSET does not match its release .sha256: $(tail -1 "$IDS/sha-release.log")" 4
     # (2) pin.env's own copy of the hash: a second, independent check
     GOT="$(shasum -a 256 "$TAR" | awk '{print $1}')"
     [ "$GOT" = "$APR_TARBALL_SHA256" ] \
@@ -3856,25 +3856,22 @@ llm-endpoint-image push="0":
     docker buildx build --platform linux/arm64 --provenance=false \
         --build-arg APR_TAG="$APR_TAG" --build-arg APR_TARBALL_SHA256="$APR_TARBALL_SHA256" \
         -f "$DOCKERFILE" -t "$TAG" --load "$DIR" > "$IDS/build.log" 2>&1 && rc=0 || rc=$?
-    [ "$rc" -eq 0 ] || { tail -15 "$IDS/build.log" >&2; refuse build "docker buildx build failed (rc=$rc, see $IDS/build.log)" 5; }
-    # prove the identity from the image's own binary, never from the tag we gave it
+    [ "$rc" -eq 0 ] || { tail -15 "$IDS/build.log" >&2; refuse build "docker buildx build failed, rc=$rc, see $IDS/build.log" 5; }
+    # prove the identity from the binary inside the image, never from the tag we gave it
     docker run --rm --entrypoint /usr/local/bin/apr "$TAG" --version > "$IDS/identity.log" 2>&1 && rc=0 || rc=$?
     VLINE="$(head -1 "$IDS/identity.log")"
-    [ "$rc" -eq 0 ] || refuse identity "the image's apr --version exited $rc: $VLINE" 6
+    [ "$rc" -eq 0 ] || refuse identity "the apr --version of the image exited $rc: $VLINE" 6
     case "$VLINE" in
         *"${APR_TAG#v}"*) ;;
-        *) refuse identity "the image's apr --version prints '$VLINE', which does not carry ${APR_TAG#v}" 6 ;;
+        *) refuse identity "the apr --version of the image prints $VLINE, which does not carry ${APR_TAG#v}" 6 ;;
     esac
-    IMAGE_ID="$(docker image inspect --format '{{{{.Id}}' "$TAG")"
-    python3 -I - "$IDS/image-local.json" "$TAG" "$APR_TAG" "$IMAGE_ID" "$VLINE" <<'PY'
-    import datetime, json, sys
-    out, image, tag, image_id, line = sys.argv[1:6]
-    rec = {"image": image, "tag": tag, "image_id": image_id, "apr_version_line": line,
-           "built_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
-    json.dump(rec, open(out, "w"), indent=2)
-    PY
+    IMAGE_FORMAT='{{{{.Id}}'
+    docker image inspect --format "$IMAGE_FORMAT" "$TAG" > "$IDS/image-id.txt"
+    IMAGE_ID="$(cat "$IDS/image-id.txt")"
+    python3 -I -c 'import datetime, json, sys; out, image, tag, image_id, line = sys.argv[1:6]; now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"); json.dump({"image": image, "tag": tag, "image_id": image_id, "apr_version_line": line, "built_at": now}, open(out, "w"), indent=2)' \
+        "$IDS/image-local.json" "$TAG" "$APR_TAG" "$IMAGE_ID" "$VLINE"
     if [ "{{push}}" = "1" ]; then
-        [ -f "$IDS/aws.json" ] || refuse ids "push=1 needs $IDS/aws.json (written by llm-endpoint-up)" 7
+        [ -f "$IDS/aws.json" ] || refuse ids "push=1 needs $IDS/aws.json, written by llm-endpoint-up" 7
         FIELDS="$(python3 -I -c 'import json, sys; a = json.load(open(sys.argv[1])); print(a["profile"], a["region"], a["ecr_host"], a["ecr_repo"], a["ecr_repo_name"])' "$IDS/aws.json")" \
             || refuse ids "$IDS/aws.json lacks profile/region/ecr_host/ecr_repo/ecr_repo_name" 7
         read -r PROFILE REGION ECR_HOST ECR_REPO ECR_REPO_NAME <<< "$FIELDS"
@@ -3884,15 +3881,11 @@ llm-endpoint-image push="0":
             || refuse push-login "docker login to $ECR_HOST failed (see $IDS/login.log)" 8
         docker tag "$TAG" "$ECR_REPO:cpu-$APR_TAG"
         docker push "$ECR_REPO:cpu-$APR_TAG" > "$IDS/push.log" 2>&1 && rc=0 || rc=$?
-        [ "$rc" -eq 0 ] || refuse push "docker push failed (rc=$rc, see $IDS/push.log)" 8
-        DIGEST="$(aws ecr describe-images --profile "$PROFILE" --region "$REGION" --repository-name "$ECR_REPO_NAME" \
-            --image-ids "imageTag=cpu-$APR_TAG" --query 'imageDetails[0].imageDigest' --output text)" \
+        [ "$rc" -eq 0 ] || refuse push "docker push failed, rc=$rc, see $IDS/push.log" 8
+        DIGEST="$(aws ecr describe-images --profile "$PROFILE" --region "$REGION" --repository-name "$ECR_REPO_NAME" --image-ids "imageTag=cpu-$APR_TAG" --query 'imageDetails[0].imageDigest' --output text)" \
             || refuse push "aws ecr describe-images failed" 8
-        python3 -I - "$IDS/image-pushed.json" "$ECR_REPO" "cpu-$APR_TAG" "$DIGEST" <<'PY'
-    import json, sys
-    out, repo, tag, digest = sys.argv[1:5]
-    json.dump({"repo": repo, "tag": tag, "digest": digest}, open(out, "w"), indent=2)
-    PY
+        python3 -I -c 'import json, sys; out, repo, tag, digest = sys.argv[1:5]; json.dump({"repo": repo, "tag": tag, "digest": digest}, open(out, "w"), indent=2)' \
+            "$IDS/image-pushed.json" "$ECR_REPO" "cpu-$APR_TAG" "$DIGEST"
         echo "PUSHED $ECR_REPO:cpu-$APR_TAG $DIGEST"
     fi
     echo "IMAGE OK $TAG (apr $VLINE)"
@@ -4081,6 +4074,716 @@ llm-endpoint-deploy env="dev" profile="ze-kasher-dev":
         "$IDS/function.json" "$FN" "$FN_ARN" "$ENV" "$PUSHED_DIGEST" "$GOT_RC" "$APR_TAG" "$GGUF_SHA256"
     echo "DEPLOY OK $FN (image $PUSHED_DIGEST, apr $APR_TAG)"
 
+# Create the environment-scoped resources (idempotent; D-13): role, log group, weights bucket and the
+# ECR repository aprender-llm-endpoint-<env>. No repository is shared across environments, so tearing
+# one environment down cannot touch the images of another. Writes $IDS/aws.json (gitignored) and
+# prints UP OK. LLM_ENDPOINT_IDS_DIR overrides the ids directory (the self-test seam).
+llm-endpoint-up env="dev" profile="ze-kasher-dev":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ENV="{{ trim_start_match(env, "env=") }}"
+    PROFILE="{{profile}}"
+    REGION=us-east-1
+    DIR=deploy/llm-endpoint
+    IDS="${LLM_ENDPOINT_IDS_DIR:-$DIR/.ids}"
+    refuse() { echo "REFUSED $1: $2" >&2; exit "${3:-2}"; }
+    case "$ENV" in
+        dev|prod) ;;
+        *) refuse env "$ENV is not a known environment, expected dev or prod" ;;
+    esac
+    mkdir -p "$IDS"
+    # tolerate <pattern> <what> <cmd...>: success, or a failure whose output names the exact exception
+    tolerate() {
+        local pat="$1" what="$2" rc
+        shift 2
+        set +e
+        "$@" > "$IDS/step.log" 2>&1
+        rc=$?
+        set -e
+        if [ "$rc" -eq 0 ]; then
+            return 0
+        fi
+        if grep -q "$pat" "$IDS/step.log"; then
+            echo "  already in place, $pat: $what"
+            return 0
+        fi
+        tail -5 "$IDS/step.log" >&2
+        refuse "$what" "failed, rc=$rc" 9
+    }
+    ACCOUNT="$(aws sts get-caller-identity --profile "$PROFILE" --query Account --output text)" \
+        || refuse account "cannot read the AWS account for profile $PROFILE"
+    NAME="aprender-llm-endpoint-$ENV"
+    BUCKET="aprender-llm-endpoint-weights-$ACCOUNT-$ENV"
+    REPO_NAME="$NAME"
+    ECR_HOST="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com"
+    ECR_REPO="$ECR_HOST/$REPO_NAME"
+    LOG_GROUP="/aws/lambda/$NAME"
+    AP=(--profile "$PROFILE" --region "$REGION")
+    # bucket: private, encrypted, tagged
+    if aws s3api head-bucket "${AP[@]}" --bucket "$BUCKET" > /dev/null 2>&1; then
+        echo "  exists:  s3://$BUCKET"
+    else
+        aws s3api create-bucket "${AP[@]}" --bucket "$BUCKET" > /dev/null
+        echo "  created: s3://$BUCKET"
+    fi
+    aws s3api put-public-access-block "${AP[@]}" --bucket "$BUCKET" \
+        --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+    aws s3api put-bucket-encryption "${AP[@]}" --bucket "$BUCKET" \
+        --server-side-encryption-configuration '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+    aws s3api put-bucket-tagging "${AP[@]}" --bucket "$BUCKET" \
+        --tagging "TagSet=[{Key=project,Value=aprender-llm-endpoint},{Key=phase,Value=09},{Key=env,Value=$ENV}]"
+    # ECR repository, one per environment
+    if aws ecr describe-repositories "${AP[@]}" --repository-names "$REPO_NAME" > /dev/null 2>&1; then
+        echo "  exists:  ECR $REPO_NAME"
+    else
+        aws ecr create-repository "${AP[@]}" --repository-name "$REPO_NAME" \
+            --tags Key=project,Value=aprender-llm-endpoint Key=phase,Value=09 Key=env,Value="$ENV" > /dev/null
+        echo "  created: ECR $REPO_NAME"
+    fi
+    # log group, 7 days
+    tolerate ResourceAlreadyExistsException log-group aws logs create-log-group "${AP[@]}" --log-group-name "$LOG_GROUP" \
+        --tags "project=aprender-llm-endpoint,phase=09,env=$ENV"
+    aws logs put-retention-policy "${AP[@]}" --cli-input-json "{\"logGroupName\":\"$LOG_GROUP\",\"retentionInDays\":7}"
+    # role: trust from a file, the managed basic-execution policy, the inline S3 read from a file
+    CREATED_ROLE=0
+    if aws iam get-role --profile "$PROFILE" --role-name "$NAME" > /dev/null 2>&1; then
+        echo "  exists:  role $NAME"
+    else
+        aws iam create-role --profile "$PROFILE" --role-name "$NAME" \
+            --assume-role-policy-document "file://$DIR/iam/lambda-trust.json" \
+            --tags Key=project,Value=aprender-llm-endpoint Key=phase,Value=09 Key=env,Value="$ENV" > /dev/null
+        CREATED_ROLE=1
+        echo "  created: role $NAME"
+    fi
+    aws iam attach-role-policy --profile "$PROFILE" --role-name "$NAME" \
+        --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+    POL="$(mktemp)"
+    trap 'rm -f "${POL:?}"' EXIT
+    sed "s/__BUCKET__/$BUCKET/g" "$DIR/iam/lambda-s3-read.json" > "$POL"
+    aws iam put-role-policy --profile "$PROFILE" --role-name "$NAME" --policy-name aprender-llm-endpoint-s3-read \
+        --policy-document "file://$POL"
+    ROLE_ARN="$(aws iam get-role --profile "$PROFILE" --role-name "$NAME" --query Role.Arn --output text)" \
+        || refuse role "cannot read the ARN of role $NAME"
+    if [ "$CREATED_ROLE" = "1" ]; then
+        echo "  waiting 10 s for IAM propagation of the new role"
+        sleep 10
+    fi
+    python3 -I -c 'import datetime, json, sys; keys = ["account", "region", "profile", "env", "bucket", "ecr_repo", "ecr_repo_name", "ecr_host", "role_arn", "log_group"]; rec = dict(zip(keys, sys.argv[2:12])); rec["created_at"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"); json.dump(rec, open(sys.argv[1], "w"), indent=2)' \
+        "$IDS/aws.json" "$ACCOUNT" "$REGION" "$PROFILE" "$ENV" "$BUCKET" "$ECR_REPO" "$REPO_NAME" "$ECR_HOST" "$ROLE_ARN" "$LOG_GROUP"
+    echo "UP OK $NAME (account $ACCOUNT, bucket $BUCKET, repository $REPO_NAME)"
+
+# Stage the ladder-pinned GGUF into the endpoint bucket and verify its Metadata.sha256 against the
+# ladder (D-13). mode=copy: server-side copy of the spike-031 object (metadata carried by the COPY
+# directive); refuses `source-meta` when the source has no matching hash, then use mode=codebuild.
+# mode=codebuild: a CodeBuild ARM job downloads the file from Hugging Face, checks its sha256 and
+# uploads it with the hash as metadata (never crosses the operator uplink). Refusals: mode, env, pin,
+# ladder, ids, account, source-meta, codebuild, s3-sha.
+llm-endpoint-weights mode="copy" env="dev" profile="ze-kasher-dev":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    MODE="{{ trim_start_match(mode, "mode=") }}"
+    ENV="{{ trim_start_match(env, "env=") }}"
+    PROFILE="{{profile}}"
+    DIR=deploy/llm-endpoint
+    IDS="${LLM_ENDPOINT_IDS_DIR:-$DIR/.ids}"
+    PIN_FILE="${LLM_ENDPOINT_PIN_FILE:-$DIR/pin.env}"
+    refuse() { echo "REFUSED $1: $2" >&2; exit "${3:-2}"; }
+    jget() { python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$1" "$2"; }
+    case "$MODE" in
+        copy|codebuild) ;;
+        *) refuse mode "$MODE is not copy or codebuild" ;;
+    esac
+    case "$ENV" in
+        dev|prod) ;;
+        *) refuse env "$ENV is not a known environment, expected dev or prod" ;;
+    esac
+    [ -f "$PIN_FILE" ] || refuse pin "$PIN_FILE does not exist"
+    . "$PIN_FILE"
+    [ -n "${GGUF_RUNG:-}" ] && [ -n "${GGUF_OBJECT:-}" ] || refuse pin "$PIN_FILE lacks GGUF_RUNG or GGUF_OBJECT"
+    mkdir -p "$IDS"
+    GGUF_SHA256="$(python3 -I "$DIR/ladder_pin.py" contracts/model-capability-ladder-v1.yaml "$GGUF_RUNG" 2> "$IDS/ladder.err")" \
+        || refuse ladder "ladder_pin.py refused rung $GGUF_RUNG: $(tail -1 "$IDS/ladder.err")"
+    [ -f "$IDS/aws.json" ] || refuse ids "$IDS/aws.json does not exist, run: just llm-endpoint-up"
+    WANT_ACCOUNT="$(jget "$IDS/aws.json" account)" || refuse ids "$IDS/aws.json lacks account"
+    REGION="$(jget "$IDS/aws.json" region)" || refuse ids "$IDS/aws.json lacks region"
+    BUCKET="$(jget "$IDS/aws.json" bucket)" || refuse ids "$IDS/aws.json lacks bucket"
+    AP=(--profile "$PROFILE" --region "$REGION")
+    ACCOUNT="$(aws sts get-caller-identity --profile "$PROFILE" --query Account --output text)" \
+        || refuse account "cannot read the AWS account for profile $PROFILE"
+    [ "$ACCOUNT" = "$WANT_ACCOUNT" ] || refuse account "profile $PROFILE is account $ACCOUNT but $IDS/aws.json was written for $WANT_ACCOUNT"
+    # object_sha <bucket>: the Metadata.sha256 of the GGUF object, or empty when absent
+    object_sha() {
+        aws s3api head-object "${AP[@]}" --bucket "$1" --key "$GGUF_OBJECT" --query Metadata.sha256 --output text 2> /dev/null || true
+    }
+    # step <what> <cmd...>: run, keep the log, refuse on failure; the status is read after a redirect
+    step() {
+        local what="$1" rc
+        shift
+        set +e
+        "$@" > "$IDS/step.log" 2>&1
+        rc=$?
+        set -e
+        if [ "$rc" -ne 0 ]; then
+            tail -5 "$IDS/step.log" >&2
+            refuse "$what" "failed, rc=$rc" 9
+        fi
+    }
+    verify_object() {
+        local got
+        got="$(object_sha "$BUCKET")"
+        [ "$got" = "$GGUF_SHA256" ] || refuse s3-sha "s3://$BUCKET/$GGUF_OBJECT does not carry the ladder pin for $GGUF_RUNG as Metadata.sha256"
+        python3 -I -c 'import json, sys; json.dump({"mode": sys.argv[2], "bucket": sys.argv[3], "key": sys.argv[4], "codebuild_project": sys.argv[5], "codebuild_role": sys.argv[6]}, open(sys.argv[1], "w"), indent=2)' \
+            "$IDS/weights.json" "$MODE" "$BUCKET" "$GGUF_OBJECT" "${CB_PROJECT:-}" "${CB_ROLE:-}"
+        echo "WEIGHTS OK s3://$BUCKET/$GGUF_OBJECT sha256 $GGUF_SHA256"
+    }
+    CB_PROJECT=""
+    CB_ROLE=""
+    if [ "$(object_sha "$BUCKET")" = "$GGUF_SHA256" ] && [ "$MODE" = "copy" ]; then
+        echo "  already staged: s3://$BUCKET/$GGUF_OBJECT carries the ladder pin"
+        verify_object
+        exit 0
+    fi
+    if [ "$MODE" = "copy" ]; then
+        SRC="llm-spike-031-$ACCOUNT"
+        SRC_SHA="$(object_sha "$SRC")"
+        [ "$SRC_SHA" = "$GGUF_SHA256" ] \
+            || refuse source-meta "s3://$SRC/$GGUF_OBJECT is absent or carries no matching sha256 metadata, use mode=codebuild"
+        step copy aws s3 cp "s3://$SRC/$GGUF_OBJECT" "s3://$BUCKET/$GGUF_OBJECT" --only-show-errors --metadata-directive COPY "${AP[@]}"
+        verify_object
+        exit 0
+    fi
+    # mode=codebuild
+    CB_ROLE="aprender-llm-endpoint-codebuild-$ENV"
+    CB_PROJECT="aprender-llm-endpoint-weights-$ENV"
+    CREATED_ROLE=0
+    if aws iam get-role --profile "$PROFILE" --role-name "$CB_ROLE" > /dev/null 2>&1; then
+        echo "  exists:  role $CB_ROLE"
+    else
+        step cb-role aws iam create-role --profile "$PROFILE" --role-name "$CB_ROLE" \
+            --assume-role-policy-document "file://$DIR/iam/codebuild-trust.json" \
+            --tags Key=project,Value=aprender-llm-endpoint Key=phase,Value=09 Key=env,Value="$ENV"
+        CREATED_ROLE=1
+    fi
+    POL="$(mktemp)"
+    PROJ_JSON="$(mktemp)"
+    trap 'rm -f "${POL:?}" "${PROJ_JSON:?}"' EXIT
+    sed "s/__BUCKET__/$BUCKET/g" "$DIR/iam/codebuild-s3-logs.json" > "$POL"
+    step cb-policy aws iam put-role-policy --profile "$PROFILE" --role-name "$CB_ROLE" --policy-name aprender-llm-endpoint-s3-logs \
+        --policy-document "file://$POL"
+    if [ "$CREATED_ROLE" = "1" ]; then
+        echo "  waiting 10 s for IAM propagation of the new role"
+        sleep 10
+    fi
+    CB_ROLE_ARN="$(aws iam get-role --profile "$PROFILE" --role-name "$CB_ROLE" --query Role.Arn --output text)" \
+        || refuse codebuild "cannot read the ARN of role $CB_ROLE"
+    # the project JSON is generated by python so the multi-line buildspec survives quoting intact
+    python3 -I -c 'import json, sys; spec = open(sys.argv[2]).read(); env = [{"name": "BUCKET", "value": sys.argv[5]}, {"name": "GGUF_SHA256", "value": sys.argv[6]}]; proj = {"name": sys.argv[3], "serviceRole": sys.argv[4], "tags": [{"key": "project", "value": "aprender-llm-endpoint"}, {"key": "phase", "value": "09"}], "source": {"type": "NO_SOURCE", "buildspec": spec}, "artifacts": {"type": "NO_ARTIFACTS"}, "environment": {"type": "ARM_CONTAINER", "image": "aws/codebuild/amazonlinux-aarch64-standard:3.0", "computeType": "BUILD_GENERAL1_SMALL", "environmentVariables": env}, "timeoutInMinutes": 30}; json.dump(proj, open(sys.argv[1], "w"))' \
+        "$PROJ_JSON" "$DIR/buildspec-weights.yaml" "$CB_PROJECT" "$CB_ROLE_ARN" "$BUCKET" "$GGUF_SHA256"
+    EXISTING="$(aws codebuild batch-get-projects "${AP[@]}" --names "$CB_PROJECT" --query 'projects[0].name' --output text 2> /dev/null || true)"
+    if [ "$EXISTING" = "$CB_PROJECT" ]; then
+        step cb-project aws codebuild update-project "${AP[@]}" --cli-input-json "file://$PROJ_JSON"
+    else
+        step cb-project aws codebuild create-project "${AP[@]}" --cli-input-json "file://$PROJ_JSON"
+    fi
+    BUILD_ID="$(aws codebuild start-build "${AP[@]}" --project-name "$CB_PROJECT" --query build.id --output text)" \
+        || refuse codebuild "start-build failed for $CB_PROJECT"
+    echo "  build $BUILD_ID started"
+    STATUS=IN_PROGRESS
+    for _ in $(seq 1 180); do
+        STATUS="$(aws codebuild batch-get-builds "${AP[@]}" --ids "$BUILD_ID" --query 'builds[0].buildStatus' --output text)"
+        if [ "$STATUS" != "IN_PROGRESS" ]; then
+            break
+        fi
+        sleep 10
+    done
+    echo "  build status: $STATUS"
+    GROUP_STREAM="$(aws codebuild batch-get-builds "${AP[@]}" --ids "$BUILD_ID" --query 'builds[0].logs.[groupName,streamName]' --output text 2> /dev/null || true)"
+    read -r CB_GROUP CB_STREAM <<< "$GROUP_STREAM"
+    if [ -n "${CB_GROUP:-}" ] && [ -n "${CB_STREAM:-}" ]; then
+        aws logs get-log-events "${AP[@]}" --log-group-name "$CB_GROUP" --log-stream-name "$CB_STREAM" --start-from-head \
+            --query 'events[].message' --output text > "$IDS/codebuild.log" 2> /dev/null || true
+        grep -E 'DOWNLOAD|SHA|UPLOAD|MISMATCH' "$IDS/codebuild.log" | head -20 || true
+    fi
+    [ "$STATUS" = "SUCCEEDED" ] || refuse codebuild "the build finished as $STATUS, see $IDS/codebuild.log" 9
+    verify_object
+
+# Prove the DEPLOYED function enforces the key (D-12): invoke it through an API Gateway v2 style event
+# with NO authorization header and record the status code in $IDS/prove-401.json. Exit 0 only on 401;
+# any other status exits 3 and no URL may be created. The first call is a cold start, about 40 s.
+llm-endpoint-prove-401 env="dev" profile="ze-kasher-dev":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ENV="{{ trim_start_match(env, "env=") }}"
+    PROFILE="{{profile}}"
+    DIR=deploy/llm-endpoint
+    IDS="${LLM_ENDPOINT_IDS_DIR:-$DIR/.ids}"
+    EVENT="$DIR/events/apigw-v2-no-auth.json"
+    # the AWS CLI spelling of the raw payload format (raw, in, base64, out) is built in two pieces so the bashrs lexer does not read the word in as a keyword
+    BINFMT="raw-i""n-base64-out"
+    refuse() { echo "REFUSED $1: $2" >&2; exit "${3:-2}"; }
+    jget() { python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$1" "$2"; }
+    case "$ENV" in
+        dev|prod) ;;
+        *) refuse env "$ENV is not a known environment, expected dev or prod" ;;
+    esac
+    [ -f "$IDS/function.json" ] || refuse function "$IDS/function.json does not exist, run: just llm-endpoint-deploy"
+    [ -f "$EVENT" ] || refuse event "$EVENT does not exist"
+    FN="$(jget "$IDS/function.json" function)" || refuse function "$IDS/function.json lacks function"
+    REGION=us-east-1
+    if [ -f "$IDS/aws.json" ]; then
+        REGION="$(jget "$IDS/aws.json" region)" || refuse ids "$IDS/aws.json lacks region"
+    fi
+    AP=(--profile "$PROFILE" --region "$REGION")
+    RESOLVED="$(aws lambda get-function "${AP[@]}" --function-name "$FN" --query Code.ResolvedImageUri --output text)" \
+        || refuse function "cannot read the resolved image of $FN"
+    DIGEST="${RESOLVED##*@}"
+    OUT="$IDS/prove-401.out.json"
+    rm -f "$OUT"
+    set +e
+    aws lambda invoke "${AP[@]}" --function-name "$FN" --cli-binary-format "$BINFMT" --cli-read-timeout 900 \
+        --payload "file://$EVENT" --log-type Tail --query LogResult --output text "$OUT" > "$IDS/prove-401.invoke.log" 2>&1
+    rc=$?
+    set -e
+    STATUS=none
+    if [ "$rc" -eq 0 ] && [ -f "$OUT" ]; then
+        STATUS="$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1])).get("statusCode", "none"))' "$OUT" 2> /dev/null || echo none)"
+    fi
+    EVENT_SHA="$(shasum -a 256 "$EVENT" | awk '{print $1}')"
+    python3 -I -c 'import datetime, json, sys; out, fn, digest, status, sha = sys.argv[1:6]; rec = {"function": fn, "image_digest": digest, "statusCode": int(status) if status.isdigit() else status, "measured_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "event_sha256": sha}; json.dump(rec, open(out, "w"), indent=2)' \
+        "$IDS/prove-401.json" "$FN" "$DIGEST" "$STATUS" "$EVENT_SHA"
+    if [ "$STATUS" = "401" ]; then
+        echo "401 PROVEN on $FN (image $DIGEST)"
+        exit 0
+    fi
+    echo "401 NOT PROVEN: statusCode=$STATUS, invoke rc=$rc. The deployed pin does not enforce the key; no URL may be created (D-12)" >&2
+    exit 3
+
+# Create the public Function URL (AuthType NONE, BUFFERED), D-12. Refuses `proof` unless
+# $IDS/prove-401.json records 401 for the CURRENTLY deployed image digest within 24 h, and refuses
+# `concurrency` unless the function has bounded reserved concurrency 1-5 (ACCEPT_UNRESERVED_URL=1
+# overrides and records risk_accepted). Creates the URL and BOTH permission statements, immediately
+# re-checks the URL WITHOUT a key (POST and GET /health must both answer 401 within 180 s) and removes
+# the URL and both statements otherwise. The URL is written only to the gitignored $IDS/url.json; only
+# its host is printed.
+llm-endpoint-url env="dev" profile="ze-kasher-dev":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ENV="{{ trim_start_match(env, "env=") }}"
+    PROFILE="{{profile}}"
+    DIR=deploy/llm-endpoint
+    IDS="${LLM_ENDPOINT_IDS_DIR:-$DIR/.ids}"
+    refuse() { echo "REFUSED $1: $2" >&2; exit "${3:-2}"; }
+    jget() { python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$1" "$2"; }
+    case "$ENV" in
+        dev|prod) ;;
+        *) refuse env "$ENV is not a known environment, expected dev or prod" ;;
+    esac
+    # the proof, from local files only: nothing below reaches AWS unless it is fresh and says 401
+    [ -f "$IDS/function.json" ] || refuse proof "$IDS/function.json does not exist, run: just llm-endpoint-deploy"
+    [ -f "$IDS/prove-401.json" ] || refuse proof "$IDS/prove-401.json does not exist, run: just llm-endpoint-prove-401"
+    FN="$(jget "$IDS/function.json" function)" || refuse proof "$IDS/function.json lacks function"
+    PROOF="$(python3 -I -c 'import datetime, json, sys; p = json.load(open(sys.argv[1])); t = datetime.datetime.strptime(p["measured_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc); print(p["statusCode"], p["image_digest"], int((datetime.datetime.now(datetime.timezone.utc) - t).total_seconds()))' "$IDS/prove-401.json" 2> /dev/null)" \
+        || refuse proof "$IDS/prove-401.json is not a valid proof record"
+    read -r PSTATUS PDIGEST PAGE <<< "$PROOF"
+    [ "$PSTATUS" = "401" ] || refuse proof "the recorded statusCode is $PSTATUS, not 401"
+    [ "$PAGE" -le 86400 ] || refuse proof "the 401 proof is $PAGE s old, older than 24 h: run just llm-endpoint-prove-401 again"
+    REGION=us-east-1
+    WANT_ACCOUNT=""
+    if [ -f "$IDS/aws.json" ]; then
+        REGION="$(jget "$IDS/aws.json" region)" || refuse ids "$IDS/aws.json lacks region"
+        WANT_ACCOUNT="$(jget "$IDS/aws.json" account)" || refuse ids "$IDS/aws.json lacks account"
+    fi
+    AP=(--profile "$PROFILE" --region "$REGION")
+    ACCOUNT="$(aws sts get-caller-identity --profile "$PROFILE" --query Account --output text)" \
+        || refuse account "cannot read the AWS account for profile $PROFILE"
+    if [ -n "$WANT_ACCOUNT" ] && [ "$ACCOUNT" != "$WANT_ACCOUNT" ]; then
+        refuse account "profile $PROFILE is account $ACCOUNT but $IDS/aws.json was written for $WANT_ACCOUNT"
+    fi
+    RESOLVED="$(aws lambda get-function "${AP[@]}" --function-name "$FN" --query Code.ResolvedImageUri --output text)" \
+        || refuse proof "cannot read the resolved image of $FN"
+    [ "${RESOLVED##*@}" = "$PDIGEST" ] \
+        || refuse proof "the 401 was measured on image $PDIGEST but $FN now runs ${RESOLVED##*@}: run just llm-endpoint-prove-401 again"
+    # the concurrency gate: a NONE URL on an unbounded function lets anyone who learns the address buy cold starts
+    CONC="$(aws lambda get-function-concurrency "${AP[@]}" --function-name "$FN" --query ReservedConcurrentExecutions --output text)" \
+        || refuse concurrency "cannot read the reserved concurrency of $FN"
+    RISK=false
+    case "$CONC" in
+        1|2|3|4|5) ;;
+        *)
+            if [ "${ACCEPT_UNRESERVED_URL:-0}" = "1" ]; then
+                echo "WARNING: reserved concurrency of $FN is $CONC, not 1-5; ACCEPT_UNRESERVED_URL=1 accepts the cost-amplification risk" >&2
+                RISK=true
+            else
+                refuse concurrency "reserved concurrency of $FN is $CONC. A NONE URL on an unbounded function lets anyone who learns the address buy cold starts: set RESERVED_CONCURRENCY=1 at deploy or run aws lambda put-function-concurrency with 1"
+            fi
+            ;;
+    esac
+    tolerate() {
+        local pat="$1" what="$2" rc
+        shift 2
+        set +e
+        "$@" > "$IDS/step.log" 2>&1
+        rc=$?
+        set -e
+        if [ "$rc" -eq 0 ]; then
+            return 0
+        fi
+        if grep -q "$pat" "$IDS/step.log"; then
+            echo "  already in place, $pat: $what"
+            return 0
+        fi
+        tail -5 "$IDS/step.log" >&2
+        return "$rc"
+    }
+    remove_url() {
+        tolerate ResourceNotFoundException delete-url aws lambda delete-function-url-config "${AP[@]}" --function-name "$FN" \
+            || echo "ERROR: the URL config of $FN was not removed: run just llm-endpoint-teardown" >&2
+        tolerate ResourceNotFoundException remove-public aws lambda remove-permission "${AP[@]}" --function-name "$FN" --statement-id llm-endpoint-url-public \
+            || echo "ERROR: statement llm-endpoint-url-public was not removed: run just llm-endpoint-teardown" >&2
+        tolerate ResourceNotFoundException remove-invoke aws lambda remove-permission "${AP[@]}" --function-name "$FN" --statement-id llm-endpoint-invoke-via-url \
+            || echo "ERROR: statement llm-endpoint-invoke-via-url was not removed: run just llm-endpoint-teardown" >&2
+    }
+    set +e
+    URL="$(aws lambda create-function-url-config "${AP[@]}" --function-name "$FN" --auth-type NONE --invoke-mode BUFFERED --query FunctionUrl --output text 2> "$IDS/step.log")"
+    crc=$?
+    set -e
+    if [ "$crc" -ne 0 ]; then
+        if grep -q 'ResourceConflictException' "$IDS/step.log"; then
+            URL="$(aws lambda get-function-url-config "${AP[@]}" --function-name "$FN" --query FunctionUrl --output text)" \
+                || refuse url-create "the URL config of $FN exists but cannot be read"
+        else
+            tail -5 "$IDS/step.log" >&2
+            refuse url-create "create-function-url-config failed for $FN, rc=$crc" 9
+        fi
+    fi
+    URL="${URL%/}"
+    HOST="${URL#https://}"
+    HOST="${HOST%%/*}"
+    # NONE needs BOTH statements (the rule since October 2025)
+    if ! tolerate ResourceConflictException add-public aws lambda add-permission "${AP[@]}" --function-name "$FN" \
+        --statement-id llm-endpoint-url-public --action lambda:InvokeFunctionUrl --principal '*' --function-url-auth-type NONE; then
+        remove_url
+        refuse permission "add-permission llm-endpoint-url-public failed, the URL was removed" 9
+    fi
+    if ! tolerate ResourceConflictException add-invoke aws lambda add-permission "${AP[@]}" --function-name "$FN" \
+        --statement-id llm-endpoint-invoke-via-url --action lambda:InvokeFunction --principal '*' --invoked-via-function-url; then
+        remove_url
+        refuse permission "add-permission llm-endpoint-invoke-via-url failed, the URL was removed" 9
+    fi
+    # IMMEDIATELY re-check without a key, from the outside
+    BODY='{"model":"x","messages":[{"role":"user","content":"Hi"}],"max_tokens":1}'
+    http_code() {
+        if [ "$1" = POST ]; then
+            curl -s -o /dev/null -w '%{http_code}' --max-time 120 -X POST -H 'content-type: application/json' --data "$BODY" "$URL/v1/chat/completions" || true
+        else
+            curl -s -o /dev/null -w '%{http_code}' --max-time 120 "$URL/health" || true
+        fi
+    }
+    retryable() {
+        case "$1" in
+            000|403|5??) return 0 ;;
+            *) return 1 ;;
+        esac
+    }
+    DEADLINE=$((SECONDS + 180))
+    VERDICT=waiting
+    PC=000
+    GC=000
+    while [ "$VERDICT" = waiting ]; do
+        PC="$(http_code POST)"
+        GC="$(http_code GET)"
+        BAD=0
+        if [ "$PC" != 401 ] && ! retryable "$PC"; then
+            BAD=1
+        fi
+        if [ "$GC" != 401 ] && ! retryable "$GC"; then
+            BAD=1
+        fi
+        if [ "$PC" = 401 ] && [ "$GC" = 401 ]; then
+            VERDICT=ok
+        elif [ "$BAD" -eq 1 ]; then
+            VERDICT=open
+        elif [ "$SECONDS" -ge "$DEADLINE" ]; then
+            VERDICT=open
+        else
+            sleep 5
+        fi
+    done
+    if [ "$VERDICT" != ok ]; then
+        remove_url
+        echo "URL REMOVED: open endpoint, POST answered $PC and GET /health answered $GC without a key, not 401" >&2
+        exit 1
+    fi
+    python3 -I -c 'import datetime, json, sys; out, fn, url, conc, risk = sys.argv[1:6]; rec = {"function": fn, "url": url, "created_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), "auth_type": "NONE", "invoke_mode": "BUFFERED", "statement_ids": ["llm-endpoint-url-public", "llm-endpoint-invoke-via-url"], "reserved_concurrency": int(conc) if conc.isdigit() else None, "risk_accepted": risk == "true"}; json.dump(rec, open(out, "w"), indent=2)' \
+        "$IDS/url.json" "$FN" "$URL" "$CONC" "$RISK"
+    chmod 0600 "$IDS/url.json"
+    echo "URL OK (401 without key verified; reserved concurrency $CONC; risk_accepted $RISK)"
+    echo "  host: $HOST (the full URL is only in $IDS/url.json, gitignored)"
+
+# Pre-warm the function with ONE authenticated 1-token invoke so the demo turn is not a cold start (D-10:
+# the platform turn must stay under 120 s). The key comes from APR_PROBE_KEY, is written into a mktemp
+# event that is deleted afterwards, and is never printed.
+llm-endpoint-warm env="dev" profile="ze-kasher-dev":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ENV="{{ trim_start_match(env, "env=") }}"
+    PROFILE="{{profile}}"
+    DIR=deploy/llm-endpoint
+    IDS="${LLM_ENDPOINT_IDS_DIR:-$DIR/.ids}"
+    EVENT="$DIR/events/apigw-v2-no-auth.json"
+    # the AWS CLI spelling of the raw payload format (raw, in, base64, out) is built in two pieces so the bashrs lexer does not read the word in as a keyword
+    BINFMT="raw-i""n-base64-out"
+    refuse() { echo "REFUSED $1: $2" >&2; exit "${3:-2}"; }
+    jget() { python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$1" "$2"; }
+    case "$ENV" in
+        dev|prod) ;;
+        *) refuse env "$ENV is not a known environment, expected dev or prod" ;;
+    esac
+    [ -n "${APR_PROBE_KEY:-}" ] || refuse probe-key "APR_PROBE_KEY is not set, the warm-up call is authenticated"
+    [ -f "$IDS/function.json" ] || refuse function "$IDS/function.json does not exist, run: just llm-endpoint-deploy"
+    FN="$(jget "$IDS/function.json" function)" || refuse function "$IDS/function.json lacks function"
+    REGION=us-east-1
+    if [ -f "$IDS/aws.json" ]; then
+        REGION="$(jget "$IDS/aws.json" region)" || refuse ids "$IDS/aws.json lacks region"
+    fi
+    EVF="$(mktemp)"
+    OUT="$(mktemp)"
+    trap 'rm -f "${EVF:?}" "${OUT:?}"' EXIT
+    chmod 0600 "$EVF"
+    python3 -I -c 'import json, os, sys; e = json.load(open(sys.argv[1])); e["headers"]["authorization"] = "Bearer " + os.environ["APR_PROBE_KEY"]; json.dump(e, open(sys.argv[2], "w"))' "$EVENT" "$EVF"
+    T0=$SECONDS
+    set +e
+    aws lambda invoke --profile "$PROFILE" --region "$REGION" --function-name "$FN" --cli-binary-format "$BINFMT" --cli-read-timeout 900 \
+        --payload "file://$EVF" --log-type Tail --query LogResult --output text "$OUT" > "$IDS/warm.invoke.log" 2>&1
+    rc=$?
+    set -e
+    DT=$((SECONDS - T0))
+    STATUS=none
+    if [ "$rc" -eq 0 ]; then
+        STATUS="$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1])).get("statusCode", "none"))' "$OUT" 2> /dev/null || echo none)"
+    fi
+    if [ "$STATUS" != "200" ]; then
+        echo "WARM FAILED: $FN answered statusCode=$STATUS after $DT s, invoke rc=$rc" >&2
+        exit 3
+    fi
+    echo "WARM OK $FN (statusCode 200, $DT s)"
+
+# Tear an environment down (D-12, Pitfall 6), contain first. Order: reserved concurrency 0, delete the
+# URL config, remove-permission for BOTH statement ids, verify get-policy lists neither (refuses
+# `policy`), delete the function, delete ONLY the ECR image tag this deployment recorded and only while
+# it still resolves to the recorded digest (otherwise SKIPPED image), the log group, the bucket (only if
+# its sole object is the GGUF, unless KEEP_BUCKET=1), the CodeBuild project and role when
+# `llm-endpoint-weights codebuild` made them, and the role. The ECR REPOSITORY is never deleted by this
+# recipe: its removal is printed under NOT RUN for the human to decide. KEEP_IMAGE=1 keeps the image
+# tag. The spike-031 leftovers are printed, and removed only with TEARDOWN_SPIKE_031=1 (never its ECR repository).
+llm-endpoint-teardown env="dev" profile="ze-kasher-dev":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ENV="{{ trim_start_match(env, "env=") }}"
+    PROFILE="{{profile}}"
+    DIR=deploy/llm-endpoint
+    IDS="${LLM_ENDPOINT_IDS_DIR:-$DIR/.ids}"
+    PIN_FILE="${LLM_ENDPOINT_PIN_FILE:-$DIR/pin.env}"
+    refuse() { echo "REFUSED $1: $2" >&2; exit "${3:-2}"; }
+    jget() { python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$1" "$2"; }
+    case "$ENV" in
+        dev|prod) ;;
+        *) refuse env "$ENV is not a known environment, expected dev or prod" ;;
+    esac
+    [ -f "$IDS/aws.json" ] || refuse ids "$IDS/aws.json does not exist, nothing to tear down"
+    [ -f "$PIN_FILE" ] || refuse pin "$PIN_FILE does not exist"
+    . "$PIN_FILE"
+    [ -n "${GGUF_OBJECT:-}" ] || refuse pin "$PIN_FILE lacks GGUF_OBJECT"
+    WANT_ACCOUNT="$(jget "$IDS/aws.json" account)" || refuse ids "$IDS/aws.json lacks account"
+    REGION="$(jget "$IDS/aws.json" region)" || refuse ids "$IDS/aws.json lacks region"
+    BUCKET="$(jget "$IDS/aws.json" bucket)" || refuse ids "$IDS/aws.json lacks bucket"
+    ECR_REPO="$(jget "$IDS/aws.json" ecr_repo)" || refuse ids "$IDS/aws.json lacks ecr_repo"
+    REPO_NAME="$(jget "$IDS/aws.json" ecr_repo_name)" || refuse ids "$IDS/aws.json lacks ecr_repo_name"
+    AP=(--profile "$PROFILE" --region "$REGION")
+    ACCOUNT="$(aws sts get-caller-identity --profile "$PROFILE" --query Account --output text)" \
+        || refuse account "cannot read the AWS account for profile $PROFILE"
+    [ "$ACCOUNT" = "$WANT_ACCOUNT" ] || refuse account "profile $PROFILE is account $ACCOUNT but $IDS/aws.json was written for $WANT_ACCOUNT"
+    FN="aprender-llm-endpoint-$ENV"
+    # tolerate <pattern> <what> <cmd...>: success, or a failure whose output names the exact exception
+    tolerate() {
+        local pat="$1" what="$2" rc
+        shift 2
+        set +e
+        "$@" > "$IDS/step.log" 2>&1
+        rc=$?
+        set -e
+        if [ "$rc" -eq 0 ]; then
+            return 0
+        fi
+        if grep -q "$pat" "$IDS/step.log"; then
+            echo "  absent, $pat: $what"
+            return 0
+        fi
+        tail -5 "$IDS/step.log" >&2
+        refuse "$what" "failed, rc=$rc" 9
+    }
+    # (1) contain first: no invocation runs, warm instances included
+    set +e
+    aws lambda put-function-concurrency "${AP[@]}" --function-name "$FN" --reserved-concurrent-executions 0 > "$IDS/step.log" 2>&1
+    crc=$?
+    set -e
+    if [ "$crc" -eq 0 ]; then
+        GOT="$(aws lambda get-function-concurrency "${AP[@]}" --function-name "$FN" --query ReservedConcurrentExecutions --output text)" \
+            || refuse contain "cannot read back the reserved concurrency of $FN" 9
+        [ "$GOT" = "0" ] || refuse contain "reserved concurrency of $FN reads $GOT, not 0: it may still be serving" 9
+        echo "  CONTAINED: $FN reserved concurrency 0"
+    elif grep -q 'ResourceNotFoundException' "$IDS/step.log"; then
+        echo "  absent: function $FN (nothing to contain)"
+    else
+        tail -5 "$IDS/step.log" >&2
+        refuse contain "put-function-concurrency failed for $FN, rc=$crc" 9
+    fi
+    # (2) the URL config, then BOTH statements (deleting the URL does not delete the policy)
+    tolerate ResourceNotFoundException delete-url-config aws lambda delete-function-url-config "${AP[@]}" --function-name "$FN"
+    tolerate ResourceNotFoundException remove-public aws lambda remove-permission "${AP[@]}" --function-name "$FN" --statement-id llm-endpoint-url-public
+    tolerate ResourceNotFoundException remove-invoke aws lambda remove-permission "${AP[@]}" --function-name "$FN" --statement-id llm-endpoint-invoke-via-url
+    set +e
+    POLICY="$(aws lambda get-policy "${AP[@]}" --function-name "$FN" --query Policy --output text 2>&1)"
+    prc=$?
+    set -e
+    if [ "$prc" -ne 0 ]; then
+        case "$POLICY" in
+            *ResourceNotFoundException*) POLICY="" ;;
+            *) refuse policy "get-policy failed for $FN, rc=$prc: $POLICY" 9 ;;
+        esac
+    fi
+    case "$POLICY" in
+        *llm-endpoint-url-public*|*llm-endpoint-invoke-via-url*)
+            refuse policy "the resource policy of $FN still lists a URL statement, the function stays contained but is NOT clean" 9
+            ;;
+    esac
+    echo "  policy clean: neither URL statement remains on $FN"
+    # (3) the function, then the image tag this deployment recorded
+    tolerate ResourceNotFoundException delete-function aws lambda delete-function "${AP[@]}" --function-name "$FN"
+    if [ "${KEEP_IMAGE:-0}" = "1" ]; then
+        echo "  KEEP_IMAGE=1: the image tag is kept"
+    elif [ -f "$IDS/image-pushed.json" ]; then
+        REC_REPO="$(jget "$IDS/image-pushed.json" repo)" || refuse ids "$IDS/image-pushed.json lacks repo"
+        REC_TAG="$(jget "$IDS/image-pushed.json" tag)" || refuse ids "$IDS/image-pushed.json lacks tag"
+        REC_DIGEST="$(jget "$IDS/image-pushed.json" digest)" || refuse ids "$IDS/image-pushed.json lacks digest"
+        set +e
+        CUR_DIGEST="$(aws ecr describe-images "${AP[@]}" --repository-name "$REPO_NAME" --image-ids "imageTag=$REC_TAG" --query 'imageDetails[0].imageDigest' --output text 2> /dev/null)"
+        drc=$?
+        set -e
+        if [ "$REC_REPO" != "$ECR_REPO" ]; then
+            echo "  SKIPPED image: the recorded repository $REC_REPO is not the repository of this environment $ECR_REPO"
+        elif [ "$drc" -eq 0 ] && [ "$CUR_DIGEST" = "$REC_DIGEST" ]; then
+            FAILCODE="$(aws ecr batch-delete-image "${AP[@]}" --repository-name "$REPO_NAME" --image-ids "imageTag=$REC_TAG" --query 'failures[0].failureCode' --output text)" \
+                || refuse image "batch-delete-image failed for tag $REC_TAG" 9
+            case "$FAILCODE" in
+                ""|None) echo "  deleted image tag $REC_TAG ($REC_DIGEST) from $REPO_NAME" ;;
+                *) echo "  WARNING: batch-delete-image reported $FAILCODE for tag $REC_TAG" >&2 ;;
+            esac
+        else
+            echo "  SKIPPED image: $REC_TAG does not resolve to the recorded digest, nothing deleted"
+        fi
+    else
+        echo "  no $IDS/image-pushed.json: no image tag recorded, nothing to delete"
+    fi
+    # (4) the repository itself is the human decision: print its state and the command, never run it
+    COUNT="$(aws ecr list-images "${AP[@]}" --repository-name "$REPO_NAME" --query 'length(imageIds)' --output text 2> /dev/null || echo unknown)"
+    echo "  NOT RUN -- for the human to decide:"
+    echo "    repository $REPO_NAME now holds $COUNT image(s)"
+    if [ "$COUNT" = "0" ]; then
+        echo "      aws ecr delete-repository --repository-name $REPO_NAME --profile $PROFILE --region $REGION"
+    else
+        echo "      aws ecr delete-repository --repository-name $REPO_NAME --force --profile $PROFILE --region $REGION   # --force is needed while images remain"
+    fi
+    # (5) log group
+    tolerate ResourceNotFoundException delete-log-group aws logs delete-log-group "${AP[@]}" --log-group-name "/aws/lambda/$FN"
+    # (6) the bucket, only when its sole object is the GGUF
+    if [ "${KEEP_BUCKET:-0}" = "1" ]; then
+        echo "  KEEP_BUCKET=1: s3://$BUCKET is kept"
+    else
+        set +e
+        KEYS="$(aws s3api list-objects-v2 "${AP[@]}" --bucket "$BUCKET" --query 'Contents[].Key' --output text 2> "$IDS/step.log")"
+        lrc=$?
+        set -e
+        if [ "$lrc" -ne 0 ] && grep -q 'NoSuchBucket' "$IDS/step.log"; then
+            echo "  absent, NoSuchBucket: s3://$BUCKET"
+        elif [ "$lrc" -ne 0 ]; then
+            tail -5 "$IDS/step.log" >&2
+            refuse bucket "list-objects-v2 failed for s3://$BUCKET, rc=$lrc" 9
+        elif [ -z "$KEYS" ] || [ "$KEYS" = "None" ]; then
+            tolerate NoSuchBucket delete-bucket aws s3api delete-bucket "${AP[@]}" --bucket "$BUCKET"
+            echo "  deleted empty bucket s3://$BUCKET"
+        elif [ "$KEYS" = "$GGUF_OBJECT" ]; then
+            tolerate NoSuchKey delete-object aws s3api delete-object "${AP[@]}" --bucket "$BUCKET" --key "$GGUF_OBJECT"
+            tolerate NoSuchBucket delete-bucket aws s3api delete-bucket "${AP[@]}" --bucket "$BUCKET"
+            echo "  deleted s3://$BUCKET with its sole object $GGUF_OBJECT"
+        else
+            echo "  KEPT s3://$BUCKET: it holds more than the GGUF, keys found: $KEYS"
+        fi
+    fi
+    # (7) the CodeBuild project and role, when llm-endpoint-weights codebuild made them
+    if [ -f "$IDS/weights.json" ]; then
+        WMODE="$(jget "$IDS/weights.json" mode)" || refuse ids "$IDS/weights.json lacks mode"
+        if [ "$WMODE" = "codebuild" ]; then
+            CB_PROJECT="$(jget "$IDS/weights.json" codebuild_project)" || refuse ids "$IDS/weights.json lacks codebuild_project"
+            CB_ROLE="$(jget "$IDS/weights.json" codebuild_role)" || refuse ids "$IDS/weights.json lacks codebuild_role"
+            tolerate ResourceNotFoundException delete-codebuild aws codebuild delete-project "${AP[@]}" --name "$CB_PROJECT"
+            tolerate ResourceNotFoundException delete-codebuild-logs aws logs delete-log-group "${AP[@]}" --log-group-name "/aws/codebuild/$CB_PROJECT"
+            tolerate NoSuchEntity delete-codebuild-policy aws iam delete-role-policy --profile "$PROFILE" --role-name "$CB_ROLE" --policy-name aprender-llm-endpoint-s3-logs
+            tolerate NoSuchEntity delete-codebuild-role aws iam delete-role --profile "$PROFILE" --role-name "$CB_ROLE"
+        fi
+        rm -f "$IDS/weights.json"
+    fi
+    # (8) the function role: inline policy, managed policy, role
+    tolerate NoSuchEntity delete-role-policy aws iam delete-role-policy --profile "$PROFILE" --role-name "$FN" --policy-name aprender-llm-endpoint-s3-read
+    tolerate NoSuchEntity detach-role-policy aws iam detach-role-policy --profile "$PROFILE" --role-name "$FN" \
+        --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+    tolerate NoSuchEntity delete-role aws iam delete-role --profile "$PROFILE" --role-name "$FN"
+    rm -f "$IDS/function.json" "$IDS/url.json" "$IDS/prove-401.json"
+    # (9) the spike-031 leftovers: listed, and removed only on request; their ECR repository is never executed
+    SP=llm-spike-031
+    SPIKE_ROLES="$SP-lambda $SP-ecs-exec $SP-ecs-task $SP-lmi-operator $SP-codebuild"
+    echo "  NOT RUN -- for the human to decide (D-15), spike-031 leftovers; TEARDOWN_SPIKE_031=1 removes all but the ECR repository:"
+    echo "    aws lambda delete-function --function-name $SP-lambda-0-8b --profile $PROFILE --region $REGION"
+    echo "    aws lambda delete-function --function-name $SP-lambda-2b --profile $PROFILE --region $REGION"
+    echo "    aws codebuild delete-project --name $SP-fetch-weights --profile $PROFILE --region $REGION"
+    echo "    aws ecs delete-cluster --cluster $SP --profile $PROFILE --region $REGION"
+    echo "    aws s3 rm s3://$SP-$ACCOUNT --recursive --profile $PROFILE --region $REGION , afterwards: aws s3api delete-bucket --bucket $SP-$ACCOUNT"
+    echo "    roles: $SPIKE_ROLES (detach and delete their policies first), security group $SP"
+    echo "    aws ecr delete-repository --repository-name $SP --force --profile $PROFILE --region $REGION   # this recipe never runs it"
+    if [ "${TEARDOWN_SPIKE_031:-0}" = "1" ]; then
+        # best_effort <cmd...>: a leftover that is already gone is not an error
+        best_effort() {
+            set +e
+            "$@" > "$IDS/step.log" 2>&1
+            local rc=$?
+            set -e
+            if [ "$rc" -ne 0 ]; then
+                echo "  not removed (already gone or refused): $*"
+            fi
+        }
+        best_effort aws lambda delete-function --function-name "$SP-lambda-0-8b" "${AP[@]}"
+        best_effort aws lambda delete-function --function-name "$SP-lambda-2b" "${AP[@]}"
+        best_effort aws codebuild delete-project --name "$SP-fetch-weights" "${AP[@]}"
+        best_effort aws ecs delete-cluster --cluster "$SP" "${AP[@]}"
+        best_effort aws s3 rm "s3://$SP-$ACCOUNT" --recursive "${AP[@]}"
+        best_effort aws s3api delete-bucket --bucket "$SP-$ACCOUNT" "${AP[@]}"
+        for role in $SPIKE_ROLES; do
+            for pol in $(aws iam list-attached-role-policies --profile "$PROFILE" --role-name "$role" --query 'AttachedPolicies[].PolicyArn' --output text 2> /dev/null || true); do
+                best_effort aws iam detach-role-policy --profile "$PROFILE" --role-name "$role" --policy-arn "$pol"
+            done
+            for pol in $(aws iam list-role-policies --profile "$PROFILE" --role-name "$role" --query PolicyNames --output text 2> /dev/null || true); do
+                best_effort aws iam delete-role-policy --profile "$PROFILE" --role-name "$role" --policy-name "$pol"
+            done
+            best_effort aws iam delete-role --profile "$PROFILE" --role-name "$role"
+        done
+        SG="$(aws ec2 describe-security-groups "${AP[@]}" --filters "Name=group-name,Values=$SP" --query 'SecurityGroups[0].GroupId' --output text 2> /dev/null || true)"
+        if [ -n "$SG" ] && [ "$SG" != "None" ]; then
+            best_effort aws ec2 delete-security-group "${AP[@]}" --group-id "$SG"
+        fi
+        echo "  TEARDOWN_SPIKE_031=1: the spike-031 leftovers above were removed where they existed"
+    fi
+    echo "TEARDOWN OK $FN"
+
 # Offline proof of llm-endpoint-deploy (and the other llm-endpoint recipes): an `aws` shim is FIRST on
 # PATH and the real aws is never executed. Offline cases run in shim mode `refuse` (log and exit 97), so
 # their log must stay empty (`AWS CALLS: 0`); the PREFLIGHT cases run in mode `preflight`, which answers
@@ -4090,7 +4793,15 @@ llm-endpoint-selftest:
     set -euo pipefail
     DIR=deploy/llm-endpoint
     T="$(mktemp -d)"
-    trap 'rm -rf "${T:?}"' EXIT
+    # SELFTEST_KEEP=1 keeps the temp directory (argv logs, per-case outputs) for debugging
+    cleanup() {
+        if [ "${SELFTEST_KEEP:-0}" = 1 ]; then
+            echo "kept $T"
+        else
+            rm -rf "${T:?}"
+        fi
+    }
+    trap cleanup EXIT
     SH="$T/shim"
     IDS="$T/ids"
     mkdir -p "$SH" "$IDS" "$T/bin"
@@ -4132,7 +4843,15 @@ llm-endpoint-selftest:
         '          *keys*) echo "APR_API_KEY_HASH MODEL_S3_URI MODEL_SHA256 PLATFORM RAYON_NUM_THREADS" ;;' \
         '          *) echo "${SHIM_CFG:-Active 10240 900 10240 arm64}" ;;' \
         '        esac ;;' \
-        '      "lambda get-policy") echo "{\"Statement\":[{\"Sid\":\"other\"}]}" ;;' \
+        '      "lambda get-policy")' \
+        '        if [ "${SHIM_POLICY_IDS:-0}" = 1 ]; then echo "{\"Sid\":\"llm-endpoint-url-public\"}"; else echo "{\"Sid\":\"other\"}"; fi ;;' \
+        '      "codebuild start-build") echo "build-selftest-1" ;;' \
+        '      "codebuild batch-get-builds")' \
+        '        case "$*" in ' \
+        '          *buildStatus*) echo "SUCCEEDED" ;;' \
+        '          *) echo "selftest-group selftest-stream" ;;' \
+        '        esac ;;' \
+        '      "logs get-log-events") echo "DOWNLOAD x 1s 100 bytes" ;;' \
         '      "lambda create-function-url-config") echo "https://shimhost0.lambda-url.us-east-1.on.aws/" ;;' \
         '      "lambda invoke")' \
         '        if [ -n "${SHIM_INVOKE_PAYLOAD:-}" ]; then cp "$SHIM_INVOKE_PAYLOAD" "$last"; fi ;;' \
@@ -4276,7 +4995,272 @@ llm-endpoint-selftest:
     run_deploy "$T/c13.log" PREFLIGHT=1 SHIM_LOG="$T/neg.log"
     row 13 "NEGATIVE CONTROL: PREFLIGHT with the refusing shim -> REFUSED account and a recorded call" "$T/c13.log" nonzero '^REFUSED account:' \
         "$([ "$(lines "$T/neg.log")" -ge 1 ] && echo 1 || echo 0)"
-    # ---- task 2 cases are appended above this line ----
+    # ---- the lifecycle recipes (shim mode permissive: canned answers, every call logged) ----
+    export SHIM_MODE=permissive SHIM_STS_ACCOUNT="$ACCT" SHIM_RESOLVED_IMAGE_URI="$REPO@$DIGEST" SHIM_ECR_DIGEST="$DIGEST" \
+        SHIM_S3_SHA="$LADDER_SHA" SHIM_S3_KEY="$GGUF_OBJECT" SHIM_CONCURRENCY=None SHIM_IMAGE_COUNT=1
+    W="$T/w"
+    printf '{"statusCode":200,"body":"{}"}\n' > "$T/p200.json"
+    printf '{"statusCode":401,"body":"{}"}\n' > "$T/p401.json"
+    # run_just <log> [VAR=value ...] just <recipe> ...: run a recipe under the base environment plus overrides
+    run_just() {
+        local log="$1"
+        shift
+        set +e
+        env "$@" > "$log" 2>&1
+        RC=$?
+        set -e
+    }
+    # fresh_ids: a clean ids directory holding aws.json, image-local.json, image-pushed.json and function.json
+    fresh_ids() {
+        rm -rf "${W:?}"
+        mkdir -p "$W"
+        cp "$IDS/aws.json" "$IDS/image-local.json" "$IDS/image-pushed.json" "$W/"
+        printf '{"function":"%s","image_digest":"%s"}\n' "$FN" "$DIGEST" > "$W/function.json"
+    }
+    # write_proof [hours]: a 401 proof record measured that many hours ago
+    write_proof() {
+        local ts
+        ts="$(python3 -I -c 'import datetime, sys; print((datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=int(sys.argv[1]))).strftime("%Y-%m-%dT%H:%M:%SZ"))' "${1:-0}")"
+        printf '{"function":"%s","image_digest":"%s","statusCode":401,"measured_at":"%s","event_sha256":"x"}\n' "$FN" "$DIGEST" "$ts" > "$W/prove-401.json"
+    }
+    # seen <log> <pattern>: 1 when the argv log holds the pattern, else 0
+    seen() {
+        if grep -qE -- "$2" "$1"; then
+            echo 1
+        else
+            echo 0
+        fi
+    }
+    # absent_from <log> <pattern>: 1 when the argv log does NOT hold the pattern
+    absent_from() {
+        if grep -qE -- "$2" "$1"; then
+            echo 0
+        else
+            echo 1
+        fi
+    }
+    # 14-15: prove-401 exits 3 on a 200 and 0 on a 401
+    fresh_ids
+    : > "$T/a14.log"
+    run_just "$T/c14.log" LLM_ENDPOINT_IDS_DIR="$W" SHIM_LOG="$T/a14.log" SHIM_INVOKE_PAYLOAD="$T/p200.json" just llm-endpoint-prove-401
+    x=1
+    [ "$RC" -eq 3 ] || x=0
+    row 14 "prove-401 on a 200 payload -> exit 3 and 401 NOT PROVEN" "$T/c14.log" nonzero '401 NOT PROVEN' "$x"
+    : > "$T/a15.log"
+    run_just "$T/c15.log" LLM_ENDPOINT_IDS_DIR="$W" SHIM_LOG="$T/a15.log" SHIM_INVOKE_PAYLOAD="$T/p401.json" just llm-endpoint-prove-401
+    x="$(seen "$W/prove-401.json" '"statusCode": 401')"
+    row 15 "prove-401 on a 401 payload -> exit 0, 401 PROVEN and a record" "$T/c15.log" zero '^401 PROVEN on aprender-llm-endpoint-dev' "$x"
+    # 16: url without a proof refuses before any aws call
+    fresh_ids
+    : > "$T/a16.log"
+    run_just "$T/c16.log" LLM_ENDPOINT_IDS_DIR="$W" SHIM_MODE=refuse SHIM_LOG="$T/a16.log" just llm-endpoint-url
+    x=1
+    [ "$(lines "$T/a16.log")" -eq 0 ] || x=0
+    row 16 "url without prove-401.json -> REFUSED proof, zero aws calls" "$T/c16.log" nonzero '^REFUSED proof:' "$x"
+    # 17: url with a valid proof but no bounded concurrency
+    fresh_ids
+    write_proof 0
+    : > "$T/a17.log"
+    run_just "$T/c17.log" LLM_ENDPOINT_IDS_DIR="$W" SHIM_MODE=preflight SHIM_LOG="$T/a17.log" SHIM_CONCURRENCY=None just llm-endpoint-url
+    x="$(absent_from "$T/a17.log" 'create-function-url-config')"
+    row 17 "url with a valid proof, concurrency None -> REFUSED concurrency, no URL created" "$T/c17.log" nonzero '^REFUSED concurrency:' "$x"
+    # 18-19: teardown under the permissive shim
+    fresh_ids
+    write_proof 0
+    printf '{}\n' > "$W/url.json"
+    : > "$T/a18.log"
+    run_just "$T/c18.log" LLM_ENDPOINT_IDS_DIR="$W" SHIM_LOG="$T/a18.log" SHIM_CONCURRENCY=0 just llm-endpoint-teardown
+    x=1
+    grep -qE 'lambda remove-permission .*--statement-id llm-endpoint-url-public' "$T/a18.log" || x=0
+    grep -qE 'lambda remove-permission .*--statement-id llm-endpoint-invoke-via-url' "$T/a18.log" || x=0
+    grep -qE 'ecr batch-delete-image .*imageTag=cpu-v0.71.4' "$T/a18.log" || x=0
+    grep -q 'delete-repository' "$T/a18.log" && x=0
+    grep -q 's3api delete-bucket' "$T/a18.log" || x=0
+    grep -q 'aws ecr delete-repository --repository-name aprender-llm-endpoint-dev' "$T/c18.log" || x=0
+    grep -q 'NOT RUN' "$T/c18.log" || x=0
+    [ ! -f "$W/url.json" ] && [ ! -f "$W/prove-401.json" ] && [ ! -f "$W/function.json" ] || x=0
+    row 18 "teardown: both statements removed, one tag deleted, no delete-repository (printed under NOT RUN)" "$T/c18.log" zero '^TEARDOWN OK' "$x"
+    fresh_ids
+    : > "$T/a19.log"
+    run_just "$T/c19.log" LLM_ENDPOINT_IDS_DIR="$W" SHIM_LOG="$T/a19.log" SHIM_CONCURRENCY=0 SHIM_ECR_DIGEST="$OTHER_DIGEST" just llm-endpoint-teardown
+    x="$(absent_from "$T/a19.log" 'batch-delete-image')"
+    row 19 "teardown: tag moved -> SKIPPED image, no batch-delete-image" "$T/c19.log" zero 'SKIPPED image' "$x"
+    # 20-24: the URL lifecycle
+    fresh_ids
+    write_proof 0
+    : > "$T/a20.log"
+    : > "$T/curl20.log"
+    run_just "$T/c20.log" LLM_ENDPOINT_IDS_DIR="$W" SHIM_LOG="$T/a20.log" SHIM_CURL_LOG="$T/curl20.log" SHIM_CURL_CODE=401 SHIM_CONCURRENCY=1 just llm-endpoint-url
+    x=1
+    grep -qE 'lambda add-permission .*--statement-id llm-endpoint-url-public .*--function-url-auth-type NONE' "$T/a20.log" || x=0
+    grep -qE 'lambda add-permission .*--statement-id llm-endpoint-invoke-via-url .*--invoked-via-function-url' "$T/a20.log" || x=0
+    grep -qE 'create-function-url-config .*--auth-type NONE --invoke-mode BUFFERED' "$T/a20.log" || x=0
+    grep -q '"auth_type": "NONE"' "$W/url.json" || x=0
+    grep -q 'https://' "$T/c20.log" && x=0
+    grep -q '/health' "$T/curl20.log" || x=0
+    grep -q 'v1/chat/completions' "$T/curl20.log" || x=0
+    grep -qi 'authorization' "$T/curl20.log" && x=0
+    row 20 "url: both statements, 401 re-check without a key, url.json written, only the host printed" "$T/c20.log" zero '^URL OK \(401 without key verified; reserved concurrency 1' "$x"
+    fresh_ids
+    write_proof 0
+    : > "$T/a21.log"
+    run_just "$T/c21.log" LLM_ENDPOINT_IDS_DIR="$W" SHIM_LOG="$T/a21.log" SHIM_CURL_LOG="$T/curl21.log" SHIM_CURL_CODE=200 SHIM_CONCURRENCY=1 just llm-endpoint-url
+    x=1
+    grep -q 'lambda delete-function-url-config' "$T/a21.log" || x=0
+    grep -qE 'lambda remove-permission .*--statement-id llm-endpoint-url-public' "$T/a21.log" || x=0
+    grep -qE 'lambda remove-permission .*--statement-id llm-endpoint-invoke-via-url' "$T/a21.log" || x=0
+    [ ! -f "$W/url.json" ] || x=0
+    row 21 "url: an open answer (200) -> URL REMOVED, URL config and both statements deleted, no url.json" "$T/c21.log" nonzero 'URL REMOVED: open endpoint' "$x"
+    fresh_ids
+    write_proof 48
+    : > "$T/a22.log"
+    run_just "$T/c22.log" LLM_ENDPOINT_IDS_DIR="$W" SHIM_MODE=refuse SHIM_LOG="$T/a22.log" just llm-endpoint-url
+    x=1
+    [ "$(lines "$T/a22.log")" -eq 0 ] || x=0
+    row 22 "url: a 48 h old proof -> REFUSED proof, zero aws calls" "$T/c22.log" nonzero '^REFUSED proof:.*older than 24 h' "$x"
+    fresh_ids
+    write_proof 0
+    : > "$T/a23.log"
+    run_just "$T/c23.log" LLM_ENDPOINT_IDS_DIR="$W" SHIM_MODE=preflight SHIM_LOG="$T/a23.log" SHIM_CONCURRENCY=1 SHIM_RESOLVED_IMAGE_URI="$REPO@$OTHER_DIGEST" just llm-endpoint-url
+    x="$(absent_from "$T/a23.log" 'create-function-url-config')"
+    row 23 "url: proof measured on another image digest -> REFUSED proof, no URL created" "$T/c23.log" nonzero '^REFUSED proof:' "$x"
+    fresh_ids
+    write_proof 0
+    : > "$T/a24.log"
+    run_just "$T/c24.log" LLM_ENDPOINT_IDS_DIR="$W" SHIM_LOG="$T/a24.log" SHIM_CURL_LOG="$T/curl24.log" SHIM_CURL_CODE=401 SHIM_CONCURRENCY=None ACCEPT_UNRESERVED_URL=1 just llm-endpoint-url
+    x="$(seen "$W/url.json" '"risk_accepted": true')"
+    row 24 "url: ACCEPT_UNRESERVED_URL=1 on an unbounded function -> WARNING and risk_accepted true" "$T/c24.log" zero '^URL OK .*risk_accepted true' "$x"
+    # 25: up writes an aws.json that the deploy ladder accepts, with the environment-specific repository
+    rm -rf "${T:?}/up"
+    mkdir -p "$T/up"
+    cp "$IDS/image-local.json" "$IDS/image-pushed.json" "$T/up/"
+    : > "$T/a25.log"
+    run_just "$T/c25.log" LLM_ENDPOINT_IDS_DIR="$T/up" SHIM_LOG="$T/a25.log" just llm-endpoint-up
+    UP_RC=$RC
+    x=1
+    [ "$UP_RC" -eq 0 ] || x=0
+    grep -qE 'repository-names aprender-llm-endpoint-dev( |$)' "$T/a25.log" || x=0
+    grep -qE 'repository-names?.aprender-llm-endpoint( |$)' "$T/a25.log" && x=0
+    grep -q 'AWSLambdaBasicExecutionRole' "$T/a25.log" || x=0
+    grep -q 'put-public-access-block' "$T/a25.log" || x=0
+    run_deploy "$T/c25b.log" LLM_ENDPOINT_IDS_DIR="$T/up" DRY_RUN=1
+    [ "$RC" -eq 0 ] || x=0
+    RC=$UP_RC
+    row 25 "up: env-specific repository, posture calls, and an aws.json that DRY_RUN deploy accepts" "$T/c25.log" zero '^UP OK aprender-llm-endpoint-dev' "$x"
+    # 26-28: the live deploy under the permissive shim
+    fresh_ids
+    rm -f "$W/function.json"
+    : > "$T/a26.log"
+    run_deploy "$T/c26.log" LLM_ENDPOINT_IDS_DIR="$W" SHIM_LOG="$T/a26.log" SHIM_FN_EXISTS=0
+    x=1
+    grep -qE 'lambda create-function .*--memory-size 10240 --timeout 900 --ephemeral-storage Size=10240' "$T/a26.log" || x=0
+    grep -qE 'lambda create-function .*--architectures arm64' "$T/a26.log" || x=0
+    grep -q 'lambda wait function-active-v2' "$T/a26.log" || x=0
+    grep -q '"reserved_concurrency": null' "$W/function.json" || x=0
+    grep -q "$HASH64" "$T/a26.log" && x=0
+    grep -q "$HASH64" "$T/c26.log" && x=0
+    grep -q "$HASH64" "$W/function.json" && x=0
+    row 26 "deploy live, function absent -> create-function with the readback values, no key hash anywhere" "$T/c26.log" zero '^DEPLOY OK aprender-llm-endpoint-dev' "$x"
+    fresh_ids
+    rm -f "$W/function.json"
+    : > "$T/a27.log"
+    run_deploy "$T/c27.log" LLM_ENDPOINT_IDS_DIR="$W" SHIM_LOG="$T/a27.log" SHIM_FN_EXISTS=1 RESERVED_CONCURRENCY=1 SHIM_CONCURRENCY=1
+    x=1
+    grep -q 'lambda update-function-configuration' "$T/a27.log" || x=0
+    grep -q "lambda update-function-code .*--image-uri $REPO@$DIGEST" "$T/a27.log" || x=0
+    grep -q 'lambda create-function ' "$T/a27.log" && x=0
+    grep -q 'put-function-concurrency .*--reserved-concurrent-executions 1' "$T/a27.log" || x=0
+    grep -q '"reserved_concurrency": 1' "$W/function.json" || x=0
+    row 27 "deploy live, function present -> update path, reserved concurrency applied and recorded" "$T/c27.log" zero '^DEPLOY OK' "$x"
+    fresh_ids
+    rm -f "$W/function.json"
+    : > "$T/a28.log"
+    run_deploy "$T/c28.log" LLM_ENDPOINT_IDS_DIR="$W" SHIM_LOG="$T/a28.log" SHIM_FN_EXISTS=1 "SHIM_CFG=Active 3008 900 10240 arm64"
+    x=1
+    [ ! -f "$W/function.json" ] || x=0
+    row 28 "deploy live, memory reads 3008 -> REFUSED readback, no function.json" "$T/c28.log" nonzero '^REFUSED readback:' "$x"
+    # 29-30: teardown refusals and the spike-031 guard
+    fresh_ids
+    : > "$T/a29.log"
+    run_just "$T/c29.log" LLM_ENDPOINT_IDS_DIR="$W" SHIM_LOG="$T/a29.log" SHIM_CONCURRENCY=0 SHIM_POLICY_IDS=1 just llm-endpoint-teardown
+    x="$(absent_from "$T/a29.log" 'lambda delete-function ')"
+    row 29 "teardown: get-policy still lists a URL statement -> REFUSED policy, function not deleted" "$T/c29.log" nonzero '^REFUSED policy:' "$x"
+    fresh_ids
+    : > "$T/a30.log"
+    run_just "$T/c30.log" LLM_ENDPOINT_IDS_DIR="$W" SHIM_LOG="$T/a30.log" SHIM_CONCURRENCY=0 TEARDOWN_SPIKE_031=1 just llm-endpoint-teardown
+    x=1
+    grep -q 'lambda delete-function --function-name llm-spike-031-lambda-0-8b' "$T/a30.log" || x=0
+    grep -q 'delete-repository' "$T/a30.log" && x=0
+    grep -q 'aws ecr delete-repository --repository-name llm-spike-031' "$T/c30.log" || x=0
+    row 30 "teardown: TEARDOWN_SPIKE_031=1 removes the spike leftovers but never runs delete-repository" "$T/c30.log" zero '^TEARDOWN OK' "$x"
+    fresh_ids
+    : > "$T/a30b.log"
+    run_just "$T/c31.log" LLM_ENDPOINT_IDS_DIR="$W" SHIM_LOG="$T/a30b.log" SHIM_CONCURRENCY=0 just llm-endpoint-teardown
+    x="$(absent_from "$T/a30b.log" 'llm-spike-031')"
+    row 31 "teardown: without TEARDOWN_SPIKE_031 no spike-031 resource is touched" "$T/c31.log" zero '^TEARDOWN OK' "$x"
+    # 32: warm
+    fresh_ids
+    : > "$T/a32.log"
+    run_just "$T/c32.log" LLM_ENDPOINT_IDS_DIR="$W" SHIM_LOG="$T/a32.log" SHIM_INVOKE_PAYLOAD="$T/p200.json" APR_PROBE_KEY=probe-key-selftest just llm-endpoint-warm
+    x=1
+    grep -q 'probe-key-selftest' "$T/a32.log" && x=0
+    grep -q 'probe-key-selftest' "$T/c32.log" && x=0
+    row 32 "warm: authenticated 1-token invoke, the key appears in no argv and no output" "$T/c32.log" zero '^WARM OK' "$x"
+    : > "$T/a33.log"
+    run_just "$T/c33.log" -u APR_PROBE_KEY LLM_ENDPOINT_IDS_DIR="$W" SHIM_MODE=refuse SHIM_LOG="$T/a33.log" just llm-endpoint-warm
+    x=1
+    [ "$(lines "$T/a33.log")" -eq 0 ] || x=0
+    row 33 "warm without APR_PROBE_KEY -> REFUSED probe-key, zero aws calls" "$T/c33.log" nonzero '^REFUSED probe-key:' "$x"
+    # 34-36: weights
+    fresh_ids
+    : > "$T/a34.log"
+    run_just "$T/c34.log" LLM_ENDPOINT_IDS_DIR="$W" SHIM_LOG="$T/a34.log" just llm-endpoint-weights
+    x="$(absent_from "$T/a34.log" 's3 cp')"
+    row 34 "weights copy: object already carries the ladder pin -> WEIGHTS OK without a copy" "$T/c34.log" zero '^WEIGHTS OK' "$x"
+    fresh_ids
+    : > "$T/a35.log"
+    run_just "$T/c35.log" LLM_ENDPOINT_IDS_DIR="$W" SHIM_LOG="$T/a35.log" SHIM_S3_SHA=notthepin just llm-endpoint-weights
+    x="$(absent_from "$T/a35.log" 's3 cp')"
+    row 35 "weights copy: source without the matching hash -> REFUSED source-meta, nothing copied" "$T/c35.log" nonzero '^REFUSED source-meta:' "$x"
+    fresh_ids
+    : > "$T/a36.log"
+    run_just "$T/c36.log" LLM_ENDPOINT_IDS_DIR="$W" SHIM_LOG="$T/a36.log" just llm-endpoint-weights codebuild
+    x=1
+    grep -q 'codebuild create-project' "$T/a36.log" || x=0
+    grep -q 'codebuild start-build' "$T/a36.log" || x=0
+    grep -q '"mode": "codebuild"' "$W/weights.json" || x=0
+    row 36 "weights codebuild: role, project, build and the metadata check -> WEIGHTS OK, recorded" "$T/c36.log" zero '^WEIGHTS OK' "$x"
+    : > "$T/a37.log"
+    run_just "$T/c37.log" LLM_ENDPOINT_IDS_DIR="$W" SHIM_LOG="$T/a37.log" SHIM_CONCURRENCY=0 just llm-endpoint-teardown
+    x=1
+    grep -qE 'codebuild delete-project .*--name aprender-llm-endpoint-weights-dev' "$T/a37.log" || x=0
+    grep -qE 'iam delete-role .*--role-name aprender-llm-endpoint-codebuild-dev' "$T/a37.log" || x=0
+    row 37 "teardown removes the CodeBuild project and role that weights codebuild recorded" "$T/c37.log" zero '^TEARDOWN OK' "$x"
+    # 38-41: guards that a mutation probe showed were not yet pinned by a case
+    fresh_ids
+    printf '{"function":"%s","image_digest":"%s","statusCode":200,"measured_at":"%s","event_sha256":"x"}\n' "$FN" "$DIGEST" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$W/prove-401.json"
+    : > "$T/a38.log"
+    run_just "$T/c38.log" LLM_ENDPOINT_IDS_DIR="$W" SHIM_MODE=refuse SHIM_LOG="$T/a38.log" just llm-endpoint-url
+    x=1
+    [ "$(lines "$T/a38.log")" -eq 0 ] || x=0
+    row 38 "url: a recorded statusCode of 200 -> REFUSED proof, zero aws calls" "$T/c38.log" nonzero '^REFUSED proof:.*not 401' "$x"
+    fresh_ids
+    : > "$T/a39.log"
+    run_just "$T/c39.log" LLM_ENDPOINT_IDS_DIR="$W" SHIM_LOG="$T/a39.log" SHIM_CONCURRENCY=0 SHIM_S3_KEY=other-object.bin just llm-endpoint-teardown
+    x=1
+    grep -qE 's3api (delete-bucket|delete-object)' "$T/a39.log" && x=0
+    row 39 "teardown: a bucket holding more than the GGUF is kept, never emptied" "$T/c39.log" zero 'KEPT s3://' "$x"
+    fresh_ids
+    : > "$T/a40.log"
+    run_just "$T/c40.log" LLM_ENDPOINT_IDS_DIR="$W" SHIM_LOG="$T/a40.log" SHIM_CONCURRENCY=5 just llm-endpoint-teardown
+    x="$(absent_from "$T/a40.log" 'lambda delete-function ')"
+    row 40 "teardown: containment reads back 5, not 0 -> REFUSED contain, nothing deleted" "$T/c40.log" nonzero '^REFUSED contain:' "$x"
+    fresh_ids
+    : > "$T/a41.log"
+    run_just "$T/c41.log" LLM_ENDPOINT_IDS_DIR="$W" SHIM_LOG="$T/a41.log" SHIM_STS_ACCOUNT=222222222222 just llm-endpoint-teardown
+    x=1
+    [ "$(lines "$T/a41.log")" -eq 1 ] || x=0
+    row 41 "teardown: profile is another account -> REFUSED account after the single sts call" "$T/c41.log" nonzero '^REFUSED account:' "$x"
     echo "AWS CALLS: $AWS_CALLS"
     echo "FIXTURE READS: $FIXTURE_READS"
     if [ "$AWS_CALLS" -ne 0 ]; then
