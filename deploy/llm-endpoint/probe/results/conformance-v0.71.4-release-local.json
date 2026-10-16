@@ -1,0 +1,1296 @@
+{
+ "label": "release-local",
+ "profile": "baseline",
+ "pin": "v0.71.4",
+ "server_version": "apr 0.71.4 (5027da624)",
+ "generated_at": "2026-10-16T15:20:01Z",
+ "base": "http://127.0.0.1:8029/v1",
+ "model": "Qwen3.5-0.8B-Q4_K_M",
+ "known_limitations": [],
+ "unreleased_at_pin": [],
+ "probes": [
+  {
+   "probe": "GET /models",
+   "verdict": "✓",
+   "status": 200,
+   "seconds": 0.008051249897107482,
+   "note": "ids=['default']",
+   "request": null,
+   "response": {
+    "object": "list",
+    "data": [
+     {
+      "id": "default",
+      "object": "model",
+      "created": 1792163691,
+      "owned_by": "realizar"
+     }
+    ]
+   }
+  },
+  {
+   "probe": "GET /effective-config",
+   "verdict": "✓",
+   "status": 200,
+   "seconds": 0.0010454170405864716,
+   "note": "ok",
+   "request": null,
+   "response": {
+    "schema_version": 1,
+    "parity": {
+     "status": "not-run",
+     "cosine": null,
+     "positions": 0,
+     "threshold": 0.98,
+     "basis": "cuda feature not compiled: no GPU gate exists in this build"
+    },
+    "server": {
+     "version": "0.71.4",
+     "build_commit": "5027da624",
+     "pid": 1,
+     "started_utc": "2026-10-16T15:14:51.855Z",
+     "clock_source": "chrono::Utc::now (CLOCK_REALTIME) + std::time::Instant (CLOCK_MONOTONIC)",
+     "uptime_sec": 24.361216428
+    },
+    "compute_class": "cpu",
+    "build_features": [
+     "server",
+     "cli"
+    ],
+    "build_features_cli": [
+     "inference",
+     "training"
+    ],
+    "backend_loaded": [
+     "cpu"
+    ],
+    "model": {
+     "path": "/tmp/model.gguf",
+     "size_bytes": 532517120,
+     "format": "gguf",
+     "quantization": "Q4_K",
+     "architecture": "qwen35",
+     "context_length": 4096,
+     "model_max_context_length": 262144,
+     "content_hash": null,
+     "parameter_count": 752393024,
+     "loaded": true
+    },
+    "offload": {
+     "gpu_layers_requested": "none",
+     "gpu_layers_resolved": 0,
+     "gpu_layers_total": 24,
+     "offload_policy": "all_or_nothing",
+     "autofit_applied": [],
+     "explicit_args": [
+      "backend"
+     ]
+    },
+    "scheduler": null,
+    "cuda": null,
+    "kv": null,
+    "lock_contended": false
+   }
+  },
+  {
+   "probe": "chat plain",
+   "verdict": "✓",
+   "status": 200,
+   "seconds": 8.154491875087842,
+   "note": "fields=['choices', 'created', 'id', 'model', 'object', 'timings', 'usage', 'used_gpu'] usage={'prompt_tokens': 55, 'completion_tokens': 31, 'total_tokens': 86} finish=stop",
+   "request": {
+    "model": "Qwen3.5-0.8B-Q4_K_M",
+    "messages": [
+     {
+      "role": "system",
+      "content": "You are a helpful assistant for an operations team. Use the tools when a question needs live data; otherwise answer directly. Be concise."
+     },
+     {
+      "role": "user",
+      "content": "In one sentence, what does an MCP server do?"
+     }
+    ],
+    "max_tokens": 256,
+    "temperature": 0.2
+   },
+   "response": {
+    "id": "chatcmpl-q4k-1792163716217",
+    "object": "chat.completion",
+    "created": 1792163724,
+    "model": "Qwen3.5-0.8B-Q4_K_M",
+    "choices": [
+     {
+      "index": 0,
+      "message": {
+       "role": "assistant",
+       "content": "An MCP server acts as a bridge between a client application and a server, enabling clients to interact with the server's data and services through a standardized protocol."
+      },
+      "finish_reason": "stop"
+     }
+    ],
+    "usage": {
+     "prompt_tokens": 55,
+     "completion_tokens": 31,
+     "total_tokens": 86
+    },
+    "timings": {
+     "prompt_n": 55,
+     "prompt_ms": 5148.372086,
+     "prompt_per_second": 10.682988541088907,
+     "predicted_n": 31,
+     "predicted_ms": 2973.120543,
+     "predicted_per_second": 10.426755172435671,
+     "clock": "server std::time::Instant (CLOCK_MONOTONIC)",
+     "load_ms": 25.087000000000003
+    },
+    "used_gpu": false
+   }
+  },
+  {
+   "probe": "tools auto -> tool_call",
+   "verdict": "✓",
+   "status": 200,
+   "seconds": 41.15385383297689,
+   "note": "finish=tool_calls id=call_0 type=function name=get_weather args={'city': 'Paris', 'unit': 'celsius'} args_is_str=True",
+   "request": {
+    "model": "Qwen3.5-0.8B-Q4_K_M",
+    "messages": [
+     {
+      "role": "system",
+      "content": "You are a helpful assistant for an operations team. Use the tools when a question needs live data; otherwise answer directly. Be concise."
+     },
+     {
+      "role": "user",
+      "content": "What's the weather in Paris right now?"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the current weather for a city.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string",
+          "description": "City name, e.g. 'Paris'"
+         },
+         "unit": {
+          "type": "string",
+          "enum": [
+           "celsius",
+           "fahrenheit"
+          ]
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "add",
+       "description": "Add two numbers and return the sum.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "a": {
+          "type": "number"
+         },
+         "b": {
+          "type": "number"
+         }
+        },
+        "required": [
+         "a",
+         "b"
+        ]
+       }
+      }
+     }
+    ],
+    "tool_choice": "auto",
+    "max_tokens": 256,
+    "temperature": 0.0
+   },
+   "response": {
+    "id": "chatcmpl-q4k-1792163724373",
+    "object": "chat.completion",
+    "created": 1792163765,
+    "model": "Qwen3.5-0.8B-Q4_K_M",
+    "choices": [
+     {
+      "index": 0,
+      "message": {
+       "role": "assistant",
+       "content": "",
+       "tool_calls": [
+        {
+         "id": "call_0",
+         "type": "function",
+         "function": {
+          "name": "get_weather",
+          "arguments": "{\"city\":\"Paris\",\"unit\":\"celsius\"}"
+         }
+        }
+       ]
+      },
+      "finish_reason": "tool_calls"
+     }
+    ],
+    "usage": {
+     "prompt_tokens": 410,
+     "completion_tokens": 38,
+     "total_tokens": 448
+    },
+    "timings": {
+     "prompt_n": 410,
+     "prompt_ms": 37559.380184,
+     "prompt_per_second": 10.916048081503133,
+     "predicted_n": 38,
+     "predicted_ms": 3557.72221,
+     "predicted_per_second": 10.680991307637816,
+     "clock": "server std::time::Instant (CLOCK_MONOTONIC)",
+     "load_ms": 29.370333
+    },
+    "used_gpu": false
+   }
+  },
+  {
+   "probe": "tool result -> final answer",
+   "verdict": "✗",
+   "status": 422,
+   "seconds": 0.0011545829474925995,
+   "note": "finish=None tool_calls=False content=\"\"",
+   "request": {
+    "model": "Qwen3.5-0.8B-Q4_K_M",
+    "messages": [
+     {
+      "role": "system",
+      "content": "You are a helpful assistant for an operations team. Use the tools when a question needs live data; otherwise answer directly. Be concise."
+     },
+     {
+      "role": "user",
+      "content": "What's the weather in Paris right now?"
+     },
+     {
+      "role": "assistant",
+      "tool_calls": [
+       {
+        "id": "call_0",
+        "type": "function",
+        "function": {
+         "name": "get_weather",
+         "arguments": "{\"city\": \"Paris\"}"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "tool_call_id": "call_0",
+      "content": "{\"city\": \"Paris\", \"temperature_c\": 17, \"condition\": \"light rain\"}"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the current weather for a city.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string",
+          "description": "City name, e.g. 'Paris'"
+         },
+         "unit": {
+          "type": "string",
+          "enum": [
+           "celsius",
+           "fahrenheit"
+          ]
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "add",
+       "description": "Add two numbers and return the sum.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "a": {
+          "type": "number"
+         },
+         "b": {
+          "type": "number"
+         }
+        },
+        "required": [
+         "a",
+         "b"
+        ]
+       }
+      }
+     }
+    ],
+    "tool_choice": "auto",
+    "max_tokens": 256,
+    "temperature": 0.0
+   },
+   "response": {
+    "error": "Invalid request body. Check that the JSON structure matches the expected schema."
+   }
+  },
+  {
+   "probe": "tool_choice=required",
+   "verdict": "✗",
+   "status": 200,
+   "seconds": 34.945777291897684,
+   "note": "finish=stop got_call=False want_call=True err=",
+   "request": {
+    "model": "Qwen3.5-0.8B-Q4_K_M",
+    "messages": [
+     {
+      "role": "user",
+      "content": "Say hello."
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the current weather for a city.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string",
+          "description": "City name, e.g. 'Paris'"
+         },
+         "unit": {
+          "type": "string",
+          "enum": [
+           "celsius",
+           "fahrenheit"
+          ]
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "add",
+       "description": "Add two numbers and return the sum.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "a": {
+          "type": "number"
+         },
+         "b": {
+          "type": "number"
+         }
+        },
+        "required": [
+         "a",
+         "b"
+        ]
+       }
+      }
+     }
+    ],
+    "tool_choice": "required",
+    "max_tokens": 256,
+    "temperature": 0.0
+   },
+   "response": {
+    "id": "chatcmpl-q4k-1792163765529",
+    "object": "chat.completion",
+    "created": 1792163800,
+    "model": "Qwen3.5-0.8B-Q4_K_M",
+    "choices": [
+     {
+      "index": 0,
+      "message": {
+       "role": "assistant",
+       "content": "Hello! How can I help you today?"
+      },
+      "finish_reason": "stop"
+     }
+    ],
+    "usage": {
+     "prompt_tokens": 376,
+     "completion_tokens": 9,
+     "total_tokens": 385
+    },
+    "timings": {
+     "prompt_n": 376,
+     "prompt_ms": 34078.236015,
+     "prompt_per_second": 11.033434941717594,
+     "predicted_n": 9,
+     "predicted_ms": 842.348792,
+     "predicted_per_second": 10.684410170080708,
+     "clock": "server std::time::Instant (CLOCK_MONOTONIC)",
+     "load_ms": 18.126083
+    },
+    "used_gpu": false
+   }
+  },
+  {
+   "probe": "tool_choice=none",
+   "verdict": "✓",
+   "status": 200,
+   "seconds": 38.35033074999228,
+   "note": "finish=stop got_call=False want_call=False err=",
+   "request": {
+    "model": "Qwen3.5-0.8B-Q4_K_M",
+    "messages": [
+     {
+      "role": "user",
+      "content": "What's the weather in Paris?"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the current weather for a city.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string",
+          "description": "City name, e.g. 'Paris'"
+         },
+         "unit": {
+          "type": "string",
+          "enum": [
+           "celsius",
+           "fahrenheit"
+          ]
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "add",
+       "description": "Add two numbers and return the sum.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "a": {
+          "type": "number"
+         },
+         "b": {
+          "type": "number"
+         }
+        },
+        "required": [
+         "a",
+         "b"
+        ]
+       }
+      }
+     }
+    ],
+    "tool_choice": "none",
+    "max_tokens": 256,
+    "temperature": 0.0
+   },
+   "response": {
+    "id": "chatcmpl-q4k-1792163800476",
+    "object": "chat.completion",
+    "created": 1792163838,
+    "model": "Qwen3.5-0.8B-Q4_K_M",
+    "choices": [
+     {
+      "index": 0,
+      "message": {
+       "role": "assistant",
+       "content": "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n<parameter=unit>\ncelsius\n</parameter>\n</function>\n</tool_call>"
+      },
+      "finish_reason": "stop"
+     }
+    ],
+    "usage": {
+     "prompt_tokens": 380,
+     "completion_tokens": 38,
+     "total_tokens": 418
+    },
+    "timings": {
+     "prompt_n": 380,
+     "prompt_ms": 34813.889182,
+     "prompt_per_second": 10.915183822566808,
+     "predicted_n": 38,
+     "predicted_ms": 3510.234919,
+     "predicted_per_second": 10.825486292759427,
+     "clock": "server std::time::Instant (CLOCK_MONOTONIC)",
+     "load_ms": 18.475375
+    },
+    "used_gpu": false
+   }
+  },
+  {
+   "probe": "10 tools -> picks convert_currency",
+   "verdict": "✓",
+   "status": 200,
+   "seconds": 91.2154758751858,
+   "note": "finish=tool_calls name=convert_currency args={\"amount\":250,\"from\":\"eur\",\"to\":\"usd\"} prompt_tokens=926",
+   "request": {
+    "model": "Qwen3.5-0.8B-Q4_K_M",
+    "messages": [
+     {
+      "role": "system",
+      "content": "You are a helpful assistant for an operations team. Use the tools when a question needs live data; otherwise answer directly. Be concise."
+     },
+     {
+      "role": "user",
+      "content": "Convert 250 euros to US dollars."
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the current weather for a city.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string",
+          "description": "City name, e.g. 'Paris'"
+         },
+         "unit": {
+          "type": "string",
+          "enum": [
+           "celsius",
+           "fahrenheit"
+          ]
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "add",
+       "description": "Add two numbers and return the sum.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "a": {
+          "type": "number"
+         },
+         "b": {
+          "type": "number"
+         }
+        },
+        "required": [
+         "a",
+         "b"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "list_orders",
+       "description": "List orders for a customer id.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "customer_id": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "customer_id"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "get_order",
+       "description": "Fetch one order by id.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "order_id": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "order_id"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "create_ticket",
+       "description": "Open a support ticket.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "subject": {
+          "type": "string"
+         },
+         "body": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "subject",
+         "body"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "search_docs",
+       "description": "Full-text search in the documentation.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "query": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "query"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "get_stock_price",
+       "description": "Current price of a stock ticker.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "ticker": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "ticker"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "convert_currency",
+       "description": "Convert an amount between currencies.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "amount": {
+          "type": "number"
+         },
+         "from": {
+          "type": "string"
+         },
+         "to": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "amount",
+         "from",
+         "to"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "send_email",
+       "description": "Send an email.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "to": {
+          "type": "string"
+         },
+         "subject": {
+          "type": "string"
+         },
+         "body": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "to",
+         "subject",
+         "body"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "get_time",
+       "description": "Current time in an IANA timezone.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "timezone": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "timezone"
+        ]
+       }
+      }
+     }
+    ],
+    "tool_choice": "auto",
+    "max_tokens": 256,
+    "temperature": 0.0
+   },
+   "response": {
+    "id": "chatcmpl-q4k-1792163838828",
+    "object": "chat.completion",
+    "created": 1792163930,
+    "model": "Qwen3.5-0.8B-Q4_K_M",
+    "choices": [
+     {
+      "index": 0,
+      "message": {
+       "role": "assistant",
+       "content": "",
+       "tool_calls": [
+        {
+         "id": "call_0",
+         "type": "function",
+         "function": {
+          "name": "convert_currency",
+          "arguments": "{\"amount\":250,\"from\":\"eur\",\"to\":\"usd\"}"
+         }
+        }
+       ]
+      },
+      "finish_reason": "tool_calls"
+     }
+    ],
+    "usage": {
+     "prompt_tokens": 926,
+     "completion_tokens": 53,
+     "total_tokens": 979
+    },
+    "timings": {
+     "prompt_n": 926,
+     "prompt_ms": 86154.72357999999,
+     "prompt_per_second": 10.748104822600373,
+     "predicted_n": 53,
+     "predicted_ms": 5034.045545,
+     "predicted_per_second": 10.528311578873488,
+     "clock": "server std::time::Instant (CLOCK_MONOTONIC)",
+     "load_ms": 19.372833999999997
+    },
+    "used_gpu": false
+   }
+  },
+  {
+   "probe": "stream + tools",
+   "verdict": "✓",
+   "status": 200,
+   "seconds": 38.56209329213016,
+   "note": "ctype=text/event-stream events=3 tool_call_deltas=1 finish=['tool_calls'] done=True",
+   "request": {
+    "model": "Qwen3.5-0.8B-Q4_K_M",
+    "messages": [
+     {
+      "role": "user",
+      "content": "What is 17 plus 25? Use the tool."
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the current weather for a city.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string",
+          "description": "City name, e.g. 'Paris'"
+         },
+         "unit": {
+          "type": "string",
+          "enum": [
+           "celsius",
+           "fahrenheit"
+          ]
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "add",
+       "description": "Add two numbers and return the sum.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "a": {
+          "type": "number"
+         },
+         "b": {
+          "type": "number"
+         }
+        },
+        "required": [
+         "a",
+         "b"
+        ]
+       }
+      }
+     }
+    ],
+    "tool_choice": "auto",
+    "stream": true,
+    "max_tokens": 256,
+    "temperature": 0.0
+   },
+   "response": {
+    "events": [
+     {
+      "id": "chatcmpl-q4k-1792163930045",
+      "object": "chat.completion.chunk",
+      "created": 1792163930,
+      "model": "Qwen3.5-0.8B-Q4_K_M",
+      "choices": [
+       {
+        "index": 0,
+        "delta": {
+         "role": "assistant"
+        },
+        "finish_reason": null
+       }
+      ],
+      "stream_mode": "live"
+     },
+     {
+      "id": "chatcmpl-q4k-1792163930045",
+      "object": "chat.completion.chunk",
+      "created": 1792163968,
+      "model": "Qwen3.5-0.8B-Q4_K_M",
+      "choices": [
+       {
+        "index": 0,
+        "delta": {
+         "tool_calls": [
+          {
+           "index": 0,
+           "id": "call_0",
+           "type": "function",
+           "function": {
+            "name": "add",
+            "arguments": "{\"a\":17,\"b\":25}"
+           }
+          }
+         ]
+        },
+        "finish_reason": null
+       }
+      ]
+     },
+     {
+      "id": "chatcmpl-q4k-1792163930045",
+      "object": "chat.completion.chunk",
+      "created": 1792163968,
+      "model": "Qwen3.5-0.8B-Q4_K_M",
+      "choices": [
+       {
+        "index": 0,
+        "delta": {},
+        "finish_reason": "tool_calls"
+       }
+      ],
+      "usage": {
+       "prompt_tokens": 387,
+       "completion_tokens": 36,
+       "total_tokens": 423
+      },
+      "timings": {
+       "prompt_n": 387,
+       "prompt_ms": 35195.362224,
+       "prompt_per_second": 10.995766929089925,
+       "predicted_n": 36,
+       "predicted_ms": 3347.524752,
+       "predicted_per_second": 10.754214730896784,
+       "clock": "server std::time::Instant (CLOCK_MONOTONIC)",
+       "load_ms": 18.153916
+      }
+     }
+    ],
+    "done": true
+   }
+  },
+  {
+   "probe": "stream plain",
+   "verdict": "✓",
+   "status": 200,
+   "seconds": 6.447740999981761,
+   "note": "events=44 done=True usage_in_stream=True text=\"Here is the count from one to ten in words:\\n\\n1. One\\n2. Two\\n3. Three\\n4. Fou",
+   "request": {
+    "model": "Qwen3.5-0.8B-Q4_K_M",
+    "messages": [
+     {
+      "role": "user",
+      "content": "Count from one to ten in words."
+     }
+    ],
+    "stream": true,
+    "max_tokens": 64,
+    "temperature": 0.0
+   },
+   "response": {
+    "n_events": 44,
+    "first": [
+     {
+      "id": "chatcmpl-q4k-1792163968608",
+      "object": "chat.completion.chunk",
+      "created": 1792163968,
+      "model": "Qwen3.5-0.8B-Q4_K_M",
+      "choices": [
+       {
+        "index": 0,
+        "delta": {
+         "role": "assistant"
+        },
+        "finish_reason": null
+       }
+      ],
+      "stream_mode": "live"
+     },
+     {
+      "id": "chatcmpl-q4k-1792163968608",
+      "object": "chat.completion.chunk",
+      "created": 1792163970,
+      "model": "Qwen3.5-0.8B-Q4_K_M",
+      "choices": [
+       {
+        "index": 0,
+        "delta": {
+         "content": "Here"
+        },
+        "finish_reason": null
+       }
+      ]
+     }
+    ],
+    "last": [
+     {
+      "id": "chatcmpl-q4k-1792163968608",
+      "object": "chat.completion.chunk",
+      "created": 1792163974,
+      "model": "Qwen3.5-0.8B-Q4_K_M",
+      "choices": [
+       {
+        "index": 0,
+        "delta": {
+         "content": " Ten"
+        },
+        "finish_reason": null
+       }
+      ]
+     },
+     {
+      "id": "chatcmpl-q4k-1792163968608",
+      "object": "chat.completion.chunk",
+      "created": 1792163975,
+      "model": "Qwen3.5-0.8B-Q4_K_M",
+      "choices": [
+       {
+        "index": 0,
+        "delta": {},
+        "finish_reason": "stop"
+       }
+      ],
+      "usage": {
+       "prompt_tokens": 20,
+       "completion_tokens": 52,
+       "total_tokens": 72
+      },
+      "timings": {
+       "prompt_n": 20,
+       "prompt_ms": 1780.4750430000001,
+       "prompt_per_second": 11.232957226011507,
+       "predicted_n": 52,
+       "predicted_ms": 4648.114793999999,
+       "predicted_per_second": 11.187331273987466,
+       "clock": "server std::time::Instant (CLOCK_MONOTONIC)",
+       "load_ms": 17.914875,
+       "first_token_ms": 0.058499999999999996
+      }
+     }
+    ]
+   }
+  },
+  {
+   "probe": "extra OpenAI fields tolerated",
+   "verdict": "✓",
+   "status": 200,
+   "seconds": 1.958773500053212,
+   "note": "err=ok",
+   "request": {
+    "model": "Qwen3.5-0.8B-Q4_K_M",
+    "messages": [
+     {
+      "role": "user",
+      "content": "Hi"
+     }
+    ],
+    "max_tokens": 16,
+    "stream_options": {
+     "include_usage": true
+    },
+    "parallel_tool_calls": false,
+    "n": 1,
+    "user": "spike",
+    "response_format": {
+     "type": "text"
+    },
+    "seed": 7,
+    "top_p": 0.9,
+    "presence_penalty": 0.0,
+    "frequency_penalty": 0.0,
+    "logit_bias": {},
+    "metadata": {
+     "x": "y"
+    },
+    "store": false
+   },
+   "response": {
+    "id": "chatcmpl-q4k-1792163975056",
+    "object": "chat.completion",
+    "created": 1792163977,
+    "model": "Qwen3.5-0.8B-Q4_K_M",
+    "choices": [
+     {
+      "index": 0,
+      "message": {
+       "role": "assistant",
+       "content": "Hello! How can I help you today?"
+      },
+      "finish_reason": "stop"
+     }
+    ],
+    "usage": {
+     "prompt_tokens": 13,
+     "completion_tokens": 9,
+     "total_tokens": 22
+    },
+    "timings": {
+     "prompt_n": 13,
+     "prompt_ms": 1143.5055009999999,
+     "prompt_per_second": 11.368550469264425,
+     "predicted_n": 9,
+     "predicted_ms": 789.60325,
+     "predicted_per_second": 11.39812937700041,
+     "clock": "server std::time::Instant (CLOCK_MONOTONIC)",
+     "load_ms": 18.230415999999998
+    },
+    "used_gpu": false
+   }
+  },
+  {
+   "probe": "max_completion_tokens honoured",
+   "verdict": "✗",
+   "status": 200,
+   "seconds": 21.95368062518537,
+   "note": "completion_tokens=222 finish=stop",
+   "request": {
+    "model": "Qwen3.5-0.8B-Q4_K_M",
+    "messages": [
+     {
+      "role": "user",
+      "content": "Write 200 words about rivers."
+     }
+    ],
+    "max_completion_tokens": 12
+   },
+   "response": {
+    "id": "chatcmpl-q4k-1792163977016",
+    "object": "chat.completion",
+    "created": 1792163998,
+    "model": "Qwen3.5-0.8B-Q4_K_M",
+    "choices": [
+     {
+      "index": 0,
+      "message": {
+       "role": "assistant",
+       "content": "Rivers are the lifeblood of the natural world, acting as the great highways connecting land to water. They carry water from high elevations to lowlands, transporting essential nutrients and minerals that sustain agriculture and fisheries. As they flow, rivers shape the landscape, carving canyons and creating fertile valleys that support diverse ecosystems.\n\nThe water itself is a complex mixture of minerals, salts, and organic matter, which influences the water quality and the health of aquatic life. Rivers also serve as vital transportation routes, moving goods and people across vast distances, often requiring massive engineering feats like dams and canals to manage their flow. Despite their power, rivers are fragile; their erosion can lead to soil depletion and flooding, while their pollution can harm the entire ecosystem.\n\nIn the human world, rivers are often viewed as sacred, with many cultures treating them as living beings. Ancient civilizations built cities along their banks, and modern efforts focus on sustainable management to protect these vital resources for future generations. Ultimately, rivers remind us that nature is interconnected and that understanding them requires patience, respect, and a commitment to conservation."
+      },
+      "finish_reason": "stop"
+     }
+    ],
+    "usage": {
+     "prompt_tokens": 21,
+     "completion_tokens": 222,
+     "total_tokens": 243
+    },
+    "timings": {
+     "prompt_n": 21,
+     "prompt_ms": 1878.817792,
+     "prompt_per_second": 11.177241395848991,
+     "predicted_n": 222,
+     "predicted_ms": 20049.455718,
+     "predicted_per_second": 11.07261978192719,
+     "clock": "server std::time::Instant (CLOCK_MONOTONIC)",
+     "load_ms": 17.657084
+    },
+    "used_gpu": false
+   }
+  },
+  {
+   "probe": "error envelope {error:{message,type}}",
+   "verdict": "✗",
+   "status": 422,
+   "seconds": 0.0010945419780910015,
+   "note": "{\"error\": \"Invalid request body. Check that the JSON structure matches the expected schema.\"}",
+   "request": {
+    "model": "Qwen3.5-0.8B-Q4_K_M",
+    "messages": "not-a-list"
+   },
+   "response": {
+    "error": "Invalid request body. Check that the JSON structure matches the expected schema."
+   }
+  },
+  {
+   "probe": "foreign model id",
+   "verdict": "ℹ",
+   "status": 200,
+   "seconds": 1.8203310419339687,
+   "note": "served_as=gpt-4o-mini status=200",
+   "request": {
+    "model": "gpt-4o-mini",
+    "messages": [
+     {
+      "role": "user",
+      "content": "Hi"
+     }
+    ],
+    "max_tokens": 8
+   },
+   "response": {
+    "id": "chatcmpl-q4k-1792163998971",
+    "object": "chat.completion",
+    "created": 1792164000,
+    "model": "gpt-4o-mini",
+    "choices": [
+     {
+      "index": 0,
+      "message": {
+       "role": "assistant",
+       "content": "Hello! How can I help you today"
+      },
+      "finish_reason": "length"
+     }
+    ],
+    "usage": {
+     "prompt_tokens": 13,
+     "completion_tokens": 8,
+     "total_tokens": 21
+    },
+    "timings": {
+     "prompt_n": 13,
+     "prompt_ms": 1165.841251,
+     "prompt_per_second": 11.150746286296915,
+     "predicted_n": 8,
+     "predicted_ms": 628.370459,
+     "predicted_per_second": 12.731343247312013,
+     "clock": "server std::time::Instant (CLOCK_MONOTONIC)",
+     "load_ms": 19.09375
+    },
+    "used_gpu": false
+   }
+  },
+  {
+   "probe": "no Authorization header",
+   "verdict": "ℹ",
+   "status": 200,
+   "seconds": 0.90493791596964,
+   "note": "accepted (no auth at the server; the front door must enforce it)",
+   "request": null,
+   "response": null
+  },
+  {
+   "probe": "cpu_part in /health",
+   "verdict": "ℹ",
+   "status": 200,
+   "seconds": 0.0007919170893728733,
+   "note": "no cpu_part key in /health (the entrypoint [entry] log line carries it)",
+   "request": null,
+   "response": {
+    "status": "ok",
+    "version": "0.71.4",
+    "compute_mode": "cpu",
+    "model_loaded": true,
+    "uptime_sec": 309.836009308
+   }
+  }
+ ],
+ "notes": [
+  "release-local re-probe of the v0.71.4 release image (aprender-llm-endpoint:cpu-v0.71.4, apr 0.71.4 (5027da624)) from the locally built image, GGUF sha256 bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517 == the ladder pin (qwen35-0.8b-q4km).",
+  "seconds-to-health: 2 s from docker run to GET /health 200 (entrypoint sha256 check took ~1.15 s of it; model loaded by mmap).",
+  "memory: the container ran under `docker --memory 10g` (in-container cgroup memory.max = 10737418240) BUT the Docker Desktop VM has only ~4.0 GB (docker info MemTotal 4106346496; `docker stats` clamps the limit to 3.824 GiB). The 10 GB cap was set but not physically backed; the v0.71.4 host-RAM guard admitted the 0.8B reading the 10 GB cgroup limit. Measured through the whole probe: cgroup memory.peak 1368408064 B (1.27 GiB), apr VmHWM 1020896 kB (~0.97 GiB). Admission under a REAL 10 GB Lambda tier is not proven by this laptop run.",
+  "timings are laptop (Docker VM, arm64) context only; D-14 measures on the deployed function.",
+  "v0.71.4 response_format: the P8 probe (extra OpenAI fields tolerated) sends {\"type\":\"text\"} and is still a check mark on this release.",
+  "baseline verdict set reproduced: the four crosses are tool result -> final answer (422), tool_choice=required, max_completion_tokens honoured, error envelope; identical to the spike-029 set."
+ ]
+}
