@@ -113,14 +113,14 @@ equations:
       - 'the server was started with APR_API_KEY (or its hash) set; an open server is the spike-029 baseline, not this equation'
 
   max_completion_tokens_alias:
-    formula: 'effective_max_tokens(req) == req.max_tokens when present, else req.max_completion_tokens when present, else the server default'
+    formula: 'effective_max_tokens(req) == the one of req.max_tokens / req.max_completion_tokens that is present, else the server default; a body carrying both names is refused (serde `duplicate field`)'
     domain: 'the max_tokens / max_completion_tokens members of a chat-completions request body'
     codomain: 'the generation cap the handler passes to the sampler'
     invariants:
       - 'D-05: max_completion_tokens is the newer OpenAI name for the same cap; neither pmcp.run client sends it, so this fix may be UNRELEASED at a pin (an unreleased_at_pin entry) without gating the turn'
-      - 'when both are present max_tokens wins: an older client that sends both keeps its own meaning'
+      - 'when both are present serde''s derive refuses the body with `duplicate field` (a deterministic 422; no value silently wins). OBSERVED in plan 09-02 and pinned by both_max_tokens_names_present_is_documented; the earlier draft wording "max_tokens wins" did not match serde alias semantics'
     preconditions:
-      - 'enforced by plan 09-02; FALSIFY-LLM-CONF-003 carries no test: key until that plan writes the test'
+      - 'enforced by plan 09-02; FALSIFY-LLM-CONF-003 is bound to its test: key (api::max_completion_tokens_alias_tests)'
 
   verdict_profile:
     formula: 'record.profile == baseline => {p : p.verdict == ✗} == {tool result -> final answer, tool_choice=required, max_completion_tokens honoured, error envelope {error:{message,type}}}; record.profile == fixed => (no auth probe `no Authorization header` reads ✓) AND no probe reads ✗ AND every limitation reads KNOWN LIMITATION AND (a D-03 or D-05-alias limitation carries an unreleased_at_pin entry whose reason says `unreleased at pin`)'
@@ -194,7 +194,8 @@ falsification_tests:
   - id: FALSIFY-LLM-CONF-003
     rule: 'max_completion_tokens aliases max_tokens (D-05). Neither pmcp.run client sends the field, so it may be unreleased at a pin under the same unreleased_at_pin rule as row 001.'
     prediction: 'A request carrying max_completion_tokens 12 and no max_tokens completes with completion_tokens <= 16; spike 029 measured 244 at v0.70.3 (the field was ignored).'
-    implemented_by: 'plan 09-02 (the request alias); the test: key is added there once the test exists (staged binding)'
+    implemented_by: 'plan 09-02 (upstream commit 31db0c39a9466faaec209181c031f11a0852c361 on branch fix/max-completion-tokens-alias; phase-branch cherry-pick b9bd4516566a33e664960f94219aab69d64fc47b)'
+    test: 'cargo test -p aprender-serve --lib api::max_completion_tokens_alias_tests::max_completion_tokens_aliases_max_tokens'
     if_fails: 'A newer OpenAI client caps nothing on this endpoint; no pmcp.run turn is affected, so this never gates the end-to-end turn.'
 
   - id: FALSIFY-LLM-CONF-004
