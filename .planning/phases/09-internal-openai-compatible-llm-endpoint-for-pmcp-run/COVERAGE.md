@@ -9,7 +9,7 @@
 |---|---|---|
 | `POST /v1/chat/completions` (non-streaming) | INTEGRATE | the only route both clients call; probed, fixed (D-03/D-05) and proven end to end (SC1/SC2) |
 | `POST /v1/chat/completions` + `tools`, `tool_choice: auto` | INTEGRATE | the two-tool and ten-tool turns; contract rows 004-007 |
-| tool-result turn (`role: tool`, `tool_call_id`) | INTEGRATE | gap 1 fix (D-03) + SDK fix (D-09); matrix in 09-12 (split from 09-05) |
+| tool-result turn (`role: tool`, `tool_call_id`) | INTEGRATE | gap 1 fix (D-03, role-aware: only an assistant message may omit `content`; user/system/tool still 422) + SDK fix (D-09); matrix in 09-12 (five cells incl. a same-run two-tool turn) |
 | `POST /v1/chat/completions` with `stream: true` | INTEGRATE | probed (P6/P7) buffered through the adapter so a future streaming client has a verdict; neither platform client streams today, so the Function URL stays BUFFERED (Surface 2) |
 | `max_completion_tokens` | INTEGRATE | aliased to `max_tokens` (D-05 cheap fix, plan 09-02) |
 | `tool_choice: required` | OPT-OUT | KNOWN LIMITATION — needs constrained decoding to be honest; not on the real wire of either client (D-05) |
@@ -26,7 +26,8 @@
 | Ollama `/api/*` routes (chat, generate, tags, show, pull, embeddings, delete) | OPT-OUT | explicitly out of scope — pmcp.run speaks OpenAI shapes only; `pull`/`delete` would mutate a function's `/tmp` and are never exposed |
 | `response_format` (`json_object` / `json_schema`, v0.71.x) | OPT-OUT | not needed yet — neither client sends it; P8 keeps `{"type":"text"}` tolerated |
 | `logprobs` / `top_logprobs` (v0.71.x) | OPT-OUT | not needed — no client reads them |
-| `cpu_part` in `/health` | OPT-OUT | KNOWN LIMITATION — recorded by the entrypoint `[entry]` log line instead (D-14); platform-specific, not upstreamed (D-05) |
+| `cpu_part` in `/health` | OPT-OUT | KNOWN LIMITATION — recorded by the entrypoint `[entry]` log line instead (D-14); platform-specific, not upstreamed (D-05). Enforced, not just cited: the 09-01 reader requires the fixed-profile record to carry a `cpu_part in /health` probe as ✓ or `KNOWN LIMITATION` (contract row 012 binds to its own test) |
+| GPU-path realizar router builders (`handlers_include_01.rs`, `handler_gpu_completion.rs`) | OPT-OUT | NOT gated by plan 09-03's fix — a scope exception to `apr-serve-api-key-auth-v1`'s "every router builder" wording, named in contract row 002; the deployment is CPU-only (`--backend cpu`, `-cpu` asset) and the deployed 401 proofs cover the serving route; drafted as an upstream issue, GPU hosts deferred by CONTEXT |
 
 ## Surface 2 — AWS Lambda ingress for the endpoint (RESEARCH Q1, D-12)
 
@@ -39,7 +40,9 @@
 | CloudFront front door (OAC + header check) | OPT-OUT | origin response timeout 30 s (60 s max without a quota increase) cannot carry 71-146 s turns; adds no auth the server lacks |
 | ALB Lambda target | OPT-OUT | VPC + hourly cost + an ACM certificate/domain for HTTPS; adds nothing once the server gates |
 | API Gateway HTTP API | OPT-OUT | 30 s integration cap (ruled out by the decide contract's own pricing) |
-| Reserved concurrency | INTEGRATE | operator option at D-15: blast-radius cap and one-conversation-per-process; `RESERVED_CONCURRENCY` in the deploy recipe |
+| Reserved concurrency | INTEGRATE | operator option at D-15 (blast-radius cap, one-conversation-per-process; `RESERVED_CONCURRENCY` in the deploy recipe) and, since the cross-AI review, ENFORCED before a Function URL exists: `llm-endpoint-url` refuses without 1-5 unless `ACCEPT_UNRESERVED_URL=1` records the risk |
+| `DRY_RUN` vs `PREFLIGHT` deploy modes | INTEGRATE | `DRY_RUN=1` = offline rungs 1-7 with zero AWS calls; `PREFLIGHT=1` = read-only rungs 1-10 (account, S3 sha, ECR digest); the live deploy runs all ten |
+| ECR repository per environment, single-tag teardown | INTEGRATE | `aprender-llm-endpoint-<env>`; teardown deletes only the recorded tag and prints `delete-repository` for the human (laya precedent) |
 | Provisioned concurrency / SnapStart | OPT-OUT | explicitly out of scope — the phase is the cost/security option; warm-up is the pre-warm recipe |
 | Lambda Managed Instances / Fargate / GPU hosts | OPT-OUT | deferred by CONTEXT (`## Deferred Ideas`) |
 
@@ -52,4 +55,5 @@
 | `LLMProvider.timeoutSecs` (new optional field) | INTEGRATE | delivered as a PR for the team (D-10), clamped to 148 s; optional for the demo |
 | `availableBuiltInTools` for this provider | OPT-OUT | the endpoint has no native tools; `[]` |
 | new transformer / provider branch in `map_provider_row_to_config` | OPT-OUT | forbidden by D-08 (the row is data) |
+| redacting the resolved endpoint in the platform's provider-call log (`llm/service.rs`) | OPT-OUT | the platform team's operability decision; the same URL is in the row by design. Recorded as disposition T-09-50 (accept with enforced controls) in 09-08 and the evidence, proposed as an OPTIONAL non-blocking suggestion in the brief's Known exposure section |
 | Bedrock's OpenAI surface as a provider row | OPT-OUT | deferred by CONTEXT; data-only on pmcp.run, not aprender work (IR-3) |

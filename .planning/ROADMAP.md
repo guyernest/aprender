@@ -792,7 +792,7 @@ from `upstream/main`, one small PR per fix (maintainer guidance 2026-09-29: smal
 Deployment of record uses a release artifact; a PR-branch build may back a pre-merge conformance proof
 only, labelled as such, never the deployed endpoint.
 
-**Plans**: 12 plans (7 waves; tracer-first; human checkpoints at D-06 PR openings, the D-15 go/no-go, the D-11 team review and the data actions; plan 09-08's precondition is the only place the phase waits on an upstream RELEASE carrying the D-04 fix)
+**Plans**: 13 plans (7 waves; tracer-first; revised in place after the 2026-10-16 cross-AI review — 09-13 split from 09-06; human checkpoints at D-06 PR openings, the D-15 go/no-go, the D-11 team review and the data actions; plan 09-08's precondition is the only place the phase waits on an upstream RELEASE carrying the D-04 fix)
 
 Plans:
 **Wave 1**
@@ -801,22 +801,23 @@ Plans:
 - [ ] 09-11-PLAN.md — deploy assets in-repo, staging half: IAM policies as files, the 0.8B CodeBuild buildspec, the ladder reader `ladder_pin.py`, the runbook README (wave 1; split from 09-04 for the per-plan file budget, no shared file)
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 09-02-PLAN.md — D-03 null/absent `content` deserializer + `max_completion_tokens` alias with tests; two upstream PR branches; blocking-human PR opening (wave 2)
-- [ ] 09-06-PLAN.md — the justfile deployment surface: up/weights/deploy (refusal ladder, DRY_RUN)/prove-401/url/warm/probe/measure/teardown + selftest at AWS CALLS: 0; aws-cli bench with wall+billed+cpu_part (wave 2)
+- [ ] 09-02-PLAN.md — D-03 role-aware (assistant-only) null/absent `content` deserializer + `max_completion_tokens` alias, each ONE upstream-only commit with its own test file built in its own upstream/main worktree, cherry-picked onto the phase branch with the contract bindings as separate commits; blocking-human PR opening (wave 2)
+- [ ] 09-06-PLAN.md — the justfile lifecycle surface: up/weights/deploy (refusal ladder; `DRY_RUN` = offline rungs 1-7, `PREFLIGHT` = read-only rungs 1-10)/prove-401/url (reserved-concurrency gate)/warm/teardown (env-specific ECR repo, only the recorded image tag deleted, repository removal printed for the human) + selftest at AWS CALLS: 0 (wave 2)
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 09-03-PLAN.md — D-04 `build_gguf_router` seam wiring `AuthGate::from_env()` with a oneshot test on the real realizar router; upstream PR branch; blocking-human PR opening (wave 3 — serialized after 09-02: both bind rows of the conformance contract)
+- [ ] 09-03-PLAN.md — D-04 `build_gguf_router` seam wiring `AuthGate::from_env()` with a oneshot test on the real realizar router, ONE upstream-only commit built in an upstream/main worktree (GPU-path scope exception recorded in the contract and drafted as upstream issues); blocking-human PR opening (wave 3 — serialized after 09-02: both bind rows of the conformance contract)
+- [ ] 09-13-PLAN.md — probe/measure tooling split from 09-06: `llm-endpoint-probe` wrapper (labels release-local|interim|deployed-https), stdlib `shapes.py` + `bench.py` (wall+billed+cpu_part+dollars, budget guard that refuses a sample before it overspends), `llm-endpoint-measure` (wave 3 — after 09-06, both edit the justfile)
 
 **Wave 4** *(blocked on Wave 3 completion)*
-- [ ] 09-05-PLAN.md — local proofs: v0.71.4 re-probe from the image under 10 GB, interim build (upstream/main + fixes) 401 table + ✗-free table; the interim binary kept on disk for 09-12 (wave 4)
+- [ ] 09-05-PLAN.md — local proofs: v0.71.4 re-probe from the image under 10 GB, interim build (upstream/main + the three verified commits, proven by patch-id and file-set audit) 401 table + ✗-free table; the interim binary kept on disk for 09-12 (wave 4)
 
 **Wave 5** *(blocked on Wave 4 completion)*
 - [ ] 09-07-PLAN.md — D-15 go/no-go (blocking-human), live deploy by recipes, 401 proof attempt BEFORE any URL, D-14 measurement on the deployed function, deployed conformance via lambda:Invoke, evidence record (wave 5, autonomous: false)
-- [ ] 09-12-PLAN.md — SDK fix branch (D-09) in the sibling rust-mcp-sdk worktree, the in-repo agent-loop driver, and the four-cell pmcp-agent matrix (three Completed + the http 422 control) against the interim binary and the release image (wave 5; split from 09-05 for the per-plan context budget, no shared file)
+- [ ] 09-12-PLAN.md — SDK fix branch (D-09) in the sibling rust-mcp-sdk worktree cut from the fetched upstream base, the in-repo agent-loop driver (fail-closed key) with `make-variant.sh` (a generated directory with a real `Cargo.toml`), and the five-cell pmcp-agent matrix (four Completed, one a same-run two-tool turn, plus the http 422 control) against the interim binary and the release image (wave 5; split from 09-05 for the per-plan context budget, no shared file)
 
 **Wave 6** *(blocked on Wave 5 completion)*
-- [ ] 09-09-PLAN.md — `09-PMCP-RUN-BRIEF.md`, the `timeoutSecs` PR branch (clamp 148 s + invariant tests), SDK PR; blocking-human team review + PR opening (wave 6 — after 09-12's SDK branch and matrix, autonomous: false)
-- [ ] 09-08-PLAN.md — re-pin to a RELEASE carrying the D-04 fix if needed (precondition), Function URL after the 401 proof, HTTPS auth table + fixed-profile conformance, SDK turn over HTTPS (wave 6)
+- [ ] 09-09-PLAN.md — `09-PMCP-RUN-BRIEF.md` (incl. the Known exposure section), the `timeoutSecs` PR branch cut from the fetched origin/main (clamp 148 s, malformed values warned, invariant tests, `--bin durable-agent-lambda` test commands), SDK PR; blocking-human team review + PR opening (wave 6 — after 09-12's SDK branch and matrix, autonomous: false)
+- [ ] 09-08-PLAN.md — re-pin to a RELEASE carrying the D-04 fix if needed (precondition), Function URL after the 401 proof (bounded by reserved concurrency; the platform-logs-the-URL exposure recorded as T-09-50), HTTPS auth table + fixed-profile conformance, SDK turns over HTTPS including one combined two-tool run (wave 6)
 
 **Wave 7** *(blocked on Wave 6 completion)*
-- [ ] 09-10-PLAN.md — the three pmcp.run data actions + secret (blocking-human), the SC1 platform two-tool turn with both sides' evidence, switch-back by configuration, final record `deployed-passed-e2e` (wave 7, autonomous: false)
+- [ ] 09-10-PLAN.md — the three pmcp.run data actions + secret (blocking-human), the SC1 platform two-tool turn accepted by `verify_platform_turn.py` (both tools, wire properties, accepted tool result, derived timing, request-id-correlated endpoint evidence; nine-refusal self-test), switch-back by configuration, final record `deployed-passed-e2e` (wave 7, autonomous: false)
