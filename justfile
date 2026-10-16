@@ -3896,3 +3896,395 @@ llm-endpoint-image push="0":
         echo "PUSHED $ECR_REPO:cpu-$APR_TAG $DIGEST"
     fi
     echo "IMAGE OK $TAG (apr $VLINE)"
+
+# Deploy the endpoint function (D-13): a fail-closed ladder in the laya-deploy shape. ONE mode
+# contract, worded identically in the plan, here, in the self-test and in the README:
+#   Ten rungs, each printing `REFUSED <check>: ...` before any AWS write. Rungs 1-7 are LOCAL (env,
+#   pin, tarball, image, ladder, auth, ids); rungs 8-10 are read-only AWS calls (account = sts,
+#   s3-sha = head-object, digest = ecr describe-images).
+#   DRY_RUN=1   = OFFLINE static validation: runs rungs 1-7 only, makes ZERO AWS calls of any kind,
+#                 and ends `DRY-RUN OK ... (offline rungs 1-7; account, s3-sha and digest NOT checked; nothing deployed)`.
+#   PREFLIGHT=1 = CONNECTED read-only preflight: runs rungs 1-10 (only the three read calls) and
+#                 ends `PREFLIGHT OK ... (rungs 1-10; read-only AWS calls only; nothing deployed)`.
+#   Neither flag = rungs 1-10 then the live deploy. Both flags = `REFUSED mode`.
+# Test seams: LLM_ENDPOINT_IDS_DIR (default deploy/llm-endpoint/.ids), LLM_ENDPOINT_PIN_FILE (default
+# deploy/llm-endpoint/pin.env), LLM_ENDPOINT_BIN_DIR (default deploy/llm-endpoint/bin). RESERVED_CONCURRENCY
+# (an integer) is applied after the deploy and read back. APR_API_KEY_HASH comes from the environment
+# and is only ever printed as the word `set`.
+llm-endpoint-deploy env="dev" profile="ze-kasher-dev":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ENV="{{ trim_start_match(env, "env=") }}"
+    PROFILE="{{profile}}"
+    DIR=deploy/llm-endpoint
+    IDS="${LLM_ENDPOINT_IDS_DIR:-$DIR/.ids}"
+    PIN_FILE="${LLM_ENDPOINT_PIN_FILE:-$DIR/pin.env}"
+    BIN="${LLM_ENDPOINT_BIN_DIR:-$DIR/bin}"
+    refuse() { echo "REFUSED $1: $2" >&2; exit "${3:-2}"; }
+    # shasum directly, as laya-deploy: the pin must not depend on which sha tool the PATH offers.
+    sha256() { shasum -a 256 "$1" | awk '{print $1}'; }
+    jget() { python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$1" "$2"; }
+    has_keys() { python3 -I -c 'import json, sys; d = json.load(open(sys.argv[1])); [d[k] for k in sys.argv[2:]]' "$@" 2> /dev/null; }
+    # rung 0: mode
+    if [ "${DRY_RUN:-0}" = "1" ] && [ "${PREFLIGHT:-0}" = "1" ]; then
+        refuse mode "DRY_RUN=1 (offline, rungs 1-7) and PREFLIGHT=1 (connected, read-only, rungs 1-10) are different modes; set one"
+    fi
+    # rung 1: env
+    case "$ENV" in
+        dev|prod) ;;
+        *) refuse env "'$ENV' is not a known environment (expected dev or prod)" ;;
+    esac
+    # rung 2: pin
+    [ -f "$PIN_FILE" ] || refuse pin "$PIN_FILE does not exist"
+    . "$PIN_FILE"
+    printf '%s' "${APR_TAG:-}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+        || refuse pin "APR_TAG '${APR_TAG:-}' in $PIN_FILE is not vMAJOR.MINOR.PATCH"
+    case "${APR_PIN_PROFILE:-}" in
+        baseline|fixed) ;;
+        *) refuse pin "APR_PIN_PROFILE '${APR_PIN_PROFILE:-}' in $PIN_FILE is not baseline or fixed" ;;
+    esac
+    [ -n "${APR_ASSET:-}" ] && [ -n "${GGUF_RUNG:-}" ] && [ -n "${GGUF_OBJECT:-}" ] \
+        || refuse pin "$PIN_FILE lacks APR_ASSET, GGUF_RUNG or GGUF_OBJECT"
+    # rung 3: tarball
+    [ -f "$BIN/$APR_ASSET" ] || refuse tarball "$BIN/$APR_ASSET does not exist -- run: just llm-endpoint-image"
+    GOT="$(sha256 "$BIN/$APR_ASSET")"
+    [ "$GOT" = "${APR_TARBALL_SHA256:-}" ] \
+        || refuse tarball "$APR_ASSET hashes to $GOT but the pin is ${APR_TARBALL_SHA256:-unset}"
+    # rung 4: image
+    [ -f "$IDS/image-local.json" ] || refuse image "$IDS/image-local.json does not exist -- run: just llm-endpoint-image"
+    VLINE="$(jget "$IDS/image-local.json" apr_version_line 2> /dev/null)" \
+        || refuse image "$IDS/image-local.json has no apr_version_line"
+    case "$VLINE" in
+        *"${APR_TAG#v}"*) ;;
+        *) refuse image "the local image apr version line $VLINE does not carry ${APR_TAG#v}" ;;
+    esac
+    # rung 5: ladder (the hash is derived, never typed here)
+    GGUF_SHA256="$(python3 -I "$DIR/ladder_pin.py" contracts/model-capability-ladder-v1.yaml "$GGUF_RUNG" 2> "$IDS/ladder.err")" \
+        || refuse ladder "ladder_pin.py refused rung $GGUF_RUNG: $(tail -1 "$IDS/ladder.err")"
+    printf '%s' "$GGUF_SHA256" | grep -Eq '^[0-9a-f]{64}$' || refuse ladder "the ladder pin for $GGUF_RUNG is not 64 lowercase hex"
+    # rung 6: auth (the value is checked and never printed)
+    KEYHASH="${APR_API_KEY_HASH:-}"
+    KEYLEN="$(printf '%s' "$KEYHASH" | wc -c | tr -d ' ')"
+    [ "$KEYLEN" -eq 64 ] || refuse auth "APR_API_KEY_HASH must be set to 64 hex chars, otherwise the server would start OPEN"
+    case "$KEYHASH" in
+        *[!0-9a-f]*) refuse auth "APR_API_KEY_HASH is 64 chars but not lowercase hex" ;;
+    esac
+    echo "APR_API_KEY_HASH=set"
+    # rung 7: ids
+    [ -f "$IDS/aws.json" ] || refuse ids "$IDS/aws.json does not exist -- run: just llm-endpoint-up"
+    has_keys "$IDS/aws.json" account region bucket ecr_repo ecr_repo_name role_arn log_group \
+        || refuse ids "$IDS/aws.json lacks one of account, region, bucket, ecr_repo, ecr_repo_name, role_arn, log_group"
+    WANT_ACCOUNT="$(jget "$IDS/aws.json" account)"
+    REGION="$(jget "$IDS/aws.json" region)"
+    AP=(--profile "$PROFILE" --region "$REGION")
+    BUCKET="$(jget "$IDS/aws.json" bucket)"
+    ECR_REPO="$(jget "$IDS/aws.json" ecr_repo)"
+    ECR_REPO_NAME="$(jget "$IDS/aws.json" ecr_repo_name)"
+    ROLE_ARN="$(jget "$IDS/aws.json" role_arn)"
+    if [ "${DRY_RUN:-0}" = "1" ]; then
+        echo "DRY-RUN OK aprender-llm-endpoint-$ENV (offline rungs 1-7; account, s3-sha and digest NOT checked; apr $APR_TAG, gguf $GGUF_SHA256; nothing deployed)"
+        exit 0
+    fi
+    # rung 8: account -- never deploy into another account
+    ACCOUNT="$(aws sts get-caller-identity --profile "$PROFILE" --query Account --output text)" \
+        || refuse account "cannot read the AWS account for profile $PROFILE"
+    [ "$ACCOUNT" = "$WANT_ACCOUNT" ] \
+        || refuse account "profile $PROFILE is account $ACCOUNT but $IDS/aws.json was written for $WANT_ACCOUNT"
+    # rung 9: s3-sha -- the staged object carries the hash of the ladder pin as metadata
+    REMOTE_SHA="$(aws s3api head-object "${AP[@]}" --bucket "$BUCKET" --key "$GGUF_OBJECT" --query Metadata.sha256 --output text)" \
+        || refuse s3-sha "s3://$BUCKET/$GGUF_OBJECT is absent -- stage it: just llm-endpoint-weights"
+    [ "$REMOTE_SHA" = "$GGUF_SHA256" ] \
+        || refuse s3-sha "s3://$BUCKET/$GGUF_OBJECT carries a sha256 that is not the ladder pin for $GGUF_RUNG"
+    # rung 10: digest -- the pushed tag still points at what was recorded
+    [ -f "$IDS/image-pushed.json" ] || refuse digest "$IDS/image-pushed.json does not exist -- run: just llm-endpoint-image 1"
+    has_keys "$IDS/image-pushed.json" repo tag digest || refuse digest "$IDS/image-pushed.json lacks repo, tag or digest"
+    PUSHED_REPO="$(jget "$IDS/image-pushed.json" repo)"
+    PUSHED_TAG="$(jget "$IDS/image-pushed.json" tag)"
+    PUSHED_DIGEST="$(jget "$IDS/image-pushed.json" digest)"
+    [ "$PUSHED_TAG" = "cpu-$APR_TAG" ] || refuse digest "the pushed tag is $PUSHED_TAG, the pin is cpu-$APR_TAG"
+    [ "$PUSHED_REPO" = "$ECR_REPO" ] \
+        || refuse digest "the image was pushed to $PUSHED_REPO but the repository of this environment is $ECR_REPO"
+    printf '%s' "$PUSHED_DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$' || refuse digest "the recorded digest is not sha256:<64 hex>"
+    LIVE_DIGEST="$(aws ecr describe-images "${AP[@]}" --repository-name "$ECR_REPO_NAME" --image-ids "imageTag=cpu-$APR_TAG" --query 'imageDetails[0].imageDigest' --output text)" \
+        || refuse digest "cannot read tag cpu-$APR_TAG in $ECR_REPO_NAME"
+    [ "$LIVE_DIGEST" = "$PUSHED_DIGEST" ] \
+        || refuse digest "tag cpu-$APR_TAG now resolves to $LIVE_DIGEST, not the recorded $PUSHED_DIGEST"
+    if [ "${PREFLIGHT:-0}" = "1" ]; then
+        echo "PREFLIGHT OK aprender-llm-endpoint-$ENV (rungs 1-10; read-only AWS calls only; apr $APR_TAG; nothing deployed)"
+        exit 0
+    fi
+    # ---- live ----
+    FN="aprender-llm-endpoint-$ENV"
+    TAGS="project=aprender-llm-endpoint,phase=09,env=$ENV"
+    # step <what> <cmd...>: run, keep the log, refuse on failure (the status is read after a redirect, never a pipe)
+    step() {
+        local what="$1" rc
+        shift
+        set +e
+        "$@" > "$IDS/step.log" 2>&1
+        rc=$?
+        set -e
+        if [ "$rc" -ne 0 ]; then
+            tail -5 "$IDS/step.log" >&2
+            refuse "$what" "failed (rc=$rc)" 9
+        fi
+    }
+    ENVF="$(mktemp)"
+    trap 'rm -f "$ENVF"' EXIT
+    chmod 0600 "$ENVF"
+    python3 -I -c 'import json, os, sys; json.dump({"Variables": {"MODEL_S3_URI": sys.argv[2], "MODEL_SHA256": sys.argv[3], "APR_API_KEY_HASH": os.environ["APR_API_KEY_HASH"], "RAYON_NUM_THREADS": "6", "PLATFORM": "lambda"}}, open(sys.argv[1], "w"))' \
+        "$ENVF" "s3://$BUCKET/$GGUF_OBJECT" "$GGUF_SHA256"
+    set +e
+    aws lambda get-function --profile "$PROFILE" --region "$REGION" --function-name "$FN" > "$IDS/get-function.log" 2>&1
+    grc=$?
+    set -e
+    if [ "$grc" -eq 0 ]; then
+        echo "UPDATING $FN"
+        step update-config aws lambda update-function-configuration --profile "$PROFILE" --region "$REGION" --function-name "$FN" \
+            --memory-size 10240 --timeout 900 --ephemeral-storage Size=10240 --environment "file://$ENVF"
+        step wait-config aws lambda wait function-updated-v2 --profile "$PROFILE" --region "$REGION" --function-name "$FN"
+        step update-code aws lambda update-function-code --profile "$PROFILE" --region "$REGION" --function-name "$FN" \
+            --image-uri "$ECR_REPO@$PUSHED_DIGEST"
+        step wait-code aws lambda wait function-updated-v2 --profile "$PROFILE" --region "$REGION" --function-name "$FN"
+    elif grep -q 'ResourceNotFoundException' "$IDS/get-function.log"; then
+        echo "CREATING $FN"
+        step create aws lambda create-function --profile "$PROFILE" --region "$REGION" --function-name "$FN" \
+            --package-type Image --code "ImageUri=$ECR_REPO@$PUSHED_DIGEST" --role "$ROLE_ARN" \
+            --architectures arm64 --memory-size 10240 --timeout 900 --ephemeral-storage Size=10240 \
+            --environment "file://$ENVF" --tags "$TAGS"
+        step wait-active aws lambda wait function-active-v2 --profile "$PROFILE" --region "$REGION" --function-name "$FN"
+        step wait-updated aws lambda wait function-updated-v2 --profile "$PROFILE" --region "$REGION" --function-name "$FN"
+    else
+        tail -3 "$IDS/get-function.log" >&2
+        refuse lambda "aws lambda get-function failed for a reason other than the function being absent (rc=$grc)" 9
+    fi
+    if [ -n "${RESERVED_CONCURRENCY:-}" ]; then
+        case "$RESERVED_CONCURRENCY" in
+            ''|*[!0-9]*) refuse concurrency "RESERVED_CONCURRENCY=$RESERVED_CONCURRENCY is not an integer" ;;
+        esac
+        step reserve aws lambda put-function-concurrency --profile "$PROFILE" --region "$REGION" --function-name "$FN" \
+            --reserved-concurrent-executions "$RESERVED_CONCURRENCY"
+    fi
+    GOT_RC="$(aws lambda get-function-concurrency "${AP[@]}" --function-name "$FN" --query ReservedConcurrentExecutions --output text)" \
+        || refuse readback "cannot read the reserved concurrency of $FN" 9
+    # readback: what Lambda actually holds, not what we asked for
+    CFG="$(aws lambda get-function-configuration "${AP[@]}" --function-name "$FN" --query '[State, MemorySize, Timeout, EphemeralStorage.Size, Architectures[0]]' --output text)" \
+        || refuse readback "cannot read the configuration of $FN" 9
+    ENV_KEYS="$(aws lambda get-function-configuration "${AP[@]}" --function-name "$FN" --query 'keys(Environment.Variables)' --output text)" \
+        || refuse readback "cannot read the environment keys of $FN" 9
+    read -r CSTATE CMEM CTIMEOUT CEPH CARCH <<< "$CFG"
+    [ "$CMEM" = "10240" ] && [ "$CTIMEOUT" = "900" ] && [ "$CEPH" = "10240" ] && [ "$CARCH" = "arm64" ] \
+        || refuse readback "$FN reads memory=$CMEM timeout=$CTIMEOUT ephemeral=$CEPH arch=$CARCH (want 10240 / 900 / 10240 / arm64)" 9
+    echo "  readback: state=$CSTATE memory=$CMEM timeout=$CTIMEOUT ephemeral=$CEPH arch=$CARCH env keys: $ENV_KEYS"
+    FN_ARN="arn:aws:lambda:$REGION:$ACCOUNT:function:$FN"
+    python3 -I -c 'import datetime, json, sys; out, fn, arn, env, digest, conc, tag, gguf = sys.argv[1:9]; now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"); rec = {"function": fn, "arn": arn, "env": env, "image_digest": digest, "memory_mb": 10240, "timeout_s": 900, "ephemeral_mb": 10240, "reserved_concurrency": int(conc) if conc.isdigit() else None, "deployed_at": now, "apr_tag": tag, "gguf_sha256": gguf}; json.dump(rec, open(out, "w"), indent=2)' \
+        "$IDS/function.json" "$FN" "$FN_ARN" "$ENV" "$PUSHED_DIGEST" "$GOT_RC" "$APR_TAG" "$GGUF_SHA256"
+    echo "DEPLOY OK $FN (image $PUSHED_DIGEST, apr $APR_TAG)"
+
+# Offline proof of llm-endpoint-deploy (and the other llm-endpoint recipes): an `aws` shim is FIRST on
+# PATH and the real aws is never executed. Offline cases run in shim mode `refuse` (log and exit 97), so
+# their log must stay empty (`AWS CALLS: 0`); the PREFLIGHT cases run in mode `preflight`, which answers
+# only the three read calls (`FIXTURE READS: n`); a negative control proves the counter can be non-zero.
+llm-endpoint-selftest:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    DIR=deploy/llm-endpoint
+    T="$(mktemp -d)"
+    trap 'rm -rf "${T:?}"' EXIT
+    SH="$T/shim"
+    IDS="$T/ids"
+    mkdir -p "$SH" "$IDS" "$T/bin"
+    # write_shim <name> <script line>...: an executable bash shim; lines are written verbatim
+    write_shim() {
+        local name="$1"
+        shift
+        printf '%s\n' '#!/usr/bin/env bash' "$@" > "$SH/$name"
+        chmod 0755 "$SH/$name"
+    }
+    write_shim aws \
+        'echo "$*" >> "$SHIM_LOG"' \
+        'key="${1:-} ${2:-}"; last=""' \
+        'for a in "$@"; do last="$a"; done ' \
+        'case "${SHIM_MODE:-refuse}" in ' \
+        '  refuse) echo "aws shim: refused (the self-test never reaches AWS)" >&2; exit 97 ;;' \
+        '  preflight)' \
+        '    case "$key" in ' \
+        '      "sts get-caller-identity") echo "$key" >> "${SHIM_READS:-/dev/null}"; echo "${SHIM_STS_ACCOUNT:-}"; exit 0 ;;' \
+        '      "s3api head-object") echo "$key" >> "${SHIM_READS:-/dev/null}"; echo "${SHIM_S3_SHA:-}"; exit 0 ;;' \
+        '      "ecr describe-images") echo "$key" >> "${SHIM_READS:-/dev/null}"; echo "${SHIM_ECR_DIGEST:-}"; exit 0 ;;' \
+        '      "lambda get-function-concurrency") echo "$key" >> "${SHIM_READS:-/dev/null}"; echo "${SHIM_CONCURRENCY:-None}"; exit 0 ;;' \
+        '      "lambda get-function") echo "$key" >> "${SHIM_READS:-/dev/null}"; echo "${SHIM_RESOLVED_IMAGE_URI:-}"; exit 0 ;;' \
+        '    esac ' \
+        '    echo "aws shim: unanswered call in preflight mode: $key" >&2; exit 97 ;;' \
+        '  permissive)' \
+        '    case "$key" in ' \
+        '      "sts get-caller-identity") echo "${SHIM_STS_ACCOUNT:-}" ;;' \
+        '      "s3api head-object") echo "${SHIM_S3_SHA:-}" ;;' \
+        '      "s3api list-objects-v2") echo "${SHIM_S3_KEY:-}" ;;' \
+        '      "ecr describe-images") echo "${SHIM_ECR_DIGEST:-}" ;;' \
+        '      "ecr list-images") echo "${SHIM_IMAGE_COUNT:-1}" ;;' \
+        '      "lambda get-function-concurrency") echo "${SHIM_CONCURRENCY:-None}" ;;' \
+        '      "lambda get-function")' \
+        '        if [ "${SHIM_FN_EXISTS:-1}" = 0 ]; then echo "An error occurred, ResourceNotFoundException, when calling GetFunction" >&2; exit 254; fi ' \
+        '        echo "${SHIM_RESOLVED_IMAGE_URI:-}" ;;' \
+        '      "lambda get-function-configuration")' \
+        '        case "$*" in ' \
+        '          *keys*) echo "APR_API_KEY_HASH MODEL_S3_URI MODEL_SHA256 PLATFORM RAYON_NUM_THREADS" ;;' \
+        '          *) echo "${SHIM_CFG:-Active 10240 900 10240 arm64}" ;;' \
+        '        esac ;;' \
+        '      "lambda get-policy") echo "{\"Statement\":[{\"Sid\":\"other\"}]}" ;;' \
+        '      "lambda create-function-url-config") echo "https://shimhost0.lambda-url.us-east-1.on.aws/" ;;' \
+        '      "lambda invoke")' \
+        '        if [ -n "${SHIM_INVOKE_PAYLOAD:-}" ]; then cp "$SHIM_INVOKE_PAYLOAD" "$last"; fi ;;' \
+        '      "iam get-role") echo "arn:aws:iam::${SHIM_STS_ACCOUNT:-0}:role/shim" ;;' \
+        '    esac ' \
+        '    exit 0 ;;' \
+        'esac ' \
+        'exit 97'
+    write_shim curl \
+        'echo "$*" >> "${SHIM_CURL_LOG:-/dev/null}"' \
+        'printf "%s" "${SHIM_CURL_CODE:-401}"'
+    export PATH="$SH:$PATH"
+    [ "$(command -v aws)" = "$SH/aws" ] || { echo "ERROR: the aws shim is not first on PATH" >&2; exit 1; }
+    # positive control: a zero count means nothing unless the shim demonstrably records
+    export SHIM_LOG="$T/offline.log"
+    : > "$SHIM_LOG"
+    set +e
+    aws recorder-control > /dev/null 2>&1
+    crc=$?
+    set -e
+    [ "$crc" -eq 97 ] && [ "$(wc -l < "$SHIM_LOG" | tr -d ' ')" -eq 1 ] \
+        || { echo "ERROR: the aws shim did not record its control call (exit $crc)" >&2; exit 1; }
+    : > "$SHIM_LOG"
+    echo "AWS SHIM: control call recorded and cleared"
+    # ---- fixtures ----
+    ACCT=111111111111
+    GGUF_OBJECT="Qwen3.5-0.8B-Q4_K_M.gguf"
+    LADDER_SHA="$(python3 -I "$DIR/ladder_pin.py" contracts/model-capability-ladder-v1.yaml qwen35-0.8b-q4km)"
+    printf 'selftest fake release tarball\n' > "$T/bin/fake.tar.gz"
+    FAKE_SHA="$(shasum -a 256 "$T/bin/fake.tar.gz" | awk '{print $1}')"
+    PIN="$T/pin.env"
+    printf '%s\n' 'APR_TAG=v0.71.4' 'APR_ASSET=fake.tar.gz' "APR_TARBALL_SHA256=$FAKE_SHA" 'APR_PIN_PROFILE=baseline' \
+        'IMAGE_NAME=aprender-llm-endpoint' 'GGUF_RUNG=qwen35-0.8b-q4km' "GGUF_OBJECT=$GGUF_OBJECT" > "$PIN"
+    REPO_NAME="aprender-llm-endpoint-dev"
+    REPO="$ACCT.dkr.ecr.us-east-1.amazonaws.com/$REPO_NAME"
+    BUCKET="aprender-llm-endpoint-weights-$ACCT-dev"
+    DIGEST="sha256:$(printf 'c%.0s' $(seq 1 64))"
+    OTHER_DIGEST="sha256:$(printf 'd%.0s' $(seq 1 64))"
+    FN=aprender-llm-endpoint-dev
+    write_aws_json() {
+        printf '{"account":"%s","region":"us-east-1","profile":"p","env":"dev","bucket":"%s","ecr_repo":"%s","ecr_repo_name":"%s","ecr_host":"%s.dkr.ecr.us-east-1.amazonaws.com","role_arn":"arn:aws:iam::%s:role/%s","log_group":"/aws/lambda/%s"}\n' \
+            "$ACCT" "$BUCKET" "$REPO" "$REPO_NAME" "$ACCT" "$ACCT" "$FN" "$FN" > "$1/aws.json"
+    }
+    write_aws_json "$IDS"
+    printf '{"image":"aprender-llm-endpoint:cpu-v0.71.4","tag":"v0.71.4","apr_version_line":"apr 0.71.4 (selftest)"}\n' > "$IDS/image-local.json"
+    printf '{"repo":"%s","tag":"cpu-v0.71.4","digest":"%s"}\n' "$REPO" "$DIGEST" > "$IDS/image-pushed.json"
+    HASH64="$(printf 'ab%.0s' $(seq 1 32))"
+    export LLM_ENDPOINT_IDS_DIR="$IDS" LLM_ENDPOINT_PIN_FILE="$PIN" LLM_ENDPOINT_BIN_DIR="$T/bin" APR_API_KEY_HASH="$HASH64"
+    # ---- harness ----
+    PASS=0
+    FAILS=0
+    RC=0
+    # run_deploy <log> [env args...]: the recipe under the base environment plus the given overrides
+    run_deploy() {
+        local log="$1"
+        shift
+        set +e
+        env "$@" just llm-endpoint-deploy > "$log" 2>&1
+        RC=$?
+        set -e
+    }
+    # row <n> <label> <log> <zero|nonzero> <pattern> [extra 1|0]: one PASS/FAIL row
+    row() {
+        local n="$1" label="$2" log="$3" want="$4" pat="$5" extra="${6:-1}" ok=1
+        if [ "$want" = zero ]; then
+            [ "$RC" -eq 0 ] || ok=0
+        else
+            [ "$RC" -ne 0 ] || ok=0
+        fi
+        grep -Eq -- "$pat" "$log" || ok=0
+        [ "$extra" = 1 ] || ok=0
+        if [ "$ok" -eq 1 ]; then
+            PASS=$((PASS + 1))
+            echo "PASS $n $label"
+        else
+            FAILS=$((FAILS + 1))
+            echo "FAIL $n $label (rc=$RC, want $want, pattern '$pat', extra=$extra)" >&2
+            tail -4 "$log" >&2
+        fi
+    }
+    lines() {
+        if [ -f "$1" ]; then
+            wc -l < "$1" | tr -d ' '
+        else
+            echo 0
+        fi
+    }
+    # ---- offline cases (shim mode refuse; the log must stay empty) ----
+    export SHIM_MODE=refuse
+    run_deploy "$T/c1.log" LLM_ENDPOINT_PIN_FILE="$T/absent.env"
+    row 1 "pin file absent -> REFUSED pin" "$T/c1.log" nonzero '^REFUSED pin:'
+    printf 'tampered\n' > "$T/bin/fake.tar.gz"
+    run_deploy "$T/c2.log"
+    row 2 "tarball sha mismatch -> REFUSED tarball" "$T/c2.log" nonzero '^REFUSED tarball:'
+    printf 'selftest fake release tarball\n' > "$T/bin/fake.tar.gz"
+    mkdir -p "$T/ids-img"
+    cp "$IDS/aws.json" "$IDS/image-pushed.json" "$T/ids-img/"
+    printf '{"apr_version_line":"apr 0.70.0 (old)"}\n' > "$T/ids-img/image-local.json"
+    run_deploy "$T/c3.log" LLM_ENDPOINT_IDS_DIR="$T/ids-img"
+    row 3 "image-local.json with a wrong version line -> REFUSED image" "$T/c3.log" nonzero '^REFUSED image:'
+    run_deploy "$T/c4.log" -u APR_API_KEY_HASH
+    row 4 "APR_API_KEY_HASH unset -> REFUSED auth" "$T/c4.log" nonzero '^REFUSED auth:'
+    run_deploy "$T/c5.log" APR_API_KEY_HASH="g$(printf 'ab%.0s' $(seq 1 31))a"
+    row 5 "64 chars that are not hex -> REFUSED auth" "$T/c5.log" nonzero '^REFUSED auth:'
+    mkdir -p "$T/ids-noaws"
+    cp "$IDS/image-local.json" "$IDS/image-pushed.json" "$T/ids-noaws/"
+    run_deploy "$T/c6.log" LLM_ENDPOINT_IDS_DIR="$T/ids-noaws"
+    row 6 "aws.json absent -> REFUSED ids" "$T/c6.log" nonzero '^REFUSED ids:'
+    run_deploy "$T/c7.log" DRY_RUN=1 PREFLIGHT=1
+    row 7 "DRY_RUN=1 together with PREFLIGHT=1 -> REFUSED mode" "$T/c7.log" nonzero '^REFUSED mode:'
+    run_deploy "$T/c8.log" DRY_RUN=1
+    x=1
+    [ "$(lines "$SHIM_LOG")" -eq 0 ] || x=0
+    row 8 "DRY_RUN=1, consistent fixtures -> DRY-RUN OK (offline rungs 1-7; ... NOT checked ...), zero aws calls" "$T/c8.log" zero \
+        '^DRY-RUN OK aprender-llm-endpoint-dev \(offline rungs 1-7; account, s3-sha and digest NOT checked;' "$x"
+    AWS_CALLS="$(lines "$SHIM_LOG")"
+    # ---- PREFLIGHT cases (shim mode preflight: only the three read calls are answered) ----
+    export SHIM_MODE=preflight
+    FIXTURE_READS=0
+    pf() { # pf <n> <label> <log> <zero|nonzero> <pattern> <sts> <s3sha> <digest>
+        local n="$1" label="$2" log="$3" want="$4" pat="$5" r
+        : > "$T/reads$n.log"
+        : > "$T/pf$n.log"
+        run_deploy "$log" PREFLIGHT=1 SHIM_LOG="$T/pf$n.log" SHIM_READS="$T/reads$n.log" SHIM_STS_ACCOUNT="$6" SHIM_S3_SHA="$7" SHIM_ECR_DIGEST="$8"
+        r="$(lines "$T/reads$n.log")"
+        FIXTURE_READS=$((FIXTURE_READS + r))
+        row "$n" "$label" "$log" "$want" "$pat" "$([ "$(lines "$T/pf$n.log")" -eq "$r" ] && echo 1 || echo 0)"
+    }
+    pf 9 "PREFLIGHT, sts account differs from aws.json -> REFUSED account" "$T/c9.log" nonzero '^REFUSED account:' 222222222222 "$LADDER_SHA" "$DIGEST"
+    pf 10 "PREFLIGHT, right account, wrong object sha -> REFUSED s3-sha" "$T/c10.log" nonzero '^REFUSED s3-sha:' "$ACCT" "$(printf '0%.0s' $(seq 1 64))" "$DIGEST"
+    pf 11 "PREFLIGHT, right account and sha, tag moved -> REFUSED digest" "$T/c11.log" nonzero '^REFUSED digest:' "$ACCT" "$LADDER_SHA" "$OTHER_DIGEST"
+    pf 12 "PREFLIGHT, all three reads right -> PREFLIGHT OK (rungs 1-10; read-only AWS calls only; ...), three reads" "$T/c12.log" zero \
+        '^PREFLIGHT OK aprender-llm-endpoint-dev \(rungs 1-10; read-only AWS calls only;' "$ACCT" "$LADDER_SHA" "$DIGEST"
+    if [ "$(lines "$T/reads12.log")" -lt 3 ]; then
+        FAILS=$((FAILS + 1))
+        echo "FAIL 12 fewer than three fixture reads in the PREFLIGHT happy path" >&2
+    fi
+    # 13: NEGATIVE CONTROL -- the refuse shim under PREFLIGHT: the first read is refused, and a SEPARATE log shows a call
+    export SHIM_MODE=refuse
+    : > "$T/neg.log"
+    run_deploy "$T/c13.log" PREFLIGHT=1 SHIM_LOG="$T/neg.log"
+    row 13 "NEGATIVE CONTROL: PREFLIGHT with the refusing shim -> REFUSED account and a recorded call" "$T/c13.log" nonzero '^REFUSED account:' \
+        "$([ "$(lines "$T/neg.log")" -ge 1 ] && echo 1 || echo 0)"
+    # ---- task 2 cases are appended above this line ----
+    echo "AWS CALLS: $AWS_CALLS"
+    echo "FIXTURE READS: $FIXTURE_READS"
+    if [ "$AWS_CALLS" -ne 0 ]; then
+        FAILS=$((FAILS + 1))
+        echo "FAIL the offline cases reached the aws shim $AWS_CALLS time(s)" >&2
+    fi
+    if [ "$FAILS" -ne 0 ]; then
+        echo "LLM-ENDPOINT SELFTEST FAILED ($FAILS failure(s), $PASS passed)" >&2
+        exit 1
+    fi
+    echo "LLM-ENDPOINT SELFTEST OK $PASS/$PASS"
