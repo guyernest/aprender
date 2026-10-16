@@ -1,0 +1,323 @@
+contract: llm-endpoint-openai-conformance
+metadata:
+  version: 1.0.0
+  created: '2026-10-15'
+  author: PAIML Engineering
+  kind: kernel
+  # The conformance claims hold in the committed tree: the parse tests and the probe-record reader run
+  # in CI on every host. The LIVE rows (013-016) are the deployed proofs and carry the explicit
+  # LIVE-PENDING marker until plans 09-07/09-08/09-12 land their records. No qualifier is claimed:
+  # the closed qualifier set (host_class, toolchain, backend, features) cannot express "the Lambda
+  # memory tier this endpoint is deployed at".
+  valid_under:
+    world: committed
+  description: >
+    THE CONFORMANCE CONTRACT FOR AN INTERNAL OPENAI-COMPATIBLE LLM ENDPOINT. pmcp.run's agent layer
+    talks to a model through exactly two clients, and this contract is those two clients, written down
+    from their source — NOT the OpenAI specification in the abstract (IR-1). The platform client is
+    durable-agent-lambda's `openai_v1` (openai.rs:21-60); the SDK client is pmcp-agent's
+    `OpenAiCompatSource` (openai_compat.rs:167-200, iteration.rs:62-72). Every constant below is read
+    from one of them, every spike-029 gap is a falsification row, and the deployed proofs are rows
+    that say LIVE-PENDING until a record backs them.
+
+    DEPLOYMENT OF RECORD (D-02). The endpoint is an upstream `apr` RELEASE BINARY at ONE pinned tag,
+    sha256-verified before it is run — never a fork build. A PR-branch build may back an `interim`
+    probe record only; it never backs a deployed claim. The measured baseline is `measured_release_tag`
+    (v0.70.3, spike 029); the candidate is `candidate_release_tag` (v0.71.4).
+
+    THE MODEL (D-01), quoted honestly. Qwen3.5-0.8B Q4_K_M, the model-capability-ladder pin, sha256
+    bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517. That rung is CRUX-UNCERTIFIED:
+    `contracts/model-capability-ladder-v1.yaml` lists it under `known_red` against ticket #4030 (its
+    `golden_output_thinking_on` clause: the think block does not close within 2048 tokens), and the 2B
+    rung is the smallest CERTIFIED size. It is chosen for CPU cost, not for certification; spike 029
+    observed a correct tool call on every run, and that observation is evidence about the runs, not a
+    certification of the model. Nothing here upgrades the rung.
+
+    HOW A CLAIM IS LICENSED. A statement about `apr serve` conformance is licensed only by (a) a row of
+    this contract and (b) a probe record under `deploy/llm-endpoint/probe/results/` that the reader test
+    `api::llm_endpoint_conformance_tests::conformance_record_matches_contract` has accepted. The record
+    carries a `profile`: `baseline` (the ✗ set is exactly the four spike-029 gaps) or `fixed` (the D-04
+    auth gate is present and no ✗ remains). `fixed` does NOT mean "all three upstream fixes are
+    released": D-05 says none of the other 029 fixes may gate the end-to-end turn, so the D-03 content
+    fix and the D-05 alias may read KNOWN LIMITATION in a fixed record, but only with an explicit
+    `unreleased_at_pin` reason. The D-04 auth gate is never a limitation.
+
+    KNOWN LIMITATIONS ARE NOT FIXES. `tool_choice=required` needs constrained decoding (it behaves as
+    auto and is not on the real wire); the `{"error": "<string>"}` envelope is contracted by routes.rs:321
+    and FALSIFY-AUTH-001 and is never reshaped by this phase; `model` is echoed, not checked (an opt-in
+    strict mode is the upstream proposal); `tool_choice=none` may leak `<tool_call>` text through the
+    shared render path; `cpu_part` is recorded by the entrypoint `[entry]` log line, not by `/health`.
+  references:
+    - 'durable-agent-lambda openai_v1 client, openai.rs:21-60 — the platform request shape (RESEARCH Q5).'
+    - 'pmcp-agent OpenAiCompatSource, openai_compat.rs:167-200 and iteration.rs:62-72 — the SDK request shape (RESEARCH Q5).'
+    - '.claude/skills/spike-findings-aprender/references/openai-endpoint-conformance.md — the spike-029 gap table this contract turns into rows.'
+    - '.claude/skills/spike-findings-aprender/sources/029-apr-serve-openai-tool-loop/results/ — probe-0.8b.json (the baseline record), wire-0.8b-plain.jsonl and wire-0.8b-fixed.jsonl (the real wire).'
+    - 'contracts/model-capability-ladder-v1.yaml — the Qwen3.5-0.8B Q4_K_M rung (known_red, #4030) and the 2B rung, the smallest certified size.'
+    - 'contracts/apr-serve-api-key-auth-v1.yaml — FALSIFY-AUTH-001..003, the bearer gate and the contracted {"error":"unauthorized"} body.'
+    - 'contracts/decide-tool-boundary-v1.yaml — the thin-server boundary precedent this file follows.'
+  depends_on:
+    - apr-serve-api-key-auth
+
+constants:
+  # ---- the deployment of record (D-01, D-02) ----
+  gguf_sha256: 'bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517'
+  measured_release_tag: v0.70.3
+  candidate_release_tag: v0.71.4
+  # ---- the platform client: durable-agent-lambda openai_v1 (RESEARCH Q5: openai.rs:21-60) ----
+  # The request is {model, messages, max_tokens, top_p, stream, tools}; the platform never sends temperature.
+  platform_request_fields: 'model,messages,max_tokens,top_p,stream,tools'
+  platform_sends_temperature: 0
+  # openai.rs writes an EMPTY STRING as the content of an assistant tool-use turn (not null, not absent).
+  platform_assistant_tool_turn_content: ''
+  # openai.rs:21-60 — the platform's HTTP timeout (s), and openai.rs's class-1 retry budget.
+  platform_http_timeout_s: 120
+  platform_class1_attempts: 2
+  # The platform clamps a turn's timeout to this many seconds (ceiling of the 150 s step budget minus slack).
+  platform_timeout_clamp_s: 148
+  # ---- the SDK client: pmcp-agent OpenAiCompatSource (openai_compat.rs:167-200, iteration.rs:62-72) ----
+  # The REAL wire (wire-0.8b-plain.jsonl n=2): {model, messages, max_tokens 384, tools}; no tool_choice, no temperature.
+  sdk_request_fields: 'model,messages,max_tokens,tools'
+  sdk_max_tokens: 384
+  # pmcp-agent OMITS the content key on an assistant tool-use turn today (wire request n=3), which is the
+  # 422 the D-03 fix removes server-side; the SDK-side `content: ""` fix removes it client-side.
+  sdk_assistant_tool_turn_has_content_key: 0
+  sdk_default_timeout_s: 60
+  # ---- what both clients read back (wire-0.8b-fixed.jsonl) ----
+  response_fields_read: 'choices.0.message,tool_calls,finish_reason,usage,refusal'
+  # tool_calls[].function.arguments is a JSON-ENCODED STRING on the wire, never a nested object.
+  tool_call_arguments_type: string
+
+equations:
+
+  content_tolerance:
+    formula: 'deserialize(msg) == Ok(msg with content = "") when msg.role == "assistant" AND msg.content is absent or null; serialize(deserialize(msg)) is unchanged for every message that already carried a string content; deserialize(msg) == Err for msg.role in {user, system, tool} AND msg.content is absent or null'
+    domain: 'the messages[] of a POST /v1/chat/completions request body, as sent by pmcp-agent (no content key on an assistant tool-use turn) and by openai_v1 (content "")'
+    codomain: 'either a parsed ChatMessage, or a 422 refusal (the pre-PMAT-801 contract), never a silently defaulted user/system/tool message'
+    invariants:
+      - 'the tolerance is for an ASSISTANT message only (D-03): the same absent or null content on a user, system or tool message is still refused, so the pre-PMAT-801 422 contract survives for every other role (review round 1, MEDIUM)'
+      - 'serialization is unchanged: a message that carried content "" still serializes content "", so a response-side assistant tool-call message is byte-identical to before'
+      - 'this fix may be UNRELEASED at a pinned tag; a fixed probe record then reads KNOWN LIMITATION on `tool result -> final answer` with an `unreleased_at_pin` reason, and the two-tool turn is carried by the SDK-side `content: ""` fix and the platform''s own transformer — SC2 does not wait on this release'
+      - 'enforced by plan 09-02; this row (FALSIFY-LLM-CONF-001) carries no test: key until that plan writes the test'
+    preconditions:
+      - 'the request body is valid JSON whose messages member is an array of objects with a string role'
+
+  bearer_gate:
+    formula: 'for every route r of the GGUF router, /health included: status(GET or POST r, no valid bearer) == 401 AND body == {"error":"unauthorized",...}; status(r, valid bearer) != 401'
+    domain: 'every route of the CPU GGUF / Qwen3.5 serve path this deployment runs (`apr serve --backend cpu`, the `-cpu` release asset), reached over the network'
+    codomain: 'a 401 carrying the contracted `{"error":"unauthorized",...}` envelope, or the route''s own answer for a request that presents the configured key'
+    invariants:
+      - 'D-04: /health and /metrics are NOT exempt (FALSIFY-AUTH-001); an unauthenticated /health would let any caller read model, version and uptime'
+      - 'the key is compared by its SHA-256 hash with a constant-time comparison (FALSIFY-AUTH-003); no plaintext key is stored, logged or written into any probe record'
+      - 'SCOPE, in so many words: the CPU GGUF / Qwen3.5 serve path (`--backend cpu`, the `-cpu` release asset). The GPU-path realizar router call sites (handlers_include_01.rs and handler_gpu_completion.rs of the apr-cli serve module) are NOT gated by plan 09-03 and are an explicit, named exception to apr-serve-api-key-auth-v1''s "every router builder" wording until upstream wires them; they are covered here by the deployed 401 proofs (FALSIFY-LLM-CONF-013), never silently'
+    preconditions:
+      - 'the server was started with APR_API_KEY (or its hash) set; an open server is the spike-029 baseline, not this equation'
+
+  max_completion_tokens_alias:
+    formula: 'effective_max_tokens(req) == req.max_tokens when present, else req.max_completion_tokens when present, else the server default'
+    domain: 'the max_tokens / max_completion_tokens members of a chat-completions request body'
+    codomain: 'the generation cap the handler passes to the sampler'
+    invariants:
+      - 'D-05: max_completion_tokens is the newer OpenAI name for the same cap; neither pmcp.run client sends it, so this fix may be UNRELEASED at a pin (an unreleased_at_pin entry) without gating the turn'
+      - 'when both are present max_tokens wins: an older client that sends both keeps its own meaning'
+    preconditions:
+      - 'enforced by plan 09-02; FALSIFY-LLM-CONF-003 carries no test: key until that plan writes the test'
+
+  verdict_profile:
+    formula: 'record.profile == baseline => {p : p.verdict == ✗} == {tool result -> final answer, tool_choice=required, max_completion_tokens honoured, error envelope {error:{message,type}}}; record.profile == fixed => (no auth probe `no Authorization header` reads ✓) AND no probe reads ✗ AND every limitation reads KNOWN LIMITATION AND (a D-03 or D-05-alias limitation carries an unreleased_at_pin entry whose reason says `unreleased at pin`)'
+    domain: 'a probe record conformance-*.json under deploy/llm-endpoint/probe/results/ (the glob; non-recursive; every other file in the directory is never opened)'
+    codomain: 'accepted by the reader api::llm_endpoint_conformance_tests::check_record, or refused naming the contradiction'
+    invariants:
+      - 'probe names are unique in every profile (a duplicate could hide a ✗); a fixed record requires all eight of `tool result -> final answer`, `tool_choice=required`, `max_completion_tokens honoured`, `error envelope {error:{message,type}}`, `foreign model id`, `tool_choice=none`, `no Authorization header`, `cpu_part in /health`'
+      - 'the allowed limitation set is the five D-05 gaps (`tool_choice=required`, `error envelope {error:{message,type}}`, `foreign model id`, `tool_choice=none`, `cpu_part in /health`) plus, only with an unreleased_at_pin entry, `tool result -> final answer` and `max_completion_tokens honoured`; `no Authorization header` is NEVER a limitation, so an open server cannot be recorded as fixed'
+      - 'the committed spike-029 baseline record predates the probe and is exempt from the required-probe set; it is immutable, and release-specific drift is a different profile or an UNEXPECTED-* file, never an edit'
+      - 'the reader FAILS (never skips) when the glob matches zero files: a reader with nothing to read is theater'
+    preconditions:
+      - 'the record carries label, profile, pin, server_version, probes[] and known_limitations[]'
+
+  ingress_order:
+    formula: 'exists(FunctionUrl(f)) => exists(measurement m: m.status == 401 AND m.function == f AND m.transport == lambda:Invoke AND m.bearer == absent) AND time(m) < time(FunctionUrl(f))'
+    domain: 'the deployed Lambda function that serves the endpoint, and the ordering of its provisioning steps'
+    codomain: 'an ingress that was proven closed before it was opened'
+    invariants:
+      - 'D-12: a Function URL is created only AFTER a 401 without the bearer was measured on the deployed function through lambda:Invoke, so the first public request cannot reach an unauthenticated model'
+      - 'live-only: no unit-test surface; FALSIFY-LLM-CONF-013 is LIVE-PENDING until the deployed HTTPS probe records it'
+    preconditions:
+      - 'the deployed binary is the pinned release, sha256-verified (D-02)'
+
+proof_obligations:
+
+  - type: invariant
+    property: 'An assistant message tolerates an absent or null content; every other role still refuses it'
+    formal: '∀ msg: msg.role == "assistant" ∧ msg.content ∈ {absent, null} ⇒ deserialize(msg) == Ok ∧ ∀ msg: msg.role ≠ "assistant" ∧ msg.content ∈ {absent, null} ⇒ deserialize(msg) == Err'
+    applies_to: all
+
+  - type: invariant
+    property: 'Every route of the GGUF router, /health included, answers 401 without a valid bearer'
+    formal: '∀ r ∈ routes, req: ¬valid_bearer(req) ⇒ status(r, req) == 401'
+    applies_to: all
+
+  - type: invariant
+    property: 'A probe record of profile fixed never carries a cross, and never records the D-04 gate as a limitation'
+    formal: '∀ rec: rec.profile == fixed ⇒ (∀ p ∈ rec.probes: p.verdict ≠ ✗) ∧ verdict(rec, no Authorization header) == ✓'
+    applies_to: all
+
+  - type: invariant
+    property: 'A probe record of profile baseline has exactly the four spike-029 crosses'
+    formal: '∀ rec: rec.profile == baseline ⇒ |{p ∈ rec.probes: p.verdict == ✗}| == 4'
+    applies_to: all
+
+  - type: bound
+    property: 'Probe names are unique within a record, so no repeat can hide a cross'
+    formal: '∀ rec, i, j: i ≠ j ⇒ rec.probes[i].probe ≠ rec.probes[j].probe'
+    applies_to: all
+
+  - type: ordering
+    property: 'A Function URL exists only after a 401 without the bearer was measured on the deployed function'
+    formal: '∀ f: exists(FunctionUrl(f)) ⇒ measured_401_without_bearer(f) ∧ time(measured_401_without_bearer(f)) < time(FunctionUrl(f))'
+    applies_to: all
+
+falsification_tests:
+
+  - id: FALSIFY-LLM-CONF-001
+    rule: 'An assistant message with an absent or null content deserializes to content ""; a user, system or tool message with the same input is still refused (D-03). The fix may be unreleased at a pinned tag: a fixed probe record then reads KNOWN LIMITATION on `tool result -> final answer` with an `unreleased_at_pin` reason, and the two-tool turn is carried by the SDK-side `content: ""` fix and the platform''s own transformer, so SC2 does not wait on this release.'
+    prediction: 'The pmcp-agent turn-2 body (an assistant message with a tool_calls array and no content key) is accepted with content "" and the tool-result turn answers 200; the same body with the content key removed from a user message is 422.'
+    implemented_by: 'plan 09-02 (the ChatMessage deserializer); the test: key is added there once the test exists (staged binding — a row whose test a later plan writes carries none)'
+    if_fails: 'pmcp-agent''s second turn is a 422, so no SDK two-tool turn can complete against the deployed endpoint without a client-side workaround.'
+
+  - id: FALSIFY-LLM-CONF-002
+    rule: 'The GGUF router answers 401 without a valid bearer on POST /v1/chat/completions and on GET /health, and not 401 with the key (D-04). SCOPE: the CPU GGUF / Qwen3.5 serve path this deployment runs (`--backend cpu`, the `-cpu` release asset). The GPU-path realizar router call sites — the ones in handlers_include_01.rs and handler_gpu_completion.rs of the apr-cli serve module, which plan 09-03 leaves ungated — are NAMED here as an explicit exception to contracts/apr-serve-api-key-auth-v1.yaml''s "every router builder" wording until upstream wires them: they are covered by the deployed 401 proofs (row 013), not by a unit test, and never silently.'
+    prediction: 'With APR_API_KEY set, a request with no Authorization header and a request with a wrong bearer are both 401 with body {"error":"unauthorized",...} on /v1/chat/completions and on /health; the right bearer is 200. Spike 029 measured the same server open (200 on every route, no key) at v0.70.3.'
+    implemented_by: 'plan 09-03 (the GGUF router auth layer); the test: key is added there once the test exists (staged binding)'
+    if_fails: 'The endpoint is reachable without the key: the ingress must not be opened (D-12), and the GPU-path exception must be re-read before any claim about it.'
+
+  - id: FALSIFY-LLM-CONF-003
+    rule: 'max_completion_tokens aliases max_tokens (D-05). Neither pmcp.run client sends the field, so it may be unreleased at a pin under the same unreleased_at_pin rule as row 001.'
+    prediction: 'A request carrying max_completion_tokens 12 and no max_tokens completes with completion_tokens <= 16; spike 029 measured 244 at v0.70.3 (the field was ignored).'
+    implemented_by: 'plan 09-02 (the request alias); the test: key is added there once the test exists (staged binding)'
+    if_fails: 'A newer OpenAI client caps nothing on this endpoint; no pmcp.run turn is affected, so this never gates the end-to-end turn.'
+
+  - id: FALSIFY-LLM-CONF-004
+    rule: 'The platform openai_v1 request shape parses into the server''s ChatCompletionRequest, and its assistant tool-use turn with content "" round-trips with the empty content serialized.'
+    prediction: 'A body with exactly the platform''s fields (model, messages incl. system, user, an assistant turn {"role":"assistant","content":"","tool_calls":[...]} and a {"role":"tool","tool_call_id":"call_0",...} turn, max_tokens, top_p, stream, tools; no temperature) deserializes; messages[2].content == "" and tool_calls has length 1.'
+    implemented_by: 'plan 09-01 (this plan): api::llm_endpoint_conformance_tests'
+    test: 'cargo test -p aprender-serve --lib api::llm_endpoint_conformance_tests::platform_openai_v1_request_shape_parses'
+    if_fails: 'The platform''s own client is refused by the server it is configured to call: every durable-agent-lambda turn is a 422.'
+
+  - id: FALSIFY-LLM-CONF-005
+    rule: 'The pmcp-agent turn-1 request shape (wire request #2 of wire-0.8b-plain.jsonl) parses into ChatCompletionRequest. It is deliberately NOT the turn-2 body (wire request #3, an assistant message with no content key), which cannot parse until row 001 lands.'
+    prediction: 'A body with model, system + user messages each carrying a content key, max_tokens 384 and two tools, with no tool_choice and no temperature, deserializes with max_tokens Some(384).'
+    implemented_by: 'plan 09-01 (this plan): api::llm_endpoint_conformance_tests'
+    test: 'cargo test -p aprender-serve --lib api::llm_endpoint_conformance_tests::pmcp_agent_request_shape_parses'
+    if_fails: 'The SDK client''s first turn is refused: no pmcp-agent run can start against this endpoint.'
+
+  - id: FALSIFY-LLM-CONF-006
+    rule: 'ResponseToolCall serializes `arguments` as a JSON STRING, and the tool-call finish_reason is `tool_calls`; both clients read arguments as a string.'
+    prediction: 'A ResponseToolCall named get_weather with arguments {"city":"Paris"} serializes with function.arguments a JSON string and round-trips by equality.'
+    implemented_by: 'plan 09-01 (this plan): api::llm_endpoint_conformance_tests'
+    test: 'cargo test -p aprender-serve --lib api::llm_endpoint_conformance_tests::tool_call_arguments_serialize_as_string'
+    if_fails: 'A client that json-decodes arguments receives an object and fails on every tool call.'
+
+  - id: FALSIFY-LLM-CONF-007
+    rule: 'Every committed probe record matches its declared profile: baseline has exactly the four spike-029 crosses; fixed has no cross, the D-04 probe reads ✓, every limitation reads KNOWN LIMITATION, and a D-03 or D-05-alias limitation carries an unreleased_at_pin entry whose reason says `unreleased at pin`.'
+    prediction: 'The reader reads every conformance-*.json under deploy/llm-endpoint/probe/results/ (the glob; non-conformance siblings are never opened), fails on zero matches, accepts the committed spike-029 baseline, and refuses a fixed record with a cross, a duplicate probe name, a missing required probe, or a waved-through auth gate.'
+    implemented_by: 'plan 09-01 (this plan): the reader in api::llm_endpoint_conformance_tests; `just llm-endpoint-probe` is the live harness that writes the records, this reader is the binding'
+    test: 'cargo test -p aprender-serve --lib api::llm_endpoint_conformance_tests::conformance_record_matches_contract && cargo test -p aprender-serve --lib api::llm_endpoint_conformance_tests::fixed_profile_unreleased_fix_requires_explicit_reason'
+    if_fails: 'A record that contradicts its own profile is licensing a claim the probe never made.'
+
+  - id: FALSIFY-LLM-CONF-008
+    rule: 'tool_choice=required is a KNOWN LIMITATION: honouring it needs constrained decoding, the server behaves as auto, and neither pmcp.run client sends it.'
+    prediction: 'A fixed record reads KNOWN LIMITATION on `tool_choice=required` and names it in known_limitations; the reader accepts that and refuses the same probe reading ✗.'
+    implemented_by: 'plan 09-01 (this plan): the reader asserts the record reads KNOWN LIMITATION for it in the fixed profile'
+    test: 'cargo test -p aprender-serve --lib api::llm_endpoint_conformance_tests::conformance_record_matches_contract && cargo test -p aprender-serve --lib api::llm_endpoint_conformance_tests::fixed_profile_unreleased_fix_requires_explicit_reason'
+    if_fails: 'A cross on a known gap is being read as a defect, or the limitation is being silently dropped from the record.'
+
+  - id: FALSIFY-LLM-CONF-009
+    rule: 'The error envelope stays {"error": "<string>"}: a KNOWN LIMITATION, contracted by routes.rs:321 and FALSIFY-AUTH-001, never reshaped by this phase.'
+    prediction: 'A fixed record reads KNOWN LIMITATION on `error envelope {error:{message,type}}`; the server is not changed to emit {"error":{"message","type"}}.'
+    implemented_by: 'plan 09-01 (this plan): the reader asserts KNOWN LIMITATION in the fixed profile'
+    test: 'cargo test -p aprender-serve --lib api::llm_endpoint_conformance_tests::conformance_record_matches_contract && cargo test -p aprender-serve --lib api::llm_endpoint_conformance_tests::fixed_profile_unreleased_fix_requires_explicit_reason'
+    if_fails: 'The envelope was reshaped, breaking FALSIFY-AUTH-001''s contracted 401 body, or the limitation was dropped from the record.'
+
+  - id: FALSIFY-LLM-CONF-010
+    rule: '`model` is echoed, not checked: a request naming a foreign model id is served and answered with that id echoed back. An opt-in strict mode is the upstream proposal; making the id load-bearing would break LLMModel.modelId against a server whose /v1/models answers `default`.'
+    prediction: 'A fixed record reads KNOWN LIMITATION on `foreign model id`; spike 029 measured served_as=gpt-4o-mini, status 200.'
+    implemented_by: 'plan 09-01 (this plan): the reader asserts KNOWN LIMITATION in the fixed profile'
+    test: 'cargo test -p aprender-serve --lib api::llm_endpoint_conformance_tests::conformance_record_matches_contract && cargo test -p aprender-serve --lib api::llm_endpoint_conformance_tests::fixed_profile_unreleased_fix_requires_explicit_reason'
+    if_fails: 'A strict model check landed unannounced and every client that sends its own configured model name is now refused.'
+
+  - id: FALSIFY-LLM-CONF-011
+    rule: 'tool_choice=none may leak `<tool_call>` text into the content: a KNOWN LIMITATION naming the render seam (qwen35_chat_backend.rs:109, format_chat_messages_official_thinking) for the upstream issue.'
+    prediction: 'A fixed record reads KNOWN LIMITATION on `tool_choice=none` where the server leaks; spike 029 measured got_call=False (the leak did not fire on the 0.8B run), so a baseline record reads ✓ and a fixed record may read either.'
+    implemented_by: 'plan 09-01 (this plan): the reader asserts KNOWN LIMITATION in the fixed profile'
+    test: 'cargo test -p aprender-serve --lib api::llm_endpoint_conformance_tests::conformance_record_matches_contract && cargo test -p aprender-serve --lib api::llm_endpoint_conformance_tests::fixed_profile_unreleased_fix_requires_explicit_reason'
+    if_fails: 'A tool_choice=none turn emits tool-call markup the caller then misreads as a request to call a tool.'
+
+  - id: FALSIFY-LLM-CONF-012
+    rule: 'cpu_part is recorded by the entrypoint `[entry]` log line, not by /health: a KNOWN LIMITATION. A fixed record must carry a `cpu_part in /health` probe whose verdict is ✓ (the server reports it) or KNOWN LIMITATION (and then the name is in known_limitations), never ✗ and never absent.'
+    prediction: 'An in-memory fixed record is valid with the probe reading KNOWN LIMITATION and named in known_limitations, valid again with ✓, and refused in each of three mutations: the probe absent, the verdict ✗, the verdict KNOWN LIMITATION with the name missing from known_limitations.'
+    implemented_by: 'plan 09-01 (this plan): the reader''s fixed-profile required-probe set; bound to its OWN filter, not the row-007 reader filter, so cpu_part is tested rather than cited'
+    test: 'cargo test -p aprender-serve --lib api::llm_endpoint_conformance_tests::fixed_profile_cpu_part_limitation_is_enforced'
+    if_fails: 'A fixed record can omit or cross the cpu_part probe and still be accepted: the deployed evidence (D-14) would lose its host-class attribution.'
+
+  - id: FALSIFY-LLM-CONF-013
+    rule: 'A request without the bearer is 401 through the deployed ingress (D-12, SC3): first through lambda:Invoke before any Function URL exists, then over HTTPS through the Function URL.'
+    prediction: 'just llm-endpoint-prove-401 records a 401 with the contracted body and no bearer through lambda:Invoke; the HTTPS probe then records 401 without the bearer and 200 with it, in a conformance-<tag>-deployed-https.json record the reader accepts.'
+    implemented_by: 'plans 09-07 and 09-08 (the deployed 401 proofs); the GPU-path exception of row 002 is covered here and nowhere else'
+    test: 'LIVE-PENDING — just llm-endpoint-prove-401, then the HTTPS probe record conformance-<tag>-deployed-https.json (plans 09-07/09-08)'
+    if_fails: 'The deployed model is reachable without the key, or the function URL was opened before the 401 was proven (ingress_order).'
+
+  - id: FALSIFY-LLM-CONF-014
+    rule: 'The platform completes a two-tool turn through durable-agent-lambda openai_v1 against the deployed endpoint (SC1).'
+    prediction: 'A two-tool agent run through openai_v1 returns a final answer that uses both tool results, in a recorded platform-turn evidence file.'
+    implemented_by: 'plan 09-12 (the platform two-tool turn)'
+    test: 'LIVE-PENDING — the platform two-tool turn via durable-agent-lambda openai_v1 (plan 09-12; SC1)'
+    if_fails: 'The platform cannot drive the endpoint, so the deployment does not meet its purpose.'
+
+  - id: FALSIFY-LLM-CONF-015
+    rule: 'The SDK completes a two-tool turn through pmcp-agent OpenAiCompatSource + AgentEngine over HTTPS against the deployed endpoint (SC2).'
+    prediction: 'A two-tool AgentEngine run over HTTPS returns a final answer that uses both tool results; SC2 does not wait on the server-side D-03 release because the SDK-side content: "" fix carries the turn.'
+    implemented_by: 'plan 09-12 (the SDK two-tool turn)'
+    test: 'LIVE-PENDING — the SDK two-tool turn via pmcp-agent OpenAiCompatSource over HTTPS (plan 09-12; SC2)'
+    if_fails: 'The SDK client cannot drive the endpoint over the ingress it will actually use.'
+
+  - id: FALSIFY-LLM-CONF-016
+    rule: 'The live record carries cpu_part, the cold start, the seconds and dollars per two-tool turn, turn-2 reuse, and wall and billed time (D-14, SC4).'
+    prediction: 'The deployed evidence file has each of those fields for every recorded sample, so the per-turn cost is a measurement rather than an estimate.'
+    implemented_by: 'plan 09-07 (the deployed measurement harness)'
+    test: 'LIVE-PENDING — the live measurement record with cpu_part, cold start, seconds and dollars per two-tool turn (plan 09-07; SC4)'
+    if_fails: 'The pmcp.run brief quotes a per-turn cost nothing measured.'
+
+kani_harnesses:
+
+  # DECLARED, NOT EXECUTED. cargo-kani is not installed in this repository and no
+  # #[kani::proof] harness exists anywhere under crates/. The entry names the runnable
+  # serde test that is the ACTUAL evidence.
+  - id: KANI-LLM-CONF-001
+    obligation: 'A probe record of profile fixed never carries a cross, and never records the D-04 gate as a limitation'
+    property: 'forall record in the bounded record space (profile in {baseline, fixed}, each probe verdict in {✓, ✗, ℹ, KNOWN LIMITATION}, up to 10 probes): the reader accepts iff the profile rules hold, and the first contradiction in order is the one it names'
+    bound: 10
+    strategy: bounded_int
+    harness: 'NOT EXECUTED — the evidence is the runnable serde test over the same predicate, `cargo test -p aprender-serve --lib api::llm_endpoint_conformance_tests::conformance_record_matches_contract`, which reads every committed record, plus the in-memory mutation tests fixed_profile_cpu_part_limitation_is_enforced and fixed_profile_unreleased_fix_requires_explicit_reason'
+
+qa_gate:
+  id: F-LLM-CONF-001
+  name: 'Internal OpenAI-compatible LLM endpoint conformance gate'
+  description: >
+    The blocking gate for the endpoint's conformance claims. Rows 004-012 are unit-falsifiable and run
+    in CI from CI fragment 530; rows 001-003 are staged (plans 09-02 and 09-03 add their `test:` lines
+    when their tests exist); rows 013-016 are LIVE and carry the explicit LIVE-PENDING marker until the
+    deployed records back them. A claim not backed by a row here and an accepted record is not licensed.
+  checks:
+    - 'contract schema validity (pv validate, zero errors) and non-zero pv status counts'
+    - 'scripts/check_contract_test_binding.sh reports zero findings for this contract'
+    - 'both pmcp.run client request shapes parse into ChatCompletionRequest'
+    - 'ResponseToolCall serializes arguments as a JSON string'
+    - 'every committed conformance-*.json record matches its declared profile; the glob matching nothing fails'
+    - 'the fixed profile requires the eight probes, the D-04 gate reading ✓, and an explicit unreleased_at_pin reason for any unreleased fix'
+    - 'LIVE, NOT IN CI: the deployed 401 proofs, the two-tool turns and the per-turn cost record (rows 013-016)'
+  run: 'cargo test -p aprender-serve --lib api::llm_endpoint_conformance_tests'
+  pass_criteria: 'FALSIFY-LLM-CONF-004..012 pass on every host and each has been observed RED under an induced negative; rows 001-003 gain tests from plans 09-02/09-03; rows 013-016 gain live records from plans 09-07/09-08/09-12.'
+  falsification: >
+    Flip one probe verdict in a committed fixed record to a cross and the reader test must go red
+    naming the probe; revert and it goes green. Delete every conformance-*.json and the reader must
+    fail, not pass.

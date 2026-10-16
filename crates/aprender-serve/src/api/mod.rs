@@ -401,3 +401,9 @@ include!("dispatch_metrics.rs");
 #[cfg(test)]
 #[path = "tests_engine_identity.rs"]
 mod tests_engine_identity;
+
+// Phase 9 (D-07): the pmcp.run client-shape parse tests and the probe-record reader for
+// contracts/llm-endpoint-openai-conformance-v1.yaml.
+#[cfg(test)]
+#[path = "tests/llm_endpoint_conformance.rs"]
+mod llm_endpoint_conformance_tests;

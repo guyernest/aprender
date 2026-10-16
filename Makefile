@@ -2242,7 +2242,8 @@ CONTRACTS := contracts/softmax-kernel-v1.yaml \
              contracts/decide-tool-boundary-v1.yaml \
              contracts/laya-finetune-gate-v1.yaml \
              contracts/laya-parity-v1.yaml \
-             contracts/decide-apr-v1.yaml
+             contracts/decide-apr-v1.yaml \
+             contracts/llm-endpoint-openai-conformance-v1.yaml
 
 # The two Phase 2 contracts, audited as a BLOCKING tier3 gate by
 # `contract-audit-phase2` below. Deliberately a separate, narrower list than
