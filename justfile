@@ -5261,6 +5261,16 @@ llm-endpoint-selftest:
     x=1
     [ "$(lines "$T/a41.log")" -eq 1 ] || x=0
     row 41 "teardown: profile is another account -> REFUSED account after the single sts call" "$T/c41.log" nonzero '^REFUSED account:' "$x"
+    # 42: the bench (plan 09-13) proves itself offline, with its own shimmed aws; the shim above never sees it
+    set +e
+    python3 -I "$DIR/probe/bench.py" --selftest > "$T/c42.log" 2>&1
+    RC=$?
+    set -e
+    x=1
+    grep -q 'price=0.009473' "$T/c42.log" || x=0
+    grep -q 'cpu_part=0xd40' "$T/c42.log" || x=0
+    grep -q 'budget guard refused tools2_turn1 #2' "$T/c42.log" || x=0
+    row 42 "bench-selftest: fixture LogResult parsed and priced, cpu_part read, budget guard refuses the second two-tool turn" "$T/c42.log" zero 'BENCH SELFTEST OK' "$x"
     echo "AWS CALLS: $AWS_CALLS"
     echo "FIXTURE READS: $FIXTURE_READS"
     if [ "$AWS_CALLS" -ne 0 ]; then
