@@ -792,7 +792,7 @@ from `upstream/main`, one small PR per fix (maintainer guidance 2026-09-29: smal
 Deployment of record uses a release artifact; a PR-branch build may back a pre-merge conformance proof
 only, labelled as such, never the deployed endpoint.
 
-**Plans**: 6/13 plans executed (7 waves; tracer-first; revised in place after the 2026-10-16 cross-AI review — 09-13 split from 09-06; human checkpoints at D-06 PR openings, the D-15 go/no-go, the D-11 team review and the data actions; plan 09-08's precondition is the only place the phase waits on an upstream RELEASE carrying the D-04 fix)
+**Plans**: 7/13 plans executed (7 waves; tracer-first; revised in place after the 2026-10-16 cross-AI review — 09-13 split from 09-06; human checkpoints at D-06 PR openings, the D-15 go/no-go, the D-11 team review and the data actions; plan 09-08's precondition is the only place the phase waits on an upstream RELEASE carrying the D-04 fix)
 
 **Release dependency and bounded outcome** *(plan-check amendment 2026-10-16)*: only the D-04 auth-gate merge gates the ingress and the end-to-end turn (D-12); D-05 forbids the content and alias fixes from gating it, so a pin that lacks them is recorded with `unreleased_at_pin` KNOWN LIMITATIONs in a `fixed`-profile record (`fixed` = the D-04 gate is present). If NO upstream release ever contains the auth-gate merge commit, the phase does not stall open-endedly: plan 09-08 writes a halt record and plan 09-10 closes the phase as `phase-incomplete-awaiting-auth-release` — SC1 and SC3 (deployed ingress) reported NOT DELIVERED, SC2 PARTIAL (offline matrix only), no Function URL or other public surface (D-12), no fork or PR-branch build deployed (D-02) — with the reopen condition "a release contains the auth-gate merge commit".
 
@@ -807,7 +807,7 @@ Plans:
 - [x] 09-06-PLAN.md — the justfile lifecycle surface: up/weights/deploy (refusal ladder; `DRY_RUN` = offline rungs 1-7, `PREFLIGHT` = read-only rungs 1-10)/prove-401/url (reserved-concurrency gate)/warm/teardown (env-specific ECR repo, only the recorded image tag deleted, repository removal printed for the human) + selftest at AWS CALLS: 0 (wave 2)
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 09-03-PLAN.md — D-04 `build_gguf_router` seam wiring `AuthGate::from_env()` with a oneshot test on the real realizar router, ONE upstream-only commit built in an upstream/main worktree (GPU-path scope exception recorded in the contract and drafted as upstream issues); blocking-human PR opening (wave 3 — serialized after 09-02: both bind rows of the conformance contract)
+- [x] 09-03-PLAN.md — D-04 `build_gguf_router` seam wiring `AuthGate::from_env()` with a oneshot test on the real realizar router, ONE upstream-only commit built in an upstream/main worktree (GPU-path scope exception recorded in the contract and drafted as upstream issues); blocking-human PR opening (wave 3 — serialized after 09-02: both bind rows of the conformance contract)
 - [x] 09-13-PLAN.md — probe/measure tooling split from 09-06: `llm-endpoint-probe` wrapper (labels release-local|interim|deployed-https), stdlib `shapes.py` + `bench.py` (wall+billed+cpu_part+dollars, budget guard that refuses a sample before it overspends), `llm-endpoint-measure` (wave 3 — after 09-06, both edit the justfile)
 
 **Wave 4** *(blocked on Wave 3 completion)*

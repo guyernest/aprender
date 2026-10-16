@@ -20,3 +20,21 @@ Out-of-scope discoveries logged by executors. Not fixed in the plan that found t
 ### D-09-02-3: pre-existing clippy error `unused macro definition: cpu_feature` (`crates/aprender-serve/src/isa.rs:171`)
 
 - Present on pristine `upstream/main` (`5b1fd7b08`) under `cargo clippy -p aprender-serve --lib --no-deps -- -D warnings`; absent on the phase branch (count 0). Not introduced by either fix.
+
+## From plan 09-03
+
+### D-09-03-1: the two upstream issue drafts are saved but deliberately NOT filed
+
+- The user answered `open-draft` at the 09-03 checkpoint: the PR only (https://github.com/paiml/aprender/pull/5451), no issues.
+- Drafts (kept in this directory): `09-03-issue-gpu-router-auth.md` (CUDA-path routers ungated) and `09-03-issue-auth-contract-drift.md` (auth contract names a nonexistent `--auth-disabled` flag, wrong `references`, `build_gpu_router` has no caller).
+- The PR body's "What is not in" says both will be filed as follow-ups. Until they are, the CUDA exception lives only in contract row FALSIFY-LLM-CONF-002 and the deployed 401 proofs.
+
+### D-09-03-2: five CUDA-gated router call sites still ungated (scope exception, not fixed)
+
+- `handlers_include_01.rs` (`start_apr_server_gpu`, `start_apr_q4k_server_gpu`, `start_safetensors_server_gpu`), `handler_gpu_completion.rs` (`start_gguf_server_cuda`) and `server.rs` (`start_gguf_server_gpu_batched`), all behind `feature = "cuda"`, build `create_router_with_config(...)` without an `AuthGate`. `APR_API_KEY_HASH` is ignored on them.
+- Out of scope: this deployment is CPU-only (`--backend cpu`), and the change cannot be tested without a CUDA host. The fix is the same one-liner as `build_gguf_router`.
+- Do not run a GPU-backed deployment of this endpoint until these are gated or the deployed 401 proof is repeated on that path.
+
+### D-09-03-3: auth contract drift (observation)
+
+- `contracts/apr-serve-api-key-auth-v1.yaml` is not edited by this phase. See `09-03-issue-auth-contract-drift.md` (D-09-03-1).
