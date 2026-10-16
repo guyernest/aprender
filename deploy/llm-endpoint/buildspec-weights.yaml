@@ -1,0 +1,27 @@
+# Stage the ladder-pinned Qwen3.5-0.8B Q4_K_M GGUF into the endpoint bucket WITHOUT crossing the
+# operator's uplink (D-13): CodeBuild downloads it from Hugging Face, checks its sha256 against the
+# capability ladder's pin, and copies it to S3 with the hash as object metadata.
+#
+# Both inputs arrive as CodeBuild environment variables set by `just llm-endpoint-weights codebuild`
+# (plan 09-06) -- nothing is typed here:
+#   BUCKET       the weights bucket
+#   GGUF_SHA256  the ladder pin, derived by deploy/llm-endpoint/ladder_pin.py
+#
+# Exit 9 on a sha256 mismatch; nothing is uploaded in that case.
+version: 0.2
+phases:
+  build:
+    commands:
+      - |
+        set -e
+        fetch() { # repo file pin  (one shell: CodeBuild runs each list entry in its own shell)
+          T0=$(date +%s)
+          curl -sSL --retry 5 --retry-delay 5 -o "$2" "https://huggingface.co/$1/resolve/main/$2"
+          echo "DOWNLOAD $2 $(( $(date +%s)-T0 ))s $(stat -c %s "$2") bytes"
+          SHA=$(sha256sum "$2" | cut -d' ' -f1); echo "SHA256 $2 $SHA"
+          [ "$SHA" = "$3" ] || { echo "SHA MISMATCH for $2: want $3"; exit 9; }
+          T1=$(date +%s); aws s3 cp "$2" "s3://$BUCKET/$2" --only-show-errors --metadata sha256=$SHA; echo "UPLOAD $2 $(( $(date +%s)-T1 ))s"
+          rm -f "$2"
+        }
+        fetch unsloth/Qwen3.5-0.8B-GGUF Qwen3.5-0.8B-Q4_K_M.gguf "$GGUF_SHA256"
+        aws s3 ls "s3://$BUCKET/"
