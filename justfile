@@ -4248,7 +4248,10 @@ llm-endpoint-weights mode="copy" env="dev" profile="ze-kasher-dev":
         SRC_SHA="$(object_sha "$SRC")"
         [ "$SRC_SHA" = "$GGUF_SHA256" ] \
             || refuse source-meta "s3://$SRC/$GGUF_OBJECT is absent or carries no matching sha256 metadata, use mode=codebuild"
-        step copy aws s3 cp "s3://$SRC/$GGUF_OBJECT" "s3://$BUCKET/$GGUF_OBJECT" --only-show-errors --metadata-directive COPY "${AP[@]}"
+        # s3api copy-object (a 532 MB object is far under its 5 GB limit): `aws s3 cp` between buckets
+        # dropped the sha256 metadata on the first live run, and verify_object then refused s3-sha.
+        step copy aws s3api copy-object "${AP[@]}" --copy-source "$SRC/$GGUF_OBJECT" --bucket "$BUCKET" --key "$GGUF_OBJECT" \
+            --metadata-directive COPY --server-side-encryption AES256
         verify_object
         exit 0
     fi
@@ -4977,7 +4980,11 @@ llm-endpoint-selftest:
         '  permissive)' \
         '    case "$key" in ' \
         '      "sts get-caller-identity") echo "${SHIM_STS_ACCOUNT:-}" ;;' \
-        '      "s3api head-object") echo "${SHIM_S3_SHA:-}" ;;' \
+        '      "s3api head-object")' \
+        '        case "$*" in ' \
+        '          *llm-spike-031*) echo "${SHIM_S3_SHA:-}" ;;' \
+        '          *) if [ "${SHIM_DST_EMPTY:-0}" = 1 ] && ! grep -q "s3api copy-object" "$SHIM_LOG"; then echo None; else echo "${SHIM_S3_SHA:-}"; fi ;;' \
+        '        esac ;;' \
         '      "s3api list-objects-v2") echo "${SHIM_S3_KEY:-}" ;;' \
         '      "ecr describe-images") echo "${SHIM_ECR_DIGEST:-}" ;;' \
         '      "ecr list-images") echo "${SHIM_IMAGE_COUNT:-1}" ;;' \
@@ -5364,6 +5371,13 @@ llm-endpoint-selftest:
     run_just "$T/c34.log" LLM_ENDPOINT_IDS_DIR="$W" SHIM_LOG="$T/a34.log" just llm-endpoint-weights
     x="$(absent_from "$T/a34.log" 's3 cp')"
     row 34 "weights copy: object already carries the ladder pin -> WEIGHTS OK without a copy" "$T/c34.log" zero '^WEIGHTS OK' "$x"
+    fresh_ids
+    : > "$T/a43.log"
+    run_just "$T/c43.log" LLM_ENDPOINT_IDS_DIR="$W" SHIM_LOG="$T/a43.log" SHIM_DST_EMPTY=1 just llm-endpoint-weights
+    x=1
+    grep -qE 's3api copy-object .*--copy-source llm-spike-031-.*--metadata-directive COPY' "$T/a43.log" || x=0
+    grep -qE 's3 cp ' "$T/a43.log" && x=0
+    row 43 "weights copy: destination empty -> one copy-object with the COPY directive, then the metadata is re-read -> WEIGHTS OK" "$T/c43.log" zero '^WEIGHTS OK' "$x"
     fresh_ids
     : > "$T/a35.log"
     run_just "$T/c35.log" LLM_ENDPOINT_IDS_DIR="$W" SHIM_LOG="$T/a35.log" SHIM_S3_SHA=notthepin just llm-endpoint-weights
