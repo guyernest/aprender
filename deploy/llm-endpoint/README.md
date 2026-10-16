@@ -113,8 +113,8 @@ produced it and no other.
 | 4 | `just llm-endpoint-deploy` | create or update the function (`DRY_RUN=1` offline, `PREFLIGHT=1` connected read-only, neither = live) |
 | 5 | `just llm-endpoint-prove-401` | invoke the deployed function without a key and prove it answers 401 |
 | 6 | `just llm-endpoint-url` | create the public URL, refused without a fresh 401 proof and bounded concurrency |
-| 7 | probe | the conformance probe against the deployed function |
-| 8 | `just llm-endpoint-measure` | the D-14 measurement |
+| 7 | `just llm-endpoint-probe` | the conformance probe against a server, bound to the reader test (see Probe and measure) |
+| 8 | `just llm-endpoint-measure` | the D-14 measurement, with an optional budget guard |
 | 9 | `just llm-endpoint-teardown` | remove what the phase created, without ever deleting an ECR repository |
 
 `just llm-endpoint-warm` (one authenticated 1-token invoke, key from `APR_PROBE_KEY`) and
@@ -151,6 +151,8 @@ ever printed as the word `set`; it reaches Lambda through a mode-0600 temporary 
 | `llm-endpoint-prove-401` | `env`, `function`, `event`; exits 3 with `401 NOT PROVEN` on any status but 401 |
 | `llm-endpoint-url` | `proof` (no record, not 401, another image digest, older than 24 h), `account`, `concurrency` (not 1-5 unless `ACCEPT_UNRESERVED_URL=1`, recorded as `risk_accepted`); removes the URL and both statements and exits 1 with `URL REMOVED` when the no-key re-check is not 401 |
 | `llm-endpoint-warm` | `probe-key`, `function` |
+| `llm-endpoint-probe` | `key`, `label`, `pin`, `profile`, `unreleased`, `probe`, `reader` |
+| `llm-endpoint-measure` | `env`, `key`, `function`, `pin`, `label`, `conc`, `budget`; exits 4 with `MEASURE STOPPED (budget)` |
 | `llm-endpoint-teardown` | `ids`, `pin`, `account`, `contain`, `policy` (a URL statement survived `remove-permission`) |
 
 ### Environment-specific names
@@ -208,6 +210,72 @@ a negative control proves the call counter can be non-zero; the lifecycle recipe
 permissive shim that logs every argv, so the tests assert which AWS calls were and were not made
 (both `remove-permission` ids, one `batch-delete-image`, no `delete-repository`, no
 `create-function-url-config` without a proof). `SELFTEST_KEEP=1` keeps the temporary directory.
+Its last row, `bench-selftest`, runs `probe/bench.py --selftest`, which has its own aws shim.
+
+## Probe and measure
+
+Two recipes, one for each half of the evidence. Neither is run by the self-test against a real server
+or account.
+
+### `just llm-endpoint-probe base model label server_version`
+
+Runs `probe/probe_openai.py` and then the Rust reader test
+(`api::llm_endpoint_conformance_tests::conformance_record_matches_contract`), so a record the
+contract rejects cannot sit in `probe/results/` unnoticed (`REFUSED reader`, exit 1; the record
+stays for diagnosis). The key is read by the probe from `APR_PROBE_KEY` and is never an argument;
+without it the recipe is `REFUSED key`.
+
+Accepted labels: `release-local`, `interim`, `deployed-https`. Anything else is `REFUSED label`.
+`baseline` is the committed spike-029 transcription and `deployed` is written only by plan 09-07's
+`bench.py --conformance` through `lambda:Invoke`, so this HTTP wrapper can write neither.
+
+| Label | File written (in `probe/results/`) | `--pin` |
+|---|---|---|
+| `release-local` | `conformance-<APR_TAG>-release-local.json` | `<APR_TAG>` |
+| `deployed-https` | `conformance-<APR_TAG>-deployed-https.json` | `<APR_TAG>` |
+| `interim` | `conformance-interim-upstream-main-plus-fixes.json` | `upstream-main+PRs` |
+
+The profile is `APR_PIN_PROFILE` from the environment, else the one in `pin.env`.
+`APR_UNRELEASED_FIXES` is a semicolon-separated list of `<probe name>=<reference>`, forwarded as
+repeated `--unreleased` flags so a fix the pinned release lacks is recorded as `KNOWN LIMITATION`
+with an `unreleased_at_pin` entry. It is `REFUSED unreleased` outside the `fixed` profile, for any
+probe except `tool result -> final answer` and `max_completion_tokens honoured` (in particular
+`no Authorization header`, the D-04 gate), and for an entry without `=`.
+`LLM_ENDPOINT_PROBE_DRY=1` prints `WOULD WRITE <file> pin=<pin> profile=<profile> unreleased=<n>` and
+exits 0 before contacting any server; that is how the naming and unreleased rules are tested offline.
+Test seams: `LLM_ENDPOINT_PIN_FILE`, `LLM_ENDPOINT_RESULTS_DIR`.
+
+### `just llm-endpoint-measure env profile label cold long conc budget`
+
+Runs `probe/bench.py` against the deployed function through `aws lambda invoke --log-type Tail` (no
+boto3). Defaults: `label=deployed cold=1 long=1 conc=2 budget=""`. It refuses without `APR_PROBE_KEY`
+(`REFUSED key`) and without `.ids/function.json` (`REFUSED function`). The output is
+`.ids/bench-<label>-<utc>.json` (gitignored) and a Markdown table; the recipe prints
+`MEASURE OK <file>`. Plan 09-07 composes the evidence record from that file.
+
+Shapes, in order: `cold_short_1tok` (after a `COLD_NONCE` bump), `short_1tok`, `short_64tok`,
+`tools2_1tok`, `tools2_turn1`, `turn2_extend_1tok`, `turn2_extend_64tok`, `tools10_1tok`, `conc<N>`,
+and `no_auth_401` (the statusCode is recorded, never asserted here). Every prompt carries a nonce.
+
+Record keys: `label`, `function`, `image_digest`, `apr_tag`, `gguf_sha256`, `apr_version_line`,
+`model`, `memory_mb`, `generated_at`, `cpu_part`, `price_usd_per_gb_s`, `budget_usd`, `spent_usd`,
+`budget_stop`, `records[]`, `derived{}`. Each record carries `shape`, `status`, `client_wall_s`,
+`duration_ms`, `billed_ms`, `init_ms` (cold only), `max_mem_mb`, `cost_usd`, `cpu_part` and
+`cpu_part_source`. Every `$` figure is `memory/1024 * billed_ms/1000 * 0.0000133334`, computed from the
+billed duration; `client_wall_s` is reported beside it and the two disagree (the spike saw up to 46 s).
+`cpu_part` comes from the `[entry] host:` line of the record's own log tail, else from the cold
+record, else from the newest such line in the log group; a record that initialised a new environment
+without carrying its own line says so in `cpu_part_source`.
+
+**The budget guard.** `budget` (USD) makes `bench.py` check, BEFORE each invocation, that the measured
+spend so far plus a conservative per-shape ceiling stays within the budget. If not, no further sample
+runs, the partial record is written with a `budget_stop` object (`before`, `spent_usd`, `est_usd`,
+`budget_usd`; `null` otherwise) and the recipe prints `MEASURE STOPPED (budget)` and exits 4. The
+ceilings (`EST_USD` in `bench.py`) are guard estimates derived from the spike-031 prices and are never
+reported as measurements; `spent_usd` sums measured costs only. A failed invocation has no billed
+duration and adds nothing to `spent_usd`, so a budget bounds samples that completed, not ones that
+errored. Offline proofs: `python3 -I probe/bench.py --selftest` and
+`--selftest-budget-only --budget-usd <x>` (exits 4 when `x` is smaller than the first estimate).
 
 ## Rules
 

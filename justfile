@@ -4784,6 +4784,153 @@ llm-endpoint-teardown env="dev" profile="ze-kasher-dev":
     fi
     echo "TEARDOWN OK $FN"
 
+# Run the conformance probe against a server and bind the record to the Rust reader (D-07, plan 09-13).
+# Accepted labels: release-local, interim, deployed-https. This HTTP wrapper NEVER writes the label
+# baseline (the committed spike-029 transcription) or deployed (written only by plan 09-07 through
+# lambda:Invoke); both are refused. The key is read from APR_PROBE_KEY by the probe, never from argv.
+# File name and pin follow the probe-record contract in deploy/llm-endpoint/probe/README.md:
+# interim -> conformance-interim-upstream-main-plus-fixes.json with pin upstream-main+PRs, every other
+# label -> conformance-<APR_TAG>-<label>.json with pin APR_TAG. APR_UNRELEASED_FIXES is a semicolon
+# separated list of probe=reference, forwarded as repeated --unreleased flags (fixed profile, and only
+# for the two unreleased-eligible probes). LLM_ENDPOINT_PROBE_DRY=1 prints what would be written and exits 0
+# before contacting any server. Seams: LLM_ENDPOINT_PIN_FILE, LLM_ENDPOINT_RESULTS_DIR.
+llm-endpoint-probe $base $model $label $server_version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    DIR=deploy/llm-endpoint
+    PIN_FILE="${LLM_ENDPOINT_PIN_FILE:-$DIR/pin.env}"
+    RESULTS="${LLM_ENDPOINT_RESULTS_DIR:-$DIR/probe/results}"
+    BASE="$base"
+    MODEL="$model"
+    LABEL="$label"
+    SERVER_VERSION="$server_version"
+    refuse() { echo "REFUSED $1: $2" >&2; exit "${3:-2}"; }
+    [ -n "${APR_PROBE_KEY:-}" ] || refuse key "APR_PROBE_KEY is not set, the probe reads the key from the environment only"
+    case "$LABEL" in
+        release-local|interim|deployed-https) ;;
+        *) refuse label "$LABEL is not accepted, use release-local, interim or deployed-https; baseline is the committed transcription and deployed is written only by plan 09-07" ;;
+    esac
+    ENV_PROFILE="${APR_PIN_PROFILE:-}"
+    [ -f "$PIN_FILE" ] || refuse pin "$PIN_FILE does not exist"
+    . "$PIN_FILE"
+    printf '%s' "${APR_TAG:-}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+        || refuse pin "APR_TAG in $PIN_FILE is not vMAJOR.MINOR.PATCH"
+    PIN_PROFILE="${APR_PIN_PROFILE:-}"
+    PROFILE="$PIN_PROFILE"
+    if [ -n "$ENV_PROFILE" ]; then PROFILE="$ENV_PROFILE"; fi
+    case "$PROFILE" in
+        baseline|fixed) ;;
+        *) refuse profile "the profile $PROFILE is not baseline or fixed" ;;
+    esac
+    UNREL=()
+    N=0
+    if [ -n "${APR_UNRELEASED_FIXES:-}" ]; then
+        [ "$PROFILE" = fixed ] || refuse unreleased "APR_UNRELEASED_FIXES is accepted only in the fixed profile, this one is $PROFILE"
+        ENTRIES="$(printf '%s' "$APR_UNRELEASED_FIXES" | tr ';' '\n')"
+        while IFS= read -r entry; do
+            [ -n "$entry" ] || continue
+            case "$entry" in
+                "tool result -> final answer="?*|"max_completion_tokens honoured="?*) ;;
+                *) refuse unreleased "$entry is not probe=reference for tool result -> final answer or max_completion_tokens honoured, no other probe may be recorded as unreleased" ;;
+            esac
+            UNREL+=(--unreleased "$entry")
+            N=$((N + 1))
+        done <<< "$ENTRIES"
+    fi
+    if [ "$LABEL" = interim ]; then
+        FILE="conformance-interim-upstream-main-plus-fixes.json"
+        PIN="upstream-main+PRs"
+    else
+        FILE="conformance-$APR_TAG-$LABEL.json"
+        PIN="$APR_TAG"
+    fi
+    if [ "${LLM_ENDPOINT_PROBE_DRY:-0}" = 1 ]; then
+        echo "WOULD WRITE $FILE pin=$PIN profile=$PROFILE unreleased=$N"
+        exit 0
+    fi
+    mkdir -p "$RESULTS"
+    OUTFILE="$RESULTS/$FILE"
+    CMD=(python3 -I "$DIR/probe/probe_openai.py" --base "$BASE" --model "$MODEL" --profile "$PROFILE" --label "$LABEL" --pin "$PIN" --server-version "$SERVER_VERSION" --out "$OUTFILE")
+    if [ "$N" -gt 0 ]; then
+        CMD+=("${UNREL[@]}")
+    fi
+    set +e
+    "${CMD[@]}"
+    PRC=$?
+    set -e
+    [ -f "$OUTFILE" ] || refuse probe "the probe wrote no record, exit $PRC" 3
+    echo "RECORD $OUTFILE (probe exit $PRC)"
+    # the reader runs on every record, so a record the contract rejects can never sit unnoticed in results/
+    set +e
+    CARGO_INCREMENTAL=0 cargo test -p aprender-serve --lib api::llm_endpoint_conformance_tests::conformance_record_matches_contract
+    RRC=$?
+    set -e
+    [ "$RRC" -eq 0 ] || refuse reader "the reader test rejected the results directory, exit $RRC; the record is left in place for diagnosis" 1
+    [ "$PRC" -eq 0 ] || { echo "PROBE CROSS: the probe exited $PRC, see the table above" >&2; exit "$PRC"; }
+    echo "PROBE OK $FILE pin=$PIN profile=$PROFILE"
+
+# Measure the DEPLOYED function (D-14): the spike-031 shapes through aws lambda invoke, recording client
+# wall AND billed time, the price at 0.0000133334 per GB-s and cpu_part on every record. `budget` (USD,
+# optional) makes bench.py refuse each sample before it would overspend; when it stops, the partial file is
+# still written and this recipe exits 4. Writes deploy/llm-endpoint/.ids/bench-<label>-<utc>.json (gitignored);
+# plan 09-07 composes the evidence record from it. No key on any command line: APR_PROBE_KEY is read by bench.py.
+llm-endpoint-measure env="dev" profile="ze-kasher-dev" label="deployed" cold="1" long="1" conc="2" budget="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ENV="{{ trim_start_match(env, "env=") }}"
+    PROFILE="{{profile}}"
+    LABEL="{{label}}"
+    COLD="{{cold}}"
+    LONG="{{long}}"
+    CONC="{{conc}}"
+    BUDGET="{{budget}}"
+    DIR=deploy/llm-endpoint
+    IDS="${LLM_ENDPOINT_IDS_DIR:-$DIR/.ids}"
+    PIN_FILE="${LLM_ENDPOINT_PIN_FILE:-$DIR/pin.env}"
+    refuse() { echo "REFUSED $1: $2" >&2; exit "${3:-2}"; }
+    jget() { python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$1" "$2"; }
+    case "$ENV" in
+        dev|prod) ;;
+        *) refuse env "$ENV is not a known environment, expected dev or prod" ;;
+    esac
+    [ -n "${APR_PROBE_KEY:-}" ] || refuse key "APR_PROBE_KEY is not set, every sample except the 401 case is authenticated"
+    [ -f "$IDS/function.json" ] || refuse function "$IDS/function.json does not exist, run: just llm-endpoint-deploy"
+    FN="$(jget "$IDS/function.json" function)" || refuse function "$IDS/function.json lacks function"
+    [ -f "$PIN_FILE" ] || refuse pin "$PIN_FILE does not exist"
+    . "$PIN_FILE"
+    [ -n "${GGUF_OBJECT:-}" ] || refuse pin "$PIN_FILE lacks GGUF_OBJECT"
+    MODEL="${GGUF_OBJECT%.gguf}"
+    printf '%s' "$LABEL" | grep -Eq '^[A-Za-z0-9._-]+$' || refuse label "the label must be letters, digits, dot, underscore or dash"
+    printf '%s' "$CONC" | grep -Eq '^[0-9]+$' || refuse conc "conc must be a whole number"
+    if [ -n "$BUDGET" ]; then
+        printf '%s' "$BUDGET" | grep -Eq '^[0-9]+(\.[0-9]+)?$' || refuse budget "budget must be a positive number of USD"
+    fi
+    ARGS=(--function "$FN" --ids-dir "$IDS" --profile "$PROFILE" --model "$MODEL" --label "$LABEL" --conc "$CONC")
+    if [ "$COLD" = 1 ]; then
+        ARGS+=(--cold)
+    fi
+    if [ "$LONG" = 1 ]; then
+        ARGS+=(--long)
+    fi
+    if [ -n "$BUDGET" ]; then
+        ARGS+=(--budget-usd "$BUDGET")
+    fi
+    OUT="$IDS/bench-$LABEL-$(date -u +%Y%m%dT%H%M%SZ).json"
+    set +e
+    python3 -I "$DIR/probe/bench.py" "${ARGS[@]}" --out "$OUT"
+    RC=$?
+    set -e
+    if [ "$RC" -eq 0 ]; then
+        echo "MEASURE OK $OUT"
+    elif [ "$RC" -eq 4 ] && [ -f "$OUT" ]; then
+        STOP="$(python3 -I -c 'import json, sys; s = json.load(open(sys.argv[1]))["budget_stop"]; print("%s spent=%s est=%s budget=%s" % (s["before"], s["spent_usd"], s["est_usd"], s["budget_usd"]))' "$OUT")"
+        echo "MEASURE STOPPED (budget): $STOP, partial record $OUT" >&2
+        exit 4
+    else
+        echo "MEASURE FAILED: bench.py exited $RC" >&2
+        exit "$RC"
+    fi
+
 # Offline proof of llm-endpoint-deploy (and the other llm-endpoint recipes): an `aws` shim is FIRST on
 # PATH and the real aws is never executed. Offline cases run in shim mode `refuse` (log and exit 97), so
 # their log must stay empty (`AWS CALLS: 0`); the PREFLIGHT cases run in mode `preflight`, which answers
