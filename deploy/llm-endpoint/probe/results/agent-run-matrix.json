@@ -1,0 +1,91 @@
+{
+  "generated_at": "2026-10-16T15:45:42Z",
+  "note": "Offline laptop matrix (plan 09-12). Timings are laptop context only (D-14). The interim server is an upstream/main + three draft-PR build and is NOT the deployment of record.",
+  "servers": {
+    "interim": {
+      "server_version": "apr 0.71.3 (bd85d728f) interim upstream-main+PRs",
+      "worktree_head": "bd85d728f5354f7b42f2ee85114ab14639c4e12a",
+      "binary_sha256": "a633be3a663591c37b3fb37988967aa8083d62b00ec5522376addcbeaf3a25fd",
+      "rebuilt": false
+    },
+    "release": {
+      "server_version": "apr 0.71.4 (5027da624)",
+      "image": "aprender-llm-endpoint:cpu-v0.71.4",
+      "image_id": "sha256:210b15b0736813cc3c4b10cd54b023d6b7f4950474adc8faed44b0b25f7a61f7"
+    }
+  },
+  "sdk": {
+    "base_sha": "c1498c6b1856bab64e1abadf056a5bdd78e478f5",
+    "branch_sha": "eb684bbd6c92703f8eb551ecc787bcd164e34577",
+    "branch": "fix/openai-compat-tool-use-content-empty-string"
+  },
+  "model": "Qwen3.5-0.8B-Q4_K_M (GGUF sha256 == ladder pin bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517)",
+  "cells": [
+    {
+      "id": "sdk-base-x-interim",
+      "sdk": "base",
+      "server": "interim",
+      "outcome": "Completed",
+      "elapsed_s": 28.21,
+      "iterations": 2,
+      "tool_calls": [
+        "get_weather"
+      ],
+      "final_text_excerpt": "The weather in Paris is currently light rain. The temperature is 17\u00b0C.",
+      "error": null
+    },
+    {
+      "id": "sdk-branch-x-interim",
+      "sdk": "branch",
+      "server": "interim",
+      "outcome": "Completed",
+      "elapsed_s": 28.56,
+      "iterations": 2,
+      "tool_calls": [
+        "get_weather"
+      ],
+      "final_text_excerpt": "The weather in Paris is currently light rain. The temperature is 17\u00b0C.",
+      "error": null
+    },
+    {
+      "id": "sdk-branch-x-release",
+      "sdk": "branch",
+      "server": "release",
+      "outcome": "Completed",
+      "elapsed_s": 44.33,
+      "iterations": 2,
+      "tool_calls": [
+        "get_weather"
+      ],
+      "final_text_excerpt": "The weather in Paris is currently light rain. The temperature is 17\u00b0C.",
+      "error": null
+    },
+    {
+      "id": "sdk-branch-x-interim-twotool",
+      "sdk": "branch",
+      "server": "interim",
+      "outcome": "Completed",
+      "elapsed_s": 37.21,
+      "iterations": 3,
+      "tool_calls": [
+        "get_weather",
+        "add"
+      ],
+      "final_text_excerpt": "The weather in Paris is currently light rain at 17\u00b0C. The sum of 17 and 25 is 42.0.",
+      "error": null
+    },
+    {
+      "id": "sdk-base-x-release",
+      "sdk": "base",
+      "server": "release",
+      "outcome": "Failed",
+      "elapsed_s": 38.8,
+      "iterations": 1,
+      "tool_calls": [
+        "get_weather"
+      ],
+      "final_text_excerpt": "",
+      "error": "completion decode error: http 422"
+    }
+  ]
+}

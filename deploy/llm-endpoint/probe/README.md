@@ -148,3 +148,82 @@ The probe sends the bearer key (from `--key` or `APR_PROBE_KEY`) and records req
 no `Authorization` value reaches a record. As a second guard the probe refuses to write the record
 if the key's value appears anywhere in it. No API key value, plaintext or hash, belongs in a
 committed record, the contract or this file. `auth_probe.sh` never prints the key either.
+
+## Agent-loop matrix
+
+The conformance probe above talks to `apr serve` with hand-written requests. This matrix instead
+drives the real SDK loop, pmcp.run's `pmcp-agent` (`AgentEngine` + `OpenAiCompatSource`, tools
+advertised), against the same servers. It answers one question: does the loop depend on which
+release the endpoint runs? Record: `results/agent-run-matrix.json` (outside the reader's
+`conformance-*.json` glob; `agent-run-*.json` is named in the contract above as a sibling that is
+never opened). Timings in it are laptop context only (D-14).
+
+The driver is `agent-loop/` (moved in from spike 029). The key comes from `APR_PROBE_KEY` and the
+driver fails closed: with the variable unset it exits 2 with `REFUSED key`; the spike's predictable
+literal is usable only with `--allow-test-key` AND a loopback `--base` (127.0.0.1, localhost, [::1],
+exact match, no userinfo). `--insecure-http true|false` defaults to true for loopback only.
+
+### Cells
+
+| Cell id | SDK | Server | Expected | What it proves |
+|---|---|---|---|---|
+| `sdk-base-x-interim` | upstream base | interim (upstream/main + 3 fix commits) | Completed | the server fix alone closes the loop |
+| `sdk-branch-x-interim` | base + the `content: ""` fix | interim | Completed | the two fixes compose |
+| `sdk-branch-x-release` | base + fix | v0.71.4 release image | Completed | the SDK fix alone closes the loop on today's open release |
+| `sdk-branch-x-interim-twotool` | base + fix | interim | Completed with `get_weather` AND `add` | a same-run two-tool AgentEngine turn (the weather cells isolate the 422 defect; this one proves a multi-tool turn) |
+| `sdk-base-x-release` | upstream base | v0.71.4 release image | **Failed, http 422** | the CONTROL: the spike's failure reproduces, so a green elsewhere is not an artefact |
+
+The interim server is a build of upstream/main plus the three open draft PRs and is **never the
+deployment of record**; the release cells run the locally built `aprender-llm-endpoint:cpu-<tag>`
+image from plan 09-04.
+
+### Building the two SDK variants: `make-variant.sh VARIANT SDK_DIR`
+
+`agent-loop/Cargo.toml` is a template whose three SDK path dependencies (`pmcp-agent`,
+`pmcp-package`, `pmcp`) point at the sibling checkout, which carries whatever branch the developer
+has there, so it is not used for a cell. `make-variant.sh` writes a generated directory
+`deploy/llm-endpoint/.ids/agent-loop-VARIANT/` (gitignored) holding a real `Cargo.toml` that points
+all three at SDK_DIR, plus `src` and `spike029` symlinks to the tracked sources. Build with
+`--manifest-path` on that directory's `Cargo.toml`.
+
+Why a directory and not a renamed manifest: cargo accepts `--manifest-path` only for a file named
+exactly `Cargo.toml` (`error: the manifest-path must be a path to a Cargo.toml file` for
+`Cargo.branch.toml`), so a sibling copy under another name can never build.
+
+```bash
+SDK=$HOME/Development/mcp/sdk
+git -C $SDK/rust-mcp-sdk fetch upstream main
+git -C $SDK/rust-mcp-sdk worktree add --detach $SDK/rust-mcp-sdk-wt-main-base upstream/main   # clean base
+# the fix lives on branch fix/openai-compat-tool-use-content-empty-string in rust-mcp-sdk-wt-content-fix
+bash deploy/llm-endpoint/probe/agent-loop/make-variant.sh base   $SDK/rust-mcp-sdk-wt-main-base
+bash deploy/llm-endpoint/probe/agent-loop/make-variant.sh branch $SDK/rust-mcp-sdk-wt-content-fix
+for v in base branch; do
+  CARGO_TARGET_DIR=/some/scratch/agent-loop-target-$v cargo build --release \
+    --manifest-path deploy/llm-endpoint/.ids/agent-loop-$v/Cargo.toml
+done
+# prove each variant resolves its own SDK tree (no network needed):
+cargo metadata --no-deps --format-version 1 --manifest-path deploy/llm-endpoint/.ids/agent-loop-branch/Cargo.toml
+```
+
+A fresh SDK worktree has no `Cargo.lock` (the SDK gitignores it) and re-resolving hit a yanked
+`zip ^7` in `pmcp-workbook-runtime`; copying the sibling checkout's lock into the worktree is what
+let the SDK's own tests run. The driver's own graph (the generated directory) resolves without it.
+
+### Running a cell
+
+```bash
+export APR_PROBE_KEY="$(openssl rand -hex 16)"       # throwaway; the interim server uses it as APR_API_KEY
+"$DRIVER" --base http://127.0.0.1:8030/v1 --model Qwen3.5-0.8B-Q4_K_M \
+  --task "What's the weather in Paris right now?" --max-tokens 384 --timeout-s 900 \
+  --insecure-http true --package "$PWD/deploy/llm-endpoint/probe/agent-loop/spike029/agent.package.json" \
+  --out /scratch/raw.json
+```
+
+The combined run adds `--max-iterations 8 --task "What's the weather in Paris right now? Then add
+17 and 25. Use the tools."`. The driver's `--out` JSON carries `outcome`, `elapsed_s`, `iterations`,
+`tool_calls` (the tool names the loop actually invoked), `final_text` and `detail` (the error string
+for a `Failed` run); a cell is that record reduced to
+`{id, sdk, server, outcome, elapsed_s, iterations, tool_calls, final_text_excerpt, error}`. The GGUF
+is served only after its sha256 equals `ladder_pin.py` for `qwen35-0.8b-q4km` (D-01), the release
+container binds `127.0.0.1:8029` and the native server `127.0.0.1:8030`, and both are stopped when
+the cells are done.
