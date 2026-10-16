@@ -163,6 +163,38 @@ def server_root(base):
     return trimmed[: -len("/v1")] if trimmed.endswith("/v1") else trimmed
 
 
+class HttpTransport:
+    """The probe's default transport: plain HTTP to --base. The private-bench transport (lambda:Invoke,
+    deploy/llm-endpoint/probe/bench.py --conformance) implements the same four methods, so the request
+    bodies and the verdict rules below run unchanged over either. `stream_note` is appended to the two
+    streaming probes' notes: empty over HTTP, `buffered-through-adapter` over lambda:Invoke."""
+
+    stream_note = ""
+
+    def __init__(self, base):
+        self.base = base
+
+    def get(self, path, key):
+        return get(self.base, path, key)
+
+    def get_root(self, path, key):
+        return get(server_root(self.base), path, key)
+
+    def post(self, path, body, key):
+        return post(self.base, path, body, key)
+
+    def post_noauth(self, path, body):
+        req = urllib.request.Request(self.base + path, data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"}, method="POST")
+        t0 = time.perf_counter()
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:
+                st = r.status
+        except urllib.error.HTTPError as e:
+            st = e.code
+        return st, time.perf_counter() - t0
+
+
 def parse_sse(raw):
     """Return the list of JSON data events and whether [DONE] was seen."""
     events, done = [], False
@@ -235,8 +267,11 @@ def parse_args(argv):
     return args
 
 
-def main(argv=None):
+def main(argv=None, tx=None, extra_header=None):
+    """tx: a transport (default HttpTransport(--base)); extra_header: keys merged into the record header
+    after `probes` is built (the private bench adds `transport: lambda-invoke`; the reader ignores it)."""
     args = parse_args(sys.argv[1:] if argv is None else argv)
+    tx = tx or HttpTransport(args.base)
     key = args.key
     fixed = args.profile == "fixed"
 
@@ -277,7 +312,7 @@ def main(argv=None):
 
     # --- P0: discovery routes -------------------------------------------------------------
     for path in ("/models", "/effective-config"):
-        st, raw, dt = get(args.base, path, key)
+        st, raw, dt = tx.get(path, key)
         js = body_json(raw)
         ok = st == 200
         if path == "/models" and ok:
@@ -291,7 +326,7 @@ def main(argv=None):
     req = {"model": args.model, "messages": [{"role": "system", "content": SYSTEM},
                                               {"role": "user", "content": "In one sentence, what does an MCP server do?"}],
            "max_tokens": args.max_tokens, "temperature": 0.2}
-    st, hdr, raw, dt = post(args.base, "/chat/completions", req, key)
+    st, hdr, raw, dt = tx.post("/chat/completions", req, key)
     js = body_json(raw)
     msg = (js.get("choices") or [{}])[0].get("message", {}) if isinstance(js, dict) else {}
     fields = sorted(js.keys()) if isinstance(js, dict) else []
@@ -305,7 +340,7 @@ def main(argv=None):
     req = {"model": args.model, "messages": [{"role": "system", "content": SYSTEM},
                                               {"role": "user", "content": "What's the weather in Paris right now?"}],
            "tools": TOOLS, "tool_choice": "auto", "max_tokens": args.max_tokens, "temperature": 0.0}
-    st, hdr, raw, dt = post(args.base, "/chat/completions", req, key)
+    st, hdr, raw, dt = tx.post("/chat/completions", req, key)
     js = body_json(raw)
     ch = (js.get("choices") or [{}])[0] if isinstance(js, dict) else {}
     msg = ch.get("message", {})
@@ -335,7 +370,7 @@ def main(argv=None):
             {"role": "tool", "tool_call_id": tcs[0].get("id") or "call_0",
              "content": json.dumps({"city": "Paris", "temperature_c": 17, "condition": "light rain"})},
         ], "tools": TOOLS, "tool_choice": "auto", "max_tokens": args.max_tokens, "temperature": 0.0}
-        st, hdr, raw, dt = post(args.base, "/chat/completions", req3, key)
+        st, hdr, raw, dt = tx.post("/chat/completions", req3, key)
         js3 = body_json(raw)
         ch3 = (js3.get("choices") or [{}])[0] if isinstance(js3, dict) else {}
         m3 = ch3.get("message", {})
@@ -354,7 +389,7 @@ def main(argv=None):
     for mode, q, want_call in (("required", "Say hello.", True), ("none", "What's the weather in Paris?", False)):
         req = {"model": args.model, "messages": [{"role": "user", "content": q}], "tools": TOOLS,
                "tool_choice": mode, "max_tokens": args.max_tokens, "temperature": 0.0}
-        st, hdr, raw, dt = post(args.base, "/chat/completions", req, key)
+        st, hdr, raw, dt = tx.post("/chat/completions", req, key)
         js = body_json(raw)
         ch = (js.get("choices") or [{}])[0] if isinstance(js, dict) else {}
         got_call = bool(ch.get("message", {}).get("tool_calls"))
@@ -367,7 +402,7 @@ def main(argv=None):
     req = {"model": args.model, "messages": [{"role": "system", "content": SYSTEM},
                                               {"role": "user", "content": "Convert 250 euros to US dollars."}],
            "tools": MANY_TOOLS, "tool_choice": "auto", "max_tokens": args.max_tokens, "temperature": 0.0}
-    st, hdr, raw, dt = post(args.base, "/chat/completions", req, key)
+    st, hdr, raw, dt = tx.post("/chat/completions", req, key)
     js = body_json(raw)
     ch = (js.get("choices") or [{}])[0] if isinstance(js, dict) else {}
     tcs5 = ch.get("message", {}).get("tool_calls") or []
@@ -379,7 +414,7 @@ def main(argv=None):
     # --- P6: streaming with tools (the 0.70.3 change) ---------------------------------------
     req = {"model": args.model, "messages": [{"role": "user", "content": "What is 17 plus 25? Use the tool."}],
            "tools": TOOLS, "tool_choice": "auto", "stream": True, "max_tokens": args.max_tokens, "temperature": 0.0}
-    st, hdr, raw, dt = post(args.base, "/chat/completions", req, key)
+    st, hdr, raw, dt = tx.post("/chat/completions", req, key)
     events, done = parse_sse(raw)
     deltas_tc = [e for e in events if (e.get("choices") or [{}])[0].get("delta", {}).get("tool_calls")]
     finishes = [(e.get("choices") or [{}])[0].get("finish_reason") for e in events]
@@ -387,17 +422,17 @@ def main(argv=None):
     ok = st == 200 and bool(deltas_tc) and "tool_calls" in finishes
     add("stream + tools", OK if ok else CROSS, st, dt,
         f"ctype={hdr.get('Content-Type') or hdr.get('content-type')} events={len(events)} tool_call_deltas={len(deltas_tc)} "
-        f"finish={finishes} done={done}", req, {"events": events[:6] + (["..."] if len(events) > 6 else []), "done": done})
+        f"finish={finishes} done={done}" + tx.stream_note, req, {"events": events[:6] + (["..."] if len(events) > 6 else []), "done": done})
 
     # --- P7: streaming plain (TTFT shape) --------------------------------------------------
     req = {"model": args.model, "messages": [{"role": "user", "content": "Count from one to ten in words."}],
            "stream": True, "max_tokens": 64, "temperature": 0.0}
-    st, hdr, raw, dt = post(args.base, "/chat/completions", req, key)
+    st, hdr, raw, dt = tx.post("/chat/completions", req, key)
     events, done = parse_sse(raw)
     text = "".join(((e.get("choices") or [{}])[0].get("delta", {}).get("content") or "") for e in events)
     has_usage = any("usage" in e and e["usage"] for e in events)
     add("stream plain", OK if st == 200 and events and done else CROSS, st, dt,
-        f"events={len(events)} done={done} usage_in_stream={has_usage} text={json.dumps(text)[:80]}", req,
+        f"events={len(events)} done={done} usage_in_stream={has_usage} text={json.dumps(text)[:80]}" + tx.stream_note, req,
         {"n_events": len(events), "first": events[:2], "last": events[-2:]})
 
     # --- P8: fields other clients send (should be tolerated, not 400) -----------------------
@@ -405,7 +440,7 @@ def main(argv=None):
            "stream_options": {"include_usage": True}, "parallel_tool_calls": False, "n": 1, "user": "spike",
            "response_format": {"type": "text"}, "seed": 7, "top_p": 0.9, "presence_penalty": 0.0,
            "frequency_penalty": 0.0, "logit_bias": {}, "metadata": {"x": "y"}, "store": False}
-    st, hdr, raw, dt = post(args.base, "/chat/completions", req, key)
+    st, hdr, raw, dt = tx.post("/chat/completions", req, key)
     js = body_json(raw)
     add("extra OpenAI fields tolerated", OK if st == 200 else CROSS, st, dt,
         f"err={json.dumps(js.get('error'))[:200] if isinstance(js, dict) and js.get('error') else 'ok'}", req, js)
@@ -413,7 +448,7 @@ def main(argv=None):
     # --- P9: max_completion_tokens (the newer OpenAI name) ----------------------------------
     req = {"model": args.model, "messages": [{"role": "user", "content": "Write 200 words about rivers."}],
            "max_completion_tokens": 12}
-    st, hdr, raw, dt = post(args.base, "/chat/completions", req, key)
+    st, hdr, raw, dt = tx.post("/chat/completions", req, key)
     js = body_json(raw)
     ct = ((js.get("usage") or {}).get("completion_tokens") if isinstance(js, dict) else None)
     add(P_MAX_COMPLETION, OK if st == 200 and ct is not None and ct <= 16 else CROSS, st, dt,
@@ -421,7 +456,7 @@ def main(argv=None):
 
     # --- P10: error envelope ----------------------------------------------------------------
     req = {"model": args.model, "messages": "not-a-list"}
-    st, hdr, raw, dt = post(args.base, "/chat/completions", req, key)
+    st, hdr, raw, dt = tx.post("/chat/completions", req, key)
     js = body_json(raw)
     openai_shape = isinstance(js, dict) and isinstance(js.get("error"), dict) and "message" in js["error"]
     add(P_ENVELOPE, OK if 400 <= st < 500 and openai_shape else CROSS, st, dt,
@@ -429,7 +464,7 @@ def main(argv=None):
 
     # --- P11: wrong model id -> what happens? -------------------------------------------------
     req = {"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "Hi"}], "max_tokens": 8}
-    st, hdr, raw, dt = post(args.base, "/chat/completions", req, key)
+    st, hdr, raw, dt = tx.post("/chat/completions", req, key)
     js = body_json(raw)
     served = (js.get("model") if isinstance(js, dict) else None)
     if fixed:
@@ -440,16 +475,7 @@ def main(argv=None):
         add(P_FOREIGN_MODEL, INFO, st, dt, f"served_as={served} status={st}", req, js)
 
     # --- P12: no Authorization header -> auth enforced? ------------------------------------
-    req2 = urllib.request.Request(args.base + "/chat/completions",
-                                  data=json.dumps({"model": args.model, "messages": [{"role": "user", "content": "Hi"}], "max_tokens": 4}).encode(),
-                                  headers={"Content-Type": "application/json"}, method="POST")
-    t0 = time.perf_counter()
-    try:
-        with urllib.request.urlopen(req2, timeout=120) as r:
-            st = r.status
-    except urllib.error.HTTPError as e:
-        st = e.code
-    dt = time.perf_counter() - t0
+    st, dt = tx.post_noauth("/chat/completions", {"model": args.model, "messages": [{"role": "user", "content": "Hi"}], "max_tokens": 4})
     if fixed:
         # D-04: the proof is a 401. An open server (200) turns the fixed table red; never a limitation.
         add(P_NO_AUTH, OK if st == 401 else CROSS, st, dt,
@@ -460,7 +486,7 @@ def main(argv=None):
 
     # --- P13: cpu_part in /health ------------------------------------------------------------
     # The bearer is sent when the key is set: a fixed server gates /health (FALSIFY-AUTH-001).
-    st, raw, dt = get(server_root(args.base), "/health", key)
+    st, raw, dt = tx.get_root("/health", key)
     js = body_json(raw)
     has_cpu_part = st == 200 and isinstance(js, dict) and "cpu_part" in js
     note = "cpu_part=%s" % (js.get("cpu_part"),) if has_cpu_part else \
@@ -485,6 +511,8 @@ def main(argv=None):
         "unreleased_at_pin": unreleased_at_pin,
         "probes": record,
     }
+    if extra_header:
+        out.update(extra_header)
     dumped = json.dumps(out, indent=1, ensure_ascii=False)
     if key and key in dumped:
         # Fail closed: no key value, plaintext or otherwise, may reach a committed record.

@@ -18,6 +18,13 @@ Budget guard: with --budget-usd, BEFORE each invocation the running MEASURED spe
 per-shape ceiling (EST_USD) is compared with the budget; if it would pass, no further sample is run, the
 partial record is written with a `budget_stop` object and the exit status is 4.
 
+Conformance mode (plan 09-07): `--conformance` replays probe_openai.py's request bodies and verdict rules through
+lambda:Invoke (no HTTPS surface exists) and writes a probe record labelled `deployed` with `transport: lambda-invoke`:
+
+    APR_PROBE_KEY=... python3 -I bench.py --conformance --function aprender-llm-endpoint-dev --profile ze-kasher-dev \
+        --model Qwen3.5-0.8B-Q4_K_M --pin v0.71.4 --pin-profile baseline --server-version "apr 0.71.4 (5027da624)" \
+        --out deploy/llm-endpoint/probe/results/conformance-v0.71.4-deployed-invoke.json [--budget-usd 0.2] [--unreleased P=REF]
+
 Offline proofs (no aws, no spend):
     python3 -I bench.py --selftest
     python3 -I bench.py --selftest-budget-only --budget-usd 0.0001     # exits 4: proves the guard can fire
@@ -28,6 +35,8 @@ deleted in a `finally`, never put on a command line, and redacted from every out
 import argparse
 import base64
 import concurrent.futures as cf
+import contextlib
+import io
 import json
 import os
 import re
@@ -38,6 +47,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from shapes import shape_short, shape_tools2, shape_tools10, shape_turn2  # noqa: E402
+import probe_openai  # noqa: E402  (its request bodies and verdict rules are reused by --conformance)
 
 PRICE_LAMBDA_GB_S = 0.0000133334  # arm64, us-east-1 list: 0.0000133334
 
@@ -57,6 +67,10 @@ EST_USD = {
     "conc2": 0.0200,  # for the pair; --conc N scales it by N/2
     "no_auth_401": 0.0070,
 }
+
+# GUARD ESTIMATE ONLY (never recorded as a measurement): the ceiling for ONE conformance invocation, the ten-tool
+# prefill (about $0.02 in spike 031) rounded up. The conformance guard checks spent + this against the budget.
+EST_CONFORMANCE_CALL_USD = 0.025
 
 EXIT_BUDGET = 4
 HOST_RE = re.compile(r"cpu_part=(\S+)")
@@ -78,6 +92,20 @@ def lambda_event(body, key):
                                         "sourceIp": "127.0.0.1", "userAgent": "llm-endpoint-bench"},
                                "requestId": "bench", "stage": "$default"},
             "body": json.dumps(body), "isBase64Encoded": False}
+
+
+def lambda_event_raw(method, path, body, key):
+    """An API-GW v2 event for any method and path (the conformance replay also GETs /v1/models and /health)."""
+    headers = {"accept": "application/json"}
+    if body is not None:
+        headers["content-type"] = "application/json"
+    if key:
+        headers["authorization"] = "Bearer " + key
+    return {"version": "2.0", "routeKey": "$default", "rawPath": path, "rawQueryString": "", "headers": headers,
+            "requestContext": {"http": {"method": method, "path": path, "protocol": "HTTP/1.1", "sourceIp": "127.0.0.1",
+                                        "userAgent": "llm-endpoint-bench-conformance"},
+                               "requestId": "bench", "stage": "$default"},
+            "body": json.dumps(body) if body is not None else "", "isBase64Encoded": False}
 
 
 def parse_report_text(text):
@@ -220,6 +248,44 @@ class LambdaTarget:
             out["cost_usd"] = price_usd(mem, rep["billed_ms"])
         return out
 
+    def invoke_raw(self, method, path, body, key):
+        """One invoke of any route: (status, headers, raw body bytes, client wall s, REPORT fields). A failed or
+        unreadable invoke is status 0 with the reason as the body, so a probe verdict reads it as a cross."""
+        evfd, evpath = tempfile.mkstemp(prefix="bench-event-", suffix=".json")  # mode 0600
+        ofd, opath = tempfile.mkstemp(prefix="bench-out-", suffix=".json")
+        os.close(ofd)
+        t0 = time.perf_counter()
+        try:
+            with os.fdopen(evfd, "w") as f:
+                json.dump(lambda_event_raw(method, path, body, key), f)
+            cmd = ["lambda", "invoke", *self.ap, "--function-name", self.fn,
+                   "--cli-binary-format", "raw-in-base64-out", "--cli-read-timeout", "910",
+                   "--payload", "file://" + evpath, "--log-type", "Tail", "--query", "LogResult",
+                   "--output", "text", opath]
+            try:
+                p = self._aws(cmd, timeout=910)
+            except subprocess.TimeoutExpired:
+                return 0, {}, b"aws invoke timed out", round(time.perf_counter() - t0, 3), {}
+            wall = round(time.perf_counter() - t0, 3)
+            if p.returncode != 0:
+                return 0, {}, f"aws rc={p.returncode}: {p.stderr[-300:]}".encode(), wall, {}
+            rep = parse_log_result(p.stdout)
+            try:
+                with open(opath) as f:
+                    payload = json.load(f)
+            except (OSError, json.JSONDecodeError) as e:
+                return 0, {}, f"unreadable payload: {e}".encode(), wall, rep
+        finally:
+            os.unlink(evpath)
+            os.unlink(opath)
+        if not isinstance(payload, dict):
+            return 0, {}, b"payload is not an object", wall, rep
+        if payload.get("errorMessage"):
+            return 0, {}, ("FunctionError: " + str(payload.get("errorMessage")))[:300].encode(), wall, rep
+        body_s = payload.get("body", "") or ""
+        raw = base64.b64decode(body_s) if payload.get("isBase64Encoded") and body_s else body_s.encode()
+        return int(payload.get("statusCode", 0)), dict(payload.get("headers") or {}), raw, wall, rep
+
     def host_info(self):
         """Newest `[entry] host:` (and apr version) line of the log group, for when the tail lacks them."""
         info = {}
@@ -275,6 +341,48 @@ def admit(budget_usd, spent_usd, shape, est_usd):
     if budget_usd is not None and spent_usd + est_usd > budget_usd:
         return {"before": shape, "spent_usd": round(spent_usd, 6), "est_usd": est_usd, "budget_usd": budget_usd}
     return None
+
+
+class LambdaInvokeTransport:
+    """probe_openai's transport over lambda:Invoke (plan 09-07): the same request bodies and verdict rules, no URL.
+    Every invocation is budget-guarded BEFORE it runs (admit) and priced from its billed duration afterwards."""
+
+    stream_note = " [buffered-through-adapter]"
+
+    def __init__(self, tgt, budget_usd=None, log=None):
+        self.tgt, self.budget_usd, self.log = tgt, budget_usd, log
+        self.spent_usd, self.calls, self.budget_stop = 0.0, [], None
+
+    def _call(self, method, path, body, key):
+        label = f"{method} {path}"
+        stop = admit(self.budget_usd, self.spent_usd, label, EST_CONFORMANCE_CALL_USD)
+        if stop:
+            self.budget_stop = stop
+            raise BudgetStop(stop)
+        st, hdr, raw, wall, rep = self.tgt.invoke_raw(method, path, body, key)
+        cost = price_usd(rep.get("memory_size_mb") or self.tgt.mem_mb, rep["billed_ms"]) if rep.get("billed_ms") else 0.0
+        self.spent_usd += cost
+        rec = {"call": label, "status": st, "client_wall_s": wall, "billed_ms": rep.get("billed_ms"),
+               "init_ms": rep.get("init_ms"), "max_mem_mb": rep.get("max_mem_mb"), "cost_usd": cost}
+        self.calls.append(rec)
+        if self.log:
+            self.log(rec)
+        return st, hdr, raw, wall
+
+    def get(self, path, key):
+        st, _, raw, wall = self._call("GET", "/v1" + path, None, key)
+        return st, raw, wall
+
+    def get_root(self, path, key):
+        st, _, raw, wall = self._call("GET", path, None, key)
+        return st, raw, wall
+
+    def post(self, path, body, key):
+        return self._call("POST", "/v1" + path, body, key)
+
+    def post_noauth(self, path, body):
+        st, _, _, wall = self._call("POST", "/v1" + path, body, "")
+        return st, wall
 
 
 class Runner:
@@ -461,8 +569,9 @@ if cmd == "lambda invoke":
     auth = "authorization" in ev["headers"]
     with open(log, "a") as f:
         f.write(json.dumps({"event_authorization_header": auth, "event_path": opt("--payload")[len("file://"):],
+                            "event_rawpath": ev["rawPath"], "event_method": ev["requestContext"]["http"]["method"],
                             "out_path": a[-1]}) + "\n")
-    body = json.loads(ev["body"])
+    body = json.loads(ev["body"]) if ev["body"] else {}
     if not auth:
         payload = {"statusCode": 401, "body": json.dumps({"error": "unauthorized"}), "isBase64Encoded": False}
     else:
@@ -608,6 +717,62 @@ def selftest():
         check(info_w.get("cpu_part") == "0xd4f" and rn_w.records[0]["cpu_part_source"] == "log-lookup",
               f"log-lookup fallback {info_w} {rn_w.records[0].get('cpu_part_source')}")
 
+    # 3b. --conformance over the same shimmed aws: routes, the single no-auth event, the record header, no key in the
+    #     record or any argv, and the guard (a budget below one call's ceiling writes NOTHING and exits 4)
+    with tempfile.TemporaryDirectory(prefix="bench-conf-selftest-") as td:
+        shim = os.path.join(td, "aws")
+        with open(shim, "w") as f:
+            f.write(SHIM)
+        os.chmod(shim, 0o755)
+        log = os.path.join(td, "shim.log")
+        open(log, "w").close()
+        out_json = os.path.join(td, "conf.json")
+        os.environ.update({"PATH": td + os.pathsep + saved_path, "BENCH_SHIM_LOG": log, "BENCH_SHIM_TAIL": FIXTURE_TAIL,
+                           "BENCH_SHIM_COLD": os.path.join(td, "cold.flag"), "APR_PROBE_KEY": "selftest-key-0123456789"})
+        try:
+            def conf_args(budget):
+                return argparse.Namespace(function="fn-selftest", model="m", out=out_json, pin="v0.71.4", pin_profile="baseline",
+                                          server_version="apr 0.71.4 (5027da624)", unreleased=[], budget_usd=budget,
+                                          profile="p", region="us-east-1")
+            sink = io.StringIO()
+            with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+                rc_c = conformance(conf_args(None), {"function": "fn-selftest", "memory_mb": 10240}, {})
+            check(rc_c == 0, f"conformance rc {rc_c}")
+            with open(out_json) as f:
+                rec_text = f.read()
+            rec = json.loads(rec_text)
+            check(rec.get("label") == "deployed" and rec.get("transport") == "lambda-invoke" and rec.get("pin") == "v0.71.4"
+                  and rec.get("profile") == "baseline" and rec.get("streaming") == "buffered-through-adapter",
+                  f"conformance header {[rec.get(k) for k in ('label', 'transport', 'pin', 'profile', 'streaming')]}")
+            check("selftest-key-0123456789" not in rec_text and "Bearer " not in rec_text, "key or bearer in the conformance record")
+            check(any("[buffered-through-adapter]" in p.get("note", "") for p in rec["probes"] if p["probe"].startswith("stream")),
+                  "streaming probes must carry the buffered-through-adapter note")
+            with open(log) as f:
+                ccalls = [json.loads(line) for line in f if line.strip()]
+            cev = [c for c in ccalls if "event_rawpath" in c]
+            check(len(cev) >= 15, f"conformance replay made {len(cev)} invokes, expected 15 (16 when the tools probe returns a call and P3 runs)")
+            check({"/v1/models", "/v1/effective-config", "/v1/chat/completions", "/health"} <= {c["event_rawpath"] for c in cev},
+                  f"conformance routes {sorted({c['event_rawpath'] for c in cev})}")
+            check({c["event_method"] for c in cev} == {"GET", "POST"}, "conformance must use GET and POST")
+            check(sum(1 for c in cev if not c["event_authorization_header"]) == 1, "exactly one conformance event (P12) lacks the authorization header")
+            check("selftest-key-0123456789" not in json.dumps(ccalls), "key reached an argv in conformance mode")
+            check(not any(os.path.exists(c["event_path"]) or os.path.exists(c["out_path"]) for c in cev), "a conformance temp file survived")
+            os.unlink(out_json)
+            before = len(cev)
+            open(log, "w").close()
+            with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+                rc_b = conformance(conf_args(0.01), {"function": "fn-selftest", "memory_mb": 10240}, {})
+            with open(log) as f:
+                after = sum(1 for line in f if "event_rawpath" in line)
+            check(rc_b == EXIT_BUDGET and not os.path.exists(out_json) and after == 0,
+                  f"conformance budget guard: rc {rc_b}, record written {os.path.exists(out_json)}, invokes {after} (was {before})")
+        finally:
+            os.environ["PATH"] = saved_path
+            if saved_key is None:
+                os.environ.pop("APR_PROBE_KEY", None)
+            else:
+                os.environ["APR_PROBE_KEY"] = saved_key
+
     # 4. a key that somehow reached a record (an echoing error body) is redacted from the written file
     os.environ["APR_PROBE_KEY"] = "selftest-key-0123456789"
     try:
@@ -628,7 +793,7 @@ def selftest():
             print("SELFTEST FAIL: " + f, file=sys.stderr)
         return 1
     print(f"BENCH SELFTEST OK price={priced:.6f} (71047 ms at 10240 MB) parsed cpu_part={got['cpu_part']} "
-          f"budget guard refused tools2_turn1 #2 (11 shimmed invokes, key in no argv, temp events removed)")
+          f"budget guard refused tools2_turn1 #2 (11 shimmed invokes, key in no argv, temp events removed; --conformance routes, header, no-auth event and guard checked)")
     return 0
 
 
@@ -643,6 +808,39 @@ def selftest_budget_only(budget_usd):
         return EXIT_BUDGET
     print(json.dumps({"budget_stop": None, "samples_run": len(rn.records), "aws_calls": 0}))
     return 0
+
+
+def conformance(a, ident, aws, tgt=None):
+    """--conformance: probe_openai.main over lambda:Invoke. Writes a `deployed` record with `transport: lambda-invoke`
+    (the 09-01 probe-record contract's named exception: the HTTP wrapper never writes label `deployed`).
+    Exit 0 written, 4 budget stop (NOTHING written: a table needs every probe), 2 refused or fixed-profile crosses."""
+    missing = [n for n, v in (("--function", ident.get("function")), ("--model", a.model), ("--out", a.out), ("--pin", a.pin),
+                              ("--pin-profile", a.pin_profile), ("--server-version", a.server_version)) if not v]
+    if missing:
+        print("REFUSED args: --conformance needs " + ", ".join(missing), file=sys.stderr)
+        return 2
+    fn = ident["function"]
+    tgt = tgt or LambdaTarget(fn, a.profile, a.region or aws.get("region", "us-east-1"), int(ident.get("memory_mb") or 10240),
+                              aws.get("log_group"))
+    tx = LambdaInvokeTransport(tgt, a.budget_usd, log=lambda r: print(
+        f"  {r['call']}: status={r['status']} wall={r['client_wall_s']}s billed={r['billed_ms']}ms cost={r['cost_usd']}",
+        file=sys.stderr, flush=True))
+    argv = ["--base", f"lambda-invoke://{fn}/v1", "--model", a.model, "--profile", a.pin_profile, "--label", "deployed",
+            "--pin", a.pin, "--server-version", a.server_version, "--out", a.out]
+    for u in a.unreleased:
+        argv += ["--unreleased", u]
+    extra = {"transport": "lambda-invoke", "streaming": "buffered-through-adapter", "function": fn,
+             "image_digest": ident.get("image_digest")}
+    try:
+        rc = probe_openai.main(argv, tx=tx, extra_header=extra)
+    except BudgetStop as e:
+        print(f"budget_stop: refused {e.info['before']} (spent {e.info['spent_usd']} + est {e.info['est_usd']} > {e.info['budget_usd']}); "
+              f"no record written", file=sys.stderr, flush=True)
+        print(json.dumps({"budget_stop": e.info, "calls": len(tx.calls), "spent_usd": round(tx.spent_usd, 6)}))
+        return EXIT_BUDGET
+    print(f"conformance invokes={len(tx.calls)} spent_usd={round(tx.spent_usd, 6)} budget_usd={a.budget_usd}")
+    print(json.dumps({"conformance_calls": tx.calls, "spent_usd": round(tx.spent_usd, 6)}))
+    return rc
 
 
 def main():
@@ -660,6 +858,11 @@ def main():
     ap.add_argument("--long", action="store_true", help="include the 10-tool prefill")
     ap.add_argument("--conc", type=int, default=0, help="also fire N simultaneous short requests")
     ap.add_argument("--budget-usd", type=float, default=None)
+    ap.add_argument("--conformance", action="store_true", help="replay the probe's P1-P13 through lambda:Invoke and write a `deployed` record")
+    ap.add_argument("--pin", help="--conformance: the release tag the record is about (APR_TAG)")
+    ap.add_argument("--pin-profile", dest="pin_profile", choices=probe_openai.PROFILES, help="--conformance: baseline or fixed (pin.env APR_PIN_PROFILE)")
+    ap.add_argument("--server-version", dest="server_version", help="--conformance: the apr --version line from the function's [entry] log")
+    ap.add_argument("--unreleased", action="append", default=[], metavar="PROBE=REFERENCE", help="--conformance, fixed profile only: see probe_openai.py")
     a = ap.parse_args()
 
     if a.selftest:
@@ -682,6 +885,8 @@ def main():
         print("REFUSED budget: --budget-usd must be positive", file=sys.stderr)
         return 2
     ident.setdefault("function", fn)
+    if a.conformance:
+        return conformance(a, ident, aws)
     mem_mb = int(ident.get("memory_mb") or 10240)
     tgt = LambdaTarget(fn, a.profile, a.region or aws.get("region", "us-east-1"), mem_mb, aws.get("log_group"))
     rn = Runner(tgt, a.budget_usd, log=progress)
