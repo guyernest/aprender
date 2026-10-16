@@ -11,12 +11,13 @@
 | `POST /v1/chat/completions` + `tools`, `tool_choice: auto` | INTEGRATE | the two-tool and ten-tool turns; contract rows 004-007 |
 | tool-result turn (`role: tool`, `tool_call_id`) | INTEGRATE | gap 1 fix (D-03, role-aware: only an assistant message may omit `content`; user/system/tool still 422) + SDK fix (D-09); matrix in 09-12 (five cells incl. a same-run two-tool turn) |
 | `POST /v1/chat/completions` with `stream: true` | INTEGRATE | probed (P6/P7) buffered through the adapter so a future streaming client has a verdict; neither platform client streams today, so the Function URL stays BUFFERED (Surface 2) |
-| `max_completion_tokens` | INTEGRATE | aliased to `max_tokens` (D-05 cheap fix, plan 09-02) |
+| `max_completion_tokens` | INTEGRATE | aliased to `max_tokens` (D-05 cheap fix, plan 09-02); never gates the turn (neither platform client sends it) — recorded as an `unreleased_at_pin` KNOWN LIMITATION when the pinned release lacks it |
 | `tool_choice: required` | OPT-OUT | KNOWN LIMITATION — needs constrained decoding to be honest; not on the real wire of either client (D-05) |
 | `tool_choice: none` | OPT-OUT | KNOWN LIMITATION — render-path change shared with `apr chat`; not on the real wire; upstream issue, not a PR (D-05) |
 | strict `model` id check | OPT-OUT | KNOWN LIMITATION — would make `LLMModel.modelId` load-bearing against a server answering `/v1/models` with `default`; `APR_SERVE_STRICT_MODEL` proposed upstream as an issue (D-05) |
 | OpenAI-shaped error envelope `{"error": {message,type,code}}` | OPT-OUT | KNOWN LIMITATION — the string envelope is contracted (`routes.rs:321`, FALSIFY-AUTH-001, Ollama readers); pmcp-agent classifies by status, the platform reads `choices` only (D-05) |
-| Bearer auth (`APR_API_KEY[_HASH]`) on the GGUF router incl. `/health` | INTEGRATE | D-04 fix (plan 09-03); 401 proven locally, on the deployed function and through the ingress |
+| Bearer auth (`APR_API_KEY[_HASH]`) on the GGUF router incl. `/health` | INTEGRATE | D-04 fix (plan 09-03); 401 proven locally, on the deployed function and through the ingress. The ONLY upstream fix that gates the re-pin and the ingress (D-12); if its release never ships the phase closes `phase-incomplete-awaiting-auth-release` (SC1/SC3 not delivered, no ingress, no fork build) |
+| `fixed` profile with unreleased D-03/D-05 fixes | INTEGRATE | a pin carrying the D-04 gate but not the content or alias merge is recorded `fixed` with `unreleased_at_pin` KNOWN LIMITATIONs (reason "unreleased at pin"); `no Authorization header` can never be a limitation (plans 09-01/09-08) |
 | `GET /v1/models` | INTEGRATE | probed (P0); answers `default` — recorded, no client depends on it |
 | `GET /v1/effective-config` | INTEGRATE | probed (P0); informational |
 | `GET /health` | INTEGRATE | gated like every route (FALSIFY-AUTH-001); LWA 0.9.1 readiness counts a 401 as ready |

@@ -794,9 +794,11 @@ only, labelled as such, never the deployed endpoint.
 
 **Plans**: 13 plans (7 waves; tracer-first; revised in place after the 2026-10-16 cross-AI review — 09-13 split from 09-06; human checkpoints at D-06 PR openings, the D-15 go/no-go, the D-11 team review and the data actions; plan 09-08's precondition is the only place the phase waits on an upstream RELEASE carrying the D-04 fix)
 
+**Release dependency and bounded outcome** *(plan-check amendment 2026-10-16)*: only the D-04 auth-gate merge gates the ingress and the end-to-end turn (D-12); D-05 forbids the content and alias fixes from gating it, so a pin that lacks them is recorded with `unreleased_at_pin` KNOWN LIMITATIONs in a `fixed`-profile record (`fixed` = the D-04 gate is present). If NO upstream release ever contains the auth-gate merge commit, the phase does not stall open-endedly: plan 09-08 writes a halt record and plan 09-10 closes the phase as `phase-incomplete-awaiting-auth-release` — SC1 and SC3 (deployed ingress) reported NOT DELIVERED, SC2 PARTIAL (offline matrix only), no Function URL or other public surface (D-12), no fork or PR-branch build deployed (D-02) — with the reopen condition "a release contains the auth-gate merge commit".
+
 Plans:
 **Wave 1**
-- [ ] 09-01-PLAN.md — conformance contract declared before the fixes (D-07), probe harness with `KNOWN LIMITATION` + `--profile`, reader test over the committed spike-029 baseline, CI fragment 530 (wave 1)
+- [ ] 09-01-PLAN.md — conformance contract declared before the fixes (D-07), probe harness with `KNOWN LIMITATION` + `--profile` + `--unreleased` (the `fixed` profile = the D-04 gate present; D-03/D-05 fixes absent from a pin are recordable as unreleased-at-pin limitations), reader test over the committed spike-029 baseline, CI fragment 530 (wave 1)
 - [ ] 09-04-PLAN.md — deploy assets in-repo, image half: pinned Dockerfile/entrypoint (refuses an open server and an unverified GGUF), pin.env, `.gitignore`, `just llm-endpoint-image` (wave 1)
 - [ ] 09-11-PLAN.md — deploy assets in-repo, staging half: IAM policies as files, the 0.8B CodeBuild buildspec, the ladder reader `ladder_pin.py`, the runbook README (wave 1; split from 09-04 for the per-plan file budget, no shared file)
 
@@ -817,7 +819,7 @@ Plans:
 
 **Wave 6** *(blocked on Wave 5 completion)*
 - [ ] 09-09-PLAN.md — `09-PMCP-RUN-BRIEF.md` (incl. the Known exposure section), the `timeoutSecs` PR branch cut from the fetched origin/main (clamp 148 s, malformed values warned, invariant tests, `--bin durable-agent-lambda` test commands), SDK PR; blocking-human team review + PR opening (wave 6 — after 09-12's SDK branch and matrix, autonomous: false)
-- [ ] 09-08-PLAN.md — re-pin to a RELEASE carrying the D-04 fix if needed (precondition), Function URL after the 401 proof (bounded by reserved concurrency; the platform-logs-the-URL exposure recorded as T-09-50), HTTPS auth table + fixed-profile conformance, SDK turns over HTTPS including one combined two-tool run (wave 6)
+- [ ] 09-08-PLAN.md — re-pin to a RELEASE whose history contains the D-04 auth-gate merge commit if needed (the ONLY predicate; content/alias recorded as `fixes_in_release` / unreleased-at-pin; a bounded `awaiting-auth-release` halt record if none exists), Function URL after the 401 proof (bounded by reserved concurrency; the platform-logs-the-URL exposure recorded as T-09-50), HTTPS auth table + fixed-profile conformance, SDK turns over HTTPS including one combined two-tool run (wave 6)
 
 **Wave 7** *(blocked on Wave 6 completion)*
-- [ ] 09-10-PLAN.md — the three pmcp.run data actions + secret (blocking-human), the SC1 platform two-tool turn accepted by `verify_platform_turn.py` (both tools, wire properties, accepted tool result, derived timing, request-id-correlated endpoint evidence; nine-refusal self-test), switch-back by configuration, final record `deployed-passed-e2e` (wave 7, autonomous: false)
+- [ ] 09-10-PLAN.md — (skipped to a bounded `phase-incomplete-awaiting-auth-release` close when 09-08 halted) the three pmcp.run data actions + secret (blocking-human), the SC1 platform two-tool turn accepted by `verify_platform_turn.py` (both tools, wire properties, accepted tool result, derived timing, request-id-correlated endpoint evidence; nine-refusal self-test), switch-back by configuration, final record `deployed-passed-e2e` (wave 7, autonomous: false)

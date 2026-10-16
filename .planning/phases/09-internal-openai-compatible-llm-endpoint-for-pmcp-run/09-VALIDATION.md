@@ -38,6 +38,8 @@ created: "2026-10-15"
 
 ## Per-Task Verification Map
 
+> The rows below are a template seed. The per-task map for this phase's 13 plans (09-01 .. 09-13, including 09-13) is filled by `/gsd-validate-phase 9` after execution, from each task's `<automated>` command and `<fails_when>` signal in the PLAN.md files; until then the plans' own verify blocks are the authoritative map.
+
 | Task ID | Plan | Wave | Requirement | Threat Ref | Secure Behavior | Test Type | Automated Command | File Exists | Status |
 |---------|------|------|-------------|------------|-----------------|-----------|-------------------|-------------|--------|
 | 09-01-01 | 01 | 1 | REQ-{XX} | T-09-01 / — | {expected secure behavior or "N/A"} | unit | `{command}` | ✅ / ❌ W0 | ⬜ pending |
