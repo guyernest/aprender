@@ -251,14 +251,8 @@ fn check_fixed(
     }
     // cpu_part: the server reports it, or the gap is recorded as a limitation. Never absent, never a cross.
     match verdict_of(probes, P_CPU_PART) {
-        Some(OK) => {},
-        Some(KNOWN_LIMITATION) => {
-            if !limitations.iter().any(|l| l == P_CPU_PART) {
-                return Err(format!(
-                    "fixed profile: `{P_CPU_PART}` reads {KNOWN_LIMITATION} but is not named in known_limitations"
-                ));
-            }
-        },
+        // A KNOWN LIMITATION verdict must be named in known_limitations: the loop below enforces it.
+        Some(OK | KNOWN_LIMITATION) => {},
         other => {
             return Err(format!(
                 "fixed profile: `{P_CPU_PART}` must read {OK} or {KNOWN_LIMITATION}, got {other:?}"
@@ -290,13 +284,12 @@ fn check_fixed(
             ));
         }
     }
-    check_unreleased(probes, limitations, unreleased)
+    check_unreleased(probes, unreleased)
 }
 
 /// The `unreleased_at_pin` rules, both directions (plan-check iteration 1, D-05).
 fn check_unreleased(
     probes: &[(String, String)],
-    limitations: &[String],
     unreleased: &[(String, String)],
 ) -> Result<(), String> {
     for (probe, reason) in unreleased {
@@ -314,11 +307,6 @@ fn check_unreleased(
             return Err(format!(
                 "unreleased_at_pin names `{probe}` but its verdict is not {KNOWN_LIMITATION} \
                  (an entry beside a passing probe is a contradiction)"
-            ));
-        }
-        if !limitations.iter().any(|l| l == probe) {
-            return Err(format!(
-                "unreleased_at_pin names `{probe}` but known_limitations does not list it"
             ));
         }
     }
