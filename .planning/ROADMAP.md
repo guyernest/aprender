@@ -792,7 +792,7 @@ from `upstream/main`, one small PR per fix (maintainer guidance 2026-09-29: smal
 Deployment of record uses a release artifact; a PR-branch build may back a pre-merge conformance proof
 only, labelled as such, never the deployed endpoint.
 
-**Plans**: 7/13 plans executed (7 waves; tracer-first; revised in place after the 2026-10-16 cross-AI review — 09-13 split from 09-06; human checkpoints at D-06 PR openings, the D-15 go/no-go, the D-11 team review and the data actions; plan 09-08's precondition is the only place the phase waits on an upstream RELEASE carrying the D-04 fix)
+**Plans**: 8/13 plans executed (7 waves; tracer-first; revised in place after the 2026-10-16 cross-AI review — 09-13 split from 09-06; human checkpoints at D-06 PR openings, the D-15 go/no-go, the D-11 team review and the data actions; plan 09-08's precondition is the only place the phase waits on an upstream RELEASE carrying the D-04 fix)
 
 **Release dependency and bounded outcome** *(plan-check amendment 2026-10-16)*: only the D-04 auth-gate merge gates the ingress and the end-to-end turn (D-12); D-05 forbids the content and alias fixes from gating it, so a pin that lacks them is recorded with `unreleased_at_pin` KNOWN LIMITATIONs in a `fixed`-profile record (`fixed` = the D-04 gate is present). If NO upstream release ever contains the auth-gate merge commit, the phase does not stall open-endedly: plan 09-08 writes a halt record and plan 09-10 closes the phase as `phase-incomplete-awaiting-auth-release` — SC1 and SC3 (deployed ingress) reported NOT DELIVERED, SC2 PARTIAL (offline matrix only), no Function URL or other public surface (D-12), no fork or PR-branch build deployed (D-02) — with the reopen condition "a release contains the auth-gate merge commit".
 
@@ -811,7 +811,7 @@ Plans:
 - [x] 09-13-PLAN.md — probe/measure tooling split from 09-06: `llm-endpoint-probe` wrapper (labels release-local|interim|deployed-https), stdlib `shapes.py` + `bench.py` (wall+billed+cpu_part+dollars, budget guard that refuses a sample before it overspends), `llm-endpoint-measure` (wave 3 — after 09-06, both edit the justfile)
 
 **Wave 4** *(blocked on Wave 3 completion)*
-- [ ] 09-05-PLAN.md — local proofs: v0.71.4 re-probe from the image under 10 GB, interim build (upstream/main + the three verified commits, proven by patch-id and file-set audit) 401 table + ✗-free table; the interim binary kept on disk for 09-12 (wave 4)
+- [x] 09-05-PLAN.md — local proofs: v0.71.4 re-probe from the image under 10 GB, interim build (upstream/main + the three verified commits, proven by patch-id and file-set audit) 401 table + ✗-free table; the interim binary kept on disk for 09-12 (wave 4)
 
 **Wave 5** *(blocked on Wave 4 completion)*
 - [ ] 09-07-PLAN.md — D-15 go/no-go (blocking-human), live deploy by recipes, 401 proof attempt BEFORE any URL, D-14 measurement on the deployed function, deployed conformance via lambda:Invoke, evidence record (wave 5, autonomous: false)
