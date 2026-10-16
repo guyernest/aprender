@@ -290,11 +290,15 @@ class LambdaTarget:
         """Newest `[entry] host:` (and apr version) line of the log group, for when the tail lacks them."""
         info = {}
         start = str(int((time.time() - 7 * 86400) * 1000))
-        for key, pattern in (("host", '"[entry] host:"'), ("start", '"[entry]" "start pid="')):
+        # Two live findings (plan 09-07): the filter pattern `"[entry] host:"` matches NOTHING on the real service
+        # (`"cpu_part"` finds the host line), and `--query events[-1].message` prints once per result page, so a
+        # `None` precedes the message. Take every message, keep the [entry] lines, use the newest.
+        for key, pattern in (("host", '"cpu_part"'), ("start", '"[entry]" "start pid="')):
             p = self._aws(["logs", "filter-log-events", *self.ap, "--log-group-name", self.log_group,
                            "--start-time", start, "--filter-pattern", pattern,
-                           "--query", "events[-1].message", "--output", "text"])
-            msg = p.stdout.strip() if p.returncode == 0 else ""
+                           "--query", "events[].message", "--output", "text"])
+            lines = [m.strip() for m in re.split(r"[\t\n]+", p.stdout) if "[entry]" in m] if p.returncode == 0 else []
+            msg = lines[-1] if lines else ""
             if key == "host":
                 m = HOST_RE.search(msg)
                 if m:
@@ -600,7 +604,15 @@ elif cmd == "lambda update-function-configuration":
 elif cmd == "lambda wait":
     pass
 elif cmd == "logs filter-log-events":
-    print("[entry] t=5ms host: nproc=4 cpu_part=0xd4f model_name=x")
+    # answers like the real service: only a pattern that matches a line returns it (`"[entry] host:"` matches
+    # nothing there), and a paginated --query prints a `None` per empty page first
+    pat = opt("--filter-pattern")
+    if pat == '"cpu_part"':
+        print("None\nNone\n[entry] t=5ms host: nproc=4 cpu_part=0xd4f model_name=x\t[entry] t=6ms host: nproc=4 cpu_part=0xd4e model_name=y")
+    elif pat == '"[entry]" "start pid="':
+        print("None\n[entry] t=1ms start pid=9 apr=apr 0.71.4 (5027da624)")
+    else:
+        print("None\nNone")
 else:
     sys.stderr.write("shim: unexpected call " + cmd + "\n")
     sys.exit(97)
@@ -714,8 +726,9 @@ def selftest():
                 os.environ.pop("APR_PROBE_KEY", None)
             else:
                 os.environ["APR_PROBE_KEY"] = saved_key
-        check(info_w.get("cpu_part") == "0xd4f" and rn_w.records[0]["cpu_part_source"] == "log-lookup",
-              f"log-lookup fallback {info_w} {rn_w.records[0].get('cpu_part_source')}")
+        check(info_w.get("cpu_part") == "0xd4e" and rn_w.records[0]["cpu_part_source"] == "log-lookup",
+              f"log-lookup fallback {info_w} {rn_w.records[0].get('cpu_part_source')} (the NEWEST host line, 0xd4e, not the first)")
+        check(info_w.get("apr_version_line") == "apr 0.71.4 (5027da624)", f"log-lookup apr line {info_w.get('apr_version_line')}")
 
     # 3b. --conformance over the same shimmed aws: routes, the single no-auth event, the record header, no key in the
     #     record or any argv, and the guard (a budget below one call's ceiling writes NOTHING and exits 4)
