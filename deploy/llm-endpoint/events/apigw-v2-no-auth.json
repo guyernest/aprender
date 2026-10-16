@@ -1,0 +1,23 @@
+{
+  "version": "2.0",
+  "routeKey": "$default",
+  "rawPath": "/v1/chat/completions",
+  "rawQueryString": "",
+  "headers": {
+    "content-type": "application/json",
+    "accept": "application/json"
+  },
+  "requestContext": {
+    "http": {
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "protocol": "HTTP/1.1",
+      "sourceIp": "127.0.0.1",
+      "userAgent": "llm-endpoint-prove-401"
+    },
+    "requestId": "prove-401",
+    "stage": "$default"
+  },
+  "body": "{\"model\":\"x\",\"messages\":[{\"role\":\"user\",\"content\":\"Hi\"}],\"max_tokens\":1}",
+  "isBase64Encoded": false
+}
