@@ -3800,3 +3800,99 @@ laya-gap-regression:
     else
         echo "LAYA GAP REGRESSION OK"
     fi
+
+# ---------------------------------------------------------------------------------------------
+# Phase 9: internal LLM endpoint (deploy/llm-endpoint)
+# ---------------------------------------------------------------------------------------------
+
+# Build the one arm64 image for the internal OpenAI-compatible endpoint (D-13/D-02): the RELEASE
+# `apr` named by deploy/llm-endpoint/pin.env plus the Lambda Web Adapter pinned by digest. Refusals,
+# in order: tag (APR_TAG shape), sha-release (the release's own .sha256), sha-pin (pin.env's
+# APR_TARBALL_SHA256 -- a second, independent check), lwa-digest (the Dockerfile's adapter digest
+# literal vs pin.env's LWA_IMAGE_DIGEST; the Dockerfile cannot read pin.env), identity (the built
+# image's `apr --version` must carry the pinned tag). No AWS resource is touched unless push=1 AND
+# .ids/aws.json exists (written by llm-endpoint-up): then it pushes to the ENV-SPECIFIC repository
+# recorded there, never a shared one. LLM_ENDPOINT_DOCKERFILE overrides the Dockerfile (the verify
+# feeds it a digest-mutated copy).
+llm-endpoint-image push="0":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    refuse() { echo "REFUSED $1: $2" >&2; exit "${3:-2}"; }
+    # shasum directly (as laya-deploy): the pin must not depend on which sha tool the PATH offers.
+    . deploy/llm-endpoint/pin.env
+    DIR=deploy/llm-endpoint
+    IDS="$DIR/.ids"
+    BIN="$DIR/bin"
+    DOCKERFILE="${LLM_ENDPOINT_DOCKERFILE:-$DIR/Dockerfile}"
+    TAG="$IMAGE_NAME:cpu-$APR_TAG"
+    printf '%s' "$APR_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+        || refuse tag "APR_TAG '$APR_TAG' is not vMAJOR.MINOR.PATCH"
+    printf '%s' "$APR_TARBALL_SHA256" | grep -Eq '^[0-9a-f]{64}$' \
+        || refuse sha-pin "APR_TARBALL_SHA256 in pin.env is not 64 lowercase hex"
+    printf '%s' "$LWA_IMAGE_DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$' \
+        || refuse lwa-digest "LWA_IMAGE_DIGEST in pin.env is not sha256:<64 hex>"
+    mkdir -p "$BIN" "$IDS"
+    TAR="$BIN/$APR_ASSET"
+    if [ ! -f "$TAR" ] || [ ! -f "$TAR.sha256" ]; then
+        gh release download "$APR_TAG" --repo paiml/aprender --pattern "$APR_ASSET" --pattern "$APR_ASSET.sha256" \
+            --dir "$BIN" --clobber > "$IDS/download.log" 2>&1 && rc=0 || rc=$?
+        [ "$rc" -eq 0 ] || refuse download "gh release download $APR_TAG failed (rc=$rc, see $IDS/download.log)" 3
+    fi
+    # (1) the release's own checksum file, checked from inside the directory it was written for
+    (cd "$BIN" && shasum -a 256 -c "$APR_ASSET.sha256") > "$IDS/sha-release.log" 2>&1 && rc=0 || rc=$?
+    [ "$rc" -eq 0 ] || refuse sha-release "$APR_ASSET does not match its release .sha256 ($(tail -1 "$IDS/sha-release.log"))" 4
+    # (2) pin.env's own copy of the hash: a second, independent check
+    GOT="$(shasum -a 256 "$TAR" | awk '{print $1}')"
+    [ "$GOT" = "$APR_TARBALL_SHA256" ] \
+        || refuse sha-pin "$APR_ASSET hashes to $GOT but pin.env APR_TARBALL_SHA256 is $APR_TARBALL_SHA256" 4
+    # (3) the adapter digest exists twice (pin.env, Dockerfile FROM line); compare the two copies
+    FROMS="$(grep -E '^FROM ' "$DOCKERFILE" || true)"
+    case "$FROMS" in
+        *"${LWA_IMAGE}@${LWA_IMAGE_DIGEST}"*) ;;
+        *) refuse lwa-digest "$DOCKERFILE has no FROM line naming ${LWA_IMAGE}@${LWA_IMAGE_DIGEST} (pin.env and the Dockerfile disagree)" 4 ;;
+    esac
+    tar xzf "$TAR" -C "$BIN" --strip-components=1 "${APR_ASSET%.tar.gz}/apr"
+    chmod 0755 "$BIN/apr"
+    docker buildx build --platform linux/arm64 --provenance=false \
+        --build-arg APR_TAG="$APR_TAG" --build-arg APR_TARBALL_SHA256="$APR_TARBALL_SHA256" \
+        -f "$DOCKERFILE" -t "$TAG" --load "$DIR" > "$IDS/build.log" 2>&1 && rc=0 || rc=$?
+    [ "$rc" -eq 0 ] || { tail -15 "$IDS/build.log" >&2; refuse build "docker buildx build failed (rc=$rc, see $IDS/build.log)" 5; }
+    # prove the identity from the image's own binary, never from the tag we gave it
+    docker run --rm --entrypoint /usr/local/bin/apr "$TAG" --version > "$IDS/identity.log" 2>&1 && rc=0 || rc=$?
+    VLINE="$(head -1 "$IDS/identity.log")"
+    [ "$rc" -eq 0 ] || refuse identity "the image's apr --version exited $rc: $VLINE" 6
+    case "$VLINE" in
+        *"${APR_TAG#v}"*) ;;
+        *) refuse identity "the image's apr --version prints '$VLINE', which does not carry ${APR_TAG#v}" 6 ;;
+    esac
+    IMAGE_ID="$(docker image inspect --format '{{{{.Id}}' "$TAG")"
+    python3 -I - "$IDS/image-local.json" "$TAG" "$APR_TAG" "$IMAGE_ID" "$VLINE" <<'PY'
+    import datetime, json, sys
+    out, image, tag, image_id, line = sys.argv[1:6]
+    rec = {"image": image, "tag": tag, "image_id": image_id, "apr_version_line": line,
+           "built_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+    json.dump(rec, open(out, "w"), indent=2)
+    PY
+    if [ "{{push}}" = "1" ]; then
+        [ -f "$IDS/aws.json" ] || refuse ids "push=1 needs $IDS/aws.json (written by llm-endpoint-up)" 7
+        FIELDS="$(python3 -I -c 'import json, sys; a = json.load(open(sys.argv[1])); print(a["profile"], a["region"], a["ecr_host"], a["ecr_repo"], a["ecr_repo_name"])' "$IDS/aws.json")" \
+            || refuse ids "$IDS/aws.json lacks profile/region/ecr_host/ecr_repo/ecr_repo_name" 7
+        read -r PROFILE REGION ECR_HOST ECR_REPO ECR_REPO_NAME <<< "$FIELDS"
+        PW="$(aws ecr get-login-password --profile "$PROFILE" --region "$REGION")" \
+            || refuse push-login "aws ecr get-login-password failed" 8
+        printf '%s' "$PW" | docker login --username AWS --password-stdin "$ECR_HOST" > "$IDS/login.log" 2>&1 \
+            || refuse push-login "docker login to $ECR_HOST failed (see $IDS/login.log)" 8
+        docker tag "$TAG" "$ECR_REPO:cpu-$APR_TAG"
+        docker push "$ECR_REPO:cpu-$APR_TAG" > "$IDS/push.log" 2>&1 && rc=0 || rc=$?
+        [ "$rc" -eq 0 ] || refuse push "docker push failed (rc=$rc, see $IDS/push.log)" 8
+        DIGEST="$(aws ecr describe-images --profile "$PROFILE" --region "$REGION" --repository-name "$ECR_REPO_NAME" \
+            --image-ids "imageTag=cpu-$APR_TAG" --query 'imageDetails[0].imageDigest' --output text)" \
+            || refuse push "aws ecr describe-images failed" 8
+        python3 -I - "$IDS/image-pushed.json" "$ECR_REPO" "cpu-$APR_TAG" "$DIGEST" <<'PY'
+    import json, sys
+    out, repo, tag, digest = sys.argv[1:5]
+    json.dump({"repo": repo, "tag": tag, "digest": digest}, open(out, "w"), indent=2)
+    PY
+        echo "PUSHED $ECR_REPO:cpu-$APR_TAG $DIGEST"
+    fi
+    echo "IMAGE OK $TAG (apr $VLINE)"

@@ -70,6 +70,12 @@ crates/aprender-shell/qa_test_artifacts/
 /deploy/node_modules/
 /deploy/cdk.out/
 /deploy/.build/
+# Phase 9 internal LLM endpoint (deploy/llm-endpoint): the downloaded release tarball + its extracted
+# 57 MB binary, and the per-checkout ids (account/bucket/function/URL, local image id). The URL must
+# never be committed (cost amplification). Root-anchored, never a bare `bin/` (CB-510): the Dockerfile,
+# entrypoint.sh and pin.env in that directory ARE committed.
+/deploy/llm-endpoint/bin/
+/deploy/llm-endpoint/.ids/
 # cargo-pmcp per-checkout state (which named target is active on THIS machine)
 /.pmcp/active-target
 # ...and the same two per-checkout files under a PER-CRATE .pmcp/ directory.
