@@ -76,6 +76,11 @@ crates/aprender-shell/qa_test_artifacts/
 # entrypoint.sh and pin.env in that directory ARE committed.
 /deploy/llm-endpoint/bin/
 /deploy/llm-endpoint/.ids/
+# Plan 09-12: the agent-loop matrix driver is a standalone crate; its build output and lock are local.
+# Root-anchored (CB-510), never a bare `target/`. The generated per-variant directories live under
+# the already-ignored /deploy/llm-endpoint/.ids/ above; Cargo.toml, src/, make-variant.sh ARE committed.
+/deploy/llm-endpoint/probe/agent-loop/target/
+/deploy/llm-endpoint/probe/agent-loop/Cargo.lock
 # cargo-pmcp per-checkout state (which named target is active on THIS machine)
 /.pmcp/active-target
 # ...and the same two per-checkout files under a PER-CRATE .pmcp/ directory.
