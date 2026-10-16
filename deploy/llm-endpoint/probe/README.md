@@ -51,8 +51,10 @@ Exit status: `0` on a written record; `2` when a `fixed` run contains a cross (t
 written, so the failure can be read). A probe that cannot turn red is theater: pointed at an open
 server in the `fixed` profile, the `no Authorization header` row reads `✗` and the run exits `2`.
 
-The `just llm-endpoint-probe` recipe the contract's row 007 names as the live harness is a later
-plan of this phase; until it lands, the commands above are the harness.
+The `just llm-endpoint-probe base model label server_version` recipe the contract's row 007 names as
+the live harness wraps these commands: it accepts only `release-local`, `interim` and
+`deployed-https`, names the record per the contract below, and runs the reader test right after
+writing it. See `deploy/llm-endpoint/README.md`, section "Probe and measure".
 
 ## The probe-record contract
 
