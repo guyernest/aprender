@@ -1,0 +1,113 @@
+{
+  "outcome": "deployed-401-not-proven-no-url",
+  "decided_by": "human",
+  "decided_by_who": "operator of this session (the D-15 checkpoint answer, verbatim option id)",
+  "decided_on": "2026-10-16",
+  "option": "go-dev-copy-weights",
+  "option_text": "GO: env dev, profile ze-kasher-dev (816069129666, us-east-1), pin as in pin.env, weights by server-side copy from the spike bucket, reserved concurrency 1, spike-031 leftovers left as they are",
+  "cost_ceiling_usd": 0.5,
+  "cost_ceiling_source": "orchestrator-proposed default, accepted implicitly via the option id; the operator answered with the option id alone and did not state the number",
+  "account": "816069129666",
+  "region": "us-east-1",
+  "profile": "ze-kasher-dev",
+  "env": "dev",
+  "function": "aprender-llm-endpoint-dev",
+  "reserved_concurrency": 1,
+  "pin": {
+    "apr_tag": "v0.71.4",
+    "apr_tarball_sha256": "f09b425e39d89182bda9a1aebf46e9b63f1fb99e495ffe8b112821e947be2db8",
+    "apr_pin_profile": "baseline",
+    "lwa_image_digest": "sha256:46d6625e68cbbdd2efab4a20245977664513f13ffef47915b000d431adcea0b4"
+  },
+  "model": {
+    "name": "Qwen3.5-0.8B Q4_K_M",
+    "gguf_sha256": "bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517",
+    "crux_certified": false,
+    "known_issue": "#4030",
+    "note": "2B is the smallest certified"
+  },
+  "weights": {
+    "bucket": "aprender-llm-endpoint-weights-816069129666-dev",
+    "key": "Qwen3.5-0.8B-Q4_K_M.gguf",
+    "source": "copy",
+    "source_bucket": "llm-spike-031-816069129666 (read only; the object was copied server-side, nothing in the spike bucket was modified)",
+    "s3_object_bytes": 532517120,
+    "s3_metadata_sha256_equals_ladder": true,
+    "note": "the first copy (aws s3 cp) dropped the sha256 metadata and the recipe refused s3-sha; the recipe was fixed to use s3api copy-object (commit 8dfa5cf65) and the object re-copied; the metadata was then read back equal to the ladder pin"
+  },
+  "image": {
+    "repo": "aprender-llm-endpoint-dev",
+    "repo_uri": "816069129666.dkr.ecr.us-east-1.amazonaws.com/aprender-llm-endpoint-dev",
+    "tag": "cpu-v0.71.4",
+    "digest": "sha256:f291c0a77f17d9f203953bba748f1a3f7287780d36628883f933d5b069a1dd15",
+    "resolved_by_function_equals_pushed": true
+  },
+  "function_configuration": {
+    "state": "Active",
+    "memory_size_mb": 10240,
+    "timeout_s": 900,
+    "ephemeral_storage_mb": 10240,
+    "architecture": "arm64",
+    "package_type": "Image",
+    "env_var_names": ["APR_API_KEY_HASH", "MODEL_S3_URI", "MODEL_SHA256", "PLATFORM", "RAYON_NUM_THREADS"],
+    "log_group": "/aws/lambda/aprender-llm-endpoint-dev"
+  },
+  "recipe_sequence": [
+    {"step": "just llm-endpoint-up dev ze-kasher-dev", "rc": 0, "line": "UP OK aprender-llm-endpoint-dev (account 816069129666, bucket aprender-llm-endpoint-weights-816069129666-dev, repository aprender-llm-endpoint-dev)"},
+    {"step": "just llm-endpoint-weights copy dev ze-kasher-dev (first run)", "rc": 2, "line": "REFUSED s3-sha: the copied object does not carry the ladder pin as Metadata.sha256 (aws s3 cp dropped the metadata)"},
+    {"step": "recipe fix: s3api copy-object (commit 8dfa5cf65), self-test 43/43, AWS CALLS: 0", "rc": 0},
+    {"step": "just llm-endpoint-weights copy dev ze-kasher-dev (second run)", "rc": 0, "line": "WEIGHTS OK s3://aprender-llm-endpoint-weights-816069129666-dev/Qwen3.5-0.8B-Q4_K_M.gguf sha256 bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517"},
+    {"step": "just llm-endpoint-image 1 (two attempts)", "rc": 8, "line": "REFUSED push: docker push failed (Docker Desktop proxy broken pipe on layer upload)"},
+    {"step": "docker push of the recipe's own tag, repeated until it completed (5 attempts; layers already pushed persist)", "rc": 0},
+    {"step": "just llm-endpoint-image 1 (third run, push a no-op, digest recorded)", "rc": 0, "line": "PUSHED 816069129666.dkr.ecr.us-east-1.amazonaws.com/aprender-llm-endpoint-dev:cpu-v0.71.4 sha256:f291c0a7...dd15 / IMAGE OK aprender-llm-endpoint:cpu-v0.71.4 (apr apr 0.71.4 (5027da624))"},
+    {"step": "DRY_RUN=1 just llm-endpoint-deploy dev ze-kasher-dev", "rc": 0, "line": "DRY-RUN OK aprender-llm-endpoint-dev (offline rungs 1-7; account, s3-sha and digest NOT checked; apr v0.71.4, gguf bd258782...; nothing deployed)"},
+    {"step": "PREFLIGHT=1 just llm-endpoint-deploy dev ze-kasher-dev", "rc": 0, "line": "PREFLIGHT OK aprender-llm-endpoint-dev (rungs 1-10; read-only AWS calls only; apr v0.71.4; nothing deployed)"},
+    {"step": "RESERVED_CONCURRENCY=1 just llm-endpoint-deploy dev ze-kasher-dev", "rc": 0, "line": "DEPLOY OK aprender-llm-endpoint-dev (image sha256:f291c0a7...dd15, apr v0.71.4)"},
+    {"step": "just llm-endpoint-prove-401 dev ze-kasher-dev", "rc": 3, "line": "401 NOT PROVEN: statusCode=200, invoke rc=0. The deployed pin does not enforce the key; no URL may be created (D-12)"}
+  ],
+  "identity": {
+    "entry_apr_version_line": "apr 0.71.4 (5027da624)",
+    "image_apr_version_line": "apr 0.71.4 (5027da624)",
+    "matches": true,
+    "source": "the first [entry] line of the function's own log group, cold start caused by the prove-401 invocation (request 9132b641-cedc-4dcd-a600-7fd315cb99b8)"
+  },
+  "auth": {
+    "server_401": {
+      "statusCode": 200,
+      "measured_at": "2026-10-16T18:19:17Z",
+      "proven": false,
+      "request": "POST /v1/chat/completions with no Authorization header, through lambda:Invoke with an API Gateway v2 event (deploy/llm-endpoint/events/apigw-v2-no-auth.json)"
+    },
+    "url_created": false,
+    "public_surface": "none",
+    "why": "401 NOT PROVEN: the v0.71.4 release pin does not carry the D-04 auth fix (paiml/aprender#5451, open and unmerged at this date), so the server answered the no-key request 200 even though APR_API_KEY_HASH was set and the entrypoint accepted it. No Function URL was created. Plan 09-08 (the HTTPS steps) waits on a release carrying the D-04 auth fix, and ONLY that fix (D-05: the content and alias fixes never gate the turn or the ingress). If no such release ever ships, plans 09-08 and 09-10 close the phase as incomplete-awaiting-auth-release, with SC1 and SC3 reported not delivered and no ingress created.",
+    "upstream_pr": "https://github.com/paiml/aprender/pull/5451",
+    "risk_acceptance": "Cost amplification: a public AuthType NONE URL on this server would let any caller buy a cold start (about $0.005 at 10,240 MB, measured here at $0.0039 for the 29.1 s billed cold start of the proof) and, because the pin does not gate the key, free inference. Hence no URL exists. The function is reachable only through IAM-authenticated lambda:Invoke; reserved concurrency is 1 (the operator's choice via the option id), which also enforces one conversation per process."
+  },
+  "session_model": "one conversation per function; a foreign request resets the Qwen35Session; requests serialise behind one Mutex",
+  "first_entry_timeline_ms": {
+    "start": 1848,
+    "host": 1893,
+    "mem": 1901,
+    "env": 1904,
+    "auth_hash_set": 1911,
+    "s3_pull_start": 1918,
+    "s3_pull_done_bytes_532517120": 21358,
+    "model_sha256_ok": 23118,
+    "apr_serve_start": 23120,
+    "s3_pull_duration_ms": 19440,
+    "sha_check_duration_ms": 1760,
+    "note": "t is milliseconds since the entrypoint's own clock start, from the [entry] lines; Lambda reported Init Duration 9907.55 ms for the same cold start"
+  },
+  "cpu_part": "0xd40",
+  "host_memory": {
+    "total_kb": 10972280,
+    "cgroup_max": "unknown",
+    "max_memory_used_mb": 1522,
+    "memory_size_mb": 10240,
+    "note": "the 10,240 MB tier admitted the 0.8B: the function started, pulled, hashed and served (REPORT line: Max Memory Used 1522 MB). This closes the D-02 admission question that plan 09-05 left PARTIAL, for the Lambda tier"
+  },
+  "proof_invocation_report": "REPORT RequestId: 9132b641-cedc-4dcd-a600-7fd315cb99b8 Duration: 19201.83 ms Billed Duration: 29110 ms Memory Size: 10240 MB Max Memory Used: 1522 MB Init Duration: 9907.55 ms",
+  "spike_031_leftovers": "untouched",
+  "teardown_commands_not_run": ["just llm-endpoint-teardown dev ze-kasher-dev"]
+}
