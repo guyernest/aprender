@@ -560,14 +560,15 @@ mod gguf_router_auth_tests {
 /// by `auth_gate` via `super::auth::layer`, `/health` included — the auth contract
 /// says health and metrics are NOT exempt. Behind a load balancer or the AWS Lambda
 /// Web Adapter that is still safe: the adapter's readiness check treats any 100-499
-/// status as ready, so a 401 on `/health` flips it to ready. `layer_public_ops` is
-/// the one-word alternative if a k8s-style probe ever needs `/health` open. Pass
+/// status as ready, so a 401 on `/health` flips it to ready. Pass
 /// `AuthGate::disabled()` to bypass.
 ///
-/// This was the one router in `serve/` built straight from
-/// `create_router_with_config` on the CPU GGUF path: `APR_API_KEY_HASH` was set and
+/// The CPU GGUF path was built straight from
+/// `create_router_with_config`: `APR_API_KEY_HASH` was set and
 /// ignored, and the server answered 200 without a key (observed on v0.70.3 and
-/// v0.71.4). `serve_router` is a thin wrapper that supplies `AuthGate::from_env()`;
+/// v0.71.4). The GPU, CUDA and APR GPU routers (`start_gguf_server_gpu_batched`,
+/// `start_gguf_server_cuda`, `handlers_include_01.rs`) are still ungated: follow-up.
+/// `serve_router` is a thin wrapper that supplies `AuthGate::from_env()`;
 /// the seam exists so the wiring is testable without a socket or model weights.
 #[cfg(feature = "inference")]
 fn build_gguf_router(
