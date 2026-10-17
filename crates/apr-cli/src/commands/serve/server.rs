@@ -558,7 +558,7 @@ mod gguf_router_auth_tests {
 ///
 /// HELIX-IDEA-009 / FALSIFY-AUTH-001: every route on the returned router is gated
 /// by `auth_gate` via `super::auth::layer`, `/health` included — the auth contract
-/// says health and metrics are NOT exempt. Behind a load balancer or the AWS Lambda
+/// says health and metrics are NOT exempt. Behind the AWS Lambda
 /// Web Adapter that is fine (its readiness check treats any 100-499
 /// status as ready), but an ALB or a k8s httpGet probe counts a 401 as unhealthy: pass
 /// the probe the key, or `AuthGate::disabled()` to bypass.
@@ -567,7 +567,7 @@ mod gguf_router_auth_tests {
 /// `create_router_with_config`: `APR_API_KEY_HASH` was set and
 /// ignored, and the server answered 200 without a key (observed on v0.70.3 and
 /// v0.71.4). The GPU, CUDA and APR GPU routers (`start_gguf_server_gpu_batched`,
-/// `start_gguf_server_cuda`, and the APR/SafeTensors GPU starters in
+/// `start_gguf_server_cuda` (past its early serve_router fallback), and the APR/SafeTensors GPU starters in
 /// `handlers_include_01.rs`) are still ungated: follow-up.
 /// `serve_router` is a thin wrapper that supplies `AuthGate::from_env()`;
 /// the seam exists so the wiring is testable without a socket or model weights.
