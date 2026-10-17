@@ -542,7 +542,8 @@ mod gguf_router_auth_tests {
         assert_eq!(body["status"].as_str(), Some("loading"), "{body}");
     }
 
-    /// `AuthGate::from_env()` yields a disabled gate when neither env var is set;
+    /// `AuthGate::from_env()` yields a disabled gate when neither env var is set (this test uses
+    /// `AuthGate::disabled()` directly; the `serve_router` env wiring itself is a one-line call, untested);
     /// the seam must not change behaviour in that case (documented upstream
     /// semantics: with no key, `from_env()` warns and serves open).
     #[tokio::test]
@@ -563,7 +564,7 @@ mod gguf_router_auth_tests {
 /// status as ready), but an ALB or a k8s httpGet probe counts a 401 as unhealthy: pass
 /// the probe the key, or `AuthGate::disabled()` to bypass.
 ///
-/// The CPU GGUF path was built straight from
+/// The GGUF/Qwen3.5 CPU path (and every other caller of `serve_router`) was built straight from
 /// `create_router_with_config`: `APR_API_KEY_HASH` was set and
 /// ignored, and the server answered 200 without a key (observed on v0.70.3 and
 /// v0.71.4). The GPU, CUDA and APR GPU routers (`start_gguf_server_gpu_batched`,
