@@ -85,6 +85,18 @@ No new transformer and no provider branch should be needed.
   **20.1 s** (init 7.5 s: S3 pull ≈ 19 s inside the entrypoint, sha256 check ≈ 1.8 s). Turn 2 (tool result extending the
   same conversation): **4.6–8.1 s** because the prefix is reused. A **ten-tool** prompt took **148.8 s** — prefill runs at
   only ≈ 6.3 tokens/s on this 0.8B at this tier.
+* **Prefix reuse is implicit, single-slot and extension-only (measured 2026-10-16, two-tool prompt of ~420 tokens,
+  `max_tokens=1`, warm function; `apr serve` has no pin / prefix-cache control).** The Qwen3.5 session keeps ONE
+  decode state. A prompt that *extends* the tokens it holds prefills only the new suffix; any other prompt resets the
+  state and prefills everything.
+  * same tools prefix, different user message: **~102 s** (no shared-prefix reuse)
+  * identical request repeated: **1.8 s**
+  * conversation X, then conversation Y, then X again: **102 s, 102 s** (Y evicts X; only one conversation is warm)
+  * Consequence: an agent loop that appends to its own history is cheap after turn 1; two agents with the same tools
+    but different histories do not share anything, and a cold start or recycle loses the state.
+  * Prefill ran at ~4.1 tokens/s here (420 tokens in ~101 s), the docs say it goes token by token. The 6.3 tok/s
+    above is the same effect on another sample; the lever is batched prefill, not the cache.
+  * Evidence: `09-PREFIX-REUSE-EVIDENCE.json`.
 * **API Gateway's integration timeout is the problem for the URL you described.** Our research record (D-12)
   ruled API Gateway out because of its ~30 s integration cap against these turns (HTTP APIs have a hard 30 s
   limit; REST APIs ≈ 29 s by default, with a quota that may be raised — we have **not** verified current

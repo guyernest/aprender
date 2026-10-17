@@ -1,0 +1,48 @@
+{
+  "date": "2026-10-16",
+  "function": "aprender-llm-endpoint-dev",
+  "shape": "tools2 (421 prompt tokens), max_tokens=1, temperature 0",
+  "mechanism": "crates/aprender-serve/src/gguf/inference/forward/qwen35_session.rs header: a prompt that EXTENDS the held tokens prefills only the suffix; any other resets and prefills whole",
+  "run1": [
+    {
+      "label": "A_first",
+      "duration_ms": 101861,
+      "init_ms": 9069
+    },
+    {
+      "label": "B_same_prefix_different_tail",
+      "duration_ms": 101945
+    },
+    {
+      "label": "C_new_prompt",
+      "duration_ms": 101693
+    },
+    {
+      "label": "D_identical_to_C",
+      "duration_ms": 1808
+    }
+  ],
+  "run2": [
+    {
+      "label": "X_first",
+      "duration_ms": 101794
+    },
+    {
+      "label": "X_again",
+      "duration_ms": 1805
+    },
+    {
+      "label": "Y_other",
+      "duration_ms": 101356
+    },
+    {
+      "label": "X_after_Y",
+      "duration_ms": 101492
+    }
+  ],
+  "not_measured": [
+    "cpu_part per call (all earlier runs were Graviton3)",
+    "a real tool-call turn 2 in this run (earlier measured 4.6-8.1 s)",
+    "longest-common-prefix reuse across conversations (absent by design)"
+  ]
+}
