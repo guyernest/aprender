@@ -520,7 +520,8 @@ mod gguf_router_auth_tests {
     #[tokio::test]
     async fn gguf_router_admits_the_right_bearer() {
         // The model-free state answers the chat route with its own "no model"
-        // error; what matters is that the gate let the request through.
+        // 503 "No model available" (a 200 needs real weights); that exact answer proves the
+        // request reached the handler, so a missing route (404) or a gate refusal (401) fails.
         let (status, _, body) = fire(
             router(AuthGate::from_plain_key("k")),
             Method::POST,
@@ -528,6 +529,8 @@ mod gguf_router_auth_tests {
             Some("Bearer k"),
         )
         .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(body["error"].as_str().is_some_and(|e| e.contains("No model available")), "{body}");
         assert_ne!(status, StatusCode::UNAUTHORIZED, "{body}");
         let (status, _, body) = fire(
             router(AuthGate::from_plain_key("k")),
@@ -538,7 +541,7 @@ mod gguf_router_auth_tests {
         .await;
         // A model-free state reports itself as still loading (503); the point is that
         // the health handler answered, not the gate.
-        assert_ne!(status, StatusCode::UNAUTHORIZED, "{body}");
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
         assert_eq!(body["status"].as_str(), Some("loading"), "{body}");
     }
 
@@ -550,7 +553,7 @@ mod gguf_router_auth_tests {
     async fn gguf_router_disabled_gate_is_open() {
         let (status, _, body) =
             fire(router(AuthGate::disabled()), Method::GET, "/health", None).await;
-        assert_ne!(status, StatusCode::UNAUTHORIZED, "{body}");
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
         assert_eq!(body["status"].as_str(), Some("loading"), "{body}");
     }
 }
