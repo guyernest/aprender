@@ -544,7 +544,7 @@ mod gguf_router_auth_tests {
 
     /// `AuthGate::from_env()` yields a disabled gate when neither env var is set;
     /// the seam must not change behaviour in that case (documented upstream
-    /// semantics: deployments are expected to refuse to start without a key).
+    /// semantics: with no key, `from_env()` warns and serves open).
     #[tokio::test]
     async fn gguf_router_disabled_gate_is_open() {
         let (status, _, body) =
@@ -559,15 +559,16 @@ mod gguf_router_auth_tests {
 /// HELIX-IDEA-009 / FALSIFY-AUTH-001: every route on the returned router is gated
 /// by `auth_gate` via `super::auth::layer`, `/health` included — the auth contract
 /// says health and metrics are NOT exempt. Behind a load balancer or the AWS Lambda
-/// Web Adapter that is still safe: the adapter's readiness check treats any 100-499
-/// status as ready, so a 401 on `/health` flips it to ready. Pass
-/// `AuthGate::disabled()` to bypass.
+/// Web Adapter that is fine (its readiness check treats any 100-499
+/// status as ready), but an ALB or a k8s httpGet probe counts a 401 as unhealthy: pass
+/// the probe the key, or `AuthGate::disabled()` to bypass.
 ///
 /// The CPU GGUF path was built straight from
 /// `create_router_with_config`: `APR_API_KEY_HASH` was set and
 /// ignored, and the server answered 200 without a key (observed on v0.70.3 and
 /// v0.71.4). The GPU, CUDA and APR GPU routers (`start_gguf_server_gpu_batched`,
-/// `start_gguf_server_cuda`, `handlers_include_01.rs`) are still ungated: follow-up.
+/// `start_gguf_server_cuda`, and the APR/SafeTensors GPU starters in
+/// `handlers_include_01.rs`) are still ungated: follow-up.
 /// `serve_router` is a thin wrapper that supplies `AuthGate::from_env()`;
 /// the seam exists so the wiring is testable without a socket or model weights.
 #[cfg(feature = "inference")]
