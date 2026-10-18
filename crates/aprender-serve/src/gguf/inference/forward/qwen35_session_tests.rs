@@ -9,16 +9,24 @@ use crate::gguf::forward_qwen35::qwen35_reference_generate;
 use crate::gguf::QuantizedGenerateConfig;
 use crate::session::turn_budget;
 
-/// The real hybrid file the rest of the Qwen3.5 tests are specified against.
-const MODEL_PATH: &str = "/home/noah/models/Qwen3.5-0.8B-Q4_K_M.gguf";
+/// The real hybrid file the rest of the Qwen3.5 tests are specified against:
+/// `$APR_QWEN35_MODEL_DIR/Qwen3.5-0.8B-Q4_K_M.gguf`, else the host path (as
+/// `forward_qwen35_prefill_tests` resolves it).
+fn model_path() -> String {
+    match std::env::var("APR_QWEN35_MODEL_DIR") {
+        Ok(dir) => format!("{dir}/Qwen3.5-0.8B-Q4_K_M.gguf"),
+        Err(_) => "/home/noah/models/Qwen3.5-0.8B-Q4_K_M.gguf".to_string(),
+    }
+}
 
 macro_rules! mapped_or_skip {
     () => {{
-        if !std::path::Path::new(MODEL_PATH).exists() {
-            eprintln!("SKIP: {MODEL_PATH} is absent");
+        let path = model_path();
+        if !std::path::Path::new(&path).exists() {
+            eprintln!("SKIP: {path} is absent");
             return;
         }
-        MappedGGUFModel::from_path(MODEL_PATH).expect("map the GGUF")
+        MappedGGUFModel::from_path(&path).expect("map the GGUF")
     }};
 }
 
@@ -104,7 +112,8 @@ fn a_prompt_the_declared_context_cannot_hold_is_refused_whole() {
 fn cpu_a_turn_that_extends_the_last_one_reuses_the_state_and_matches_one_shot() {
     let mapped = mapped_or_skip!();
     let mut session =
-        Qwen35Session::load_cached(std::path::Path::new(MODEL_PATH), &mapped, true).expect("load");
+        Qwen35Session::load_cached(std::path::Path::new(&model_path()), &mapped, true)
+            .expect("load");
     assert!(!session.on_gpu(), "--no-gpu is the CPU route");
     let config = greedy(6);
 
@@ -145,7 +154,8 @@ fn cpu_a_turn_that_extends_the_last_one_reuses_the_state_and_matches_one_shot() 
 fn cpu_a_turn_that_does_not_extend_resets_in_place_and_matches_one_shot() {
     let mapped = mapped_or_skip!();
     let mut session =
-        Qwen35Session::load_cached(std::path::Path::new(MODEL_PATH), &mapped, true).expect("load");
+        Qwen35Session::load_cached(std::path::Path::new(&model_path()), &mapped, true)
+            .expect("load");
     let config = greedy(6);
     let p1 = encode(&mapped, &user_turn("Name the capital of Peru."));
     session
@@ -165,7 +175,8 @@ fn cpu_a_turn_that_does_not_extend_resets_in_place_and_matches_one_shot() {
 fn on_token_returning_false_ends_the_turn_after_that_token() {
     let mapped = mapped_or_skip!();
     let mut session =
-        Qwen35Session::load_cached(std::path::Path::new(MODEL_PATH), &mapped, true).expect("load");
+        Qwen35Session::load_cached(std::path::Path::new(&model_path()), &mapped, true)
+            .expect("load");
     let p1 = encode(&mapped, &user_turn("Name the capital of Peru."));
     let mut seen = Vec::new();
     let t = session
@@ -211,7 +222,8 @@ fn cpu_an_identical_prompt_again_resumes_at_its_generation_header_and_matches_on
     // #4214: the same prompt twice cost the whole prefill twice.
     let mapped = mapped_or_skip!();
     let mut session =
-        Qwen35Session::load_cached(std::path::Path::new(MODEL_PATH), &mapped, true).expect("load");
+        Qwen35Session::load_cached(std::path::Path::new(&model_path()), &mapped, true)
+            .expect("load");
     let config = greedy(6);
     let p1 = encode(&mapped, &user_turn("Name the capital of Peru."));
     let t1 = session
@@ -235,7 +247,8 @@ fn cpu_a_re_rendered_turn_two_resumes_at_turn_ones_header_and_matches_one_shot()
     // #4274: serve re-renders the history, so turn 2 never extended turn 1.
     let mapped = mapped_or_skip!();
     let mut session =
-        Qwen35Session::load_cached(std::path::Path::new(MODEL_PATH), &mapped, true).expect("load");
+        Qwen35Session::load_cached(std::path::Path::new(&model_path()), &mapped, true)
+            .expect("load");
     let config = greedy(6);
     let p1 = encode(&mapped, &user_turn("Name the capital of Peru."));
     session
@@ -257,6 +270,125 @@ fn cpu_a_re_rendered_turn_two_resumes_at_turn_ones_header_and_matches_one_shot()
     );
 }
 
+/// #5475: the CPU route prefills through the batched prefill too (#4228's
+/// `forward_prefill_qwen35`, bitwise the one-token loop by FALSIFY-4228-004/005),
+/// so tokens are asserted equal, not close. Engagement is read off the counter;
+/// the control is the session's own per-token switch. The counts follow the
+/// #4214 split exactly as in the GPU twin below.
+#[test]
+fn cpu_serve_prefill_is_batched_and_token_identical_to_the_one_token_path() {
+    let mapped = mapped_or_skip!();
+    let path = std::path::PathBuf::from(model_path());
+    let mut batched = Qwen35Session::load_cached(&path, &mapped, true).expect("load");
+    let mut one_token = Qwen35Session::load_cached(&path, &mapped, true).expect("load");
+    assert!(
+        !batched.on_gpu() && !one_token.on_gpu(),
+        "--no-gpu is the CPU route"
+    );
+    one_token.engine_mut().per_token_prefill = true;
+    let config = greedy(8);
+
+    // Turn 1: a fresh chat prefills in two batched spans, history then generation header.
+    let p1 = encode(&mapped, &user_turn("Name the capital of Peru."));
+    let b1 = batched
+        .generate(&p1, &config, &mut |_| true)
+        .expect("turn 1");
+    let o1 = one_token
+        .generate(&p1, &config, &mut |_| true)
+        .expect("turn 1");
+    assert_eq!(
+        batched.batched_prefills(),
+        2,
+        "both spans of turn 1's prompt went through the batched prefill"
+    );
+    assert_eq!(
+        one_token.batched_prefills(),
+        0,
+        "the control prefilled per token"
+    );
+    assert_eq!(b1.tokens, o1.tokens, "turn 1: batched == one-token");
+    assert_eq!(
+        b1.tokens,
+        one_shot_cpu(&mapped, &p1, &config),
+        "and both are the reference loop"
+    );
+
+    // Turn 2: extends turn 1, so both spans batch from a nonzero position.
+    let mut p2 = b1.tokens.clone();
+    p2.extend(encode(
+        &mapped,
+        &format!("<|im_end|>\n{}", user_turn("And of Chile?")),
+    ));
+    let b2 = batched
+        .generate(&p2, &config, &mut |_| true)
+        .expect("turn 2");
+    let o2 = one_token
+        .generate(&p2, &config, &mut |_| true)
+        .expect("turn 2");
+    assert_eq!(b2.reused, b1.tokens.len() - 1, "turn 2 extended the state");
+    assert_eq!(
+        batched.batched_prefills(),
+        4,
+        "both spans of turn 2's new suffix went through the batched prefill, from a nonzero position"
+    );
+    assert_eq!(b2.tokens, o2.tokens, "turn 2: batched == one-token");
+    assert_eq!(
+        b2.tokens,
+        one_shot_cpu(&mapped, &p2, &config),
+        "and both are the reference loop"
+    );
+
+    // Turn 3: the same chat again. It does not extend the state, but it starts with
+    // the #4214 checkpoint turn 2 left (its history, before the generation header),
+    // so the session restores it and batches only the header: one more span, and
+    // the tokens of a resumed CPU state are turn 2's, bitwise.
+    let b3 = batched
+        .generate(&p2, &config, &mut |_| true)
+        .expect("turn 3");
+    let o3 = one_token
+        .generate(&p2, &config, &mut |_| true)
+        .expect("turn 3");
+    assert!(
+        b3.reused > 0 && b3.reused < p2.len(),
+        "turn 3 resumed from the checkpoint: reused {}",
+        b3.reused
+    );
+    assert_eq!(
+        batched.batched_prefills(),
+        5,
+        "the generation header after a restored checkpoint is one batched span"
+    );
+    assert_eq!(
+        b3.tokens, b2.tokens,
+        "turn 3: a resumed state decodes what the fresh one did"
+    );
+    assert_eq!(b3.tokens, o3.tokens, "turn 3: batched == one-token");
+
+    // Turn 4: a raw prompt that extends nothing: reset in place, one batched span up
+    // to its last token, then that token alone through the one-token path (never
+    // counted).
+    let p4 = encode(&mapped, "The capital of Peru is");
+    let b4 = batched
+        .generate(&p4, &config, &mut |_| true)
+        .expect("turn 4");
+    let o4 = one_token
+        .generate(&p4, &config, &mut |_| true)
+        .expect("turn 4");
+    assert_eq!(b4.reused, 0, "a raw prompt extends nothing");
+    assert_eq!(
+        batched.batched_prefills(),
+        6,
+        "a raw prompt adds one batched span; its last token is a one-token step"
+    );
+    assert_eq!(one_token.batched_prefills(), 0, "the control never batched");
+    assert_eq!(b4.tokens, o4.tokens, "turn 4: batched == one-token");
+    assert_eq!(
+        b4.tokens,
+        one_shot_cpu(&mapped, &p4, &config),
+        "and both are the reference loop"
+    );
+}
+
 #[cfg(feature = "cuda")]
 mod gpu {
     use super::*;
@@ -269,7 +401,7 @@ mod gpu {
         config: &QuantizedGenerateConfig,
     ) -> Vec<u32> {
         let qwen =
-            Qwen35Forward::cached_host(std::path::Path::new(MODEL_PATH), mapped).expect("host");
+            Qwen35Forward::cached_host(std::path::Path::new(&model_path()), mapped).expect("host");
         let positions = prompt.len() + config.max_tokens;
         let mut one = Qwen35Session::load_for_run(qwen, mapped, false, positions).expect("load");
         let turn = one
@@ -287,8 +419,9 @@ mod gpu {
             eprintln!("SKIP: no CUDA device");
             return None;
         }
-        let session = Qwen35Session::load_cached(std::path::Path::new(MODEL_PATH), mapped, false)
-            .expect("load");
+        let session =
+            Qwen35Session::load_cached(std::path::Path::new(&model_path()), mapped, false)
+                .expect("load");
         assert!(
             session.on_gpu(),
             "a CUDA build on a CUDA host serves from the GPU"

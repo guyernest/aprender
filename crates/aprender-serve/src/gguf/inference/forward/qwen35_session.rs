@@ -23,7 +23,7 @@
 use crate::error::{RealizarError, Result};
 use crate::gguf::forward_qwen35::{
     qwen35_route, qwen35_route_notice, Qwen35Model, Qwen35Route, Qwen35State,
-    QWEN35_GPU_FALLBACK_PREFIX,
+    QWEN35_GPU_FALLBACK_PREFIX, QWEN35_PREFILL_CHUNK,
 };
 use crate::gguf::{MappedGGUFModel, OwnedQuantizedModel};
 
@@ -33,9 +33,9 @@ use crate::gguf::{MappedGGUFModel, OwnedQuantizedModel};
 const MIN_CAPACITY: usize = 4096;
 
 /// Set to `per-token` to make a session prefill one token at a time, the path
-/// 0.69.1 served, instead of the batched prefill (0.69.3). It exists so the two
-/// can be compared token for token on ONE binary; the session says loudly that
-/// it is set.
+/// 0.69.1 served, instead of the batched prefill (0.69.3 on the GPU, #5475 on
+/// the CPU). It exists so the two can be compared token for token on ONE
+/// binary; the session says loudly that it is set.
 pub const QWEN35_SESSION_PREFILL_ENV: &str = "APR_QWEN35_SESSION_PREFILL";
 
 /// What one Qwen3.5 turn did: the engine's [`Turn`](crate::session::Turn).
@@ -350,8 +350,8 @@ pub struct Qwen35Forward {
     notices: Vec<String>,
     /// [`QWEN35_SESSION_PREFILL_ENV`] asked for the one-token prefill.
     per_token_prefill: bool,
-    /// Prompts the GPU prefilled in one batched call — the evidence that `apr
-    /// serve` took the batched path, not a speed that merely looks like it.
+    /// Spans prefilled in one batched call, on either backend — the evidence that
+    /// `apr serve` took the batched path, not a speed that merely looks like it.
     batched_prefills: usize,
     /// The saved copy of the decode state (#4214); dropped whenever the state
     /// it was taken from is reallocated or the backend changes.
@@ -522,11 +522,17 @@ impl Qwen35Forward {
         if start == 0 {
             self.reset_state()?;
         }
-        // A prompt, or a turn's new suffix, goes through the batched prefill (#3596)
-        // — the path `apr run` takes. Decode steps (one new token) stay one-token.
-        #[cfg(feature = "cuda")]
+        // A prompt, or a turn's new suffix, goes through the batched prefill: #3596's
+        // on the GPU (the path `apr run` takes), #4228's on the CPU (#5475). Decode
+        // steps (one new token) stay one-token. The GPU helper declines when the
+        // session is not on the GPU; the CPU helper then runs, and declines unless
+        // the session is on the CPU.
         if tokens.len().saturating_sub(start) > 1 {
+            #[cfg(feature = "cuda")]
             if let Some(logits) = self.try_batched_prefill(&tokens[start..], start)? {
+                return Ok(logits);
+            }
+            if let Some(logits) = self.try_batched_prefill_cpu(&tokens[start..], start)? {
                 return Ok(logits);
             }
         }
@@ -582,6 +588,36 @@ impl Qwen35Forward {
             new.len() as f64 * 1000.0 / ms.max(1e-9),
             gpu.model.prefill_chunk_rows(end),
             gpu.model.prefill_attention_mode().as_str(),
+        );
+        self.batched_prefills += 1;
+        Ok(Some(logits))
+    }
+
+    /// Prefill `new` at positions `pos0..` in one batched call on the CPU (#4228's
+    /// layer-major chunks, bit for bit the one-token loop: FALSIFY-4228-004/005)
+    /// and return the last position's logits; `None` when the session is not on
+    /// the CPU or was told to prefill per token. There is no fallback to take
+    /// here: an error is the turn's, and the caller discards the state.
+    fn try_batched_prefill_cpu(
+        &mut self,
+        new: &[u32],
+        pos0: usize,
+    ) -> std::result::Result<Option<Vec<f32>>, Step> {
+        let qwen = self.qwen;
+        let Backend::Cpu(Some(state)) = &mut self.backend else {
+            return Ok(None);
+        };
+        if self.per_token_prefill {
+            return Ok(None);
+        }
+        let t0 = std::time::Instant::now();
+        let logits = qwen.forward_prefill_qwen35(new, state, pos0)?;
+        let ms = t0.elapsed().as_secs_f64() * 1000.0;
+        // The GPU line's shape, so a serve log shows WHICH prefill it took.
+        eprintln!(
+            "[qwen35] batched prefill: {} tokens in {ms:.0} ms ({:.0} tok/s, chunk {QWEN35_PREFILL_CHUNK} rows, on the CPU, from position {pos0})",
+            new.len(),
+            new.len() as f64 * 1000.0 / ms.max(1e-9),
         );
         self.batched_prefills += 1;
         Ok(Some(logits))
