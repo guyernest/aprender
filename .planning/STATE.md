@@ -577,6 +577,7 @@ Recent decisions affecting current work:
 
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
+| 261018-go4 | Aprender-side reply to the pmcp.run in-account LLM model-ladder brief | 2026-10-18 | 503686883 | [261018-go4-aprender-side-reply-to-the-pmcp-run-in-a](./quick/261018-go4-aprender-side-reply-to-the-pmcp-run-in-a/) |
 
 ### Roadmap Evolution
 
