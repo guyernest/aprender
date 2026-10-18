@@ -1,0 +1,79 @@
+metadata:
+  version: "1.0.0"
+  created: "2026-10-18"
+  author: Guy Ernest
+  kind: pattern
+  references:
+    - "paiml/aprender#5475 — a CPU serve prefilled one token at a time (~4 tok/s on Graviton3, the decode rate)"
+    - "paiml/aprender#4228 — forward_prefill_qwen35, the CPU batched prefill: layer-major 64-token chunks, bitwise the per-token loop (FALSIFY-4228-004/005)"
+    - "paiml/aprender#4214 — the generation-header checkpoint that splits a prompt into two spans"
+    - "paiml/aprender#3596 / contracts/qwen35-batched-prefill-v1.yaml — the GPU batched prefill this mirrors in the session"
+    - "paiml/aprender#4250 — every serve route prefills through the batched prefill (the GPU twin of the test here)"
+  description: |
+    Correctness contract for the CPU route of Qwen35Forward::try_forward. A span of more
+    than one token must go through forward_prefill_qwen35 (one batched call per span,
+    counted in batched_prefills), the served tokens must be the one-token loop's bit for
+    bit, and the session's per-token switch must still restore that loop on one binary.
+name: qwen35-cpu-session-prefill
+version: "1.0.0"
+scope: "crates/aprender-serve/src/gguf/inference/forward/qwen35_session.rs"
+description: |
+  #5475: try_forward batched a multi-token span only under cfg(feature = "cuda") and only
+  on Backend::Gpu. A CPU `apr serve` therefore looped forward_single_qwen35 over every
+  prompt token, and prefill ran at the decode rate: a 420-token system+tools prompt cost
+  101 s on a Graviton3 Lambda at 0.71.4, while #4228's batched CPU prefill, proven bitwise
+  equal to that loop, had no production caller. try_batched_prefill_cpu is the CPU twin of
+  the GPU helper: it runs when the session is on the CPU and was not told to prefill per
+  token, feeds the same counter, and prints the same log-line shape, so a serve log says
+  which prefill it took.
+equations:
+  C-QCSP-001:
+    description: "A multi-token span on the CPU is one batched call, and the counter says so."
+    formula: "len(tokens) - start > 1 and backend == Cpu(Some(state)) and not per_token_prefill  =>  one forward_prefill_qwen35(tokens[start..], state, start) call and batched_prefills += 1; a one-token span never moves the counter"
+    note: "With the #4214 split the counts are the GPU twin's: a fresh chat 2 (history, then the generation header), an extending turn 4, the same chat again 5 (only the header after the restored checkpoint), a raw prompt 6 (one span to its last token, which is then a one-token step)."
+  C-QCSP-002:
+    description: "The served tokens are the one-token loop's, bit for bit."
+    formula: "generate(batched session) == generate(per-token session) == qwen35_reference_generate, as assert_eq on the token ids, on a fresh turn, an extending turn (pos0 > 0), a turn resumed from a checkpoint, and a raw prompt"
+    note: "No tolerance: on the CPU the batched prefill is the per-token loop bitwise (FALSIFY-4228-004/005), so a tolerance here would hide a real divergence."
+  C-QCSP-003:
+    description: "APR_QWEN35_SESSION_PREFILL=per-token restores the one-token loop on the CPU."
+    formula: "per_token_prefill  =>  try_batched_prefill_cpu returns None, batched_prefills stays 0, and the tokens are unchanged"
+proof_obligations:
+  - id: PO-QCSP-001
+    kind: equivalence
+    statement: "Every multi-token span a CPU session prefills is counted as one batched call, with the counts C-QCSP-001 states."
+    discharged_by: FALSIFY-QCSP-001
+  - id: PO-QCSP-002
+    kind: equivalence
+    statement: "A CPU session's tokens equal the per-token session's and the reference loop's on fresh, extending, resumed and raw turns."
+    discharged_by: FALSIFY-QCSP-002
+  - id: PO-QCSP-003
+    kind: safety
+    statement: "The per-token switch still reaches the CPU helper, so the two paths can be compared on one binary."
+    discharged_by: FALSIFY-QCSP-003
+falsification_tests:
+  - id: FALSIFY-QCSP-001
+    rule: "A CPU session batches every multi-token span"
+    prediction: "batched_prefills reads 2 after a fresh chat, 4 after an extending turn, 5 after the same chat again, 6 after a raw prompt; the per-token control reads 0 throughout"
+    test: "APR_QWEN35_MODEL_DIR=<dir holding Qwen3.5-0.8B-Q4_K_M.gguf> APR_QWEN35_REQUIRE_MODEL=1 cargo test --release -p aprender-serve --lib cpu_serve_prefill_is_batched_and_token_identical_to_the_one_token_path"
+    if_fails: "try_forward's batched branch is gated or declined on the CPU again, or the #4214 split moved"
+  - id: FALSIFY-QCSP-002
+    rule: "Batched CPU tokens are the one-token loop's"
+    prediction: "Every turn's token ids equal the per-token control's and qwen35_reference_generate's, by assert_eq"
+    test: "the FALSIFY-QCSP-001 command (same test, token assertions)"
+    if_fails: "forward_prefill_qwen35 diverged from forward_single_qwen35 (re-run FALSIFY-4228-004/005), or the start position handed to it is wrong"
+  - id: FALSIFY-QCSP-003
+    rule: "The per-token switch restores the loop"
+    prediction: "Under APR_QWEN35_SESSION_PREFILL=per-token the same test fails at its first count assertion with left 0 (the RED control, exit 101); without it, it passes"
+    test: "APR_QWEN35_SESSION_PREFILL=per-token <the FALSIFY-QCSP-001 command>  — expected RED"
+    if_fails: "the switch no longer reaches try_batched_prefill_cpu, so the two paths cannot be compared on one binary"
+qa_gate:
+  id: F-QCSP-001
+  name: Qwen3.5 CPU session batched prefill contract
+  description: "The CPU session batches every multi-token span, its tokens are the one-token loop's bitwise, and the per-token switch still restores the loop"
+  checks:
+    - spans_batched
+    - tokens_bitwise
+    - switch_restores_loop
+  pass_criteria: "FALSIFY-QCSP-001 and -002 pass on the real 0.8B; FALSIFY-QCSP-003's RED control fails as stated"
+  falsification: "Measured 2026-10-18 on an M4 Pro (aarch64, 14 cores), upstream e293f183b: with the Backend::Cpu arm absent (the pre-change tree) the test panicked at its first count assertion, left 0 right 2, in 3.6 s; under APR_QWEN35_SESSION_PREFILL=per-token on the changed tree, the same assertion, left 0 right 2, in 2.5 s; on the changed tree without the switch, 1 passed in 11.8 s and the session module's 20 tests passed"
