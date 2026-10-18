@@ -31,7 +31,7 @@ hosts alike, with changes small enough to land upstream in 0.73.
 | Multi-entry reuse | CUDA batch scheduler only: `Qwen35BatchEngine` (#5279 P7) keeps up to 16 finished slots' device states, each with a copy at the same single boundary. Nothing on the CPU session. |
 | CPU batched prefill | `Qwen35Model::forward_prefill_qwen35` exists (#4228, folded in #4655): layer-major over 64-token chunks, Q4_K/Q5_K/Q6_K through the multi-row K-quant×Q8_K GEMM, bit-identical to the per-token path (FALSIFY-4228-004/005). **No production caller.** `Qwen35Forward::try_forward` batches only under `#[cfg(feature = "cuda")]`; the CPU session loops `forward_single_qwen35` per token. Same on `v0.71.4`. This is #5475 exactly. |
 | Reporting | `Turn::reused` exists and `apr chat` prints it. `apr serve` reports `timings.prompt_n` as the whole prompt and has no `usage.prompt_tokens_details.cached_tokens`. #4214's done-when (2026-10-15 comment) is "a repeated-prefix shot shows `timings.prompt_n < prompt_tokens`, measured by #5305's harness". |
-| Tickets | #4214 reopened 2026-10-15 for 0.73 under #3598, owner `aprender-df`, branch from `8f601caff2`. #5475 (CPU per-token prefill) and #5476 (shared prefix lost when the tail differs) filed 2026-10-18, milestone 0.73.0, P2. #5305 is the pp/tg harness. #4228 closed, parked. |
+| Tickets | #4214 reopened 2026-10-15 by a maintainer comment naming "0.73 under #3598, owner `aprender-df`, branch from `8f601caff2`"; the issue's own fields were not updated: milestone `backlog`, label `parked`, no assignee, no branch, no PR (checked 2026-10-18). #5475 (CPU per-token prefill) and #5476 (shared prefix lost when the tail differs) filed 2026-10-18, milestone 0.73.0, P2, unassigned; that milestone holds 232 open issues, so membership is a bucket, not a commitment. #5305 is the pp/tg harness. #4228 closed, parked. |
 
 ## 3. The Qwen3.5 constraint
 
@@ -101,10 +101,12 @@ Small, separable PRs cut from `upstream/main`, one in flight at a time (our last
 closed for WIP-cap clearance, not on merit), each with a `contracts/` YAML, FALSIFY tests and a
 measurement receipt, as the GEMM contribution was shipped:
 
-1. **Comment on #4214 and #5476 first.** #4214 has an owner (`aprender-df`) and a done-when
-   that is O3; as of 2026-10-18 no PR or `df/*` branch for it exists (checked `gh pr list` and
-   `git ls-remote`). The comment offers O3 and the stack, and asks which base to cut from, so
-   PR-B is a contribution to their work rather than a collision in `Timings`/`PhaseTimings`.
+1. **Comment on #4214 and #5476 first.** #4214's reopen comment names an owner (`aprender-df`)
+   and a done-when that is O3, but the issue is still `backlog`/`parked`/unassigned and as of
+   2026-10-18 no PR or `df/*` branch for it exists (checked `gh pr list` and `git ls-remote`).
+   Nothing on any of the three tickets lands by itself. The comment offers O3 and the stack,
+   and asks which base to cut from, so PR-B is a contribution to their work rather than a
+   collision in `Timings`/`PhaseTimings`.
 2. **Measure.** Run `qwen35_prefill_throughput_probe` on the 0.8B and 4B Q4_K_M at 6 and
    14 threads on the M4 and on a Graviton3 host (the dev Lambda function, or a `c7g` instance).
    One number decides whether O1 is a PR or a note.
@@ -117,11 +119,16 @@ measurement receipt, as the GEMM contribution was shipped:
 6. **Issue, then PR-D: O4**, only after O2 lands; the file format is the part to agree first.
 
 The Aprender-side Lambda image gains from each PR by re-pinning the release that carries it;
-nothing in the deploy recipe changes until O4. The schedule risk is upstream's clock: 0.73 is
-two minors past the deployed v0.71.4 and its milestone date is 2026-11-06 (a plan date). If
-pmcp.run needs the cold-turn numbers sooner, the only other path is a second workstream that
-builds the Lambda image from `upstream/main` plus a patch queue, which changes the deploy recipe
-Phase 9 plans 09-08 and 09-10 rest on; this fork (0.69.3) is not a base to backport onto.
+nothing in the deploy recipe changes until O4. The schedule risk is review latency, not the
+release cadence: upstream tagged v0.70.1, v0.70.2, v0.70.3, v0.71.1, v0.71.3 and v0.71.4
+between 2026-10-04 and 2026-10-14, a patch tag every two to three days and a minor about
+weekly; the 0.72.0 milestone was due 2026-10-17 and is not yet tagged, and 0.73.0's
+2026-11-06 date is a plan date for a 232-issue bucket. A PR merged on `upstream/main` reaches a
+tag within days, so a re-pin follows each merge, not the 0.73 date. Nothing reaches a tag
+without a PR: no one is assigned to #4214, #5475 or #5476. Only if a PR stalls in review is
+there a reason for a second workstream that builds the Lambda image from `upstream/main` plus a
+patch queue, which changes the deploy recipe Phase 9 plans 09-08 and 09-10 rest on; this fork
+(0.69.3) is not a base to backport onto.
 
 ## 7. Test obligations
 
@@ -138,9 +145,10 @@ Phase 9 plans 09-08 and 09-10 rest on; this fork (0.69.3) is not a base to backp
 
 ## 8. Decisions that are the operator's
 
-1. **The clock.** Upstream PRs only (earliest effect on pmcp.run: the 0.73 tag), or also the
-   second workstream in §6 that builds the Lambda image from `upstream/main` with a patch queue
-   and changes the deploy recipe.
+1. **The clock.** Upstream PRs only (effect on pmcp.run: a re-pin to the first tag after each
+   merge, days at the measured cadence, gated by review time), or also the second workstream in
+   §6 that builds the Lambda image from `upstream/main` with a patch queue and changes the
+   deploy recipe. Waiting without writing the PRs delivers nothing: no ticket is assigned.
 2. Whether to spend the Graviton3 measurement (§6 step 2) before PR-A, or go straight to PR-A
    on the x86 numbers upstream already accepted.
 3. Whether O4 (persisted checkpoint) is worth proposing upstream, or should stay an
