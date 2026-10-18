@@ -42,10 +42,15 @@ fixed-size recurrence that cannot be rewound at all, so a prefix cache for this 
 checkpoint is already shaped this way. What makes it cheap is that the recurrent half does not
 grow with the prefix:
 
-| Model (HF `text_config`) | Recurrent half per checkpoint | KV per cached token | 900-token prefix, KV only |
-|---|---|---|---|
-| 0.8B: 24 layers (18 DeltaNet, 6 attention), 16 k-heads, 16 v-heads, 128×128, kv 2×256 | 19.3 MiB (18 MiB DeltaNet, 1.3 MiB conv) | 24 KiB | 21 MiB |
-| 4B: 32 layers (24 + 8), 16 k-heads, 32 v-heads, 128×128, kv 4×256 | 50 MiB (48 + 2.3) | 64 KiB | 56 MiB |
+| Model (HF `text_config`) | Recurrent half per checkpoint, as copied today | Trimmed to DeltaNet layers | KV per cached token | 900-token prefix, KV only |
+|---|---|---|---|---|
+| 0.8B: 24 layers (18 DeltaNet, 6 attention), 16 k-heads, 16 v-heads, 128×128, kv 2×256 | 25.7 MiB | 19.3 MiB (18 MiB DeltaNet, 1.3 MiB conv) | 24 KiB | 21 MiB |
+| 4B: 32 layers (24 + 8), 16 k-heads, 32 v-heads, 128×128, kv 4×256 | 67 MiB | 50 MiB (48 + 2.3) | 64 KiB | 56 MiB |
+
+"As copied today" is what `Qwen35State::checkpoint()` clones: `Qwen35State::new` allocates a
+conv window and a DeltaNet state for every layer, attention layers included (they stay zero),
+and the copy takes all of them. Copying only the DeltaNet layers is a free quarter off, and
+PR-C should take it.
 
 Two consequences the design relies on:
 
@@ -67,15 +72,21 @@ Two consequences the design relies on:
 | # | Option | Platform | What it buys | Cost / risk |
 |---|---|---|---|---|
 | O1 | **Wire `forward_prefill_qwen35` into the CPU session.** In `try_forward`, a span of more than one token on `Backend::Cpu` goes through the batched prefill; `APR_QWEN35_SESSION_PREFILL=per-token` keeps the old path; `batched_prefills` counts it; the serve log prints the same `[qwen35] batched prefill` line the GPU prints. | CPU (Lambda, Fargate, LMI) | The first turn and every non-cached suffix. #4228's own measurement was 20.8–25.1 tok/s vs 5.0–6.2 on a 48-thread x86 host; the gain on 6 Graviton3 vCPUs is **unmeasured** and is the first thing to measure (the ignored `qwen35_prefill_throughput_probe` already exists). | ~40 lines. Bit-identity is already proven by FALSIFY-4228-004/005. Memory: a 64-row chunk of activations per layer, small. |
-| O2 | **Checkpoint stack.** Generalise the #4214 single copy to a stack of copies at every `<|im_start|>` of the prompt (capped, keeping the shallowest and the deepest). `prepare_prompt` restores the deepest checkpoint that is a prefix of the new prompt; `step` from position `start` drops every checkpoint deeper than `start`. Arch-agnostic in `Session`; `ArchForward::checkpoint_at` becomes "checkpoint points", `save`/`restore` take an index. Both backends reuse their existing copy code (`Qwen35State::checkpoint`, `Qwen35CudaModel::save_checkpoint`). | CPU and CUDA session | A different conversation that shares the system+tools block resumes from the block's end (the case #5476 measured at 101 s today). A tool-call reply that re-renders differently resumes from the last message boundary, not from zero. A warm-up call that carries only the system block leaves a usable checkpoint. No KV copies at all: rows below the restored point are still in the state. | 19 MiB (0.8B) or 50 MiB (4B) per checkpoint; a cap of 8 is 150–400 MiB. Only ONE chain is held: X, Y, X re-prefills X's tail (not its prefix). Needs the owner of #4214 on board; the done-when there is unchanged by this. |
+| O2 | **Checkpoint stack.** Generalise the #4214 single copy to a stack of copies at every `<|im_start|>` of the prompt (capped, keeping the shallowest and the deepest). `prepare_prompt` restores the deepest checkpoint that is a prefix of the new prompt; `step` from position `start` drops every checkpoint deeper than `start`. Arch-agnostic in `Session`; `ArchForward::checkpoint_at` becomes "checkpoint points", `save`/`restore` take an index. Both backends reuse their existing copy code (`Qwen35State::checkpoint`, `Qwen35CudaModel::save_checkpoint`). | CPU and CUDA session | A different conversation that shares the system+tools block resumes from the block's end (the case #5476 measured at 101 s today). A tool-call reply that re-renders differently resumes from the last message boundary, not from zero. A warm-up call that carries only the system block leaves a usable checkpoint. No KV copies at all: rows below the restored point are still in the state. | 26 MiB (0.8B) or 67 MiB (4B) per checkpoint as copied today, 19 / 50 MiB trimmed; a cap of 8 is 150–535 MiB. Only ONE chain is held: X, Y, X re-prefills X's tail (not its prefix). Changing `checkpoint_at` into checkpoint points also touches the batch engine's `batch_checkpoint_at` call site. Needs the owner of #4214 on board; the done-when there is unchanged by this. |
 | O3 | **Report reuse.** `usage.prompt_tokens_details.cached_tokens = Turn::reused` on `/v1/chat/completions` (the OpenAI field pmcp.run's clients already parse), and `timings.prompt_n` = tokens actually prefilled, with the reused count beside it. | all | pmcp.run's per-call fingerprint can log hit or miss per call, and its replay harness can tell a numerics change from a cache miss. Satisfies #4214's done-when wording directly. | ~30 lines plus a test on the streamed terminal chunk. |
 | O4 | **Persisted checkpoint for a cold start.** Serialize the shallowest checkpoint plus its KV rows `[0, k)` to a file keyed by model sha256, apr version, target triple and the token prefix; `apr serve --checkpoint-dir DIR` writes it when first taken and, on the first prompt that starts with its tokens, loads it instead of prefilling. The deployer (our Lambda image) syncs DIR with S3 at start. | Lambda cold start; any restart | A 0.8B 420-token system+tools block is ~30 MiB: under a second at Lambda's measured 80–95 MB/s S3 rate, against ~100 s of prefill. It is the only option that touches pmcp.run's 125–343 s cold numbers beyond the 40 s weight pull. | A format and a flag upstream may not want; must refuse on any key mismatch; a Graviton2 host restoring a Graviton3 file is correct only if the forward is bitwise across the two (unverified: key on the CPU feature set until it is). Depends on O2's shallow checkpoint. |
 | O5 | **Branch pool on the CPU.** Keep whole states (recurrent half and the KV tail) for several conversations, as P7 does on CUDA. | CPU | X, Y, X without re-prefilling X's tail. | 24–64 KiB per cached token on top of O2. Only matters when one process serves several conversations at once, which pmcp.run's one-agent-per-LLM mapping avoids. Defer. |
 | O6 | **Explicit control.** `prompt_cache_key` selecting a named stack, or a `/v1/prefix` pin endpoint. | all | Needed only if one process must hold several agents' prefixes at once. | Deployment pattern already covers it: a `max_tokens: 0` request with the system block warms the stack (works today: budget 0 prefills and decodes nothing). Defer. |
 | O7 | **Faster CPU prefill beyond O1.** DeltaNet per value head in parallel (spike 020 measured the per-token DeltaNet loop serial at 288 ms on one thread while five waited); chunk size tuning. | CPU | More tok/s on the suffix and the cold first turn. | Only after O1's measurement says where the time goes on Graviton3. |
 
-GPU hosts: the batched prefill and the P7 pool already exist on the CUDA path; O2 and O3 are
-what the GPU host gains, nothing else is needed from this design.
+GPU hosts: a CUDA `apr serve` without `--batch` serves every chat request from the `Session`,
+so O1 is moot there (the batched prefill exists) and O2 and O3 apply as written. With `--batch`
+(opt-in, per `serve_plan_output.rs`) untraced chat requests go to the batch scheduler instead,
+which never touches the `Session`: there the P7 pool already resumes from one copy per slot,
+and the engine counts `reused_rows` but returns only `PhaseTimings` per request. PR-B therefore
+also threads the per-request reused count through `CudaBatchRequest`'s timing channel; a P7
+stack (O2 inside the batch engine) is a follow-up, not part of PR-C. pmcp.run's one-LLM-per-agent
+host does not need `--batch`.
 
 ## 5. What a pmcp.run turn would cost
 
@@ -90,18 +101,27 @@ Small, separable PRs cut from `upstream/main`, one in flight at a time (our last
 closed for WIP-cap clearance, not on merit), each with a `contracts/` YAML, FALSIFY tests and a
 measurement receipt, as the GEMM contribution was shipped:
 
-1. **Measure first.** Run `qwen35_prefill_throughput_probe` on the 0.8B and 4B Q4_K_M at 6 and
+1. **Comment on #4214 and #5476 first.** #4214 has an owner (`aprender-df`) and a done-when
+   that is O3; as of 2026-10-18 no PR or `df/*` branch for it exists (checked `gh pr list` and
+   `git ls-remote`). The comment offers O3 and the stack, and asks which base to cut from, so
+   PR-B is a contribution to their work rather than a collision in `Timings`/`PhaseTimings`.
+2. **Measure.** Run `qwen35_prefill_throughput_probe` on the 0.8B and 4B Q4_K_M at 6 and
    14 threads on the M4 and on a Graviton3 host (the dev Lambda function, or a `c7g` instance).
    One number decides whether O1 is a PR or a note.
-2. **PR-A: O1** (#5475). Wiring plus the log line and a test that the CPU session's
-   `batched_prefills` increments.
-3. **PR-B: O3** (#4214's done-when). Independent of A and C.
-4. **Comment on #4214 and #5476 before PR-C**, proposing the stack and asking `aprender-df`
-   whether it fits their 0.73 branch; then **PR-C: O2**.
-5. **Issue, then PR-D: O4**, only after O2 lands; the file format is the part to agree first.
+3. **PR-A: O1** (#5475). Wiring plus the log line and a test that the CPU session's
+   `batched_prefills` increments. Nobody else owns #5475.
+4. **PR-B: O3**, on the base the #4214 owner names. The streamed terminal chunk of
+   `/v1/chat/completions` already carries `usage` (spike 030's bench read it there), so
+   `cached_tokens` has a home on both shapes; the batch-scheduler count rides the same PR.
+5. **PR-C: O2**, after the comment's answer.
+6. **Issue, then PR-D: O4**, only after O2 lands; the file format is the part to agree first.
 
 The Aprender-side Lambda image gains from each PR by re-pinning the release that carries it;
-nothing in the deploy recipe changes until O4.
+nothing in the deploy recipe changes until O4. The schedule risk is upstream's clock: 0.73 is
+two minors past the deployed v0.71.4 and its milestone date is 2026-11-06 (a plan date). If
+pmcp.run needs the cold-turn numbers sooner, the only other path is a second workstream that
+builds the Lambda image from `upstream/main` plus a patch queue, which changes the deploy recipe
+Phase 9 plans 09-08 and 09-10 rest on; this fork (0.69.3) is not a base to backport onto.
 
 ## 7. Test obligations
 
@@ -118,19 +138,29 @@ nothing in the deploy recipe changes until O4.
 
 ## 8. Decisions that are the operator's
 
-1. Whether to spend the Graviton3 measurement (step 1) before anything else, or go straight to
-   PR-A on the x86 numbers upstream already accepted.
-2. Whether O4 (persisted checkpoint) is worth proposing upstream, or should stay an
+1. **The clock.** Upstream PRs only (earliest effect on pmcp.run: the 0.73 tag), or also the
+   second workstream in §6 that builds the Lambda image from `upstream/main` with a patch queue
+   and changes the deploy recipe.
+2. Whether to spend the Graviton3 measurement (§6 step 2) before PR-A, or go straight to PR-A
+   on the x86 numbers upstream already accepted.
+3. Whether O4 (persisted checkpoint) is worth proposing upstream, or should stay an
    Aprender-side deployment feature (a warm-up call after each cold start is the no-code
    alternative, at the same 100 s once per container).
-3. Whether to coordinate with `aprender-df` on #4214 first, or file PR-C and let the review
-   decide.
+4. Whether pmcp.run's two clients parse `usage` on the streamed terminal chunk (then O3 reaches
+   their fingerprint as designed) or only `timings` (then the `timings` fields carry the count
+   too). An ask for the pmcp.run team, not a code question.
+
+Calls made in this document rather than asked: O2 and O3 are scoped to the `Session` path, with
+the `--batch` scheduler getting only the reuse count (§4); the #4214 comment goes before any PR
+(§6 step 1); checkpoints trim to DeltaNet layers in PR-C (§3).
 
 ## 9. Left to the builder
 
 The stack cap and eviction policy within "keep shallowest and deepest"; the exact `timings`
 field names beside `prompt_n`; the checkpoint file layout; whether O1 also serves `apr run`'s
-one-call session (it should, through the same `try_forward`).
+one-call session (it should, through the same `try_forward`); one call to
+`POST /v1/chat/prompt-ids` before PR-C to confirm the rendered prompt carries the `<|im_start|>`
+id at every message start, which the stack's boundaries depend on.
 
 Sources read for this document: `upstream/main` `session.rs`, `qwen35_session.rs`,
 `forward_qwen35.rs` (`forward_prefill_qwen35`, `Qwen35Checkpoint`), `runtime.rs`,
