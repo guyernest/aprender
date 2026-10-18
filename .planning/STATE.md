@@ -573,6 +573,11 @@ Recent decisions affecting current work:
 - RESOLVED 2026-09-27 (was: 08-09 HALTED at its tracer on RescoreDrift zero_shot row 49 1.028e-5): debug session laya-rescore-drift fixed the RoPE inv_freq rounding (8e55e0bed); user decision option A keeps pack_rescore_probs_abs 1e-5, early_stopping 3d4b91da demonstrates GateFailed[ece_post] (exit 3), fixed_epochs d0f4e40d is refused with RescoreDrift fine_tuned row 59 4.667e-5 (exit 2). 08-09 complete (87c957bff). OPEN CONCERN, queued not acted on: the 1e-5 bar has ~1.5x headroom on early_stopping and the ladder final block 1.09x; x86_64 unmeasured (D-ITEM-08-09-B, spike-laya-calibration-slice-and-temperature-cap todo).
 - [RESOLVED 2026-09-27] 08-17 deploy-refused blocker: the user chose option 1 ([iam] statements in the deploy config); redeploy loaded the model on pmcp.run's own post-deploy call, identity == H, Task 3 deployed-passed (08-17-SUMMARY.md). Open follow-ups: D-ITEM-08-17-D (pmcp.run platform issue, recommend only) and D-ITEM-08-17-E (cold margin 650 ms; 08-18/08-12)
 
+### Quick Tasks Completed
+
+| # | Description | Date | Commit | Directory |
+|---|-------------|------|--------|-----------|
+
 ### Roadmap Evolution
 
 - Phase 06.1 inserted after Phase 6: Forecast exogenous inputs (Prophet regressors, NeuralProphet events, tier-safe cost bounds) — sequenced ahead of Phase 7 by user decision 2026-09-20; accepted cost is that the C-08 event-column term lands on a hard constant and is re-expressed as tier policy in Phase 7 (URGENT)
