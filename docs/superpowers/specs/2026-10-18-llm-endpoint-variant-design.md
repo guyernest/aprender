@@ -27,7 +27,7 @@ Goals
 - The 2B stays deployed after the acceptance test: pmcp.run selects it by name for its own
   measured tables. The teardown half of the isolation proof therefore uses a throwaway variant.
 - The model per variant is selected by the two existing pin keys in a per-variant pin file.
-- The 2B is deployed as `aprender-llm-endpoint-2b-dev` and one tool-calling chat completion is
+- The 2B is deployed as `aprender-llm-endpoint-dev-2b` and one tool-calling chat completion is
   measured through the recipe's own probe and the API Gateway v2 event.
 - Isolation is proved by a measured acceptance test, not by a code reading.
 
@@ -47,7 +47,7 @@ Anti-goals (would make this a failure even if it works)
 
 ## 3. Constraints
 
-- Every name derives from one suffix. With `S = <variant>-<env>` when a variant is given and
+- Every name derives from one suffix. With `S = <env>-<variant>` when a variant is given and
   `S = <env>` otherwise:
 
   | Resource | Name |
@@ -104,10 +104,10 @@ Anti-goals (would make this a failure even if it works)
   spends only API calls plus one 2B deploy that the smoke test needs anyway.
 - Nothing live runs without the operator's go for that step: the deploy, the weights copy and the
   teardown are side effects outside the worktree. The offline self-test and the name case table run
-  freely. The live 2B deploy additionally waits for pmcp.run to confirm the name
-  `aprender-llm-endpoint-2b-dev` (their plan's Task 7 writes `aprender-llm-endpoint-dev-2b`, and the
-  function name is the only thing their provider row keys on), unless the operator waives that wait.
-  The build does not wait for it.
+  freely. The live 2B deploy waits only for the operator's go. The name order is env before variant
+  (`aprender-llm-endpoint-dev-2b`), chosen to match the name pmcp.run's own plan writes; the function name
+  is the only thing their provider row keys on. A variant may not be `codebuild` or end in `-codebuild`
+  (its function role would equal another name's CodeBuild role).
 
 ## 4. The parts, as decided
 
@@ -182,7 +182,7 @@ deploy, no invocation, cents):
 5. `readback` of the 0.8B → R2 and of the 2B → S0.
 6. `teardown` for `variant=iso`.
 7. `readback` of the 0.8B → R3 and of the 2B → S1; `aws lambda get-function` on
-   `aprender-llm-endpoint-iso-dev` returns not found.
+   `aprender-llm-endpoint-dev-iso` returns not found.
 8. `readback_equal.py R0 R1 R2 R3` and `readback_equal.py S0 S1` both exit 0. The evidence file
    carries the six records, both exit statuses and outputs, the not-found read, and the recipe
    sequence with timestamps.
@@ -226,9 +226,9 @@ the evidence file names once they exist (the reply is otherwise already written)
 Must match (accepted): `2b`, `4b`, `2b-q4km`, `x`, `a1b2c3d4e5f6g7` (14 chars), empty (the default).
 Must not match (refused): `2B`, `2_b`, `-2b`, `2b-`, `a1b2c3d4e5f6g7h` (15 chars), `2b.q4`, `2b dev`,
 `aprender-llm-endpoint-2b` (the stem is not the caller's to write).
-Derived names for `2b`/`dev`/account `816069129666`: function `aprender-llm-endpoint-2b-dev`, bucket
-`aprender-llm-endpoint-weights-816069129666-2b-dev`, CodeBuild project `aprender-llm-endpoint-weights-2b-dev`,
-CodeBuild role `aprender-llm-endpoint-2b-dev-codebuild`.
+Derived names for `2b`/`dev`/account `816069129666`: function `aprender-llm-endpoint-dev-2b`, bucket
+`aprender-llm-endpoint-weights-816069129666-dev-2b`, CodeBuild project `aprender-llm-endpoint-weights-dev-2b`,
+CodeBuild role `aprender-llm-endpoint-dev-2b-codebuild`.
 Derived names for empty/`dev`: exactly today's, except the CodeBuild role `aprender-llm-endpoint-dev-codebuild`.
 Collision rows (must hold): `variant=codebuild-2b` derives a function role that equals no other
 derived role for any variant; `variant=codebuild` likewise.

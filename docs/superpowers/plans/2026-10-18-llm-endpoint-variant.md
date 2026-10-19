@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Let several sizes of the in-account LLM endpoint be deployed at the same time under their own names, prove that one name's deploy and teardown leave the others untouched, and deploy the 2B as `aprender-llm-endpoint-2b-dev` with a measured smoke test.
+**Goal:** Let several sizes of the in-account LLM endpoint be deployed at the same time under their own names, prove that one name's deploy and teardown leave the others untouched, and deploy the 2B as `aprender-llm-endpoint-dev-2b` with a measured smoke test.
 
 **Architecture:** One sourced bash library derives every resource name, the default ids directory and the default pin file from `(variant, env, account)`; the nine `just llm-endpoint-*` recipes that act on a deployment call it instead of carrying literals, and every reader of a record refuses when the recorded name is not the derived one. A read-only `readback` recipe plus a comparison script turn "untouched" into a measured claim. Live steps are gated and come last.
 
@@ -13,13 +13,13 @@
 ## Global Constraints
 
 - Variant rule, verbatim from the spec: regex `^[a-z0-9]([a-z0-9-]{0,12}[a-z0-9])?$`; empty means the default. Environment stays `dev` or `prod`. A bad variant is refused with class `variant` before any AWS call.
-- Names, with `S=<variant>-<env>` when a variant is given and `S=<env>` otherwise: function, IAM role and ECR repository `aprender-llm-endpoint-S`; log group `/aws/lambda/aprender-llm-endpoint-S`; bucket `aprender-llm-endpoint-weights-<account>-S`; CodeBuild project `aprender-llm-endpoint-weights-S`; CodeBuild role `aprender-llm-endpoint-S-codebuild`.
+- Names, with `S=<env>-<variant>` when a variant is given and `S=<env>` otherwise: function, IAM role and ECR repository `aprender-llm-endpoint-S`; log group `/aws/lambda/aprender-llm-endpoint-S`; bucket `aprender-llm-endpoint-weights-<account>-S`; CodeBuild project `aprender-llm-endpoint-weights-S`; CodeBuild role `aprender-llm-endpoint-S-codebuild`.
 - Default records: ids directory `deploy/llm-endpoint/.ids` for the empty variant, `deploy/llm-endpoint/.ids/S` otherwise; pin file `deploy/llm-endpoint/pin.env` for the empty variant, `deploy/llm-endpoint/pin-<variant>.env` otherwise. `LLM_ENDPOINT_IDS_DIR` and `LLM_ENDPOINT_PIN_FILE` override both, as today.
 - Every tagged resource adds `variant=<variant>` (empty string for the default) beside `project=aprender-llm-endpoint`, `phase=09`, `env=<env>`.
 - Memory 10,240 MB, ephemeral 10,240 MB, timeout 900 s, arm64, `RAYON_NUM_THREADS` 6 and the read-back refusal are not touched.
 - No literal `aprender-llm-endpoint-$ENV` or `aprender-llm-endpoint-dev` remains in any of the nine recipe bodies after Task 4 (the self-test proves it with `just --show`).
 - A sourced library is option-neutral: no `set` at file scope, failure by return status (`scripts/check_sourced_libs_option_neutral.sh` is the rule; it globs only `scripts/*.sh`, so the self-test lints the library itself).
-- Live steps (Task 7) run only after the operator's go for that task and after pmcp.run confirms the name `aprender-llm-endpoint-2b-dev` or the operator waives the wait. Invocation spend on the 2B is capped at $3 (`budget=3`). Nothing in Tasks 1 to 6 touches AWS: the self-test's `aws` shim is first on PATH and refuses in `SHIM_MODE=refuse`.
+- Live steps (Task 7) run only after the operator's go for that task. The 2B name `aprender-llm-endpoint-dev-2b` is the one pmcp.run's own plan writes (ruled 2026-10-18: the environment comes before the variant), so no name confirmation is awaited. Invocation spend on the 2B is capped at $3 (`budget=3`). Nothing in Tasks 1 to 6 touches AWS: the self-test's `aws` shim is first on PATH and refuses in `SHIM_MODE=refuse`.
 - Every self-test row reads its status after a redirect, never through a pipe (Verification Discipline rule 1), and every new guard pattern ships both polarities (rule 7).
 - Commit messages: `type(llm-endpoint): subject`, body in prose, ending with the attribution line the session carries.
 
@@ -53,7 +53,7 @@ Rows (each a `row <label> <expected rc> <command>` line):
 - accepted variants: `2b`, `4b`, `2b-q4km`, `x`, `a1b2c3d4e5f6g7`, `` (empty)
 - refused variants: `2B`, `2_b`, `-2b`, `2b-`, `a1b2c3d4e5f6g7h`, `2b.q4`, `2b dev`, `aprender-llm-endpoint-2b`
 - refused env: `llm_endpoint_names 2b staging` → rc 1
-- derived for `2b dev 816069129666`: `FN=aprender-llm-endpoint-2b-dev`, `BUCKET=aprender-llm-endpoint-weights-816069129666-2b-dev`, `CB_PROJECT=aprender-llm-endpoint-weights-2b-dev`, `CB_ROLE=aprender-llm-endpoint-2b-dev-codebuild`, `LOG_GROUP=/aws/lambda/aprender-llm-endpoint-2b-dev`, `IDS_DEFAULT=deploy/llm-endpoint/.ids/2b-dev`, `PIN_DEFAULT=deploy/llm-endpoint/pin-2b.env`, `TAG_VARIANT=variant=2b`
+- derived for `2b dev 816069129666`: `FN=aprender-llm-endpoint-dev-2b`, `BUCKET=aprender-llm-endpoint-weights-816069129666-dev-2b`, `CB_PROJECT=aprender-llm-endpoint-weights-dev-2b`, `CB_ROLE=aprender-llm-endpoint-dev-2b-codebuild`, `LOG_GROUP=/aws/lambda/aprender-llm-endpoint-dev-2b`, `IDS_DEFAULT=deploy/llm-endpoint/.ids/dev-2b`, `PIN_DEFAULT=deploy/llm-endpoint/pin-2b.env`, `TAG_VARIANT=variant=2b`
 - derived for `"" dev`: `FN=aprender-llm-endpoint-dev`, `IDS_DEFAULT=deploy/llm-endpoint/.ids`, `PIN_DEFAULT=deploy/llm-endpoint/pin.env`, `CB_ROLE=aprender-llm-endpoint-dev-codebuild`, `TAG_VARIANT=variant=`, `BUCKET` empty when no account is given
 - collision rows: the set `{FN, CB_ROLE}` for `codebuild-2b dev` is disjoint from the set for `2b dev` and from the set for `"" dev`; likewise `codebuild dev` against `"" dev`
 - longest legal bucket: `a1b2c3d4e5f6g7 prod 816069129666` → `${#BUCKET}` is 62
@@ -104,8 +104,8 @@ git commit -m "feat(llm-endpoint): one library derives every endpoint name from 
 
 - [ ] **Step 1: Write rows V3 to V7 in the self-test, against recipes that do not accept `variant` yet**
 
-- V3 `up variant=2b` under the permissive shim with a fresh ids dir `$T/up2b`: rc 0; `$T/up2b/aws.json` has `name` = `aprender-llm-endpoint-2b-dev`, `variant` = `2b`, `suffix` = `2b-dev`, `bucket` ending `-2b-dev`, `ecr_repo_name` = `aprender-llm-endpoint-2b-dev`; the shim log shows `repository-names aprender-llm-endpoint-2b-dev` and `--tags` carrying `variant=2b`; the log holds no `aprender-llm-endpoint-dev( |$)` match.
-- V4 `deploy DRY_RUN=1 variant=2b` with `LLM_ENDPOINT_IDS_DIR=$T/up2b` plus the image fixtures copied in, and `LLM_ENDPOINT_PIN_FILE` pointing at a copy of the fixture pin with `GGUF_RUNG=qwen35-2b-q4km` and `GGUF_OBJECT=Qwen3.5-2B-Q4_K_M.gguf`: rc 0; stdout matches `^DRY-RUN OK aprender-llm-endpoint-2b-dev `.
+- V3 `up variant=2b` under the permissive shim with a fresh ids dir `$T/up2b`: rc 0; `$T/up2b/aws.json` has `name` = `aprender-llm-endpoint-dev-2b`, `variant` = `2b`, `suffix` = `dev-2b`, `bucket` ending `-dev-2b`, `ecr_repo_name` = `aprender-llm-endpoint-dev-2b`; the shim log shows `repository-names aprender-llm-endpoint-dev-2b` and `--tags` carrying `variant=2b`; the log holds no `aprender-llm-endpoint-dev( |$)` match.
+- V4 `deploy DRY_RUN=1 variant=2b` with `LLM_ENDPOINT_IDS_DIR=$T/up2b` plus the image fixtures copied in, and `LLM_ENDPOINT_PIN_FILE` pointing at a copy of the fixture pin with `GGUF_RUNG=qwen35-2b-q4km` and `GGUF_OBJECT=Qwen3.5-2B-Q4_K_M.gguf`: rc 0; stdout matches `^DRY-RUN OK aprender-llm-endpoint-dev-2b `.
 - V5 `deploy DRY_RUN=1 variant=2b` with `LLM_ENDPOINT_IDS_DIR=$IDS` (the dev fixture, whose `aws.json` has no `name` key): rc non-zero; stderr matches `^REFUSED ids:`; the shim log is empty.
 - V6 `deploy DRY_RUN=1 variant=2B` (uppercase): rc non-zero; `^REFUSED variant:`; the shim log is empty; and the same for `variant=aprender-llm-endpoint-2b`.
 - V7 `deploy DRY_RUN=1` with the dev fixture and no variant (legacy record, empty variant): rc 0 and `^DRY-RUN OK aprender-llm-endpoint-dev ` (this is row 8's path; keep row 8 as it is and let V7 use an `aws.json` that carries `name` = `aprender-llm-endpoint-dev` to cover the new-format path for the empty variant).
@@ -146,7 +146,7 @@ git commit -m "feat(llm-endpoint): up and deploy take a variant and refuse anoth
 
 - [ ] **Step 1: Write the `docker` shim and row V8**
 
-The shim answers `run ... --version` with the fixture version line (`apr 0.71.4 (selftest)`), `image inspect` with a fixed id, and exits 0 for `buildx build`, `tag`, `push` and `login`, logging every argv to `$SHIM_LOG` like the `aws` shim. Row V8: `just llm-endpoint-image push=1 env=dev variant=2b` with `LLM_ENDPOINT_IDS_DIR=$T/up2b` (from V3), `LLM_ENDPOINT_BIN_DIR=$T/bin` holding the fixture tarball, and the permissive `aws` shim: rc 0; `$T/up2b/image-pushed.json` exists with `repo` ending `/aprender-llm-endpoint-2b-dev`; `$T/ids/image-pushed.json` is unchanged (compare its bytes before and after); the docker shim log shows `push` with a tag under `aprender-llm-endpoint-2b-dev`.
+The shim answers `run ... --version` with the fixture version line (`apr 0.71.4 (selftest)`), `image inspect` with a fixed id, and exits 0 for `buildx build`, `tag`, `push` and `login`, logging every argv to `$SHIM_LOG` like the `aws` shim. Row V8: `just llm-endpoint-image push=1 env=dev variant=2b` with `LLM_ENDPOINT_IDS_DIR=$T/up2b` (from V3), `LLM_ENDPOINT_BIN_DIR=$T/bin` holding the fixture tarball, and the permissive `aws` shim: rc 0; `$T/up2b/image-pushed.json` exists with `repo` ending `/aprender-llm-endpoint-dev-2b`; `$T/ids/image-pushed.json` is unchanged (compare its bytes before and after); the docker shim log shows `push` with a tag under `aprender-llm-endpoint-dev-2b`.
 
 - [ ] **Step 2: Run to verify V8 fails**
 
@@ -184,10 +184,10 @@ git commit -m "feat(llm-endpoint): image push=1 pushes to the variant's reposito
 
 - [ ] **Step 1: Write rows V9 to V13**
 
-- V9 `teardown variant=2b` with an ids dir holding a `2b-dev` `aws.json` (from V3) plus a `function.json` naming `aprender-llm-endpoint-2b-dev`, permissive shim, `SHIM_CONCURRENCY=0`: rc 0; `^TEARDOWN OK aprender-llm-endpoint-2b-dev`; the shim log shows `--function-name aprender-llm-endpoint-2b-dev`, `--role-name aprender-llm-endpoint-2b-dev`, `--log-group-name /aws/lambda/aprender-llm-endpoint-2b-dev`, `--bucket aprender-llm-endpoint-weights-<acct>-2b-dev`; and no line matches `aprender-llm-endpoint-dev( |$)`.
+- V9 `teardown variant=2b` with an ids dir holding a `dev-2b` `aws.json` (from V3) plus a `function.json` naming `aprender-llm-endpoint-dev-2b`, permissive shim, `SHIM_CONCURRENCY=0`: rc 0; `^TEARDOWN OK aprender-llm-endpoint-dev-2b`; the shim log shows `--function-name aprender-llm-endpoint-dev-2b`, `--role-name aprender-llm-endpoint-dev-2b`, `--log-group-name /aws/lambda/aprender-llm-endpoint-dev-2b`, `--bucket aprender-llm-endpoint-weights-<acct>-dev-2b`; and no line matches `aprender-llm-endpoint-dev( |$)`.
 - V10 `teardown variant=2b` with the dev fixture ids (no `name` key): rc non-zero; `^REFUSED ids:`; the shim log is empty.
-- V11 `teardown` (no variant) with an ids dir whose `aws.json` carries `name` = `aprender-llm-endpoint-2b-dev`: rc non-zero; `^REFUSED ids:`; shim log empty.
-- V12 `weights mode=codebuild env=dev variant=2b` under the permissive shim with the 2b ids and 2b pin: the shim log shows `create-role ... --role-name aprender-llm-endpoint-2b-dev-codebuild` and `create-project ... --name aprender-llm-endpoint-weights-2b-dev` with `variant=2b` in the tags (the shim must answer `codebuild batch-get-builds` with `SUCCEEDED`; extend the shim's canned answers as needed); `weights.json` records those two names.
+- V11 `teardown` (no variant) with an ids dir whose `aws.json` carries `name` = `aprender-llm-endpoint-dev-2b`: rc non-zero; `^REFUSED ids:`; shim log empty.
+- V12 `weights mode=codebuild env=dev variant=2b` under the permissive shim with the 2b ids and 2b pin: the shim log shows `create-role ... --role-name aprender-llm-endpoint-dev-2b-codebuild` and `create-project ... --name aprender-llm-endpoint-weights-dev-2b` with `variant=2b` in the tags (the shim must answer `codebuild batch-get-builds` with `SUCCEEDED`; extend the shim's canned answers as needed); `weights.json` records those two names.
 - V13 literal guard: for each of the nine recipes, `just --show <recipe>` piped to a file, then `grep -cE 'aprender-llm-endpoint-(\$ENV|dev|prod)\b'` over the nine files must print 0 for each; a must-match control greps the same pattern over `just --show llm-endpoint-selftest` and must find at least one.
 
 - [ ] **Step 2: Run to verify V9 to V13 fail**
@@ -272,7 +272,7 @@ git commit -m "feat(llm-endpoint): readback recipe and a comparison script for t
 
 - [ ] **Step 1: Write row V15, which fails until the pin file exists**
 
-V15: `diff <(grep -vE '^GGUF_(RUNG|OBJECT)=' deploy/llm-endpoint/pin.env) <(grep -vE '^GGUF_(RUNG|OBJECT)=' deploy/llm-endpoint/pin-2b.env)` is empty, and `grep -c '^GGUF_RUNG=qwen35-2b-q4km$' deploy/llm-endpoint/pin-2b.env` prints 1, and `deploy DRY_RUN=1 variant=2b` with no `LLM_ENDPOINT_PIN_FILE` override and `LLM_ENDPOINT_IDS_DIR=$T/up2b` prints `^DRY-RUN OK aprender-llm-endpoint-2b-dev .* gguf aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223`.
+V15: `diff <(grep -vE '^GGUF_(RUNG|OBJECT)=' deploy/llm-endpoint/pin.env) <(grep -vE '^GGUF_(RUNG|OBJECT)=' deploy/llm-endpoint/pin-2b.env)` is empty, and `grep -c '^GGUF_RUNG=qwen35-2b-q4km$' deploy/llm-endpoint/pin-2b.env` prints 1, and `deploy DRY_RUN=1 variant=2b` with no `LLM_ENDPOINT_PIN_FILE` override and `LLM_ENDPOINT_IDS_DIR=$T/up2b` prints `^DRY-RUN OK aprender-llm-endpoint-dev-2b .* gguf aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223`.
 
 - [ ] **Step 2: Run to verify V15 fails** — Expected: `FAIL V15` (file absent)
 
@@ -298,7 +298,7 @@ git commit -m "docs(llm-endpoint): the variant rule, records and the 2B pin"
 
 **Calling convention:** `variant=` is always the LAST positional argument; every command below passes all positionals (`just` binds them in order, so `env=dev variant=2b` would put the variant into `profile` and aim at the live 0.8B name). The recipes refuse `variant=` in any other slot.
 
-**Gate:** operator's go for this task, and pmcp.run's confirmation of `aprender-llm-endpoint-2b-dev` or the operator's waiver. Do not start a step without it. Profile `ze-kasher-dev`, region `us-east-1`, account `816069129666`.
+**Gate:** operator's go for this task. Do not start a step without it. Profile `ze-kasher-dev`, region `us-east-1`, account `816069129666`.
 
 **Files:**
 - Create: `.planning/phases/09-internal-openai-compatible-llm-endpoint-for-pmcp-run/09-VARIANT-ISOLATION-EVIDENCE.json`
@@ -311,7 +311,7 @@ git commit -m "docs(llm-endpoint): the variant rule, records and the 2B pin"
 
 - [ ] **Step 1: R0** — `just llm-endpoint-readback dev ze-kasher-dev` → `READBACK OK aprender-llm-endpoint-dev …`; the file's `last_modified` is `2026-10-16T18:22:53.000+0000`. If not, stop: the baseline moved and the operator decides.
 
-- [ ] **Step 2: 2B up, push, weights, deploy** — `just llm-endpoint-up dev ze-kasher-dev variant=2b` → `UP OK aprender-llm-endpoint-2b-dev …`; `just llm-endpoint-image 1 dev variant=2b` → `PUSHED 816069129666.dkr.ecr.us-east-1.amazonaws.com/aprender-llm-endpoint-2b-dev:cpu-v0.71.4 sha256:…` then `IMAGE OK …` (the digest may differ from the dev image's `f291c0a7…`: the Dockerfile's base image is unpinned and the image is rebuilt, so a different digest is not a defect — record both); `just llm-endpoint-weights copy dev ze-kasher-dev variant=2b` → `WEIGHTS OK s3://aprender-llm-endpoint-weights-816069129666-2b-dev/Qwen3.5-2B-Q4_K_M.gguf sha256 aaf42c8b…`; `RESERVED_CONCURRENCY=1 just llm-endpoint-deploy dev ze-kasher-dev variant=2b` → `DEPLOY OK aprender-llm-endpoint-2b-dev …` with the read-back line `memory=10240 timeout=900 ephemeral=10240 arch=arm64`.
+- [ ] **Step 2: 2B up, push, weights, deploy** — `just llm-endpoint-up dev ze-kasher-dev variant=2b` → `UP OK aprender-llm-endpoint-dev-2b …`; `just llm-endpoint-image 1 dev variant=2b` → `PUSHED 816069129666.dkr.ecr.us-east-1.amazonaws.com/aprender-llm-endpoint-dev-2b:cpu-v0.71.4 sha256:…` then `IMAGE OK …` (the digest may differ from the dev image's `f291c0a7…`: the Dockerfile's base image is unpinned and the image is rebuilt, so a different digest is not a defect — record both); `just llm-endpoint-weights copy dev ze-kasher-dev variant=2b` → `WEIGHTS OK s3://aprender-llm-endpoint-weights-816069129666-dev-2b/Qwen3.5-2B-Q4_K_M.gguf sha256 aaf42c8b…`; `RESERVED_CONCURRENCY=1 just llm-endpoint-deploy dev ze-kasher-dev variant=2b` → `DEPLOY OK aprender-llm-endpoint-dev-2b …` with the read-back line `memory=10240 timeout=900 ephemeral=10240 arch=arm64`.
 
 - [ ] **Step 3: R1** — `just llm-endpoint-readback dev ze-kasher-dev`.
 
@@ -319,11 +319,11 @@ git commit -m "docs(llm-endpoint): the variant rule, records and the 2B pin"
 
 - [ ] **Step 5: R2 and S0** — `just llm-endpoint-readback dev ze-kasher-dev` and `just llm-endpoint-readback dev ze-kasher-dev variant=2b`.
 
-- [ ] **Step 6: tear `iso` down** — `just llm-endpoint-teardown dev ze-kasher-dev variant=iso` → `TEARDOWN OK aprender-llm-endpoint-iso-dev`; then `aws lambda get-function --function-name aprender-llm-endpoint-iso-dev` → `ResourceNotFoundException`. Delete `pin-iso.env` and `.ids/iso-dev/` locally afterwards; the `iso` ECR repository is printed under `NOT RUN` and is deleted by hand after the evidence is written.
+- [ ] **Step 6: tear `iso` down** — `just llm-endpoint-teardown dev ze-kasher-dev variant=iso` → `TEARDOWN OK aprender-llm-endpoint-dev-iso`; then `aws lambda get-function --function-name aprender-llm-endpoint-dev-iso` → `ResourceNotFoundException`. Delete `pin-iso.env` and `.ids/dev-iso/` locally afterwards; the `iso` ECR repository is printed under `NOT RUN` and is deleted by hand after the evidence is written.
 
 - [ ] **Step 7: R3 and S1, then compare** — `python3 -I deploy/llm-endpoint/readback_equal.py R0 R1 R2 R3; echo rc=$?` → `rc=0`; `python3 -I deploy/llm-endpoint/readback_equal.py S0 S1; echo rc=$?` → `rc=0`. Write `09-VARIANT-ISOLATION-EVIDENCE.json`: the six records, both commands with exit status and output, the not-found read, the recipe sequence with timestamps, and the identity lines (account, region, profile, apr tag, image digest).
 
-- [ ] **Step 8: 2B smoke test** — `just llm-endpoint-prove-401 dev ze-kasher-dev variant=2b; echo rc=$?` → `401 NOT PROVEN`, `rc=3` (expected at this pin; record it); `aws lambda get-function-url-config --function-name aprender-llm-endpoint-2b-dev` → `ResourceNotFoundException`; `just llm-endpoint-measure dev ze-kasher-dev smoke 1 0 1 3 variant=2b` (label smoke, cold 1, long 0, conc 1, budget 3) → `MEASURE OK <path>`. From the measure record and the function log: cold-start timeline, CPU part (`cpu_part`), the tool-call function names, prefill and decode tok/s, dollars. Write `09-2B-SMOKE-EVIDENCE.json` with those, the image digest and its ECR size (`aws ecr describe-images`), the weights size (`head-object`), and the sentence that the CPU part is not chosen by anyone.
+- [ ] **Step 8: 2B smoke test** — `just llm-endpoint-prove-401 dev ze-kasher-dev variant=2b; echo rc=$?` → `401 NOT PROVEN`, `rc=3` (expected at this pin; record it); `aws lambda get-function-url-config --function-name aprender-llm-endpoint-dev-2b` → `ResourceNotFoundException`; `just llm-endpoint-measure dev ze-kasher-dev smoke 1 0 1 3 variant=2b` (label smoke, cold 1, long 0, conc 1, budget 3) → `MEASURE OK <path>`. From the measure record and the function log: cold-start timeline, CPU part (`cpu_part`), the tool-call function names, prefill and decode tok/s, dollars. Write `09-2B-SMOKE-EVIDENCE.json` with those, the image digest and its ECR size (`aws ecr describe-images`), the weights size (`head-object`), and the sentence that the CPU part is not chosen by anyone.
 
 - [ ] **Step 9: Update the reply draft and commit the evidence**
 
@@ -334,4 +334,4 @@ git add .planning/phases/09-internal-openai-compatible-llm-endpoint-for-pmcp-run
 git commit -m "docs(09): variant isolation evidence and the 2B smoke test"
 ```
 
-The 2B stays deployed (`aprender-llm-endpoint-2b-dev`, reserved concurrency 1). Its idle cost is storage only.
+The 2B stays deployed (`aprender-llm-endpoint-dev-2b`, reserved concurrency 1). Its idle cost is storage only.

@@ -20,12 +20,12 @@ Nothing was deployed, changed on AWS, or written to GitHub to produce this reply
 
 ## Item 1: the deployment name
 
-**Answer:** Accepted. One amendment: the variable is a `variant` segment that the recipe places inside its own naming scheme, not a free-form `LLM_ENDPOINT_NAME`. The resulting function name for your example is `aprender-llm-endpoint-2b-dev`.
+**Answer:** Accepted. One amendment: the variable is a `variant` segment that the recipe places inside its own naming scheme, not a free-form `LLM_ENDPOINT_NAME`. The resulting function name for your example is `aprender-llm-endpoint-dev-2b`.
 
-**Why the amendment.** Every resource the recipe creates is named from one stem today: the function, its IAM role, the ECR repository and the log group are `aprender-llm-endpoint-<env>`; the weights bucket is `aprender-llm-endpoint-weights-<account>-<env>`; the CodeBuild role and project are `aprender-llm-endpoint-codebuild-<env>` and `aprender-llm-endpoint-weights-<env>`. A free-form name would have to be re-derived into each of those, and a free-form name can be mistyped outside your allowlist. A variant segment keeps the `aprender-llm-` prefix under the recipe's control and keeps every derived name consistent.
+**Why the amendment.** Every resource the recipe creates is named from one stem today: the function, its IAM role, the ECR repository and the log group are `aprender-llm-endpoint-<env>`; the weights bucket is `aprender-llm-endpoint-weights-<account>-<env>`; the CodeBuild role and project are `aprender-llm-endpoint-codebuild-<env>` and `aprender-llm-endpoint-weights-<env>` (the role becomes `<function name>-codebuild` under the change). A free-form name would have to be re-derived into each of those, and a free-form name can be mistyped outside your allowlist. A variant segment keeps the `aprender-llm-` prefix under the recipe's control and keeps every derived name consistent.
 
 **The rule.**
-- `just llm-endpoint-deploy dev ze-kasher-dev variant=2b` names the function `aprender-llm-endpoint-2b-dev`; the role, repository, log group, bucket and CodeBuild resources carry the same `2b-dev` suffix.
+- `just llm-endpoint-deploy dev ze-kasher-dev variant=2b` names the function `aprender-llm-endpoint-dev-2b`; the role, repository, log group, bucket and CodeBuild resources carry the same `dev-2b` suffix.
 - `variant` defaults to empty. With no variant the names are exactly today's (`aprender-llm-endpoint-dev`, `aprender-llm-endpoint-prod`), so the existing 0.8B deployment is untouched by the change itself.
 - Allowed variant: 1 to 14 characters, lowercase letters, digits and hyphens, no leading or trailing hyphen. This is narrower than your proposed set (no uppercase, no underscore, shorter) because the weights bucket is named from the same stem and S3 refuses uppercase and underscores and caps a bucket name at 63 characters. With the 30-character stem, the 12-digit account id and `prod`, 14 characters is what remains. Every other resource type allows more, so the bucket is the binding limit. The recipe refuses a variant outside the rule before any AWS call.
 - Environment stays `dev` or `prod`.
@@ -50,7 +50,7 @@ Nothing was deployed, changed on AWS, or written to GitHub to produce this reply
 
 ## Item 3: smoke test on the 2B
 
-**What we will run.** Deploy `aprender-llm-endpoint-2b-dev` with the recipe, then the recipe's own measurement, which invokes the function through `aws lambda invoke` with the API Gateway v2 event in `deploy/llm-endpoint/events/` (the same shape the 0.8B measurement used) and records the client-side timings, the server's log lines and the CPU part the function landed on. The result comes back as the same evidence file shape as the 0.8B's. The 401 proof is also re-run, and is expected to record that the key is ignored, as it does today on the 0.8B.
+**What we will run.** Deploy `aprender-llm-endpoint-dev-2b` with the recipe, then the recipe's own measurement, which invokes the function through `aws lambda invoke` with the API Gateway v2 event in `deploy/llm-endpoint/events/` (the same shape the 0.8B measurement used) and records the client-side timings, the server's log lines and the CPU part the function landed on. The result comes back as the same evidence file shape as the 0.8B's. The 401 proof is also re-run, and is expected to record that the key is ignored, as it does today on the 0.8B.
 
 **Image and cold start, stated now.**
 - The container image is 154,427,965 bytes in ECR (tag `cpu-v0.71.4`, digest `f291c0a7…`), compressed as ECR stores it. It holds the `apr` binary, the Lambda Web Adapter and the entrypoint, and no weights. The same image serves every size; only the pin file and the staged weights differ.
@@ -84,7 +84,7 @@ Nothing was deployed, changed on AWS, or written to GitHub to produce this reply
 
 ## What we ask of you
 
-- Confirm the name `aprender-llm-endpoint-2b-dev` (variant before environment). Your plan's Task 7 writes `aprender-llm-endpoint-dev-2b`; the recipe will produce the first form.
+- Nothing is needed on the name: the recipe produces `aprender-llm-endpoint-dev-2b`, the form your plan's Task 7 writes. Environment comes first, then the variant.
 - Keep the per-endpoint transport timeout in your provider row, as your Task 4 proposes; the 2B on a Graviton2 environment will need it.
 
 ## Evidence

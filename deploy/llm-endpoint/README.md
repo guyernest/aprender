@@ -174,7 +174,7 @@ ever printed as the word `set`; it reaches Lambda through a mode-0600 temporary 
 
 ### Names: environment and variant
 
-Nothing is shared across names, so tearing one down cannot touch another. With `S = <variant>-<env>`
+Nothing is shared across names, so tearing one down cannot touch another. With `S = <env>-<variant>`
 when a variant is given and `S = <env>` otherwise:
 
 | Resource | Name |
@@ -199,7 +199,7 @@ Local records are per name:
 
 | Record | Default variant | With a variant |
 |---|---|---|
-| ids directory (`aws.json`, `function.json`, `image-*.json`, `weights.json`, `readback-*.json`) | `deploy/llm-endpoint/.ids/` | `deploy/llm-endpoint/.ids/<variant>-<env>/` |
+| ids directory (`aws.json`, `function.json`, `image-*.json`, `weights.json`, `readback-*.json`) | `deploy/llm-endpoint/.ids/` | `deploy/llm-endpoint/.ids/<env>-<variant>/` |
 | pin file | `deploy/llm-endpoint/pin.env` | `deploy/llm-endpoint/pin-<variant>.env` |
 
 `LLM_ENDPOINT_IDS_DIR` and `LLM_ENDPOINT_PIN_FILE` still override both. `llm-endpoint-up` records the
@@ -216,7 +216,8 @@ Things to know:
   The rename keeps IAM's single role namespace unambiguous: with the old shape `variant=codebuild-2b`
   would collide with another name's function role. Teardown requires the CodeBuild names recorded in
   `weights.json` to equal the ones the variant derives (empty for `weights copy`); the old names are not
-  accepted, because `aprender-llm-endpoint-codebuild-dev` is the function role of a variant named `codebuild`.
+  accepted. A variant may not be named `codebuild` or end in `-codebuild`, because its function role would
+  then equal another name's CodeBuild role.
 - Dev and prod share `deploy/llm-endpoint/.ids/` for the empty variant (unchanged). That is a known
   limitation: the `env` check on the record is what stops one from acting on the other. A variant gets a
   directory per env.
@@ -250,7 +251,7 @@ the 0.8B one. The 2B sequence, with `pin-2b.env` already committed (`GGUF_RUNG=q
 
 ```bash
 just llm-endpoint-up dev ze-kasher-dev variant=2b
-just llm-endpoint-image 1 dev variant=2b          # pushes the shared local image to the 2b-dev repository
+just llm-endpoint-image 1 dev variant=2b          # pushes the shared local image to the dev-2b repository
 just llm-endpoint-weights copy dev ze-kasher-dev variant=2b
 RESERVED_CONCURRENCY=1 just llm-endpoint-deploy dev ze-kasher-dev variant=2b
 just llm-endpoint-readback dev ze-kasher-dev variant=2b
@@ -295,22 +296,22 @@ The variant rows (numbered rows 1-30 are the original ones):
 | Row | What it pins |
 |---|---|
 | V1, V2 | the `names.sh` case table passes; `bashrs lint` of `names.sh` is clean |
-| V3 | `up variant=2b`: 2b-dev names in `aws.json` and in the calls, tagged `variant=2b`, no default-name call |
+| V3 | `up variant=2b`: dev-2b names in `aws.json` and in the calls, tagged `variant=2b`, no default-name call |
 | V4 | `deploy variant=2b` DRY_RUN with the 2b ids and a 2b pin: `DRY-RUN OK`, zero AWS calls |
 | V5, V5b | a legacy record cannot serve `2b`, and a 2b record cannot serve the default: `REFUSED ids`, zero calls |
 | V6 | an uppercase variant is `REFUSED variant` before anything is read |
 | V7 and V7b-e | the default still accepts a record naming `aprender-llm-endpoint-dev`; `up` refuses another name's record before creating anything and accepts its own and legacy ones |
-| V8 | `image 1 dev variant=2b` pushes to the 2b-dev repository and records in the 2b ids; the default record is untouched |
-| V9 | `teardown variant=2b`: only 2b-dev names reach the shim |
+| V8 | `image 1 dev variant=2b` pushes to the dev-2b repository and records in the 2b ids; the default record is untouched |
+| V9 | `teardown variant=2b`: only dev-2b names reach the shim |
 | V10, V11 | teardown refuses the legacy record as `2b` and a 2b record as the default, nothing reaching the shim, not even sts |
-| V12 | `weights codebuild variant=2b` names the role `...-2b-dev-codebuild` and the project, tags them, records both |
+| V12 | `weights codebuild variant=2b` names the role `...-dev-2b-codebuild` and the project, tags them, records both |
 | V13 | no recipe of the nine holds an endpoint-name literal (with a must-match control) |
 | V14 | teardown `2b` over a `weights.json` naming the default's CodeBuild names: `REFUSED ids`, no delete call |
-| V15 | teardown of the default over a `weights.json` naming `aprender-llm-endpoint-codebuild-dev` (another name's function role): `REFUSED ids`, no delete call |
+| V15 | teardown of the default over a `weights.json` naming `aprender-llm-endpoint-dev-2b` (another name's function role): `REFUSED ids`, no delete call |
 | V16 | teardown `2b` with its own derived CodeBuild names deletes those |
 | V17 | `readback variant=2b`: one record, `function_url` absent, no environment value anywhere, read calls only |
 | V19 | `readback` with a URL config records `function_url` as `present`; the host is in neither the record nor stdout |
-| V20-V22 | `variant=` in the profile (teardown, up) or label (measure) slot is `REFUSED args`, nothing reaching the shim |
+| V20-V22, V24-V25 | `variant=` in the profile (teardown, up), label, cold or long (measure) slot is `REFUSED args`, nothing reaching the shim |
 | V23 | teardown `2b` over an `aws.json` whose bucket, `ecr_repo_name`, `log_group` or `role_arn` was altered: `REFUSED ids`, no delete call |
 | V18 | `pin-2b.env` equals `pin.env` but for the two GGUF keys, selects rung `qwen35-2b-q4km`, and `deploy variant=2b` with no pin override derives and reads it (`DRY-RUN OK` with the 2b GGUF hash `aaf42c8b...9223`) |
 

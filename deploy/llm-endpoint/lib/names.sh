@@ -5,7 +5,8 @@
 # A sourced library is option-neutral: no `set` at file scope, failure by return status.
 
 # llm_endpoint_variant_ok VARIANT: return 0 if empty or a legal variant, 1 otherwise.
-# 1 to 14 chars of [a-z0-9-], no leading or trailing hyphen (the S3 bucket name is the binding limit).
+# 1 to 14 chars of [a-z0-9-], no leading or trailing hyphen (the S3 bucket name is the binding limit),
+# and not ending in the segment `codebuild`.
 llm_endpoint_variant_ok() {
     local LC_ALL=C
     local v="${1-}"
@@ -13,6 +14,9 @@ llm_endpoint_variant_ok() {
     # same rule as ^[a-z0-9]([a-z0-9-]{0,12}[a-z0-9])?$, written as globs
     case "$v" in
         *[!a-z0-9-]* | -* | *-) return 1 ;;
+        # <env>-<variant>-codebuild is the CodeBuild role of <env>-<variant>, so a variant that
+        # ends in it would be another name's function with the same IAM role name
+        codebuild | *-codebuild) return 1 ;;
     esac
     [[ ${#v} -le 14 ]]
 }
@@ -36,7 +40,7 @@ llm_endpoint_names() {
             ;;
     esac
     if [ -n "$variant" ]; then
-        SUFFIX="$variant-$env"
+        SUFFIX="$env-$variant"
         IDS_DEFAULT="deploy/llm-endpoint/.ids/$SUFFIX"
         PIN_DEFAULT="deploy/llm-endpoint/pin-$variant.env"
     else
@@ -110,14 +114,14 @@ llm_endpoint_names_selftest() {
     row "accept 2b dev" 0 llm_endpoint_names 2b dev
     # derived, 2b dev 816069129666
     llm_endpoint_names 2b dev 816069129666
-    eq "2b FN" "$FN" aprender-llm-endpoint-2b-dev
-    eq "2b REPO_NAME" "$REPO_NAME" aprender-llm-endpoint-2b-dev
-    eq "2b SUFFIX" "$SUFFIX" 2b-dev
-    eq "2b BUCKET" "$BUCKET" aprender-llm-endpoint-weights-816069129666-2b-dev
-    eq "2b CB_PROJECT" "$CB_PROJECT" aprender-llm-endpoint-weights-2b-dev
-    eq "2b CB_ROLE" "$CB_ROLE" aprender-llm-endpoint-2b-dev-codebuild
-    eq "2b LOG_GROUP" "$LOG_GROUP" /aws/lambda/aprender-llm-endpoint-2b-dev
-    eq "2b IDS_DEFAULT" "$IDS_DEFAULT" deploy/llm-endpoint/.ids/2b-dev
+    eq "2b FN" "$FN" aprender-llm-endpoint-dev-2b
+    eq "2b REPO_NAME" "$REPO_NAME" aprender-llm-endpoint-dev-2b
+    eq "2b SUFFIX" "$SUFFIX" dev-2b
+    eq "2b BUCKET" "$BUCKET" aprender-llm-endpoint-weights-816069129666-dev-2b
+    eq "2b CB_PROJECT" "$CB_PROJECT" aprender-llm-endpoint-weights-dev-2b
+    eq "2b CB_ROLE" "$CB_ROLE" aprender-llm-endpoint-dev-2b-codebuild
+    eq "2b LOG_GROUP" "$LOG_GROUP" /aws/lambda/aprender-llm-endpoint-dev-2b
+    eq "2b IDS_DEFAULT" "$IDS_DEFAULT" deploy/llm-endpoint/.ids/dev-2b
     eq "2b PIN_DEFAULT" "$PIN_DEFAULT" deploy/llm-endpoint/pin-2b.env
     eq "2b TAG_VARIANT" "$TAG_VARIANT" variant=2b
     # derived, empty dev
@@ -136,7 +140,7 @@ llm_endpoint_names_selftest() {
     local a=""
     local b=""
     local c=""
-    llm_endpoint_names codebuild-2b dev; a="$FN $CB_ROLE"
+    llm_endpoint_names 4b dev; a="$FN $CB_ROLE"
     llm_endpoint_names 2b dev; b="$FN $CB_ROLE"
     llm_endpoint_names "" dev; c="$FN $CB_ROLE"
     disjoint() {
@@ -146,10 +150,13 @@ llm_endpoint_names_selftest() {
         for x in $1; do for y in $2; do [ "$x" != "$y" ] || return 1; done; done
         return 0
     }
-    row "disjoint codebuild-2b vs 2b" 0 disjoint "$a" "$b"
-    row "disjoint codebuild-2b vs empty" 0 disjoint "$a" "$c"
-    llm_endpoint_names codebuild dev; a="$FN $CB_ROLE"
-    row "disjoint codebuild vs empty" 0 disjoint "$a" "$c"
+    row "disjoint 4b vs 2b" 0 disjoint "$a" "$b"
+    row "disjoint 4b vs empty" 0 disjoint "$a" "$c"
+    row "disjoint 2b vs empty" 0 disjoint "$b" "$c"
+    row "refuse variant codebuild (its function role is the CodeBuild role of the default)" 1 llm_endpoint_variant_ok codebuild
+    row "refuse variant 2b-codebuild (its function role would be the 2b CodeBuild role)" 1 llm_endpoint_variant_ok 2b-codebuild
+    row "accept variant codebuild2 (not the segment)" 0 llm_endpoint_variant_ok codebuild2
+    row "accept variant codebuild-2b" 0 llm_endpoint_variant_ok codebuild-2b
     row "disjoint control: 2b vs 2b collides" 1 disjoint "$b" "$b"
     # longest legal bucket
     llm_endpoint_names a1b2c3d4e5f6g7 prod 816069129666
@@ -158,28 +165,28 @@ llm_endpoint_names_selftest() {
     local rd
     rd="${TMPDIR:-/tmp}/names-selftest.$$"
     mkdir -p "$rd" || return 1
-    printf '{"name":"aprender-llm-endpoint-2b-dev","env":"dev"}\n' > "$rd/named.json"
+    printf '{"name":"aprender-llm-endpoint-dev-2b","env":"dev"}\n' > "$rd/named.json"
     printf '{"env":"dev"}\n' > "$rd/legacy.json"
     printf '{"env":"prod"}\n' > "$rd/legacy-prod.json"
     printf '{"name":"aprender-llm-endpoint-dev","env":"dev"}\n' > "$rd/named-default.json"
-    printf '{"function":"aprender-llm-endpoint-2b-dev","env":"dev","variant":"2b"}\n' > "$rd/function-2b.json"
+    printf '{"function":"aprender-llm-endpoint-dev-2b","env":"dev","variant":"2b"}\n' > "$rd/function-2b.json"
     printf 'not json\n' > "$rd/garbage.json"
-    FN=aprender-llm-endpoint-2b-dev VARIANT=2b ENV=dev
+    FN=aprender-llm-endpoint-dev-2b VARIANT=2b ENV=dev
     row "record: matching name accepted" 0 llm_endpoint_check_record "$rd/named.json"
-    FN=aprender-llm-endpoint-4b-dev VARIANT=4b ENV=dev
+    FN=aprender-llm-endpoint-dev-4b VARIANT=4b ENV=dev
     row "record: mismatched name refused" 1 llm_endpoint_check_record "$rd/named.json"
     llm_endpoint_check_record "$rd/named.json"
-    eq "record: mismatch reason names both" "$LLM_ENDPOINT_NAMES_ERR" "$rd/named.json belongs to aprender-llm-endpoint-2b-dev, not aprender-llm-endpoint-4b-dev"
+    eq "record: mismatch reason names both" "$LLM_ENDPOINT_NAMES_ERR" "$rd/named.json belongs to aprender-llm-endpoint-dev-2b, not aprender-llm-endpoint-dev-4b"
     FN=aprender-llm-endpoint-dev VARIANT="" ENV=dev
     row "record: legacy accepted for the default variant" 0 llm_endpoint_check_record "$rd/legacy.json"
     row "record: named default accepted" 0 llm_endpoint_check_record "$rd/named-default.json"
     row "record: 2b-named record refused for the default" 1 llm_endpoint_check_record "$rd/named.json"
-    FN=aprender-llm-endpoint-2b-dev VARIANT=2b ENV=dev
+    FN=aprender-llm-endpoint-dev-2b VARIANT=2b ENV=dev
     row "record: legacy refused for a variant" 1 llm_endpoint_check_record "$rd/legacy.json"
     row "record: function.json keyed by function accepted for its variant" 0 llm_endpoint_check_record "$rd/function-2b.json"
     FN=aprender-llm-endpoint-dev VARIANT="" ENV=dev
     row "record: function.json of 2b refused for the default" 1 llm_endpoint_check_record "$rd/function-2b.json"
-    FN=aprender-llm-endpoint-2b-dev VARIANT=2b ENV=dev
+    FN=aprender-llm-endpoint-dev-2b VARIANT=2b ENV=dev
     FN=aprender-llm-endpoint-dev VARIANT="" ENV=dev
     row "record: legacy with the wrong env refused" 1 llm_endpoint_check_record "$rd/legacy-prod.json"
     row "record: unreadable file refused" 1 llm_endpoint_check_record "$rd/garbage.json"

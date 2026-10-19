@@ -5076,6 +5076,18 @@ llm-endpoint-measure env="dev" profile="ze-kasher-dev" label="deployed" cold="1"
     case "$LABEL" in
         variant=*) refuse args "variant= must be the last positional parameter (got it as label)" ;;
     esac
+    case "$COLD" in
+        variant=*) refuse args "variant= must be the last positional parameter (got it as cold)" ;;
+    esac
+    case "$LONG" in
+        variant=*) refuse args "variant= must be the last positional parameter (got it as long)" ;;
+    esac
+    case "$CONC" in
+        variant=*) refuse args "variant= must be the last positional parameter (got it as conc)" ;;
+    esac
+    case "$BUDGET" in
+        variant=*) refuse args "variant= must be the last positional parameter (got it as budget)" ;;
+    esac
     # every name below comes from the one library; a bad variant is refused before anything is read
     . "$DIR/lib/names.sh" || exit 1
     llm_endpoint_names "$VARIANT" "$ENV" || refuse variant "$LLM_ENDPOINT_NAMES_ERR"
@@ -5528,26 +5540,26 @@ llm-endpoint-selftest:
     : > "$T/a-v3.log"
     run_just "$T/c-v3.log" LLM_ENDPOINT_IDS_DIR="$T/up2b" SHIM_LOG="$T/a-v3.log" just llm-endpoint-up dev ze-kasher-dev variant=2b
     x=1
-    [ "$(jget_selftest "$T/up2b/aws.json" name)" = "aprender-llm-endpoint-2b-dev" ] || x=0
+    [ "$(jget_selftest "$T/up2b/aws.json" name)" = "aprender-llm-endpoint-dev-2b" ] || x=0
     [ "$(jget_selftest "$T/up2b/aws.json" variant)" = "2b" ] || x=0
-    [ "$(jget_selftest "$T/up2b/aws.json" suffix)" = "2b-dev" ] || x=0
-    [ "$(jget_selftest "$T/up2b/aws.json" ecr_repo_name)" = "aprender-llm-endpoint-2b-dev" ] || x=0
+    [ "$(jget_selftest "$T/up2b/aws.json" suffix)" = "dev-2b" ] || x=0
+    [ "$(jget_selftest "$T/up2b/aws.json" ecr_repo_name)" = "aprender-llm-endpoint-dev-2b" ] || x=0
     case "$(jget_selftest "$T/up2b/aws.json" bucket)" in
-        *-2b-dev) ;;
+        *-dev-2b) ;;
         *) x=0 ;;
     esac
-    grep -qE 'repository-names aprender-llm-endpoint-2b-dev( |$)' "$T/a-v3.log" || x=0
+    grep -qE 'repository-names aprender-llm-endpoint-dev-2b( |$)' "$T/a-v3.log" || x=0
     grep -q 'variant=2b' "$T/a-v3.log" || x=0
     grep -qE 'aprender-llm-endpoint-dev( |$)' "$T/a-v3.log" && x=0
-    row V3 "up variant=2b: 2b-dev names in aws.json and in the calls, tagged variant=2b, no default-name call" "$T/c-v3.log" zero '^UP OK aprender-llm-endpoint-2b-dev' "$x"
+    row V3 "up variant=2b: dev-2b names in aws.json and in the calls, tagged variant=2b, no default-name call" "$T/c-v3.log" zero '^UP OK aprender-llm-endpoint-dev-2b' "$x"
     # V4: the 2b ids and a 2b pin pass the offline deploy ladder
     cp "$IDS/image-pushed.json" "$IDS/image-local.json" "$T/up2b/"
     sed -e 's/^GGUF_RUNG=.*/GGUF_RUNG=qwen35-2b-q4km/' -e 's/^GGUF_OBJECT=.*/GGUF_OBJECT=Qwen3.5-2B-Q4_K_M.gguf/' "$PIN" > "$T/pin-2b.env"
     : > "$T/a-v4.log"
     run_just "$T/c-v4.log" LLM_ENDPOINT_IDS_DIR="$T/up2b" LLM_ENDPOINT_PIN_FILE="$T/pin-2b.env" SHIM_MODE=refuse SHIM_LOG="$T/a-v4.log" DRY_RUN=1 \
         just llm-endpoint-deploy dev ze-kasher-dev variant=2b
-    row V4 "deploy variant=2b DRY_RUN with the up2b ids and a 2b pin -> DRY-RUN OK aprender-llm-endpoint-2b-dev, zero aws calls" "$T/c-v4.log" zero \
-        '^DRY-RUN OK aprender-llm-endpoint-2b-dev ' "$([ "$(lines "$T/a-v4.log")" -eq 0 ] && echo 1 || echo 0)"
+    row V4 "deploy variant=2b DRY_RUN with the up2b ids and a 2b pin -> DRY-RUN OK aprender-llm-endpoint-dev-2b, zero aws calls" "$T/c-v4.log" zero \
+        '^DRY-RUN OK aprender-llm-endpoint-dev-2b ' "$([ "$(lines "$T/a-v4.log")" -eq 0 ] && echo 1 || echo 0)"
     # V5: the default-variant record cannot serve variant 2b, and the 2b record cannot serve the default
     : > "$T/a-v5.log"
     run_just "$T/c-v5.log" LLM_ENDPOINT_IDS_DIR="$IDS" SHIM_MODE=refuse SHIM_LOG="$T/a-v5.log" DRY_RUN=1 just llm-endpoint-deploy dev ze-kasher-dev variant=2b
@@ -5598,7 +5610,7 @@ llm-endpoint-selftest:
     row V7c "up variant=2b over a legacy dev record -> REFUSED ids, only the account read reached the shim" "$T/c-v7c.log" nonzero '^REFUSED ids:' "$(only_sts "$T/a-v7c.log")"
     : > "$T/a-v7d.log"
     run_just "$T/c-v7d.log" LLM_ENDPOINT_IDS_DIR="$T/up2b" SHIM_LOG="$T/a-v7d.log" just llm-endpoint-up dev ze-kasher-dev variant=2b
-    row V7d "up variant=2b over its own 2b record -> UP OK (the check accepts a matching record)" "$T/c-v7d.log" zero '^UP OK aprender-llm-endpoint-2b-dev' \
+    row V7d "up variant=2b over its own 2b record -> UP OK (the check accepts a matching record)" "$T/c-v7d.log" zero '^UP OK aprender-llm-endpoint-dev-2b' \
         "$([ "$(only_sts "$T/a-v7d.log")" = 0 ] && echo 1 || echo 0)"
     : > "$T/a-v7e.log"
     run_just "$T/c-v7e.log" LLM_ENDPOINT_IDS_DIR="$T/up-legacy" SHIM_LOG="$T/a-v7e.log" just llm-endpoint-up
@@ -5620,29 +5632,29 @@ llm-endpoint-selftest:
         just llm-endpoint-image 1 dev variant=2b
     x=1
     case "$(jget_selftest "$T/up2b/image-pushed.json" repo)" in
-        */aprender-llm-endpoint-2b-dev) ;;
+        */aprender-llm-endpoint-dev-2b) ;;
         *) x=0 ;;
     esac
     cmp -s "$IDS/image-pushed.json" "$T/v8-default-pushed.before" || x=0
-    grep -qE '^push .*/aprender-llm-endpoint-2b-dev:' "$T/a-v8.log" || x=0
-    row V8 "image 1 dev variant=2b -> pushed to the 2b-dev repository, recorded in the 2b ids, default record untouched" "$T/c-v8.log" zero '^PUSHED .*/aprender-llm-endpoint-2b-dev:' "$x"
+    grep -qE '^push .*/aprender-llm-endpoint-dev-2b:' "$T/a-v8.log" || x=0
+    row V8 "image 1 dev variant=2b -> pushed to the dev-2b repository, recorded in the 2b ids, default record untouched" "$T/c-v8.log" zero '^PUSHED .*/aprender-llm-endpoint-dev-2b:' "$x"
     # V9-V13: the remaining lifecycle recipes take the variant as their LAST positional (just binds in order,
     # so `dev ze-kasher-dev variant=2b`); teardown derives its function name from the library.
-    # V9: teardown variant=2b removes only 2b-dev-named resources
+    # V9: teardown variant=2b removes only dev-2b-named resources
     rm -rf "${T:?}/td2b"
     mkdir -p "$T/td2b"
     cp "$T/up2b/aws.json" "$T/up2b/image-local.json" "$T/up2b/image-pushed.json" "$T/td2b/"
-    printf '{"function":"aprender-llm-endpoint-2b-dev","name":"aprender-llm-endpoint-2b-dev","image_digest":"%s"}\n' "$DIGEST" > "$T/td2b/function.json"
+    printf '{"function":"aprender-llm-endpoint-dev-2b","name":"aprender-llm-endpoint-dev-2b","image_digest":"%s"}\n' "$DIGEST" > "$T/td2b/function.json"
     cp -R "$T/td2b" "$T/td2b-keep"
     : > "$T/a-v9.log"
     run_just "$T/c-v9.log" LLM_ENDPOINT_IDS_DIR="$T/td2b" SHIM_LOG="$T/a-v9.log" SHIM_CONCURRENCY=0 just llm-endpoint-teardown dev ze-kasher-dev variant=2b
     x=1
-    grep -qE -- '--function-name aprender-llm-endpoint-2b-dev( |$)' "$T/a-v9.log" || x=0
-    grep -qE -- '--role-name aprender-llm-endpoint-2b-dev( |$)' "$T/a-v9.log" || x=0
-    grep -qE -- '--log-group-name /aws/lambda/aprender-llm-endpoint-2b-dev( |$)' "$T/a-v9.log" || x=0
-    grep -qE -- "--bucket aprender-llm-endpoint-weights-$ACCT-2b-dev( |\$)" "$T/a-v9.log" || x=0
+    grep -qE -- '--function-name aprender-llm-endpoint-dev-2b( |$)' "$T/a-v9.log" || x=0
+    grep -qE -- '--role-name aprender-llm-endpoint-dev-2b( |$)' "$T/a-v9.log" || x=0
+    grep -qE -- '--log-group-name /aws/lambda/aprender-llm-endpoint-dev-2b( |$)' "$T/a-v9.log" || x=0
+    grep -qE -- "--bucket aprender-llm-endpoint-weights-$ACCT-dev-2b( |\$)" "$T/a-v9.log" || x=0
     grep -qE 'aprender-llm-endpoint-dev( |$)' "$T/a-v9.log" && x=0
-    row V9 "teardown variant=2b: only 2b-dev names reach the shim (function, role, log group, bucket), none of the default name" "$T/c-v9.log" zero '^TEARDOWN OK aprender-llm-endpoint-2b-dev' "$x"
+    row V9 "teardown variant=2b: only dev-2b names reach the shim (function, role, log group, bucket), none of the default name" "$T/c-v9.log" zero '^TEARDOWN OK aprender-llm-endpoint-dev-2b' "$x"
     # V10: a legacy record cannot be torn down as variant 2b; V11: a 2b record cannot be torn down as the default.
     # check_record runs before the account read, so the shim log is empty.
     : > "$T/a-v10.log"
@@ -5662,13 +5674,13 @@ llm-endpoint-selftest:
     run_just "$T/c-v12.log" LLM_ENDPOINT_IDS_DIR="$T/w2b" LLM_ENDPOINT_PIN_FILE="$T/pin-2b.env" SHIM_S3_SHA="$L2B" SHIM_ROLE_EXISTS=0 SHIM_LOG="$T/a-v12.log" \
         just llm-endpoint-weights codebuild dev ze-kasher-dev variant=2b
     x=1
-    grep -qE 'iam create-role .*--role-name aprender-llm-endpoint-2b-dev-codebuild( |$)' "$T/a-v12.log" || x=0
+    grep -qE 'iam create-role .*--role-name aprender-llm-endpoint-dev-2b-codebuild( |$)' "$T/a-v12.log" || x=0
     grep -qE 'iam create-role .*Key=variant,Value=2b' "$T/a-v12.log" || x=0
     grep -qE 'codebuild create-project ' "$T/a-v12.log" || x=0
-    grep -qE 'codebuild start-build .*--project-name aprender-llm-endpoint-weights-2b-dev( |$)' "$T/a-v12.log" || x=0
-    [ "$(jget_selftest "$T/w2b/weights.json" codebuild_role)" = "aprender-llm-endpoint-2b-dev-codebuild" ] || x=0
-    [ "$(jget_selftest "$T/w2b/weights.json" codebuild_project)" = "aprender-llm-endpoint-weights-2b-dev" ] || x=0
-    row V12 "weights codebuild variant=2b: role ...-2b-dev-codebuild (tagged variant=2b) and project ...-weights-2b-dev, both recorded" "$T/c-v12.log" zero '^WEIGHTS OK' "$x"
+    grep -qE 'codebuild start-build .*--project-name aprender-llm-endpoint-weights-dev-2b( |$)' "$T/a-v12.log" || x=0
+    [ "$(jget_selftest "$T/w2b/weights.json" codebuild_role)" = "aprender-llm-endpoint-dev-2b-codebuild" ] || x=0
+    [ "$(jget_selftest "$T/w2b/weights.json" codebuild_project)" = "aprender-llm-endpoint-weights-dev-2b" ] || x=0
+    row V12 "weights codebuild variant=2b: role ...-dev-2b-codebuild (tagged variant=2b) and project ...-weights-dev-2b, both recorded" "$T/c-v12.log" zero '^WEIGHTS OK' "$x"
     # V13: no literal endpoint name survives in the nine lifecycle recipes. The pattern must also match
     # in a file that does hold such literals (the self-test's own fixtures), or a zero count proves nothing.
     LITPAT='aprender-llm-endpoint-[a-z-]*(\$\{?ENV\}?|dev|prod)\b'
@@ -5701,37 +5713,37 @@ llm-endpoint-selftest:
     row V14 "teardown variant=2b with a weights.json naming the default's CodeBuild project and role -> REFUSED ids, no delete call" "$T/c-v14.log" nonzero '^REFUSED ids:.*does not belong to' \
         "$(if grep -qE ' delete-' "$T/a-v14.log"; then echo 0; else echo 1; fi)"
     fresh_ids
-    write_weights "$W" aprender-llm-endpoint-weights-dev aprender-llm-endpoint-codebuild-dev
+    write_weights "$W" aprender-llm-endpoint-weights-dev aprender-llm-endpoint-dev-2b
     : > "$T/a-v15.log"
     run_just "$T/c-v15.log" LLM_ENDPOINT_IDS_DIR="$W" SHIM_LOG="$T/a-v15.log" SHIM_CONCURRENCY=0 just llm-endpoint-teardown
-    row V15 "teardown, default variant, a weights.json naming aprender-llm-endpoint-codebuild-dev (variant codebuild's function role) -> REFUSED ids, no delete call" "$T/c-v15.log" nonzero '^REFUSED ids:.*does not belong to' \
+    row V15 "teardown, default variant, a weights.json naming aprender-llm-endpoint-dev-2b (the 2b function's role) -> REFUSED ids, no delete call" "$T/c-v15.log" nonzero '^REFUSED ids:.*does not belong to' \
         "$(if grep -qE ' delete-' "$T/a-v15.log"; then echo 0; else echo 1; fi)"
-    write_weights "$T/td2b-keep" aprender-llm-endpoint-weights-2b-dev aprender-llm-endpoint-2b-dev-codebuild
+    write_weights "$T/td2b-keep" aprender-llm-endpoint-weights-dev-2b aprender-llm-endpoint-dev-2b-codebuild
     : > "$T/a-v16.log"
     run_just "$T/c-v16.log" LLM_ENDPOINT_IDS_DIR="$T/td2b-keep" SHIM_LOG="$T/a-v16.log" SHIM_CONCURRENCY=0 just llm-endpoint-teardown dev ze-kasher-dev variant=2b
     x=1
-    grep -qE 'codebuild delete-project .*--name aprender-llm-endpoint-weights-2b-dev( |$)' "$T/a-v16.log" || x=0
-    grep -qE 'iam delete-role .*--role-name aprender-llm-endpoint-2b-dev-codebuild( |$)' "$T/a-v16.log" || x=0
-    row V16 "teardown variant=2b with its own derived CodeBuild names -> TEARDOWN OK, deletes those" "$T/c-v16.log" zero '^TEARDOWN OK aprender-llm-endpoint-2b-dev' "$x"
+    grep -qE 'codebuild delete-project .*--name aprender-llm-endpoint-weights-dev-2b( |$)' "$T/a-v16.log" || x=0
+    grep -qE 'iam delete-role .*--role-name aprender-llm-endpoint-dev-2b-codebuild( |$)' "$T/a-v16.log" || x=0
+    row V16 "teardown variant=2b with its own derived CodeBuild names -> TEARDOWN OK, deletes those" "$T/c-v16.log" zero '^TEARDOWN OK aprender-llm-endpoint-dev-2b' "$x"
     # V17: readback reads and records, it never writes, and it never records a value of an environment variable
     rm -rf "${T:?}/rb2b"
     mkdir -p "$T/rb2b"
     cp "$T/up2b/aws.json" "$T/rb2b/"
-    python3 -I -c 'import json, sys; json.dump({"function": sys.argv[2], "name": sys.argv[2], "variant": "2b", "env": "dev"}, open(sys.argv[1], "w"))' "$T/rb2b/function.json" aprender-llm-endpoint-2b-dev
+    python3 -I -c 'import json, sys; json.dump({"function": sys.argv[2], "name": sys.argv[2], "variant": "2b", "env": "dev"}, open(sys.argv[1], "w"))' "$T/rb2b/function.json" aprender-llm-endpoint-dev-2b
     : > "$T/a-v17.log"
-    run_just "$T/c-v17.log" LLM_ENDPOINT_IDS_DIR="$T/rb2b" SHIM_LOG="$T/a-v17.log" SHIM_RB_NAME=aprender-llm-endpoint-2b-dev SHIM_URL_ABSENT=1 SHIM_CONCURRENCY=1 \
+    run_just "$T/c-v17.log" LLM_ENDPOINT_IDS_DIR="$T/rb2b" SHIM_LOG="$T/a-v17.log" SHIM_RB_NAME=aprender-llm-endpoint-dev-2b SHIM_URL_ABSENT=1 SHIM_CONCURRENCY=1 \
         APR_API_KEY_HASH="$HASH64" just llm-endpoint-readback dev ze-kasher-dev variant=2b
     x=1
     [ "$(find "$T/rb2b" -name 'readback-*.json' | wc -l | tr -d ' ')" -eq 1 ] || x=0
     RBF="$(find "$T/rb2b" -name 'readback-*.json' | head -1)"
     [ "$(jget_selftest "$RBF" function_url)" = absent ] || x=0
-    [ "$(jget_selftest "$RBF" function_name)" = aprender-llm-endpoint-2b-dev ] || x=0
+    [ "$(jget_selftest "$RBF" function_name)" = aprender-llm-endpoint-dev-2b ] || x=0
     grep -q "$HASH64" "$RBF" && x=0
     grep -q "$HASH64" "$T/c-v17.log" && x=0
     grep -q 'lambda get-function ' "$T/a-v17.log" || x=0
     grep -q 'lambda get-function-url-config ' "$T/a-v17.log" || x=0
     grep -qE '^[a-z0-9-]+ (create|update|put|delete|add|remove|tag)' "$T/a-v17.log" && x=0
-    row V17 "readback variant=2b: one readback-*.json with function_url absent and no env value, read calls only (no write verb in the shim log)" "$T/c-v17.log" zero '^READBACK OK aprender-llm-endpoint-2b-dev ' "$x"
+    row V17 "readback variant=2b: one readback-*.json with function_url absent and no env value, read calls only (no write verb in the shim log)" "$T/c-v17.log" zero '^READBACK OK aprender-llm-endpoint-dev-2b ' "$x"
     # V18: the real 2b pin file. Its non-GGUF lines equal pin.env (the image build reads pin.env, deploy reads
     # pin-2b.env, so a drift in APR_* or LWA_* would deploy an image the pin does not describe). The deploy
     # derives its pin path (no LLM_ENDPOINT_PIN_FILE): it runs in a scratch working directory whose
@@ -5753,18 +5765,18 @@ llm-endpoint-selftest:
     [ "$(grep -c '^GGUF_RUNG=qwen35-2b-q4km$' "$DIR/pin-2b.env")" -eq 1 ] || x=0
     [ "$(lines "$T/a-v18.log")" -eq 0 ] || x=0
     row V18 "pin-2b.env equals pin.env but for the two GGUF keys; deploy variant=2b derives and reads it -> DRY-RUN OK with the 2b gguf hash" "$T/c-v18.log" zero \
-        '^DRY-RUN OK aprender-llm-endpoint-2b-dev .*gguf aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223' "$x"
+        '^DRY-RUN OK aprender-llm-endpoint-dev-2b .*gguf aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223' "$x"
     # V19: readback records only that a Function URL is present, never its host (the record gets committed)
     : > "$T/a-v19.log"
     rm -f "$T"/rb2b/readback-*.json
-    run_just "$T/c-v19.log" LLM_ENDPOINT_IDS_DIR="$T/rb2b" SHIM_LOG="$T/a-v19.log" SHIM_RB_NAME=aprender-llm-endpoint-2b-dev SHIM_URL=https://secrethost9z.lambda-url.us-east-1.on.aws/ SHIM_CONCURRENCY=1 \
+    run_just "$T/c-v19.log" LLM_ENDPOINT_IDS_DIR="$T/rb2b" SHIM_LOG="$T/a-v19.log" SHIM_RB_NAME=aprender-llm-endpoint-dev-2b SHIM_URL=https://secrethost9z.lambda-url.us-east-1.on.aws/ SHIM_CONCURRENCY=1 \
         just llm-endpoint-readback dev ze-kasher-dev variant=2b
     x=1
     RBF="$(find "$T/rb2b" -name 'readback-*.json' | head -1)"
     [ "$(jget_selftest "$RBF" function_url)" = present ] || x=0
     grep -q 'secrethost9z' "$RBF" && x=0
     grep -q 'secrethost9z' "$T/c-v19.log" && x=0
-    row V19 "readback with a URL config: function_url is 'present', the host appears in neither the record nor stdout" "$T/c-v19.log" zero '^READBACK OK aprender-llm-endpoint-2b-dev ' "$x"
+    row V19 "readback with a URL config: function_url is 'present', the host appears in neither the record nor stdout" "$T/c-v19.log" zero '^READBACK OK aprender-llm-endpoint-dev-2b ' "$x"
     # V20-V22: variant= in the wrong positional slot is refused, never silently bound to the default name
     : > "$T/a-v20.log"
     run_just "$T/c-v20.log" LLM_ENDPOINT_IDS_DIR="$IDS" SHIM_LOG="$T/a-v20.log" SHIM_CONCURRENCY=0 just llm-endpoint-teardown env=dev variant=iso
@@ -5774,6 +5786,14 @@ llm-endpoint-selftest:
     run_just "$T/c-v21.log" LLM_ENDPOINT_IDS_DIR="$T/rb2b" SHIM_LOG="$T/a-v21.log" APR_PROBE_KEY=k just llm-endpoint-measure dev ze-kasher-dev variant=2b
     row V21 "measure dev ze-kasher-dev variant=2b (variant lands in the label slot) -> REFUSED args, nothing reached the shim" "$T/c-v21.log" nonzero '^REFUSED args: variant= must be the last positional' \
         "$([ "$(lines "$T/a-v21.log")" -eq 0 ] && echo 1 || echo 0)"
+    : > "$T/a-v24.log"
+    run_just "$T/c-v24.log" LLM_ENDPOINT_IDS_DIR="$T/rb2b" SHIM_LOG="$T/a-v24.log" APR_PROBE_KEY=k just llm-endpoint-measure dev ze-kasher-dev smoke variant=2b
+    row V24 "measure dev ze-kasher-dev smoke variant=2b (variant lands in the cold slot) -> REFUSED args, nothing reached the shim" "$T/c-v24.log" nonzero '^REFUSED args: variant= must be the last positional.*cold' \
+        "$([ "$(lines "$T/a-v24.log")" -eq 0 ] && echo 1 || echo 0)"
+    : > "$T/a-v25.log"
+    run_just "$T/c-v25.log" LLM_ENDPOINT_IDS_DIR="$T/rb2b" SHIM_LOG="$T/a-v25.log" APR_PROBE_KEY=k just llm-endpoint-measure dev ze-kasher-dev smoke 1 variant=2b
+    row V25 "measure dev ze-kasher-dev smoke 1 variant=2b (variant lands in the long slot) -> REFUSED args, nothing reached the shim" "$T/c-v25.log" nonzero '^REFUSED args: variant= must be the last positional.*long' \
+        "$([ "$(lines "$T/a-v25.log")" -eq 0 ] && echo 1 || echo 0)"
     : > "$T/a-v22.log"
     run_just "$T/c-v22.log" LLM_ENDPOINT_IDS_DIR="$T/up-legacy" SHIM_LOG="$T/a-v22.log" just llm-endpoint-up dev variant=iso
     row V22 "up dev variant=iso (variant lands in the profile slot) -> REFUSED args, nothing reached the shim" "$T/c-v22.log" nonzero '^REFUSED args: variant= must be the last positional' \

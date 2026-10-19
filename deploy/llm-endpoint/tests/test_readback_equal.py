@@ -9,7 +9,7 @@ import unittest
 SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "readback_equal.py")
 
 BASE = {
-    "function_name": "aprender-llm-endpoint-2b-dev",
+    "function_name": "aprender-llm-endpoint-dev-2b",
     "state": "Active",
     "memory_mb": 10240,
     "timeout_s": 900,
