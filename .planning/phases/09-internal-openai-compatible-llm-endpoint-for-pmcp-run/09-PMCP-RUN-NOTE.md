@@ -4,7 +4,7 @@ From Aprender, 2026-10-18. This answers your change request of the same date. Th
 
 ## Where it stands
 
-The recipe change is built and tested offline on our working branch. It is not merged, and nothing has been deployed to AWS for it. The live steps (the 2B deploy and the isolation test) start only when our operator says go. No dates.
+The recipe change is built, tested offline (75 self-test rows against shims) and used live on 2026-10-19. It is not merged to our main branch. `aprender-llm-endpoint-dev-2b` is deployed and stays up, reserved concurrency 1. Evidence files: `09-VARIANT-ISOLATION-EVIDENCE.json` and `09-2B-SMOKE-EVIDENCE.json`.
 
 ## What you can rely on now
 
@@ -15,12 +15,14 @@ The recipe change is built and tested offline on our working branch. It is not m
 - **The model** is a per-variant pin file naming the ladder rung and the GGUF object; the sha256 comes from the capability ladder and is never typed. The 2B uses `qwen35-2b-q4km`.
 - **Memory and scratch disk are not inputs.** They stay at the Lambda maximum (10,240 MB each, 900 s, arm64) because 10,240 MB is the only size that gives the six vCPUs the server is set to use, and the recipe refuses a function that reads back anything else.
 
-## What is not proven yet
+## Measured
 
-- **Isolation.** We will not state it from a code reading. The test: with the 0.8B deployed, deploy the 2B and read the 0.8B back from Lambda, deploy a throwaway variant and tear it down, then read both back again. Every read-back must equal the one before it. You get the evidence files.
-- **The 2B smoke test.** One tool-calling chat completion through the recipe's own probe, with the same API Gateway v2 event the 0.8B used, plus the cold-start timeline. Invocation spend is capped at $3.
-- **The 2B timing depends on the CPU Lambda hands out.** The 0.8B landed on Graviton3 and prefills at about 6 tokens per second; spike 031's 2B landed on Graviton2 at 1.9. At your 881-token prompt that is roughly 460 s of prefill on Graviton2, so a cold 2B call can miss your 280 s transport limit on one day and pass on the next. The recipe records the CPU part with every measurement.
-- **Image and weights:** the image is 154,427,965 bytes (tag `cpu-v0.71.4`, no weights); the 2B weights are 1,280,835,840 bytes, pulled from S3 at each cold start.
+- **Isolation holds.** With the 0.8B deployed, we deployed the 2B, then a throwaway variant, and tore the throwaway down. Four read-backs of the 0.8B are field-for-field equal (still modified 2026-10-16), two of the 2B are equal, and the throwaway reads as not found.
+- **The 2B answers a tool call.** One two-tool chat completion returned `finish_reason: tool_calls` with `get_weather` through the same API Gateway v2 event the 0.8B takes.
+- **Timing, one sample on Graviton2 (CPU part `0xd0c`):** cold first call (1 token) 62 s; two-tool turn 245 s at $0.033; a turn that extends the session 26 s; prefill 1.87 and decode 1.89 tokens per second. The 0.8B landed on Graviton3 and is about 3x faster. Lambda assigns the CPU part, so another environment of the same function can differ.
+- **That is inside your 280 s transport limit by 35 s**, with our two-tool prompt. Your 881-token prompt is larger. Treat the 2B as at the edge on Graviton2.
+- **Image and weights:** image 154,429,272 bytes (tag `cpu-v0.71.4`, no weights); 2B weights 1,280,835,840 bytes, pulled from S3 at each cold start. Test spend $0.10.
+- **Auth:** the 401 proof returns `NOT PROVEN` (status 200 without a key), as on the 0.8B. No Function URL exists on the 2B.
 
 ## Unchanged
 

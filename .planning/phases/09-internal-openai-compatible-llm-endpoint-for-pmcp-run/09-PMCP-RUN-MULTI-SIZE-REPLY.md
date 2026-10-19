@@ -1,6 +1,6 @@
 # Aprender reply to the pmcp.run change request: several sizes of the in-account endpoint at the same time
 
-**DRAFT, not sent.** As of: 2026-10-18 (UTC), repo HEAD a17c4959a, branch gsd/phase-2-contract-gate. AWS state was read live on 2026-10-18 with read-only calls under the dev profile; repo files were read at that HEAD. This replies to `2026-10-18-pmcp-run-multi-size-change-request.md` (your message, stored verbatim beside this file).
+**DRAFT, not sent. Updated 2026-10-19 with the live results.** As of: 2026-10-18 (UTC), repo HEAD a17c4959a, branch gsd/phase-2-contract-gate. AWS state was read live on 2026-10-18 with read-only calls under the dev profile; repo files were read at that HEAD. This replies to `2026-10-18-pmcp-run-multi-size-change-request.md` (your message, stored verbatim beside this file).
 
 ## How to read this
 
@@ -75,12 +75,17 @@ Nothing was deployed, changed on AWS, or written to GitHub to produce this reply
 - **GPU policy statement.** Our recorded position is that no GPU-backed deployment of this endpoint runs until the CUDA-path routers are gated (#5478) or the deployed 401 proof is repeated on that path. A written agreement that the proxy Lambda alone satisfies that would change the position, and this reply does not change it.
 - **SageMaker shim.** No `/ping` or `/invocations` route exists in the server and no shim is in the repo. Our technical view is that the same image on ECS over an EC2 GPU host is less work than a new container contract; the choice is not made here.
 
-## What you get back, and when it exists
+## What you get back
 
-- The variable: `variant`, default empty, names as in Item 1. Stated now.
-- Isolation: the acceptance-test evidence described in Item 1, when the recipe change lands. Not stated from a code reading.
-- The 2B: the same image tag (`cpu-v0.71.4`) and the per-variant pin file naming `qwen35-2b-q4km`, the smoke-test evidence file with cold-start timeline and CPU part. When the deploy runs.
-- No dates are offered for any of the three.
+Done on 2026-10-19 against `aprender-llm-endpoint-dev-2b`, all recorded in files beside this one:
+
+- **The variable:** `variant`, default empty, names as in Item 1.
+- **Isolation:** `09-VARIANT-ISOLATION-EVIDENCE.json`. With the 0.8B deployed, we deployed the 2B, then a throwaway variant, tore the throwaway down, and read back at each point. Four 0.8B read-backs are field-for-field equal (including `last_modified` 2026-10-16, code sha `f291c0a7…`, no Function URL) and two 2B read-backs are equal. The throwaway's function and role then read as not found.
+- **The 2B smoke test:** `09-2B-SMOKE-EVIDENCE.json`. One two-tool chat completion returned `finish_reason: tool_calls` with `get_weather`, through the API Gateway v2 event. The 2B on apr v0.71.4 landed on Graviton2 (CPU part `0xd0c`): cold first call (1 token) 62.1 s with 9.8 s Lambda init; short call 39.6 s; two-tool turn 245.5 s ($0.033); a following turn that extends the session 25.6 s; prefill 1.87 and decode 1.89 tokens per second. Spend $0.10 of the $3 cap. One sample per shape on one environment.
+- **Image and weights:** image 154,429,272 bytes in ECR (digest `33d3ddae…`; the 0.8B's is `f291c0a7…` because the base image is not pinned; both are apr v0.71.4); 2B weights 1,280,835,840 bytes.
+- **Auth:** the 401 proof returned `NOT PROVEN` (status 200 without a key), as on the 0.8B; no Function URL exists on the 2B.
+
+The two-tool turn at 245 s fits inside your 280 s transport limit with 35 s to spare on Graviton2, with your own prompt larger than ours. Treat it as at the edge, not as a margin.
 
 ## What we ask of you
 

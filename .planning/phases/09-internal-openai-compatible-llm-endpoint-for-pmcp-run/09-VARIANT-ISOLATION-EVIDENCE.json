@@ -1,0 +1,194 @@
+{
+  "identity": {
+    "account": "816069129666",
+    "region": "us-east-1",
+    "profile": "ze-kasher-dev",
+    "apr_tag": "v0.71.4",
+    "image_digest_default": "sha256:f291c0a7 (0.8B, deployed 2026-10-16)",
+    "image_digest_2b_and_iso": "sha256:33d3ddaeb8583cdd6a8d9b64acf26647e0997b3daa9c9715ddb039cbab55357d"
+  },
+  "sequence": [
+    "R0 readback of aprender-llm-endpoint-dev",
+    "up/image/weights copy/deploy of variant 2b (2026-10-19)",
+    "R1",
+    "S0",
+    "up/image/weights copy/deploy of variant iso",
+    "R2, S0b",
+    "teardown variant iso",
+    "get-function and get-role for iso: not found",
+    "R3, S1"
+  ],
+  "comparisons": {
+    "R0=R1=R2=R3": "readback_equal.py exit 0",
+    "S0=S0b=S1": "readback_equal.py exit 0 (S0,S0b) and (S0,S1)"
+  },
+  "iso_not_found": "An error occurred (ResourceNotFoundException) when calling the GetFunction operation: Function not found: arn:aws:lambda:us-east-1:816069129666:function:aprender-llm-endpoint-dev-iso",
+  "left_for_the_operator": "ECR repository aprender-llm-endpoint-dev-iso (empty); not deleted",
+  "records": {
+    "R0": {
+      "function_name": "aprender-llm-endpoint-dev",
+      "state": "Active",
+      "memory_mb": 10240,
+      "timeout_s": 900,
+      "ephemeral_mb": 10240,
+      "architecture": "arm64",
+      "package_type": "Image",
+      "code_sha256": "f291c0a77f17d9f203953bba748f1a3f7287780d36628883f933d5b069a1dd15",
+      "last_modified": "2026-10-16T18:22:53.000+0000",
+      "revision_id": "fdd2764e-7444-492b-9ea8-e3e4657926c9",
+      "image_uri": "816069129666.dkr.ecr.us-east-1.amazonaws.com/aprender-llm-endpoint-dev@sha256:f291c0a77f17d9f203953bba748f1a3f7287780d36628883f933d5b069a1dd15",
+      "env_keys": [
+        "APR_API_KEY_HASH",
+        "COLD_NONCE",
+        "MODEL_S3_URI",
+        "MODEL_SHA256",
+        "PLATFORM",
+        "RAYON_NUM_THREADS"
+      ],
+      "reserved_concurrency": 1,
+      "function_url": "absent",
+      "read_at": "2026-10-19T05:40:54Z"
+    },
+    "R1": {
+      "function_name": "aprender-llm-endpoint-dev",
+      "state": "Active",
+      "memory_mb": 10240,
+      "timeout_s": 900,
+      "ephemeral_mb": 10240,
+      "architecture": "arm64",
+      "package_type": "Image",
+      "code_sha256": "f291c0a77f17d9f203953bba748f1a3f7287780d36628883f933d5b069a1dd15",
+      "last_modified": "2026-10-16T18:22:53.000+0000",
+      "revision_id": "fdd2764e-7444-492b-9ea8-e3e4657926c9",
+      "image_uri": "816069129666.dkr.ecr.us-east-1.amazonaws.com/aprender-llm-endpoint-dev@sha256:f291c0a77f17d9f203953bba748f1a3f7287780d36628883f933d5b069a1dd15",
+      "env_keys": [
+        "APR_API_KEY_HASH",
+        "COLD_NONCE",
+        "MODEL_S3_URI",
+        "MODEL_SHA256",
+        "PLATFORM",
+        "RAYON_NUM_THREADS"
+      ],
+      "reserved_concurrency": 1,
+      "function_url": "absent",
+      "read_at": "2026-10-19T06:07:41Z"
+    },
+    "R2": {
+      "function_name": "aprender-llm-endpoint-dev",
+      "state": "Active",
+      "memory_mb": 10240,
+      "timeout_s": 900,
+      "ephemeral_mb": 10240,
+      "architecture": "arm64",
+      "package_type": "Image",
+      "code_sha256": "f291c0a77f17d9f203953bba748f1a3f7287780d36628883f933d5b069a1dd15",
+      "last_modified": "2026-10-16T18:22:53.000+0000",
+      "revision_id": "fdd2764e-7444-492b-9ea8-e3e4657926c9",
+      "image_uri": "816069129666.dkr.ecr.us-east-1.amazonaws.com/aprender-llm-endpoint-dev@sha256:f291c0a77f17d9f203953bba748f1a3f7287780d36628883f933d5b069a1dd15",
+      "env_keys": [
+        "APR_API_KEY_HASH",
+        "COLD_NONCE",
+        "MODEL_S3_URI",
+        "MODEL_SHA256",
+        "PLATFORM",
+        "RAYON_NUM_THREADS"
+      ],
+      "reserved_concurrency": 1,
+      "function_url": "absent",
+      "read_at": "2026-10-19T14:04:14Z"
+    },
+    "R3": {
+      "function_name": "aprender-llm-endpoint-dev",
+      "state": "Active",
+      "memory_mb": 10240,
+      "timeout_s": 900,
+      "ephemeral_mb": 10240,
+      "architecture": "arm64",
+      "package_type": "Image",
+      "code_sha256": "f291c0a77f17d9f203953bba748f1a3f7287780d36628883f933d5b069a1dd15",
+      "last_modified": "2026-10-16T18:22:53.000+0000",
+      "revision_id": "fdd2764e-7444-492b-9ea8-e3e4657926c9",
+      "image_uri": "816069129666.dkr.ecr.us-east-1.amazonaws.com/aprender-llm-endpoint-dev@sha256:f291c0a77f17d9f203953bba748f1a3f7287780d36628883f933d5b069a1dd15",
+      "env_keys": [
+        "APR_API_KEY_HASH",
+        "COLD_NONCE",
+        "MODEL_S3_URI",
+        "MODEL_SHA256",
+        "PLATFORM",
+        "RAYON_NUM_THREADS"
+      ],
+      "reserved_concurrency": 1,
+      "function_url": "absent",
+      "read_at": "2026-10-19T14:11:31Z"
+    },
+    "S0": {
+      "function_name": "aprender-llm-endpoint-dev-2b",
+      "state": "Active",
+      "memory_mb": 10240,
+      "timeout_s": 900,
+      "ephemeral_mb": 10240,
+      "architecture": "arm64",
+      "package_type": "Image",
+      "code_sha256": "33d3ddaeb8583cdd6a8d9b64acf26647e0997b3daa9c9715ddb039cbab55357d",
+      "last_modified": "2026-10-19T06:06:42.702+0000",
+      "revision_id": "6d78a44c-e559-475f-a4b9-944a01760c2a",
+      "image_uri": "816069129666.dkr.ecr.us-east-1.amazonaws.com/aprender-llm-endpoint-dev-2b@sha256:33d3ddaeb8583cdd6a8d9b64acf26647e0997b3daa9c9715ddb039cbab55357d",
+      "env_keys": [
+        "APR_API_KEY_HASH",
+        "MODEL_S3_URI",
+        "MODEL_SHA256",
+        "PLATFORM",
+        "RAYON_NUM_THREADS"
+      ],
+      "reserved_concurrency": 1,
+      "function_url": "absent",
+      "read_at": "2026-10-19T06:07:21Z"
+    },
+    "S0b": {
+      "function_name": "aprender-llm-endpoint-dev-2b",
+      "state": "Active",
+      "memory_mb": 10240,
+      "timeout_s": 900,
+      "ephemeral_mb": 10240,
+      "architecture": "arm64",
+      "package_type": "Image",
+      "code_sha256": "33d3ddaeb8583cdd6a8d9b64acf26647e0997b3daa9c9715ddb039cbab55357d",
+      "last_modified": "2026-10-19T06:06:42.702+0000",
+      "revision_id": "6d78a44c-e559-475f-a4b9-944a01760c2a",
+      "image_uri": "816069129666.dkr.ecr.us-east-1.amazonaws.com/aprender-llm-endpoint-dev-2b@sha256:33d3ddaeb8583cdd6a8d9b64acf26647e0997b3daa9c9715ddb039cbab55357d",
+      "env_keys": [
+        "APR_API_KEY_HASH",
+        "MODEL_S3_URI",
+        "MODEL_SHA256",
+        "PLATFORM",
+        "RAYON_NUM_THREADS"
+      ],
+      "reserved_concurrency": 1,
+      "function_url": "absent",
+      "read_at": "2026-10-19T14:04:17Z"
+    },
+    "S1": {
+      "function_name": "aprender-llm-endpoint-dev-2b",
+      "state": "Active",
+      "memory_mb": 10240,
+      "timeout_s": 900,
+      "ephemeral_mb": 10240,
+      "architecture": "arm64",
+      "package_type": "Image",
+      "code_sha256": "33d3ddaeb8583cdd6a8d9b64acf26647e0997b3daa9c9715ddb039cbab55357d",
+      "last_modified": "2026-10-19T06:06:42.702+0000",
+      "revision_id": "6d78a44c-e559-475f-a4b9-944a01760c2a",
+      "image_uri": "816069129666.dkr.ecr.us-east-1.amazonaws.com/aprender-llm-endpoint-dev-2b@sha256:33d3ddaeb8583cdd6a8d9b64acf26647e0997b3daa9c9715ddb039cbab55357d",
+      "env_keys": [
+        "APR_API_KEY_HASH",
+        "MODEL_S3_URI",
+        "MODEL_SHA256",
+        "PLATFORM",
+        "RAYON_NUM_THREADS"
+      ],
+      "reserved_concurrency": 1,
+      "function_url": "absent",
+      "read_at": "2026-10-19T14:11:33Z"
+    }
+  }
+}
