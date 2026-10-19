@@ -1,6 +1,6 @@
 # Note for the pmcp.run dev team: several endpoint sizes side by side
 
-From Aprender, 2026-10-18. This answers your change request of the same date. The longer reply with evidence references is `09-PMCP-RUN-MULTI-SIZE-REPLY.md` beside this file.
+From Aprender, 2026-10-19. This answers your change request of 2026-10-18. The two evidence files named below are in our planning directory; we can send them on request.
 
 ## Where it stands
 
@@ -20,7 +20,7 @@ The recipe change is built, tested offline (75 self-test rows against shims) and
 - **Isolation holds.** With the 0.8B deployed, we deployed the 2B, then a throwaway variant, and tore the throwaway down. Four read-backs of the 0.8B are field-for-field equal (still modified 2026-10-16), two of the 2B are equal, and the throwaway reads as not found.
 - **The 2B answers a tool call.** One two-tool chat completion returned `finish_reason: tool_calls` with `get_weather` through the same API Gateway v2 event the 0.8B takes.
 - **Timing, one sample on Graviton2 (CPU part `0xd0c`):** cold first call (1 token) 62 s; two-tool turn 245 s at $0.033; a turn that extends the session 26 s; prefill 1.87 and decode 1.89 tokens per second. The 0.8B landed on Graviton3 and is about 3x faster. Lambda assigns the CPU part, so another environment of the same function can differ.
-- **That is inside your 280 s transport limit by 35 s**, with our two-tool prompt. Your 881-token prompt is larger. Treat the 2B as at the edge on Graviton2.
+- **Against your 280 s transport limit:** our two-tool turn fits by 35 s. Your 881-token prompt is larger; at 1.87 tokens per second its prefill alone is about 470 s, so on a Graviton2 environment expect the 2B to miss your limit on a cold or fresh-session call. On Graviton3 it should fit. We have not measured your prompt.
 - **Image and weights:** image 154,429,272 bytes (tag `cpu-v0.71.4`, no weights); 2B weights 1,280,835,840 bytes, pulled from S3 at each cold start. Test spend $0.10.
 - **Auth:** the 401 proof returns `NOT PROVEN` (status 200 without a key), as on the 0.8B. No Function URL exists on the 2B.
 
