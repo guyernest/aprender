@@ -58,14 +58,14 @@ llm_endpoint_names() {
 }
 
 # llm_endpoint_check_record FILE: does this ids record belong to the function FN? Reads the globals
-# FN, VARIANT and ENV the recipe set. A record with a `name` key must equal FN. A record without one
+# FN, VARIANT and ENV the recipe set. A record with a `name` key (or, in function.json, a `function` key) must equal FN. A record without one
 # is legacy (written before variants) and serves only the default variant, in the same env.
 # Returns 0 to accept; otherwise 1 with a one-line reason in LLM_ENDPOINT_NAMES_ERR.
 llm_endpoint_check_record() {
     local file="${1-}"
     local rc=0
     # one program line: bashrs mis-parses a python body inside the command substitution itself
-    local prog='import json,sys;p,fn,v,e=sys.argv[1:5];r=json.load(open(p));r=r if isinstance(r,dict) else {};m=("%s belongs to %s, not %s"%(p,r["name"],fn) if r["name"]!=fn else "") if "name" in r else ("%s has no name key (a record from before variants) and cannot serve variant %s"%(p,v) if v else ("%s has no name key and its env is %s, not %s"%(p,r.get("env"),e) if r.get("env")!=e else ""));print(m);sys.exit(1 if m else 0)'
+    local prog='import json,sys;p,fn,v,e=sys.argv[1:5];r=json.load(open(p));r=r if isinstance(r,dict) else {};n=r.get("name",r.get("function"));m=("%s belongs to %s, not %s"%(p,n,fn) if n!=fn else "") if n is not None else ("%s has no name key (a record from before variants) and cannot serve variant %s"%(p,v) if v else ("%s has no name key and its env is %s, not %s"%(p,r.get("env"),e) if r.get("env")!=e else ""));print(m);sys.exit(1 if m else 0)'
     LLM_ENDPOINT_NAMES_ERR="$(python3 -I -c "$prog" "$file" "${FN-}" "${VARIANT-}" "${ENV-}" 2>&1)"
     rc=$?
     if [ "$rc" -ne 0 ]; then
@@ -162,6 +162,7 @@ llm_endpoint_names_selftest() {
     printf '{"env":"dev"}\n' > "$rd/legacy.json"
     printf '{"env":"prod"}\n' > "$rd/legacy-prod.json"
     printf '{"name":"aprender-llm-endpoint-dev","env":"dev"}\n' > "$rd/named-default.json"
+    printf '{"function":"aprender-llm-endpoint-2b-dev","env":"dev","variant":"2b"}\n' > "$rd/function-2b.json"
     printf 'not json\n' > "$rd/garbage.json"
     FN=aprender-llm-endpoint-2b-dev VARIANT=2b ENV=dev
     row "record: matching name accepted" 0 llm_endpoint_check_record "$rd/named.json"
@@ -175,6 +176,10 @@ llm_endpoint_names_selftest() {
     row "record: 2b-named record refused for the default" 1 llm_endpoint_check_record "$rd/named.json"
     FN=aprender-llm-endpoint-2b-dev VARIANT=2b ENV=dev
     row "record: legacy refused for a variant" 1 llm_endpoint_check_record "$rd/legacy.json"
+    row "record: function.json keyed by function accepted for its variant" 0 llm_endpoint_check_record "$rd/function-2b.json"
+    FN=aprender-llm-endpoint-dev VARIANT="" ENV=dev
+    row "record: function.json of 2b refused for the default" 1 llm_endpoint_check_record "$rd/function-2b.json"
+    FN=aprender-llm-endpoint-2b-dev VARIANT=2b ENV=dev
     FN=aprender-llm-endpoint-dev VARIANT="" ENV=dev
     row "record: legacy with the wrong env refused" 1 llm_endpoint_check_record "$rd/legacy-prod.json"
     row "record: unreadable file refused" 1 llm_endpoint_check_record "$rd/garbage.json"
