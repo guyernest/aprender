@@ -19,15 +19,55 @@ fn model_path() -> String {
     }
 }
 
+/// What an absent model means for a test: a skip (`Ok`, the line to print), or
+/// under `APR_QWEN35_REQUIRE_MODEL=1` a failure (`Err`, the reason), because a
+/// skip is not a pass. `require` is that variable's value, if set.
+fn absent_model(path: &str, require: Option<&str>) -> std::result::Result<String, String> {
+    if require == Some("1") {
+        Err(format!("APR_QWEN35_REQUIRE_MODEL=1 but {path} is absent"))
+    } else {
+        Ok(format!("SKIP: {path} is absent"))
+    }
+}
+
 macro_rules! mapped_or_skip {
     () => {{
         let path = model_path();
         if !std::path::Path::new(&path).exists() {
-            eprintln!("SKIP: {path} is absent");
-            return;
+            let require = std::env::var("APR_QWEN35_REQUIRE_MODEL").ok();
+            match absent_model(&path, require.as_deref()) {
+                Ok(skip) => {
+                    eprintln!("{skip}");
+                    return;
+                },
+                Err(why) => panic!("{why}"),
+            }
         }
         MappedGGUFModel::from_path(&path).expect("map the GGUF")
     }};
+}
+
+/// A skip is not a pass: under `APR_QWEN35_REQUIRE_MODEL=1` an absent model fails
+/// the test instead (the rule `forward_qwen35_prefill_tests` follows), so a
+/// contract command that sets it cannot go green on a host without the model.
+#[test]
+fn an_absent_model_skips_unless_it_is_required() {
+    let path = "/nowhere/Qwen3.5-0.8B-Q4_K_M.gguf";
+    assert_eq!(
+        absent_model(path, None),
+        Ok("SKIP: /nowhere/Qwen3.5-0.8B-Q4_K_M.gguf is absent".to_string())
+    );
+    assert_eq!(
+        absent_model(path, Some("0")),
+        Ok("SKIP: /nowhere/Qwen3.5-0.8B-Q4_K_M.gguf is absent".to_string())
+    );
+    assert_eq!(
+        absent_model(path, Some("1")),
+        Err(
+            "APR_QWEN35_REQUIRE_MODEL=1 but /nowhere/Qwen3.5-0.8B-Q4_K_M.gguf is absent"
+                .to_string()
+        )
+    );
 }
 
 fn encode(mapped: &MappedGGUFModel, text: &str) -> Vec<u32> {
