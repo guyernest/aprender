@@ -190,5 +190,61 @@
       "function_url": "absent",
       "read_at": "2026-10-19T14:11:33Z"
     }
+  },
+  "after_smoke_test_and_spike_cleanup": {
+    "date": "2026-10-19",
+    "R4_equals_R0": "readback_equal.py exit 0: the 0.8B is unchanged after the 2B smoke test and the spike-031 removal",
+    "S2_vs_S0": "DIFFERS in last_modified, revision_id and env_keys by one added key COLD_NONCE. Expected: the measure recipe (bench.py, update-function-configuration) adds COLD_NONCE to the measured function to force a cold start. Only the 2B was measured.",
+    "spike_031_removed": "both functions, CodeBuild project, ECS cluster, S3 bucket (incl. the 4B GGUF), five roles, security group and the ECR repository: each now reads as not found",
+    "records": {
+      "R4": {
+        "function_name": "aprender-llm-endpoint-dev",
+        "state": "Active",
+        "memory_mb": 10240,
+        "timeout_s": 900,
+        "ephemeral_mb": 10240,
+        "architecture": "arm64",
+        "package_type": "Image",
+        "code_sha256": "f291c0a77f17d9f203953bba748f1a3f7287780d36628883f933d5b069a1dd15",
+        "last_modified": "2026-10-16T18:22:53.000+0000",
+        "revision_id": "fdd2764e-7444-492b-9ea8-e3e4657926c9",
+        "image_uri": "816069129666.dkr.ecr.us-east-1.amazonaws.com/aprender-llm-endpoint-dev@sha256:f291c0a77f17d9f203953bba748f1a3f7287780d36628883f933d5b069a1dd15",
+        "env_keys": [
+          "APR_API_KEY_HASH",
+          "COLD_NONCE",
+          "MODEL_S3_URI",
+          "MODEL_SHA256",
+          "PLATFORM",
+          "RAYON_NUM_THREADS"
+        ],
+        "reserved_concurrency": 1,
+        "function_url": "absent",
+        "read_at": "2026-10-19T15:41:42Z"
+      },
+      "S2": {
+        "function_name": "aprender-llm-endpoint-dev-2b",
+        "state": "Active",
+        "memory_mb": 10240,
+        "timeout_s": 900,
+        "ephemeral_mb": 10240,
+        "architecture": "arm64",
+        "package_type": "Image",
+        "code_sha256": "33d3ddaeb8583cdd6a8d9b64acf26647e0997b3daa9c9715ddb039cbab55357d",
+        "last_modified": "2026-10-19T14:39:40.000+0000",
+        "revision_id": "cff8da8c-dded-493e-a0d8-9f86bc79cae7",
+        "image_uri": "816069129666.dkr.ecr.us-east-1.amazonaws.com/aprender-llm-endpoint-dev-2b@sha256:33d3ddaeb8583cdd6a8d9b64acf26647e0997b3daa9c9715ddb039cbab55357d",
+        "env_keys": [
+          "APR_API_KEY_HASH",
+          "COLD_NONCE",
+          "MODEL_S3_URI",
+          "MODEL_SHA256",
+          "PLATFORM",
+          "RAYON_NUM_THREADS"
+        ],
+        "reserved_concurrency": 1,
+        "function_url": "absent",
+        "read_at": "2026-10-19T15:41:45Z"
+      }
+    }
   }
 }
