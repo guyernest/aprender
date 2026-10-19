@@ -1,6 +1,6 @@
 # GPU probe: one private A10G, to fill the one measurement nobody has
 
-STATUS: PREPARED, NOT LAUNCHED. Nothing here has run. Launching needs the operator's explicit word.
+STATUS: RUN ONCE on 2026-10-19 (A10G, us-east-1b), torn down and verified. Evidence: 09-GPU-PROBE-EVIDENCE.json in the phase 9 planning directory. Another launch needs the operator's explicit word.
 
 ## What it is, and what it is not
 

@@ -1,0 +1,76 @@
+{
+  "recorded": "2026-10-19",
+  "what": "One private GPU probe: apr v0.71.4 x86_64 CUDA build on an A10G, both Qwen3.5 Q4_K_M GGUFs. A measurement host, not an endpoint.",
+  "host": {
+    "instance_id": "i-0d0f84eb6123763c5",
+    "type": "g5.xlarge",
+    "az": "us-east-1b",
+    "ami": "ami-085c2a59c31280377",
+    "launched": "2026-10-19T18:37:37Z",
+    "gpu": "NVIDIA A10G, compute capability 8.6, 22589 MB VRAM",
+    "exposure": "zero ingress rules, server bound to 127.0.0.1, SSM only, IMDSv2 required, 150-minute self-terminate"
+  },
+  "pins": {
+    "apr_tarball_sha256": "03015a46b4c1a9c27e8070f9ed7293bfbc06e8c4ba3c54427d41caf2d26704c8",
+    "gguf_0_8b_sha256": "bd258782e35f7f458f8aced1adc053e6e92e89bc735ba3be89d38a06121dc517",
+    "gguf_2b_sha256": "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223"
+  },
+  "capacity_note": "First launch attempt in us-east-1a was refused (InsufficientInstanceCapacity); us-east-1b accepted.",
+  "results": {
+    "w08": {
+      "healthy": "1 start_s=3.6",
+      "chat_cold": "200 14.015085",
+      "tool_cold": "200 0.910358",
+      "tool_warm": "200 0.708602",
+      "tool_calls_present": "0",
+      "gpu_mem": "NVIDIA A10G, 8.6, 2075 MiB",
+      "gpu_process": "4270, 2066 MiB;",
+      "server_device_lines": "Backend: GPU (CUDA, NVIDIA A10G, 22589 MB VRAM) [qwen35 hybrid forward, #3090]|Model ready: Qwen3.5 hybrid, 24 layers resident on the GPU, declared context 262144 tokens|gpu-layers: requested=all resolved=24 total=24 (backend=cuda)|  POST /v1/gpu/warmup|  GET /v1/gpu/status|"
+    },
+    "w2b": {
+      "healthy": "1 start_s=2.5",
+      "chat_cold": "200 5.638774",
+      "tool_cold": "200 0.473560",
+      "tool_warm": "200 0.344230",
+      "tool_calls_present": "1",
+      "gpu_mem": "NVIDIA A10G, 8.6, 4517 MiB",
+      "gpu_process": "4335, 4508 MiB;",
+      "server_device_lines": "Backend: GPU (CUDA, NVIDIA A10G, 22589 MB VRAM) [qwen35 hybrid forward, #3090]|Model ready: Qwen3.5 hybrid, 24 layers resident on the GPU, declared context 262144 tokens|gpu-layers: requested=all resolved=24 total=24 (backend=cuda)|  POST /v1/gpu/warmup|  GET /v1/gpu/status|"
+    }
+  },
+  "mechanism_engaged": "Server lines: 'Backend: GPU (CUDA, NVIDIA A10G, 22589 MB VRAM)', '24 layers resident on the GPU', 'backend=cuda'; nvidia-smi showed a compute process holding 2066 MiB (0.8B) and 4508 MiB (2B); the 0.8B response carried used_gpu=true.",
+  "w08_tool_request_reply": {
+    "usage": {
+      "prompt_tokens": 278,
+      "completion_tokens": 96
+    },
+    "timings": {
+      "prompt_n": 278,
+      "prompt_ms": 204.2714,
+      "prompt_per_second": 1360.934521425907,
+      "predicted_n": 96,
+      "predicted_ms": 646.1622420000001,
+      "predicted_per_second": 148.5694981230426,
+      "load_ms": 46.882251
+    },
+    "used_gpu": true,
+    "finish_reason": "length",
+    "tool_calls_present": false
+  },
+  "w08_tool_request_reply_text": "Answered in prose with an invented Paris weather report; no tool_calls; finish_reason length at the 96-token cap.",
+  "ssm_status_note": "SSM reported Failed, exit 143: the script's last command was wait on the killed server. Every RESULT line printed; not treated as a probe failure.",
+  "caveats": [
+    "One sample per shape on one host; temperature 0.",
+    "The 14.0 s first chat request on the 0.8B is read as one-time CUDA kernel compilation (PTX JIT) on a fresh host; the 2B ran second and may have reused the cache. Not measured separately.",
+    "The 0.8B and 2B rows are not like-for-like: the 0.8B wrote text up to the cap, the 2B emitted a short tool call, so their repeated-call times are not a speed comparison.",
+    "Weights were already on local disk when the server started; start_s excludes the S3 pull.",
+    "Not an agent-turn cost, not a concurrency figure, and says nothing about authentication: the CUDA-path routers still ignore the key (#5478) and the 401 proof was not run on this path.",
+    "The 2B tool_calls_present=1 is a count of lines in the reply body containing tool_calls, not a validity check of the call."
+  ],
+  "teardown": {
+    "script": "deploy/llm-endpoint/gpu-probe/down.sh",
+    "verified": "instance terminated; security group count 0; role and instance profile NoSuchEntity; tagged volumes 0",
+    "checked": "2026-10-19"
+  },
+  "raw_output": "deploy/llm-endpoint/.ids/gpu-probe/probe-20261019T190158Z.out (gitignored); setup log was not retrieved"
+}
