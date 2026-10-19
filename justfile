@@ -4646,6 +4646,26 @@ llm-endpoint-teardown env="dev" profile="ze-kasher-dev" variant="":
     if [ -f "$IDS/function.json" ]; then
         llm_endpoint_check_record "$IDS/function.json" || refuse ids "$LLM_ENDPOINT_NAMES_ERR"
     fi
+    if [ -f "$IDS/weights.json" ] && [ "$(jget "$IDS/weights.json" mode 2> /dev/null || true)" = "codebuild" ]; then
+        WCB_PROJECT="$(jget "$IDS/weights.json" codebuild_project)" || refuse ids "$IDS/weights.json lacks codebuild_project"
+        WCB_ROLE="$(jget "$IDS/weights.json" codebuild_role)" || refuse ids "$IDS/weights.json lacks codebuild_role"
+        OK_PROJECT="$CB_PROJECT"
+        OK_ROLE="$CB_ROLE"
+        if [ -z "$VARIANT" ]; then
+            # a codebuild-mode environment made before the role rename can still be torn down
+            LEGACY_PROJECT="aprender-llm-endpoint-weights-$ENV"
+            LEGACY_ROLE="aprender-llm-endpoint-codebuild-$ENV"
+        else
+            LEGACY_PROJECT="$OK_PROJECT"
+            LEGACY_ROLE="$OK_ROLE"
+        fi
+        if [ -n "$WCB_PROJECT" ] && [ "$WCB_PROJECT" != "$OK_PROJECT" ] && [ "$WCB_PROJECT" != "$LEGACY_PROJECT" ]; then
+            refuse ids "weights.json names a CodeBuild project ($WCB_PROJECT) that does not belong to $FN"
+        fi
+        if [ -n "$WCB_ROLE" ] && [ "$WCB_ROLE" != "$OK_ROLE" ] && [ "$WCB_ROLE" != "$LEGACY_ROLE" ]; then
+            refuse ids "weights.json names a CodeBuild role ($WCB_ROLE) that does not belong to $FN"
+        fi
+    fi
     [ -f "$PIN_FILE" ] || refuse pin "$PIN_FILE does not exist"
     . "$PIN_FILE"
     [ -n "${GGUF_OBJECT:-}" ] || refuse pin "$PIN_FILE lacks GGUF_OBJECT"
@@ -5553,6 +5573,31 @@ llm-endpoint-selftest:
     [ "$ctl" -ge 1 ] || x=0
     RC=0
     row V13 "no recipe of the nine holds an endpoint-name literal; the pattern does match in the self-test (control)" "$T/c-v13.log" zero '^must-match control' "$x"
+    # V14-V16: teardown deletes the CodeBuild project and role that weights.json names, so those names must
+    # belong to this function before any delete runs
+    write_weights() {
+        printf '{"mode":"codebuild","bucket":"b","key":"k","codebuild_project":"%s","codebuild_role":"%s"}\n' "$2" "$3" > "$1/weights.json"
+    }
+    write_weights "$T/td2b-keep" aprender-llm-endpoint-weights-dev aprender-llm-endpoint-dev-codebuild
+    : > "$T/a-v14.log"
+    run_just "$T/c-v14.log" LLM_ENDPOINT_IDS_DIR="$T/td2b-keep" SHIM_LOG="$T/a-v14.log" SHIM_CONCURRENCY=0 just llm-endpoint-teardown dev ze-kasher-dev variant=2b
+    row V14 "teardown variant=2b with a weights.json naming the default's CodeBuild project and role -> REFUSED ids, no delete call" "$T/c-v14.log" nonzero '^REFUSED ids:.*does not belong to' \
+        "$(if grep -qE ' delete-' "$T/a-v14.log"; then echo 0; else echo 1; fi)"
+    fresh_ids
+    write_weights "$W" aprender-llm-endpoint-weights-dev aprender-llm-endpoint-codebuild-dev
+    : > "$T/a-v15.log"
+    run_just "$T/c-v15.log" LLM_ENDPOINT_IDS_DIR="$W" SHIM_LOG="$T/a-v15.log" SHIM_CONCURRENCY=0 just llm-endpoint-teardown
+    x=1
+    grep -qE 'codebuild delete-project .*--name aprender-llm-endpoint-weights-dev( |$)' "$T/a-v15.log" || x=0
+    grep -qE 'iam delete-role .*--role-name aprender-llm-endpoint-codebuild-dev( |$)' "$T/a-v15.log" || x=0
+    row V15 "teardown, default variant, a weights.json with the legacy pre-rename CodeBuild names -> TEARDOWN OK, deletes exactly those" "$T/c-v15.log" zero '^TEARDOWN OK' "$x"
+    write_weights "$T/td2b-keep" aprender-llm-endpoint-weights-2b-dev aprender-llm-endpoint-2b-dev-codebuild
+    : > "$T/a-v16.log"
+    run_just "$T/c-v16.log" LLM_ENDPOINT_IDS_DIR="$T/td2b-keep" SHIM_LOG="$T/a-v16.log" SHIM_CONCURRENCY=0 just llm-endpoint-teardown dev ze-kasher-dev variant=2b
+    x=1
+    grep -qE 'codebuild delete-project .*--name aprender-llm-endpoint-weights-2b-dev( |$)' "$T/a-v16.log" || x=0
+    grep -qE 'iam delete-role .*--role-name aprender-llm-endpoint-2b-dev-codebuild( |$)' "$T/a-v16.log" || x=0
+    row V16 "teardown variant=2b with its own derived CodeBuild names -> TEARDOWN OK, deletes those" "$T/c-v16.log" zero '^TEARDOWN OK aprender-llm-endpoint-2b-dev' "$x"
     # 26-28: the live deploy under the permissive shim
     fresh_ids
     rm -f "$W/function.json"
