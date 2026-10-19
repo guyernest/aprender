@@ -3826,6 +3826,9 @@ llm-endpoint-image push="0" env="dev" variant="":
         dev|prod) ;;
         *) refuse env "$ENV is not a known environment, expected dev or prod" ;;
     esac
+    case "$PUSH" in
+        variant=*) refuse args "variant= must be the last positional parameter (got it as push)" ;;
+    esac
     # the build is shared (one local image per pin tag); the variant picks only where the push goes and records
     . "$DIR/lib/names.sh" || exit 1
     llm_endpoint_names "$VARIANT" "$ENV" || refuse variant "$LLM_ENDPOINT_NAMES_ERR"
@@ -3936,6 +3939,9 @@ llm-endpoint-deploy env="dev" profile="ze-kasher-dev" variant="":
     case "$ENV" in
         dev|prod) ;;
         *) refuse env "'$ENV' is not a known environment (expected dev or prod)" ;;
+    esac
+    case "$PROFILE" in
+        variant=*) refuse args "variant= must be the last positional parameter (got it as profile)" ;;
     esac
     # every name below comes from the one library; a bad variant is refused before anything is read
     . "$DIR/lib/names.sh" || exit 1
@@ -4106,6 +4112,9 @@ llm-endpoint-up env="dev" profile="ze-kasher-dev" variant="":
         dev|prod) ;;
         *) refuse env "$ENV is not a known environment, expected dev or prod" ;;
     esac
+    case "$PROFILE" in
+        variant=*) refuse args "variant= must be the last positional parameter (got it as profile)" ;;
+    esac
     . "$DIR/lib/names.sh" || exit 1
     llm_endpoint_names "$VARIANT" "$ENV" || refuse variant "$LLM_ENDPOINT_NAMES_ERR"
     IDS="${LLM_ENDPOINT_IDS_DIR:-$IDS_DEFAULT}"
@@ -4215,6 +4224,12 @@ llm-endpoint-weights mode="copy" env="dev" profile="ze-kasher-dev" variant="":
     case "$ENV" in
         dev|prod) ;;
         *) refuse env "$ENV is not a known environment, expected dev or prod" ;;
+    esac
+    case "$MODE" in
+        variant=*) refuse args "variant= must be the last positional parameter (got it as mode)" ;;
+    esac
+    case "$PROFILE" in
+        variant=*) refuse args "variant= must be the last positional parameter (got it as profile)" ;;
     esac
     # every name below comes from the one library; a bad variant is refused before anything is read
     . "$DIR/lib/names.sh" || exit 1
@@ -4357,6 +4372,9 @@ llm-endpoint-prove-401 env="dev" profile="ze-kasher-dev" variant="":
         dev|prod) ;;
         *) refuse env "$ENV is not a known environment, expected dev or prod" ;;
     esac
+    case "$PROFILE" in
+        variant=*) refuse args "variant= must be the last positional parameter (got it as profile)" ;;
+    esac
     # every name below comes from the one library; a bad variant is refused before anything is read
     . "$DIR/lib/names.sh" || exit 1
     llm_endpoint_names "$VARIANT" "$ENV" || refuse variant "$LLM_ENDPOINT_NAMES_ERR"
@@ -4413,6 +4431,9 @@ llm-endpoint-url env="dev" profile="ze-kasher-dev" variant="":
     case "$ENV" in
         dev|prod) ;;
         *) refuse env "$ENV is not a known environment, expected dev or prod" ;;
+    esac
+    case "$PROFILE" in
+        variant=*) refuse args "variant= must be the last positional parameter (got it as profile)" ;;
     esac
     # every name below comes from the one library; a bad variant is refused before anything is read
     . "$DIR/lib/names.sh" || exit 1
@@ -4580,6 +4601,9 @@ llm-endpoint-warm env="dev" profile="ze-kasher-dev" variant="":
         dev|prod) ;;
         *) refuse env "$ENV is not a known environment, expected dev or prod" ;;
     esac
+    case "$PROFILE" in
+        variant=*) refuse args "variant= must be the last positional parameter (got it as profile)" ;;
+    esac
     # every name below comes from the one library; a bad variant is refused before anything is read
     . "$DIR/lib/names.sh" || exit 1
     llm_endpoint_names "$VARIANT" "$ENV" || refuse variant "$LLM_ENDPOINT_NAMES_ERR"
@@ -4618,7 +4642,8 @@ llm-endpoint-warm env="dev" profile="ze-kasher-dev" variant="":
 # isolation evidence. READ CALLS ONLY (get-function, get-function-concurrency, get-function-url-config);
 # writes only $IDS/readback-<UTC>.json. The environment is recorded as sorted KEY NAMES, never values (the
 # projection happens inside the aws CLI, so no value reaches this shell). function_url is `absent` when the
-# function has no URL config, otherwise the URL's host only (the full address is a secret-equivalent).
+# function has no URL config, otherwise `present` (the address, host included, is secret-equivalent and the
+# record gets committed, so it is never written).
 llm-endpoint-readback env="dev" profile="ze-kasher-dev" variant="":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -4631,6 +4656,9 @@ llm-endpoint-readback env="dev" profile="ze-kasher-dev" variant="":
     case "$ENV" in
         dev|prod) ;;
         *) refuse env "$ENV is not a known environment, expected dev or prod" ;;
+    esac
+    case "$PROFILE" in
+        variant=*) refuse args "variant= must be the last positional parameter (got it as profile)" ;;
     esac
     # every name below comes from the one library; a bad variant is refused before anything is read
     . "$DIR/lib/names.sh" || exit 1
@@ -4669,7 +4697,7 @@ llm-endpoint-readback env="dev" profile="ze-kasher-dev" variant="":
     fi
     STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
     OUT="$IDS/readback-$STAMP.json"
-    python3 -I -c 'import datetime, json, sys; cfg, out, conc, url = sys.argv[1:5]; rec = json.load(open(cfg)); rec["env_keys"] = sorted(rec["env_keys"] or []); rec["reserved_concurrency"] = int(conc) if conc.isdigit() else None; rec["function_url"] = "absent" if url == "absent" else url.split("//", 1)[-1].split("/", 1)[0]; rec["read_at"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"); json.dump(rec, open(out, "w"), indent=2)' \
+    python3 -I -c 'import datetime, json, sys; cfg, out, conc, url = sys.argv[1:5]; rec = json.load(open(cfg)); rec["env_keys"] = sorted(rec["env_keys"] or []); rec["reserved_concurrency"] = int(conc) if conc.isdigit() else None; rec["function_url"] = "absent" if url == "absent" else "present"; rec["read_at"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"); json.dump(rec, open(out, "w"), indent=2)' \
         "$CFG" "$OUT" "$CONC" "$URL"
     chmod 0600 "$OUT"
     echo "READBACK OK $FN $OUT"
@@ -4695,6 +4723,9 @@ llm-endpoint-teardown env="dev" profile="ze-kasher-dev" variant="":
         dev|prod) ;;
         *) refuse env "$ENV is not a known environment, expected dev or prod" ;;
     esac
+    case "$PROFILE" in
+        variant=*) refuse args "variant= must be the last positional parameter (got it as profile)" ;;
+    esac
     # every name below comes from the one library; a bad variant is refused before anything is read
     . "$DIR/lib/names.sh" || exit 1
     llm_endpoint_names "$VARIANT" "$ENV" || refuse variant "$LLM_ENDPOINT_NAMES_ERR"
@@ -4709,20 +4740,11 @@ llm-endpoint-teardown env="dev" profile="ze-kasher-dev" variant="":
     if [ -f "$IDS/weights.json" ] && [ "$(jget "$IDS/weights.json" mode 2> /dev/null || true)" = "codebuild" ]; then
         WCB_PROJECT="$(jget "$IDS/weights.json" codebuild_project)" || refuse ids "$IDS/weights.json lacks codebuild_project"
         WCB_ROLE="$(jget "$IDS/weights.json" codebuild_role)" || refuse ids "$IDS/weights.json lacks codebuild_role"
-        OK_PROJECT="$CB_PROJECT"
-        OK_ROLE="$CB_ROLE"
-        if [ -z "$VARIANT" ]; then
-            # a codebuild-mode environment made before the role rename can still be torn down
-            LEGACY_PROJECT="aprender-llm-endpoint-weights-$ENV"
-            LEGACY_ROLE="aprender-llm-endpoint-codebuild-$ENV"
-        else
-            LEGACY_PROJECT="$OK_PROJECT"
-            LEGACY_ROLE="$OK_ROLE"
-        fi
-        if [ -n "$WCB_PROJECT" ] && [ "$WCB_PROJECT" != "$OK_PROJECT" ] && [ "$WCB_PROJECT" != "$LEGACY_PROJECT" ]; then
+        # exactly the names this variant derives; empty (copy mode) passes
+        if [ -n "$WCB_PROJECT" ] && [ "$WCB_PROJECT" != "$CB_PROJECT" ]; then
             refuse ids "weights.json names a CodeBuild project ($WCB_PROJECT) that does not belong to $FN"
         fi
-        if [ -n "$WCB_ROLE" ] && [ "$WCB_ROLE" != "$OK_ROLE" ] && [ "$WCB_ROLE" != "$LEGACY_ROLE" ]; then
+        if [ -n "$WCB_ROLE" ] && [ "$WCB_ROLE" != "$CB_ROLE" ]; then
             refuse ids "weights.json names a CodeBuild role ($WCB_ROLE) that does not belong to $FN"
         fi
     fi
@@ -4734,6 +4756,28 @@ llm-endpoint-teardown env="dev" profile="ze-kasher-dev" variant="":
     BUCKET="$(jget "$IDS/aws.json" bucket)" || refuse ids "$IDS/aws.json lacks bucket"
     ECR_REPO="$(jget "$IDS/aws.json" ecr_repo)" || refuse ids "$IDS/aws.json lacks ecr_repo"
     REPO_NAME="$(jget "$IDS/aws.json" ecr_repo_name)" || refuse ids "$IDS/aws.json lacks ecr_repo_name"
+    # the record matched this function by name; its other names are cross-checked against the derived ones
+    # before any write (a hand-edited bucket or repository would otherwise be deleted as if it were ours)
+    REC_BUCKET="$BUCKET"
+    REC_REPO_NAME="$REPO_NAME"
+    llm_endpoint_names "$VARIANT" "$ENV" "$WANT_ACCOUNT" || refuse variant "$LLM_ENDPOINT_NAMES_ERR"
+    [ "$REC_BUCKET" = "$BUCKET" ] || refuse ids "$IDS/aws.json bucket $REC_BUCKET is not $BUCKET, the bucket of $FN"
+    [ "$REC_REPO_NAME" = "$REPO_NAME" ] || refuse ids "$IDS/aws.json ecr_repo_name $REC_REPO_NAME is not $REPO_NAME, the repository of $FN"
+    case "$ECR_REPO" in
+        */"$REPO_NAME") ;;
+        *) refuse ids "$IDS/aws.json ecr_repo $ECR_REPO does not end in /$REPO_NAME" ;;
+    esac
+    REC_LOG_GROUP="$(jget "$IDS/aws.json" log_group 2> /dev/null || true)"
+    if [ -n "$REC_LOG_GROUP" ] && [ "$REC_LOG_GROUP" != "$LOG_GROUP" ]; then
+        refuse ids "$IDS/aws.json log_group $REC_LOG_GROUP is not $LOG_GROUP, the log group of $FN"
+    fi
+    REC_ROLE_ARN="$(jget "$IDS/aws.json" role_arn 2> /dev/null || true)"
+    if [ -n "$REC_ROLE_ARN" ]; then
+        case "$REC_ROLE_ARN" in
+            arn:aws:iam::"$WANT_ACCOUNT":role/"$FN") ;;
+            *) refuse ids "$IDS/aws.json role_arn $REC_ROLE_ARN is not the role $FN of account $WANT_ACCOUNT" ;;
+        esac
+    fi
     AP=(--profile "$PROFILE" --region "$REGION")
     ACCOUNT="$(aws sts get-caller-identity --profile "$PROFILE" --query Account --output text)" \
         || refuse account "cannot read the AWS account for profile $PROFILE"
@@ -5026,6 +5070,12 @@ llm-endpoint-measure env="dev" profile="ze-kasher-dev" label="deployed" cold="1"
         dev|prod) ;;
         *) refuse env "$ENV is not a known environment, expected dev or prod" ;;
     esac
+    case "$PROFILE" in
+        variant=*) refuse args "variant= must be the last positional parameter (got it as profile)" ;;
+    esac
+    case "$LABEL" in
+        variant=*) refuse args "variant= must be the last positional parameter (got it as label)" ;;
+    esac
     # every name below comes from the one library; a bad variant is refused before anything is read
     . "$DIR/lib/names.sh" || exit 1
     llm_endpoint_names "$VARIANT" "$ENV" || refuse variant "$LLM_ENDPOINT_NAMES_ERR"
@@ -5153,7 +5203,8 @@ llm-endpoint-selftest:
         '        if [ -n "${SHIM_INVOKE_PAYLOAD:-}" ]; then cp "$SHIM_INVOKE_PAYLOAD" "$last"; fi ;;' \
         '      "iam get-role")' \
         '        if [ "${SHIM_ROLE_EXISTS:-1}" = 0 ] && ! grep -q "iam create-role" "$SHIM_LOG"; then echo "An error occurred, NoSuchEntity, when calling GetRole" >&2; exit 254; fi ' \
-        '        echo "arn:aws:iam::${SHIM_STS_ACCOUNT:-0}:role/shim" ;;' \
+        '        rn=shim; prev=""; for a in "$@"; do if [ "$prev" = "--role-name" ]; then rn="$a"; fi; prev="$a"; done ' \
+        '        echo "arn:aws:iam::${SHIM_STS_ACCOUNT:-0}:role/$rn" ;;' \
         '    esac ' \
         '    exit 0 ;;' \
         'esac ' \
@@ -5620,7 +5671,7 @@ llm-endpoint-selftest:
     row V12 "weights codebuild variant=2b: role ...-2b-dev-codebuild (tagged variant=2b) and project ...-weights-2b-dev, both recorded" "$T/c-v12.log" zero '^WEIGHTS OK' "$x"
     # V13: no literal endpoint name survives in the nine lifecycle recipes. The pattern must also match
     # in a file that does hold such literals (the self-test's own fixtures), or a zero count proves nothing.
-    LITPAT='aprender-llm-endpoint-(\$ENV|dev|prod)\b'
+    LITPAT='aprender-llm-endpoint-[a-z-]*(\$\{?ENV\}?|dev|prod)\b'
     x=1
     : > "$T/c-v13.log"
     for rc_name in image deploy up weights prove-401 url warm teardown measure; do
@@ -5653,10 +5704,8 @@ llm-endpoint-selftest:
     write_weights "$W" aprender-llm-endpoint-weights-dev aprender-llm-endpoint-codebuild-dev
     : > "$T/a-v15.log"
     run_just "$T/c-v15.log" LLM_ENDPOINT_IDS_DIR="$W" SHIM_LOG="$T/a-v15.log" SHIM_CONCURRENCY=0 just llm-endpoint-teardown
-    x=1
-    grep -qE 'codebuild delete-project .*--name aprender-llm-endpoint-weights-dev( |$)' "$T/a-v15.log" || x=0
-    grep -qE 'iam delete-role .*--role-name aprender-llm-endpoint-codebuild-dev( |$)' "$T/a-v15.log" || x=0
-    row V15 "teardown, default variant, a weights.json with the legacy pre-rename CodeBuild names -> TEARDOWN OK, deletes exactly those" "$T/c-v15.log" zero '^TEARDOWN OK' "$x"
+    row V15 "teardown, default variant, a weights.json naming aprender-llm-endpoint-codebuild-dev (variant codebuild's function role) -> REFUSED ids, no delete call" "$T/c-v15.log" nonzero '^REFUSED ids:.*does not belong to' \
+        "$(if grep -qE ' delete-' "$T/a-v15.log"; then echo 0; else echo 1; fi)"
     write_weights "$T/td2b-keep" aprender-llm-endpoint-weights-2b-dev aprender-llm-endpoint-2b-dev-codebuild
     : > "$T/a-v16.log"
     run_just "$T/c-v16.log" LLM_ENDPOINT_IDS_DIR="$T/td2b-keep" SHIM_LOG="$T/a-v16.log" SHIM_CONCURRENCY=0 just llm-endpoint-teardown dev ze-kasher-dev variant=2b
@@ -5705,6 +5754,47 @@ llm-endpoint-selftest:
     [ "$(lines "$T/a-v18.log")" -eq 0 ] || x=0
     row V18 "pin-2b.env equals pin.env but for the two GGUF keys; deploy variant=2b derives and reads it -> DRY-RUN OK with the 2b gguf hash" "$T/c-v18.log" zero \
         '^DRY-RUN OK aprender-llm-endpoint-2b-dev .*gguf aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223' "$x"
+    # V19: readback records only that a Function URL is present, never its host (the record gets committed)
+    : > "$T/a-v19.log"
+    rm -f "$T"/rb2b/readback-*.json
+    run_just "$T/c-v19.log" LLM_ENDPOINT_IDS_DIR="$T/rb2b" SHIM_LOG="$T/a-v19.log" SHIM_RB_NAME=aprender-llm-endpoint-2b-dev SHIM_URL=https://secrethost9z.lambda-url.us-east-1.on.aws/ SHIM_CONCURRENCY=1 \
+        just llm-endpoint-readback dev ze-kasher-dev variant=2b
+    x=1
+    RBF="$(find "$T/rb2b" -name 'readback-*.json' | head -1)"
+    [ "$(jget_selftest "$RBF" function_url)" = present ] || x=0
+    grep -q 'secrethost9z' "$RBF" && x=0
+    grep -q 'secrethost9z' "$T/c-v19.log" && x=0
+    row V19 "readback with a URL config: function_url is 'present', the host appears in neither the record nor stdout" "$T/c-v19.log" zero '^READBACK OK aprender-llm-endpoint-2b-dev ' "$x"
+    # V20-V22: variant= in the wrong positional slot is refused, never silently bound to the default name
+    : > "$T/a-v20.log"
+    run_just "$T/c-v20.log" LLM_ENDPOINT_IDS_DIR="$IDS" SHIM_LOG="$T/a-v20.log" SHIM_CONCURRENCY=0 just llm-endpoint-teardown env=dev variant=iso
+    row V20 "teardown env=dev variant=iso (variant lands in the profile slot) -> REFUSED args, nothing reached the shim" "$T/c-v20.log" nonzero '^REFUSED args: variant= must be the last positional' \
+        "$([ "$(lines "$T/a-v20.log")" -eq 0 ] && echo 1 || echo 0)"
+    : > "$T/a-v21.log"
+    run_just "$T/c-v21.log" LLM_ENDPOINT_IDS_DIR="$T/rb2b" SHIM_LOG="$T/a-v21.log" APR_PROBE_KEY=k just llm-endpoint-measure dev ze-kasher-dev variant=2b
+    row V21 "measure dev ze-kasher-dev variant=2b (variant lands in the label slot) -> REFUSED args, nothing reached the shim" "$T/c-v21.log" nonzero '^REFUSED args: variant= must be the last positional' \
+        "$([ "$(lines "$T/a-v21.log")" -eq 0 ] && echo 1 || echo 0)"
+    : > "$T/a-v22.log"
+    run_just "$T/c-v22.log" LLM_ENDPOINT_IDS_DIR="$T/up-legacy" SHIM_LOG="$T/a-v22.log" just llm-endpoint-up dev variant=iso
+    row V22 "up dev variant=iso (variant lands in the profile slot) -> REFUSED args, nothing reached the shim" "$T/c-v22.log" nonzero '^REFUSED args: variant= must be the last positional' \
+        "$([ "$(lines "$T/a-v22.log")" -eq 0 ] && echo 1 || echo 0)"
+    # V23: teardown cross-checks the names a name-matching aws.json carries before any write
+    x=1
+    : > "$T/c-v23.log"
+    for field in bucket ecr_repo_name log_group role_arn; do
+        rm -rf "${T:?}/tp"
+        mkdir -p "$T/tp"
+        cp "$T/rb2b/aws.json" "$T/rb2b/function.json" "$T/tp/"
+        python3 -I -c 'import json, sys; p, k = sys.argv[1:3]; d = json.load(open(p)); d[k] = "tampered-" + str(d.get(k, "x")); json.dump(d, open(p, "w"))' "$T/tp/aws.json" "$field"
+        : > "$T/a-v23.log"
+        run_just "$T/c-v23-$field.log" LLM_ENDPOINT_IDS_DIR="$T/tp" SHIM_LOG="$T/a-v23.log" SHIM_CONCURRENCY=0 just llm-endpoint-teardown dev ze-kasher-dev variant=2b
+        [ "$RC" -ne 0 ] || x=0
+        grep -q '^REFUSED ids:' "$T/c-v23-$field.log" || x=0
+        [ "$(lines "$T/a-v23.log")" -eq 0 ] && ! grep -q ' delete-' "$T/a-v23.log" || x=0
+        echo "tampered $field: rc=$RC" >> "$T/c-v23.log"
+    done
+    RC=0
+    row V23 "teardown variant=2b: a tampered bucket, ecr_repo_name, log_group or role_arn in aws.json -> REFUSED ids each, no delete call" "$T/c-v23.log" zero '^tampered role_arn: rc=2' "$x"
     # 26-28: the live deploy under the permissive shim
     fresh_ids
     rm -f "$W/function.json"

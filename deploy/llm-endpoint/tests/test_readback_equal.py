@@ -56,6 +56,27 @@ class ReadbackEqual(unittest.TestCase):
     def test_missing_file_is_an_error(self):
         self.assertEqual(run(BASE, None).returncode, 2)
 
+    def test_null_field_in_both_files_is_an_error_naming_it(self):
+        r = run(dict(BASE, function_name=None), dict(BASE, function_name=None))
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("function_name", r.stderr)
+
+    def test_mixed_type_env_keys_is_an_error(self):
+        r = run(BASE, dict(BASE, env_keys=["A", 1]))
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("env_keys", r.stderr)
+
+    def test_null_reserved_concurrency_in_both_is_equal(self):
+        self.assertEqual(run(dict(BASE, reserved_concurrency=None), dict(BASE, reserved_concurrency=None)).returncode, 0)
+
+    def test_single_file_is_an_error(self):
+        self.assertEqual(run(BASE).returncode, 2)
+
+    def test_env_keys_content_change_differs(self):
+        r = run(BASE, dict(BASE, env_keys=["APR_API_KEY_HASH", "OTHER"]))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("DIFFERS env_keys", r.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

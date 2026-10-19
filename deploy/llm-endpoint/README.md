@@ -123,7 +123,9 @@ produced it and no other.
 `probe` takes `env` (`dev` or `prod`, default `dev`) and a trailing `variant` (default empty, the
 original 0.8B endpoint). Most also take `profile` (default `ze-kasher-dev`). `just` binds positionals
 in order, so `variant` is always the LAST positional; write it as `variant=2b` (the recipes strip the
-`variant=` prefix). The real parameter orders (`just --show <recipe>`):
+`variant=` prefix). A `variant=...` argument that lands in an earlier slot (the profile, the measure label,
+the weights mode, the image push flag) is refused as `REFUSED args` rather than bound to the default name.
+The real parameter orders (`just --show <recipe>`):
 
 | Recipe | Positionals, in order |
 |---|---|
@@ -212,8 +214,9 @@ Things to know:
   Pass `prod` explicitly.
 - The CodeBuild role is now `aprender-llm-endpoint-S-codebuild` (it was `aprender-llm-endpoint-codebuild-<env>`).
   The rename keeps IAM's single role namespace unambiguous: with the old shape `variant=codebuild-2b`
-  would collide with another name's function role. Teardown of the default variant still accepts the old
-  names recorded in `weights.json`; readers take the role from the record and never re-derive it.
+  would collide with another name's function role. Teardown requires the CodeBuild names recorded in
+  `weights.json` to equal the ones the variant derives (empty for `weights copy`); the old names are not
+  accepted, because `aprender-llm-endpoint-codebuild-dev` is the function role of a variant named `codebuild`.
 - Dev and prod share `deploy/llm-endpoint/.ids/` for the empty variant (unchanged). That is a known
   limitation: the `env` check on the record is what stops one from acting on the other. A variant gets a
   directory per env.
@@ -256,7 +259,7 @@ just llm-endpoint-measure dev ze-kasher-dev smoke 1 0 1 3 variant=2b
 
 `weights copy` needs the spike bucket's 2B object to carry the ladder hash as `Metadata.sha256`.
 `readback` writes `readback-<UTC>.json` into the variant's ids directory (the environment as sorted key
-names, never values; the URL as its host only). To show two endpoints are independent, read both back and
+names, never values; the URL only as `present` or `absent`, never its address). To show two endpoints are independent, read both back and
 run `python3 -I deploy/llm-endpoint/readback_equal.py A.json B.json`, which names the first differing field.
 
 ### Cost amplification
@@ -303,9 +306,12 @@ The variant rows (numbered rows 1-30 are the original ones):
 | V12 | `weights codebuild variant=2b` names the role `...-2b-dev-codebuild` and the project, tags them, records both |
 | V13 | no recipe of the nine holds an endpoint-name literal (with a must-match control) |
 | V14 | teardown `2b` over a `weights.json` naming the default's CodeBuild names: `REFUSED ids`, no delete call |
-| V15 | teardown of the default over a `weights.json` with the pre-rename CodeBuild names deletes exactly those |
+| V15 | teardown of the default over a `weights.json` naming `aprender-llm-endpoint-codebuild-dev` (another name's function role): `REFUSED ids`, no delete call |
 | V16 | teardown `2b` with its own derived CodeBuild names deletes those |
 | V17 | `readback variant=2b`: one record, `function_url` absent, no environment value anywhere, read calls only |
+| V19 | `readback` with a URL config records `function_url` as `present`; the host is in neither the record nor stdout |
+| V20-V22 | `variant=` in the profile (teardown, up) or label (measure) slot is `REFUSED args`, nothing reaching the shim |
+| V23 | teardown `2b` over an `aws.json` whose bucket, `ecr_repo_name`, `log_group` or `role_arn` was altered: `REFUSED ids`, no delete call |
 | V18 | `pin-2b.env` equals `pin.env` but for the two GGUF keys, selects rung `qwen35-2b-q4km`, and `deploy variant=2b` with no pin override derives and reads it (`DRY-RUN OK` with the 2b GGUF hash `aaf42c8b...9223`) |
 
 ## Probe and measure

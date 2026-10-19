@@ -3,7 +3,8 @@
 Usage: readback_equal.py A.json B.json [C.json ...]
 Exit 0 when every file equals A on the compared fields; exit 1 and print
 `DIFFERS <field>: <A value> != <file> <value>` for the first difference;
-exit 2 on a missing/unreadable file or a file lacking a compared field.
+exit 2 on a missing/unreadable file, a file lacking a compared field, a null compared field
+(`reserved_concurrency` may be null: no reservation), an env_keys that is not a list of strings, or fewer than two files.
 `read_at` is deliberately not compared. Stdlib only, no network.
 """
 import json
@@ -30,8 +31,11 @@ def load(path):
         if field not in rec:
             print("ERROR %s: lacks field %s" % (path, field), file=sys.stderr)
             sys.exit(2)
-    if not isinstance(rec["env_keys"], list):
-        print("ERROR %s: env_keys is not a list" % path, file=sys.stderr)
+        if rec[field] is None and field != "reserved_concurrency":
+            print("ERROR %s: field %s is null" % (path, field), file=sys.stderr)
+            sys.exit(2)
+    if not isinstance(rec["env_keys"], list) or not all(isinstance(k, str) for k in rec["env_keys"]):
+        print("ERROR %s: env_keys is not a list of strings" % path, file=sys.stderr)
         sys.exit(2)
     return rec
 
