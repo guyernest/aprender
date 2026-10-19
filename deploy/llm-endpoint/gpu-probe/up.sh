@@ -45,18 +45,28 @@ if [ "$SG" = None ]; then
 fi
 [ "$("${AWS[@]}" ec2 describe-security-groups --group-ids "$SG" --query 'length(SecurityGroups[0].IpPermissions)' --output text)" = 0 ] \
   || { echo "REFUSED sg: $SG has ingress rules" >&2; exit 2; }
-SUBNET=$("${AWS[@]}" ec2 describe-subnets --filters Name=default-for-az,Values=true Name=availability-zone,Values=us-east-1a --query 'Subnets[0].SubnetId' --output text)
 case "$TYPE" in g5.xlarge|g4dn.xlarge) ;; *) echo "REFUSED type: $TYPE not in the 8-vCPU quota plan (g5.xlarge, g4dn.xlarge)" >&2; exit 2 ;; esac
 AMI=$("${AWS[@]}" ssm get-parameter --name /aws/service/deeplearning/ami/x86_64/base-oss-nvidia-driver-gpu-amazon-linux-2023/latest/ami-id --query Parameter.Value --output text)
 { printf '#!/bin/bash\n'; for V in APR_URL APR_TARBALL_SHA256 W08_URI W08_SHA256 W2B_URI W2B_SHA256 CAP_MINUTES; do printf '%s=%q\n' "$V" "${!V}"; done
   tail -n +2 "$HERE/userdata.sh"; } > "$IDS/userdata.rendered"
-IID=$("${AWS[@]}" ec2 run-instances --image-id "$AMI" --instance-type "$TYPE" --subnet-id "$SUBNET" --security-group-ids "$SG" \
-  --iam-instance-profile Name=$ROLE --user-data "file://$IDS/userdata.rendered" \
-  --metadata-options HttpTokens=required,HttpEndpoint=enabled,HttpPutResponseHopLimit=1 \
-  --instance-initiated-shutdown-behavior terminate \
-  --block-device-mappings 'DeviceName=/dev/xvda,Ebs={VolumeSize=120,VolumeType=gp3,Encrypted=true,DeleteOnTermination=true}' \
-  --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=aprender-gpu-probe},$TAGS_RES]" "ResourceType=volume,Tags=[$TAGS_RES]" \
-  --query 'Instances[0].InstanceId' --output text)
+# AZ order: GPU capacity is per AZ (1a refused g5.xlarge on 2026-10-19). Try each AZ that offers the type;
+# only a capacity refusal moves on, any other error stops.
+IID=""; SUBNET=""
+for AZ in ${GPU_AZS:-us-east-1b us-east-1c us-east-1d us-east-1f us-east-1a}; do
+  SUBNET=$("${AWS[@]}" ec2 describe-subnets --filters Name=default-for-az,Values=true Name=availability-zone,Values="$AZ" --query 'Subnets[0].SubnetId' --output text)
+  [ "$SUBNET" != None ] || continue
+  if OUT=$("${AWS[@]}" ec2 run-instances --image-id "$AMI" --instance-type "$TYPE" --subnet-id "$SUBNET" --security-group-ids "$SG" \
+    --iam-instance-profile Name=$ROLE --user-data "file://$IDS/userdata.rendered" \
+    --metadata-options HttpTokens=required,HttpEndpoint=enabled,HttpPutResponseHopLimit=1 \
+    --instance-initiated-shutdown-behavior terminate \
+    --block-device-mappings 'DeviceName=/dev/xvda,Ebs={VolumeSize=120,VolumeType=gp3,Encrypted=true,DeleteOnTermination=true}' \
+    --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=aprender-gpu-probe},$TAGS_RES]" "ResourceType=volume,Tags=[$TAGS_RES]" \
+    --query 'Instances[0].InstanceId' --output text 2>&1); then
+    IID=$OUT; echo "launched in $AZ"; break
+  fi
+  case "$OUT" in *InsufficientInstanceCapacity*) echo "no $TYPE capacity in $AZ, trying the next AZ" >&2 ;; *) echo "$OUT" >&2; exit 1 ;; esac
+done
+[ -n "$IID" ] || { echo "REFUSED capacity: no AZ had $TYPE capacity; role, profile and SG remain, run down.sh to remove them" >&2; exit 3; }
 printf '{"instance_id":"%s","type":"%s","ami":"%s","sg":"%s","subnet":"%s","cap_minutes":%s,"launched":"%s"}\n' \
   "$IID" "$TYPE" "$AMI" "$SG" "$SUBNET" "$CAP_MINUTES" "$(date -u +%FT%TZ)" | tee "$IDS/instance.json"
 echo "next: wait ~5 min for setup, then: deploy/llm-endpoint/gpu-probe/probe.sh $PROFILE ; finally down.sh"
