@@ -4120,6 +4120,10 @@ llm-endpoint-up env="dev" profile="ze-kasher-dev" variant="":
     ACCOUNT="$(aws sts get-caller-identity --profile "$PROFILE" --query Account --output text)" \
         || refuse account "cannot read the AWS account for profile $PROFILE"
     llm_endpoint_names "$VARIANT" "$ENV" "$ACCOUNT" || refuse variant "$LLM_ENDPOINT_NAMES_ERR"
+    # a record already in the ids dir must be this function's own (legacy serves only the default variant)
+    if [ -f "$IDS/aws.json" ]; then
+        llm_endpoint_check_record "$IDS/aws.json" || refuse ids "$LLM_ENDPOINT_NAMES_ERR"
+    fi
     NAME="$FN"
     ECR_HOST="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com"
     ECR_REPO="$ECR_HOST/$REPO_NAME"
@@ -5383,6 +5387,30 @@ llm-endpoint-selftest:
     run_just "$T/c-v7.log" LLM_ENDPOINT_IDS_DIR="$T/named-default" SHIM_MODE=refuse SHIM_LOG="$T/a-v7.log" DRY_RUN=1 just llm-endpoint-deploy
     row V7 "deploy, no variant, a record that names aprender-llm-endpoint-dev -> DRY-RUN OK, zero aws calls" "$T/c-v7.log" zero \
         '^DRY-RUN OK aprender-llm-endpoint-dev ' "$([ "$(lines "$T/a-v7.log")" -eq 0 ] && echo 1 || echo 0)"
+    # V7b-V7d: up checks the record already in its ids dir before it creates anything
+    # only_sts <log>: 1 when every recorded aws call is the account read, i.e. nothing was created or written
+    only_sts() {
+        if grep -qvE '^sts get-caller-identity' "$1"; then echo 0; else echo 1; fi
+    }
+    cp "$T/up2b/aws.json" "$T/up2b-aws.before"
+    : > "$T/a-v7b.log"
+    run_just "$T/c-v7b.log" LLM_ENDPOINT_IDS_DIR="$T/up2b" SHIM_LOG="$T/a-v7b.log" just llm-endpoint-up
+    row V7b "up with no variant over the 2b record -> REFUSED ids, only the account read reached the shim, record untouched" "$T/c-v7b.log" nonzero '^REFUSED ids:' \
+        "$(if [ "$(only_sts "$T/a-v7b.log")" = 1 ] && cmp -s "$T/up2b/aws.json" "$T/up2b-aws.before"; then echo 1; else echo 0; fi)"
+    rm -rf "${T:?}/up-legacy"
+    mkdir -p "$T/up-legacy"
+    cp "$IDS/aws.json" "$T/up-legacy/"
+    : > "$T/a-v7c.log"
+    run_just "$T/c-v7c.log" LLM_ENDPOINT_IDS_DIR="$T/up-legacy" SHIM_LOG="$T/a-v7c.log" just llm-endpoint-up dev ze-kasher-dev variant=2b
+    row V7c "up variant=2b over a legacy dev record -> REFUSED ids, only the account read reached the shim" "$T/c-v7c.log" nonzero '^REFUSED ids:' "$(only_sts "$T/a-v7c.log")"
+    : > "$T/a-v7d.log"
+    run_just "$T/c-v7d.log" LLM_ENDPOINT_IDS_DIR="$T/up2b" SHIM_LOG="$T/a-v7d.log" just llm-endpoint-up dev ze-kasher-dev variant=2b
+    row V7d "up variant=2b over its own 2b record -> UP OK (the check accepts a matching record)" "$T/c-v7d.log" zero '^UP OK aprender-llm-endpoint-2b-dev' \
+        "$([ "$(only_sts "$T/a-v7d.log")" = 0 ] && echo 1 || echo 0)"
+    : > "$T/a-v7e.log"
+    run_just "$T/c-v7e.log" LLM_ENDPOINT_IDS_DIR="$T/up-legacy" SHIM_LOG="$T/a-v7e.log" just llm-endpoint-up
+    row V7e "up with no variant over a legacy dev record -> UP OK (legacy still serves the default)" "$T/c-v7e.log" zero '^UP OK aprender-llm-endpoint-dev' \
+        "$([ "$(only_sts "$T/a-v7e.log")" = 0 ] && echo 1 || echo 0)"
     # 26-28: the live deploy under the permissive shim
     fresh_ids
     rm -f "$W/function.json"
