@@ -5093,6 +5093,19 @@ llm-endpoint-selftest:
             echo 0
         fi
     }
+    # ---- name library (V1, V2): the case table of the one name rule, and its lint ----
+    set +e
+    bash "$DIR/lib/names.sh" --self-test > "$T/v1.log" 2>&1
+    RC=$?
+    set -e
+    V1_CLEAN=1
+    ! grep -q '^FAIL' "$T/v1.log" || V1_CLEAN=0
+    row V1 "names.sh case table passes with no FAIL row" "$T/v1.log" zero '^PASS' "$V1_CLEAN"
+    set +e
+    bashrs lint "$DIR/lib/names.sh" > "$T/v2.log" 2>&1
+    RC=$?
+    set -e
+    row V2 "bashrs lint names.sh is clean" "$T/v2.log" zero '.'
     # ---- offline cases (shim mode refuse; the log must stay empty) ----
     export SHIM_MODE=refuse
     run_deploy "$T/c1.log" LLM_ENDPOINT_PIN_FILE="$T/absent.env"
