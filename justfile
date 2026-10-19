@@ -5683,6 +5683,28 @@ llm-endpoint-selftest:
     grep -q 'lambda get-function-url-config ' "$T/a-v17.log" || x=0
     grep -qE '^[a-z0-9-]+ (create|update|put|delete|add|remove|tag)' "$T/a-v17.log" && x=0
     row V17 "readback variant=2b: one readback-*.json with function_url absent and no env value, read calls only (no write verb in the shim log)" "$T/c-v17.log" zero '^READBACK OK aprender-llm-endpoint-2b-dev ' "$x"
+    # V18: the real 2b pin file. Its non-GGUF lines equal pin.env (the image build reads pin.env, deploy reads
+    # pin-2b.env, so a drift in APR_* or LWA_* would deploy an image the pin does not describe). The deploy
+    # derives its pin path (no LLM_ENDPOINT_PIN_FILE): it runs in a scratch working directory whose
+    # deploy/llm-endpoint links to the repository's, except pin-2b.env, a copy of the real file with only the
+    # two APR_ASSET/APR_TARBALL_SHA256 lines pointed at the V8 fixture tarball (the real release tarball is not offline).
+    rm -rf "${T:?}/v18wd"
+    mkdir -p "$T/v18wd/deploy/llm-endpoint"
+    for f in "$DIR"/* "$DIR"/.[!.]*; do
+        case "$(basename "$f")" in pin-2b.env | .ids) continue ;; esac
+        ln -s "$PWD/$f" "$T/v18wd/deploy/llm-endpoint/$(basename "$f")"
+    done
+    ln -s "$PWD/contracts" "$T/v18wd/contracts"
+    sed -e "s/^APR_ASSET=.*/APR_ASSET=fake.tar.gz/" -e "s/^APR_TARBALL_SHA256=.*/APR_TARBALL_SHA256=$V8SHA/" "$DIR/pin-2b.env" > "$T/v18wd/deploy/llm-endpoint/pin-2b.env"
+    : > "$T/a-v18.log"
+    run_just "$T/c-v18.log" -u LLM_ENDPOINT_PIN_FILE LLM_ENDPOINT_IDS_DIR="$T/up2b" LLM_ENDPOINT_BIN_DIR="$T/v8bin" SHIM_MODE=refuse SHIM_LOG="$T/a-v18.log" DRY_RUN=1 \
+        just --justfile "$PWD/justfile" --working-directory "$T/v18wd" llm-endpoint-deploy dev ze-kasher-dev variant=2b
+    x=1
+    [ "$(grep -vE '^(#|GGUF_(RUNG|OBJECT)=)' "$DIR/pin.env" | cksum)" = "$(grep -vE '^(#|GGUF_(RUNG|OBJECT)=)' "$DIR/pin-2b.env" | cksum)" ] || x=0
+    [ "$(grep -c '^GGUF_RUNG=qwen35-2b-q4km$' "$DIR/pin-2b.env")" -eq 1 ] || x=0
+    [ "$(lines "$T/a-v18.log")" -eq 0 ] || x=0
+    row V18 "pin-2b.env equals pin.env but for the two GGUF keys; deploy variant=2b derives and reads it -> DRY-RUN OK with the 2b gguf hash" "$T/c-v18.log" zero \
+        '^DRY-RUN OK aprender-llm-endpoint-2b-dev .*gguf aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223' "$x"
     # 26-28: the live deploy under the permissive shim
     fresh_ids
     rm -f "$W/function.json"
