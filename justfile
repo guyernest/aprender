@@ -3814,15 +3814,25 @@ laya-gap-regression:
 # .ids/aws.json exists (written by llm-endpoint-up): then it pushes to the ENV-SPECIFIC repository
 # recorded there, never a shared one. LLM_ENDPOINT_DOCKERFILE overrides the Dockerfile (the verify
 # feeds it a digest-mutated copy).
-llm-endpoint-image push="0":
+llm-endpoint-image push="0" env="dev" variant="":
     #!/usr/bin/env bash
     set -euo pipefail
     refuse() { echo "REFUSED $1: $2" >&2; exit "${3:-2}"; }
-    # shasum directly (as laya-deploy): the pin must not depend on which sha tool the PATH offers.
-    . deploy/llm-endpoint/pin.env
+    PUSH="{{ trim_start_match(push, "push=") }}"
+    ENV="{{ trim_start_match(env, "env=") }}"
+    VARIANT="{{ trim_start_match(variant, "variant=") }}"
     DIR=deploy/llm-endpoint
-    IDS="$DIR/.ids"
-    BIN="$DIR/bin"
+    case "$ENV" in
+        dev|prod) ;;
+        *) refuse env "$ENV is not a known environment, expected dev or prod" ;;
+    esac
+    # the build is shared (one local image per pin tag); the variant picks only where the push goes and records
+    . "$DIR/lib/names.sh" || exit 1
+    llm_endpoint_names "$VARIANT" "$ENV" || refuse variant "$LLM_ENDPOINT_NAMES_ERR"
+    IDS="${LLM_ENDPOINT_IDS_DIR:-$IDS_DEFAULT}"
+    BIN="${LLM_ENDPOINT_BIN_DIR:-$DIR/bin}"
+    # shasum directly (as laya-deploy): the pin must not depend on which sha tool the PATH offers.
+    . "${LLM_ENDPOINT_PIN_FILE:-$DIR/pin.env}"
     DOCKERFILE="${LLM_ENDPOINT_DOCKERFILE:-$DIR/Dockerfile}"
     TAG="$IMAGE_NAME:cpu-$APR_TAG"
     printf '%s' "$APR_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' \
@@ -3870,8 +3880,9 @@ llm-endpoint-image push="0":
     IMAGE_ID="$(cat "$IDS/image-id.txt")"
     python3 -I -c 'import datetime, json, sys; out, image, tag, image_id, line = sys.argv[1:6]; now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"); json.dump({"image": image, "tag": tag, "image_id": image_id, "apr_version_line": line, "built_at": now}, open(out, "w"), indent=2)' \
         "$IDS/image-local.json" "$TAG" "$APR_TAG" "$IMAGE_ID" "$VLINE"
-    if [ "{{push}}" = "1" ]; then
+    if [ "$PUSH" = "1" ]; then
         [ -f "$IDS/aws.json" ] || refuse ids "push=1 needs $IDS/aws.json, written by llm-endpoint-up" 7
+        llm_endpoint_check_record "$IDS/aws.json" || refuse ids "$LLM_ENDPOINT_NAMES_ERR" 7
         FIELDS="$(python3 -I -c 'import json, sys; a = json.load(open(sys.argv[1])); print(a["profile"], a["region"], a["ecr_host"], a["ecr_repo"], a["ecr_repo_name"])' "$IDS/aws.json")" \
             || refuse ids "$IDS/aws.json lacks profile/region/ecr_host/ecr_repo/ecr_repo_name" 7
         read -r PROFILE REGION ECR_HOST ECR_REPO ECR_REPO_NAME <<< "$FIELDS"
@@ -5026,6 +5037,13 @@ llm-endpoint-selftest:
     write_shim curl \
         'echo "$*" >> "${SHIM_CURL_LOG:-/dev/null}"' \
         'printf "%s" "${SHIM_CURL_CODE:-401}"'
+    write_shim docker \
+        'echo "$*" >> "$SHIM_LOG"' \
+        'case "${1:-}" in ' \
+        '  run) echo "apr 0.71.4 (selftest)" ;;' \
+        '  image) echo "sha256:$(printf "e%.0s" $(seq 1 64))" ;;' \
+        'esac ' \
+        'exit 0'
     export PATH="$SH:$PATH"
     [ "$(command -v aws)" = "$SH/aws" ] || { echo "ERROR: the aws shim is not first on PATH" >&2; exit 1; }
     # positive control: a zero count means nothing unless the shim demonstrably records
@@ -5411,6 +5429,28 @@ llm-endpoint-selftest:
     run_just "$T/c-v7e.log" LLM_ENDPOINT_IDS_DIR="$T/up-legacy" SHIM_LOG="$T/a-v7e.log" just llm-endpoint-up
     row V7e "up with no variant over a legacy dev record -> UP OK (legacy still serves the default)" "$T/c-v7e.log" zero '^UP OK aprender-llm-endpoint-dev' \
         "$([ "$(only_sts "$T/a-v7e.log")" = 0 ] && echo 1 || echo 0)"
+    # V8: image push=1 with a variant pushes to the variant's repository and records in the variant's ids
+    # (positional: just binds in order, so `1 dev variant=2b`)
+    rm -rf "${T:?}/v8bin"
+    mkdir -p "$T/v8bin" "$T/v8src/fake"
+    printf 'selftest apr\n' > "$T/v8src/fake/apr"
+    tar czf "$T/v8bin/fake.tar.gz" -C "$T/v8src" fake/apr
+    (cd "$T/v8bin" && shasum -a 256 fake.tar.gz > fake.tar.gz.sha256)
+    V8SHA="$(shasum -a 256 "$T/v8bin/fake.tar.gz" | awk '{print $1}')"
+    sed -e "s/^APR_ASSET=.*/APR_ASSET=fake.tar.gz/" -e "s/^APR_TARBALL_SHA256=.*/APR_TARBALL_SHA256=$V8SHA/" -e 's/^APR_TAG=.*/APR_TAG=v0.71.4/' "$DIR/pin.env" > "$T/pin-v8.env"
+    cp "$IDS/image-pushed.json" "$T/v8-default-pushed.before"
+    rm -f "$T/up2b/image-pushed.json"
+    : > "$T/a-v8.log"
+    run_just "$T/c-v8.log" LLM_ENDPOINT_IDS_DIR="$T/up2b" LLM_ENDPOINT_BIN_DIR="$T/v8bin" LLM_ENDPOINT_PIN_FILE="$T/pin-v8.env" SHIM_LOG="$T/a-v8.log" \
+        just llm-endpoint-image 1 dev variant=2b
+    x=1
+    case "$(jget_selftest "$T/up2b/image-pushed.json" repo)" in
+        */aprender-llm-endpoint-2b-dev) ;;
+        *) x=0 ;;
+    esac
+    cmp -s "$IDS/image-pushed.json" "$T/v8-default-pushed.before" || x=0
+    grep -qE '^push .*/aprender-llm-endpoint-2b-dev:' "$T/a-v8.log" || x=0
+    row V8 "image 1 dev variant=2b -> pushed to the 2b-dev repository, recorded in the 2b ids, default record untouched" "$T/c-v8.log" zero '^PUSHED .*/aprender-llm-endpoint-2b-dev:' "$x"
     # 26-28: the live deploy under the permissive shim
     fresh_ids
     rm -f "$W/function.json"
