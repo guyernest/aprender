@@ -111,7 +111,13 @@ measurement receipt, as the GEMM contribution was shipped:
    14 threads on the M4 and on a Graviton3 host (the dev Lambda function, or a `c7g` instance).
    One number decides whether O1 is a PR or a note.
 3. **PR-A: O1** (#5475). Wiring plus the log line and a test that the CPU session's
-   `batched_prefills` increments. Nobody else owns #5475.
+   `batched_prefills` increments. Nobody else owns #5475. **Opened 2026-10-18 as
+   paiml/aprender#5710** (branch `perf/qwen35-cpu-session-batched-prefill`, worktree
+   `../aprender-prefill-upstream`, three commits on `e293f183b`). Measured on the M4 Pro:
+   kernel 2.5–2.65× on 0.8B and 1.8× on 4B; serve TTFT on the 421-token two-tool prompt
+   35.0 → 15.3 s at 6 threads, the same tool chosen in both arms. Comments posted the same
+   day: #4214 (issuecomment-6256580657, asks which base PR-B cuts from) and #5476
+   (issuecomment-6256580847, the stack proposal).
 4. **PR-B: O3**, on the base the #4214 owner names. The streamed terminal chunk of
    `/v1/chat/completions` already carries `usage` (spike 030's bench read it there), so
    `cached_tokens` has a home on both shapes; the batch-scheduler count rides the same PR.
