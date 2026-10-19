@@ -4614,6 +4614,66 @@ llm-endpoint-warm env="dev" profile="ze-kasher-dev" variant="":
     fi
     echo "WARM OK $FN (statusCode 200, $DT s)"
 
+# Read the live function back and record it, so two endpoints can be compared (readback_equal.py) as the
+# isolation evidence. READ CALLS ONLY (get-function, get-function-concurrency, get-function-url-config);
+# writes only $IDS/readback-<UTC>.json. The environment is recorded as sorted KEY NAMES, never values (the
+# projection happens inside the aws CLI, so no value reaches this shell). function_url is `absent` when the
+# function has no URL config, otherwise the URL's host only (the full address is a secret-equivalent).
+llm-endpoint-readback env="dev" profile="ze-kasher-dev" variant="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ENV="{{ trim_start_match(env, "env=") }}"
+    PROFILE="{{profile}}"
+    DIR=deploy/llm-endpoint
+    VARIANT="{{ trim_start_match(variant, "variant=") }}"
+    refuse() { echo "REFUSED $1: $2" >&2; exit "${3:-2}"; }
+    jget() { python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$1" "$2"; }
+    case "$ENV" in
+        dev|prod) ;;
+        *) refuse env "$ENV is not a known environment, expected dev or prod" ;;
+    esac
+    # every name below comes from the one library; a bad variant is refused before anything is read
+    . "$DIR/lib/names.sh" || exit 1
+    llm_endpoint_names "$VARIANT" "$ENV" || refuse variant "$LLM_ENDPOINT_NAMES_ERR"
+    IDS="${LLM_ENDPOINT_IDS_DIR:-$IDS_DEFAULT}"
+    [ -f "$IDS/function.json" ] || refuse function "$IDS/function.json does not exist, run: just llm-endpoint-deploy"
+    llm_endpoint_check_record "$IDS/function.json" || refuse ids "$LLM_ENDPOINT_NAMES_ERR"
+    FN="$(jget "$IDS/function.json" function)" || refuse function "$IDS/function.json lacks function"
+    REGION=us-east-1
+    if [ -f "$IDS/aws.json" ]; then
+        REGION="$(jget "$IDS/aws.json" region)" || refuse ids "$IDS/aws.json lacks region"
+    fi
+    AP=(--profile "$PROFILE" --region "$REGION")
+    CFG="$(mktemp)"
+    ERR="$(mktemp)"
+    trap 'rm -f "${CFG:?}" "${ERR:?}"' EXIT
+    # the projection keeps the environment as key names only
+    PROJ='{function_name:Configuration.FunctionName,state:Configuration.State,memory_mb:Configuration.MemorySize,timeout_s:Configuration.Timeout,ephemeral_mb:Configuration.EphemeralStorage.Size,architecture:Configuration.Architectures[0],package_type:Configuration.PackageType,code_sha256:Configuration.CodeSha256,last_modified:Configuration.LastModified,revision_id:Configuration.RevisionId,image_uri:Code.ImageUri,env_keys:keys(Configuration.Environment.Variables || `{}`)}'
+    set +e
+    aws lambda get-function "${AP[@]}" --function-name "$FN" --query "$PROJ" --output json > "$CFG" 2> "$ERR"
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] || refuse readback "get-function failed for $FN, rc=$rc: $(tr '\n' ' ' < "$ERR")" 3
+    set +e
+    CONC="$(aws lambda get-function-concurrency "${AP[@]}" --function-name "$FN" --query ReservedConcurrentExecutions --output text 2> "$ERR")"
+    rc=$?
+    set -e
+    [ "$rc" -eq 0 ] || refuse readback "get-function-concurrency failed for $FN, rc=$rc: $(tr '\n' ' ' < "$ERR")" 3
+    set +e
+    URL="$(aws lambda get-function-url-config "${AP[@]}" --function-name "$FN" --query FunctionUrl --output text 2> "$ERR")"
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+        grep -q 'ResourceNotFoundException' "$ERR" || refuse readback "get-function-url-config failed for $FN, rc=$rc: $(tr '\n' ' ' < "$ERR")" 3
+        URL=absent
+    fi
+    STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+    OUT="$IDS/readback-$STAMP.json"
+    python3 -I -c 'import datetime, json, sys; cfg, out, conc, url = sys.argv[1:5]; rec = json.load(open(cfg)); rec["env_keys"] = sorted(rec["env_keys"] or []); rec["reserved_concurrency"] = int(conc) if conc.isdigit() else None; rec["function_url"] = "absent" if url == "absent" else url.split("//", 1)[-1].split("/", 1)[0]; rec["read_at"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"); json.dump(rec, open(out, "w"), indent=2)' \
+        "$CFG" "$OUT" "$CONC" "$URL"
+    chmod 0600 "$OUT"
+    echo "READBACK OK $FN $OUT"
+
 # Tear an environment down (D-12, Pitfall 6), contain first. Order: reserved concurrency 0, delete the
 # URL config, remove-permission for BOTH statement ids, verify get-policy lists neither (refuses
 # `policy`), delete the function, delete ONLY the ECR image tag this deployment recorded and only while
@@ -5067,7 +5127,13 @@ llm-endpoint-selftest:
         '      "lambda get-function-concurrency") echo "${SHIM_CONCURRENCY:-None}" ;;' \
         '      "lambda get-function")' \
         '        if [ "${SHIM_FN_EXISTS:-1}" = 0 ]; then echo "An error occurred, ResourceNotFoundException, when calling GetFunction" >&2; exit 254; fi ' \
-        '        echo "${SHIM_RESOLVED_IMAGE_URI:-}" ;;' \
+        '        case "$*" in ' \
+        '          *function_name:*) echo "{\"function_name\":\"${SHIM_RB_NAME:-aprender-llm-endpoint-dev}\",\"state\":\"Active\",\"memory_mb\":10240,\"timeout_s\":900,\"ephemeral_mb\":10240,\"architecture\":\"arm64\",\"package_type\":\"Image\",\"code_sha256\":\"shacode\",\"last_modified\":\"2026-10-18T10:00:00.000+0000\",\"revision_id\":\"rev-1\",\"image_uri\":\"img@sha256:1\",\"env_keys\":[\"MODEL_S3_URI\",\"APR_API_KEY_HASH\"]}" ;;' \
+        '          *) echo "${SHIM_RESOLVED_IMAGE_URI:-}" ;;' \
+        '        esac ;;' \
+        '      "lambda get-function-url-config")' \
+        '        if [ "${SHIM_URL_ABSENT:-0}" = 1 ]; then echo "An error occurred (ResourceNotFoundException) when calling the GetFunctionUrlConfig operation: nope" >&2; exit 254; fi ' \
+        '        echo "${SHIM_URL:-https://shimhost0.lambda-url.us-east-1.on.aws/}" ;;' \
         '      "lambda get-function-configuration")' \
         '        case "$*" in ' \
         '          *keys*) echo "APR_API_KEY_HASH MODEL_S3_URI MODEL_SHA256 PLATFORM RAYON_NUM_THREADS" ;;' \
@@ -5598,6 +5664,25 @@ llm-endpoint-selftest:
     grep -qE 'codebuild delete-project .*--name aprender-llm-endpoint-weights-2b-dev( |$)' "$T/a-v16.log" || x=0
     grep -qE 'iam delete-role .*--role-name aprender-llm-endpoint-2b-dev-codebuild( |$)' "$T/a-v16.log" || x=0
     row V16 "teardown variant=2b with its own derived CodeBuild names -> TEARDOWN OK, deletes those" "$T/c-v16.log" zero '^TEARDOWN OK aprender-llm-endpoint-2b-dev' "$x"
+    # V17: readback reads and records, it never writes, and it never records a value of an environment variable
+    rm -rf "${T:?}/rb2b"
+    mkdir -p "$T/rb2b"
+    cp "$T/up2b/aws.json" "$T/rb2b/"
+    python3 -I -c 'import json, sys; json.dump({"function": sys.argv[2], "name": sys.argv[2], "variant": "2b", "env": "dev"}, open(sys.argv[1], "w"))' "$T/rb2b/function.json" aprender-llm-endpoint-2b-dev
+    : > "$T/a-v17.log"
+    run_just "$T/c-v17.log" LLM_ENDPOINT_IDS_DIR="$T/rb2b" SHIM_LOG="$T/a-v17.log" SHIM_RB_NAME=aprender-llm-endpoint-2b-dev SHIM_URL_ABSENT=1 SHIM_CONCURRENCY=1 \
+        APR_API_KEY_HASH="$HASH64" just llm-endpoint-readback dev ze-kasher-dev variant=2b
+    x=1
+    [ "$(find "$T/rb2b" -name 'readback-*.json' | wc -l | tr -d ' ')" -eq 1 ] || x=0
+    RBF="$(find "$T/rb2b" -name 'readback-*.json' | head -1)"
+    [ "$(jget_selftest "$RBF" function_url)" = absent ] || x=0
+    [ "$(jget_selftest "$RBF" function_name)" = aprender-llm-endpoint-2b-dev ] || x=0
+    grep -q "$HASH64" "$RBF" && x=0
+    grep -q "$HASH64" "$T/c-v17.log" && x=0
+    grep -q 'lambda get-function ' "$T/a-v17.log" || x=0
+    grep -q 'lambda get-function-url-config ' "$T/a-v17.log" || x=0
+    grep -qE '^[a-z0-9-]+ (create|update|put|delete|add|remove|tag)' "$T/a-v17.log" && x=0
+    row V17 "readback variant=2b: one readback-*.json with function_url absent and no env value, read calls only (no write verb in the shim log)" "$T/c-v17.log" zero '^READBACK OK aprender-llm-endpoint-2b-dev ' "$x"
     # 26-28: the live deploy under the permissive shim
     fresh_ids
     rm -f "$W/function.json"
