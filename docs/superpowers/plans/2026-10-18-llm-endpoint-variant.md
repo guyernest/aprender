@@ -296,6 +296,8 @@ git commit -m "docs(llm-endpoint): the variant rule, records and the 2B pin"
 
 ### Task 7 (gated, live): isolation evidence and the 2B smoke test
 
+**Calling convention:** `variant=` is always the LAST positional argument; every command below passes all positionals (`just` binds them in order, so `env=dev variant=2b` would put the variant into `profile` and aim at the live 0.8B name). The recipes refuse `variant=` in any other slot.
+
 **Gate:** operator's go for this task, and pmcp.run's confirmation of `aprender-llm-endpoint-2b-dev` or the operator's waiver. Do not start a step without it. Profile `ze-kasher-dev`, region `us-east-1`, account `816069129666`.
 
 **Files:**
@@ -307,21 +309,21 @@ git commit -m "docs(llm-endpoint): the variant rule, records and the 2B pin"
 **Interfaces:**
 - Consumes: everything above; `APR_API_KEY_HASH` and `APR_PROBE_KEY` from the operator's environment (never written).
 
-- [ ] **Step 1: R0** — `just llm-endpoint-readback env=dev` → `READBACK OK aprender-llm-endpoint-dev …`; the file's `last_modified` is `2026-10-16T18:22:53.000+0000`. If not, stop: the baseline moved and the operator decides.
+- [ ] **Step 1: R0** — `just llm-endpoint-readback dev ze-kasher-dev` → `READBACK OK aprender-llm-endpoint-dev …`; the file's `last_modified` is `2026-10-16T18:22:53.000+0000`. If not, stop: the baseline moved and the operator decides.
 
-- [ ] **Step 2: 2B up, push, weights, deploy** — `just llm-endpoint-up env=dev variant=2b` → `UP OK aprender-llm-endpoint-2b-dev …`; `just llm-endpoint-image push=1 env=dev variant=2b` → `PUSHED 816069129666.dkr.ecr.us-east-1.amazonaws.com/aprender-llm-endpoint-2b-dev:cpu-v0.71.4 sha256:f291c0a7…` then `IMAGE OK …` (the digest equals the dev image's, since the local build is the same); `just llm-endpoint-weights mode=copy env=dev variant=2b` → `WEIGHTS OK s3://aprender-llm-endpoint-weights-816069129666-2b-dev/Qwen3.5-2B-Q4_K_M.gguf sha256 aaf42c8b…`; `RESERVED_CONCURRENCY=1 just llm-endpoint-deploy env=dev variant=2b` → `DEPLOY OK aprender-llm-endpoint-2b-dev …` with the read-back line `memory=10240 timeout=900 ephemeral=10240 arch=arm64`.
+- [ ] **Step 2: 2B up, push, weights, deploy** — `just llm-endpoint-up dev ze-kasher-dev variant=2b` → `UP OK aprender-llm-endpoint-2b-dev …`; `just llm-endpoint-image 1 dev variant=2b` → `PUSHED 816069129666.dkr.ecr.us-east-1.amazonaws.com/aprender-llm-endpoint-2b-dev:cpu-v0.71.4 sha256:…` then `IMAGE OK …` (the digest may differ from the dev image's `f291c0a7…`: the Dockerfile's base image is unpinned and the image is rebuilt, so a different digest is not a defect — record both); `just llm-endpoint-weights copy dev ze-kasher-dev variant=2b` → `WEIGHTS OK s3://aprender-llm-endpoint-weights-816069129666-2b-dev/Qwen3.5-2B-Q4_K_M.gguf sha256 aaf42c8b…`; `RESERVED_CONCURRENCY=1 just llm-endpoint-deploy dev ze-kasher-dev variant=2b` → `DEPLOY OK aprender-llm-endpoint-2b-dev …` with the read-back line `memory=10240 timeout=900 ephemeral=10240 arch=arm64`.
 
-- [ ] **Step 3: R1** — `just llm-endpoint-readback env=dev`.
+- [ ] **Step 3: R1** — `just llm-endpoint-readback dev ze-kasher-dev`.
 
-- [ ] **Step 4: throwaway `iso`** — the four recipes of Step 2 with `variant=iso` (its pin file: copy `pin-2b.env` to `pin-iso.env` for the run; do not commit it).
+- [ ] **Step 4: throwaway `iso`** — the four recipes of Step 2 with `variant=iso` in the last position (`up`, `image 1`, `weights copy`, `deploy`; same positional forms) (its pin file: copy `pin-2b.env` to `pin-iso.env` for the run; do not commit it).
 
-- [ ] **Step 5: R2 and S0** — `readback env=dev` and `readback env=dev variant=2b`.
+- [ ] **Step 5: R2 and S0** — `just llm-endpoint-readback dev ze-kasher-dev` and `just llm-endpoint-readback dev ze-kasher-dev variant=2b`.
 
-- [ ] **Step 6: tear `iso` down** — `just llm-endpoint-teardown env=dev variant=iso` → `TEARDOWN OK aprender-llm-endpoint-iso-dev`; then `aws lambda get-function --function-name aprender-llm-endpoint-iso-dev` → `ResourceNotFoundException`. Delete `pin-iso.env` and `.ids/iso-dev/` locally afterwards; the `iso` ECR repository is printed under `NOT RUN` and is deleted by hand after the evidence is written.
+- [ ] **Step 6: tear `iso` down** — `just llm-endpoint-teardown dev ze-kasher-dev variant=iso` → `TEARDOWN OK aprender-llm-endpoint-iso-dev`; then `aws lambda get-function --function-name aprender-llm-endpoint-iso-dev` → `ResourceNotFoundException`. Delete `pin-iso.env` and `.ids/iso-dev/` locally afterwards; the `iso` ECR repository is printed under `NOT RUN` and is deleted by hand after the evidence is written.
 
 - [ ] **Step 7: R3 and S1, then compare** — `python3 -I deploy/llm-endpoint/readback_equal.py R0 R1 R2 R3; echo rc=$?` → `rc=0`; `python3 -I deploy/llm-endpoint/readback_equal.py S0 S1; echo rc=$?` → `rc=0`. Write `09-VARIANT-ISOLATION-EVIDENCE.json`: the six records, both commands with exit status and output, the not-found read, the recipe sequence with timestamps, and the identity lines (account, region, profile, apr tag, image digest).
 
-- [ ] **Step 8: 2B smoke test** — `just llm-endpoint-prove-401 env=dev variant=2b; echo rc=$?` → `401 NOT PROVEN`, `rc=3` (expected at this pin; record it); `aws lambda get-function-url-config --function-name aprender-llm-endpoint-2b-dev` → `ResourceNotFoundException`; `just llm-endpoint-measure env=dev variant=2b label=smoke cold=1 long=0 conc=1 budget=3` → `MEASURE OK <path>`. From the measure record and the function log: cold-start timeline, CPU part (`cpu_part`), the tool-call function names, prefill and decode tok/s, dollars. Write `09-2B-SMOKE-EVIDENCE.json` with those, the image digest and its ECR size (`aws ecr describe-images`), the weights size (`head-object`), and the sentence that the CPU part is not chosen by anyone.
+- [ ] **Step 8: 2B smoke test** — `just llm-endpoint-prove-401 dev ze-kasher-dev variant=2b; echo rc=$?` → `401 NOT PROVEN`, `rc=3` (expected at this pin; record it); `aws lambda get-function-url-config --function-name aprender-llm-endpoint-2b-dev` → `ResourceNotFoundException`; `just llm-endpoint-measure dev ze-kasher-dev smoke 1 0 1 3 variant=2b` (label smoke, cold 1, long 0, conc 1, budget 3) → `MEASURE OK <path>`. From the measure record and the function log: cold-start timeline, CPU part (`cpu_part`), the tool-call function names, prefill and decode tok/s, dollars. Write `09-2B-SMOKE-EVIDENCE.json` with those, the image digest and its ECR size (`aws ecr describe-images`), the weights size (`head-object`), and the sentence that the CPU part is not chosen by anyone.
 
 - [ ] **Step 9: Update the reply draft and commit the evidence**
 

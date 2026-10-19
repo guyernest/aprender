@@ -94,7 +94,7 @@ Anti-goals (would make this a failure even if it works)
   `aws.json` or `function.json` refuses with class `ids` when the recorded name differs from the one
   derived from its own `variant` and `env` arguments. This is the local half of isolation: a teardown
   invoked for one name cannot act on records written for another **(builder call)**.
-- The image is shared: one local build per pin tag. `llm-endpoint-image push=1 variant=X` pushes the
+- The image is shared: one local build per pin tag. `llm-endpoint-image 1 <env> variant=X` (positional; `variant=` is the last argument of every recipe) pushes the
   already-built local image to variant X's repository and records `image-pushed.json` in X's ids
   directory; the build step itself is unchanged **(builder call)**.
 - Weights for the 2B are staged with `mode=copy` from the spike bucket: the object
