@@ -3904,14 +3904,13 @@ llm-endpoint-image push="0":
 # deploy/llm-endpoint/pin.env), LLM_ENDPOINT_BIN_DIR (default deploy/llm-endpoint/bin). RESERVED_CONCURRENCY
 # (an integer) is applied after the deploy and read back. APR_API_KEY_HASH comes from the environment
 # and is only ever printed as the word `set`.
-llm-endpoint-deploy env="dev" profile="ze-kasher-dev":
+llm-endpoint-deploy env="dev" profile="ze-kasher-dev" variant="":
     #!/usr/bin/env bash
     set -euo pipefail
     ENV="{{ trim_start_match(env, "env=") }}"
     PROFILE="{{profile}}"
+    VARIANT="{{ trim_start_match(variant, "variant=") }}"
     DIR=deploy/llm-endpoint
-    IDS="${LLM_ENDPOINT_IDS_DIR:-$DIR/.ids}"
-    PIN_FILE="${LLM_ENDPOINT_PIN_FILE:-$DIR/pin.env}"
     BIN="${LLM_ENDPOINT_BIN_DIR:-$DIR/bin}"
     refuse() { echo "REFUSED $1: $2" >&2; exit "${3:-2}"; }
     # shasum directly, as laya-deploy: the pin must not depend on which sha tool the PATH offers.
@@ -3927,6 +3926,11 @@ llm-endpoint-deploy env="dev" profile="ze-kasher-dev":
         dev|prod) ;;
         *) refuse env "'$ENV' is not a known environment (expected dev or prod)" ;;
     esac
+    # every name below comes from the one library; a bad variant is refused before anything is read
+    . "$DIR/lib/names.sh" || exit 1
+    llm_endpoint_names "$VARIANT" "$ENV" || refuse variant "$LLM_ENDPOINT_NAMES_ERR"
+    IDS="${LLM_ENDPOINT_IDS_DIR:-$IDS_DEFAULT}"
+    PIN_FILE="${LLM_ENDPOINT_PIN_FILE:-$PIN_DEFAULT}"
     # rung 2: pin
     [ -f "$PIN_FILE" ] || refuse pin "$PIN_FILE does not exist"
     . "$PIN_FILE"
@@ -3967,6 +3971,7 @@ llm-endpoint-deploy env="dev" profile="ze-kasher-dev":
     [ -f "$IDS/aws.json" ] || refuse ids "$IDS/aws.json does not exist -- run: just llm-endpoint-up"
     has_keys "$IDS/aws.json" account region bucket ecr_repo ecr_repo_name role_arn log_group \
         || refuse ids "$IDS/aws.json lacks one of account, region, bucket, ecr_repo, ecr_repo_name, role_arn, log_group"
+    llm_endpoint_check_record "$IDS/aws.json" || refuse ids "$LLM_ENDPOINT_NAMES_ERR"
     WANT_ACCOUNT="$(jget "$IDS/aws.json" account)"
     REGION="$(jget "$IDS/aws.json" region)"
     AP=(--profile "$PROFILE" --region "$REGION")
@@ -3975,7 +3980,7 @@ llm-endpoint-deploy env="dev" profile="ze-kasher-dev":
     ECR_REPO_NAME="$(jget "$IDS/aws.json" ecr_repo_name)"
     ROLE_ARN="$(jget "$IDS/aws.json" role_arn)"
     if [ "${DRY_RUN:-0}" = "1" ]; then
-        echo "DRY-RUN OK aprender-llm-endpoint-$ENV (offline rungs 1-7; account, s3-sha and digest NOT checked; apr $APR_TAG, gguf $GGUF_SHA256; nothing deployed)"
+        echo "DRY-RUN OK $FN (offline rungs 1-7; account, s3-sha and digest NOT checked; apr $APR_TAG, gguf $GGUF_SHA256; nothing deployed)"
         exit 0
     fi
     # rung 8: account -- never deploy into another account
@@ -4003,12 +4008,11 @@ llm-endpoint-deploy env="dev" profile="ze-kasher-dev":
     [ "$LIVE_DIGEST" = "$PUSHED_DIGEST" ] \
         || refuse digest "tag cpu-$APR_TAG now resolves to $LIVE_DIGEST, not the recorded $PUSHED_DIGEST"
     if [ "${PREFLIGHT:-0}" = "1" ]; then
-        echo "PREFLIGHT OK aprender-llm-endpoint-$ENV (rungs 1-10; read-only AWS calls only; apr $APR_TAG; nothing deployed)"
+        echo "PREFLIGHT OK $FN (rungs 1-10; read-only AWS calls only; apr $APR_TAG; nothing deployed)"
         exit 0
     fi
     # ---- live ----
-    FN="aprender-llm-endpoint-$ENV"
-    TAGS="project=aprender-llm-endpoint,phase=09,env=$ENV"
+    TAGS="project=aprender-llm-endpoint,phase=09,env=$ENV,$TAG_VARIANT"
     # step <what> <cmd...>: run, keep the log, refuse on failure (the status is read after a redirect, never a pipe)
     step() {
         local what="$1" rc
@@ -4070,27 +4074,30 @@ llm-endpoint-deploy env="dev" profile="ze-kasher-dev":
         || refuse readback "$FN reads memory=$CMEM timeout=$CTIMEOUT ephemeral=$CEPH arch=$CARCH (want 10240 / 900 / 10240 / arm64)" 9
     echo "  readback: state=$CSTATE memory=$CMEM timeout=$CTIMEOUT ephemeral=$CEPH arch=$CARCH env keys: $ENV_KEYS"
     FN_ARN="arn:aws:lambda:$REGION:$ACCOUNT:function:$FN"
-    python3 -I -c 'import datetime, json, sys; out, fn, arn, env, digest, conc, tag, gguf = sys.argv[1:9]; now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"); rec = {"function": fn, "arn": arn, "env": env, "image_digest": digest, "memory_mb": 10240, "timeout_s": 900, "ephemeral_mb": 10240, "reserved_concurrency": int(conc) if conc.isdigit() else None, "deployed_at": now, "apr_tag": tag, "gguf_sha256": gguf}; json.dump(rec, open(out, "w"), indent=2)' \
-        "$IDS/function.json" "$FN" "$FN_ARN" "$ENV" "$PUSHED_DIGEST" "$GOT_RC" "$APR_TAG" "$GGUF_SHA256"
+    python3 -I -c 'import datetime, json, sys; out, fn, arn, env, variant, suffix, digest, conc, tag, gguf = sys.argv[1:11]; now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"); rec = {"function": fn, "arn": arn, "env": env, "variant": variant, "suffix": suffix, "image_digest": digest, "memory_mb": 10240, "timeout_s": 900, "ephemeral_mb": 10240, "reserved_concurrency": int(conc) if conc.isdigit() else None, "deployed_at": now, "apr_tag": tag, "gguf_sha256": gguf}; json.dump(rec, open(out, "w"), indent=2)' \
+        "$IDS/function.json" "$FN" "$FN_ARN" "$ENV" "$VARIANT" "$SUFFIX" "$PUSHED_DIGEST" "$GOT_RC" "$APR_TAG" "$GGUF_SHA256"
     echo "DEPLOY OK $FN (image $PUSHED_DIGEST, apr $APR_TAG)"
 
 # Create the environment-scoped resources (idempotent; D-13): role, log group, weights bucket and the
 # ECR repository aprender-llm-endpoint-<env>. No repository is shared across environments, so tearing
 # one environment down cannot touch the images of another. Writes $IDS/aws.json (gitignored) and
 # prints UP OK. LLM_ENDPOINT_IDS_DIR overrides the ids directory (the self-test seam).
-llm-endpoint-up env="dev" profile="ze-kasher-dev":
+llm-endpoint-up env="dev" profile="ze-kasher-dev" variant="":
     #!/usr/bin/env bash
     set -euo pipefail
     ENV="{{ trim_start_match(env, "env=") }}"
     PROFILE="{{profile}}"
+    VARIANT="{{ trim_start_match(variant, "variant=") }}"
     REGION=us-east-1
     DIR=deploy/llm-endpoint
-    IDS="${LLM_ENDPOINT_IDS_DIR:-$DIR/.ids}"
     refuse() { echo "REFUSED $1: $2" >&2; exit "${3:-2}"; }
     case "$ENV" in
         dev|prod) ;;
         *) refuse env "$ENV is not a known environment, expected dev or prod" ;;
     esac
+    . "$DIR/lib/names.sh" || exit 1
+    llm_endpoint_names "$VARIANT" "$ENV" || refuse variant "$LLM_ENDPOINT_NAMES_ERR"
+    IDS="${LLM_ENDPOINT_IDS_DIR:-$IDS_DEFAULT}"
     mkdir -p "$IDS"
     # tolerate <pattern> <what> <cmd...>: success, or a failure whose output names the exact exception
     tolerate() {
@@ -4112,12 +4119,10 @@ llm-endpoint-up env="dev" profile="ze-kasher-dev":
     }
     ACCOUNT="$(aws sts get-caller-identity --profile "$PROFILE" --query Account --output text)" \
         || refuse account "cannot read the AWS account for profile $PROFILE"
-    NAME="aprender-llm-endpoint-$ENV"
-    BUCKET="aprender-llm-endpoint-weights-$ACCOUNT-$ENV"
-    REPO_NAME="$NAME"
+    llm_endpoint_names "$VARIANT" "$ENV" "$ACCOUNT" || refuse variant "$LLM_ENDPOINT_NAMES_ERR"
+    NAME="$FN"
     ECR_HOST="$ACCOUNT.dkr.ecr.$REGION.amazonaws.com"
     ECR_REPO="$ECR_HOST/$REPO_NAME"
-    LOG_GROUP="/aws/lambda/$NAME"
     AP=(--profile "$PROFILE" --region "$REGION")
     # bucket: private, encrypted, tagged
     if aws s3api head-bucket "${AP[@]}" --bucket "$BUCKET" > /dev/null 2>&1; then
@@ -4131,18 +4136,18 @@ llm-endpoint-up env="dev" profile="ze-kasher-dev":
     aws s3api put-bucket-encryption "${AP[@]}" --bucket "$BUCKET" \
         --server-side-encryption-configuration '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
     aws s3api put-bucket-tagging "${AP[@]}" --bucket "$BUCKET" \
-        --tagging "TagSet=[{Key=project,Value=aprender-llm-endpoint},{Key=phase,Value=09},{Key=env,Value=$ENV}]"
+        --tagging "TagSet=[{Key=project,Value=aprender-llm-endpoint},{Key=phase,Value=09},{Key=env,Value=$ENV},{Key=variant,Value=$VARIANT}]"
     # ECR repository, one per environment
     if aws ecr describe-repositories "${AP[@]}" --repository-names "$REPO_NAME" > /dev/null 2>&1; then
         echo "  exists:  ECR $REPO_NAME"
     else
         aws ecr create-repository "${AP[@]}" --repository-name "$REPO_NAME" \
-            --tags Key=project,Value=aprender-llm-endpoint Key=phase,Value=09 Key=env,Value="$ENV" > /dev/null
+            --tags Key=project,Value=aprender-llm-endpoint Key=phase,Value=09 Key=env,Value="$ENV" Key=variant,Value="$VARIANT" > /dev/null
         echo "  created: ECR $REPO_NAME"
     fi
     # log group, 7 days
     tolerate ResourceAlreadyExistsException log-group aws logs create-log-group "${AP[@]}" --log-group-name "$LOG_GROUP" \
-        --tags "project=aprender-llm-endpoint,phase=09,env=$ENV"
+        --tags "project=aprender-llm-endpoint,phase=09,env=$ENV,$TAG_VARIANT"
     aws logs put-retention-policy "${AP[@]}" --cli-input-json "{\"logGroupName\":\"$LOG_GROUP\",\"retentionInDays\":7}"
     # role: trust from a file, the managed basic-execution policy, the inline S3 read from a file
     CREATED_ROLE=0
@@ -4151,7 +4156,7 @@ llm-endpoint-up env="dev" profile="ze-kasher-dev":
     else
         aws iam create-role --profile "$PROFILE" --role-name "$NAME" \
             --assume-role-policy-document "file://$DIR/iam/lambda-trust.json" \
-            --tags Key=project,Value=aprender-llm-endpoint Key=phase,Value=09 Key=env,Value="$ENV" > /dev/null
+            --tags Key=project,Value=aprender-llm-endpoint Key=phase,Value=09 Key=env,Value="$ENV" Key=variant,Value="$VARIANT" > /dev/null
         CREATED_ROLE=1
         echo "  created: role $NAME"
     fi
@@ -4168,8 +4173,8 @@ llm-endpoint-up env="dev" profile="ze-kasher-dev":
         echo "  waiting 10 s for IAM propagation of the new role"
         sleep 10
     fi
-    python3 -I -c 'import datetime, json, sys; keys = ["account", "region", "profile", "env", "bucket", "ecr_repo", "ecr_repo_name", "ecr_host", "role_arn", "log_group"]; rec = dict(zip(keys, sys.argv[2:12])); rec["created_at"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"); json.dump(rec, open(sys.argv[1], "w"), indent=2)' \
-        "$IDS/aws.json" "$ACCOUNT" "$REGION" "$PROFILE" "$ENV" "$BUCKET" "$ECR_REPO" "$REPO_NAME" "$ECR_HOST" "$ROLE_ARN" "$LOG_GROUP"
+    python3 -I -c 'import datetime, json, sys; keys = ["account", "region", "profile", "env", "bucket", "ecr_repo", "ecr_repo_name", "ecr_host", "role_arn", "log_group", "name", "variant", "suffix"]; rec = dict(zip(keys, sys.argv[2:15])); rec["created_at"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"); json.dump(rec, open(sys.argv[1], "w"), indent=2)' \
+        "$IDS/aws.json" "$ACCOUNT" "$REGION" "$PROFILE" "$ENV" "$BUCKET" "$ECR_REPO" "$REPO_NAME" "$ECR_HOST" "$ROLE_ARN" "$LOG_GROUP" "$FN" "$VARIANT" "$SUFFIX"
     echo "UP OK $NAME (account $ACCOUNT, bucket $BUCKET, repository $REPO_NAME)"
 
 # Stage the ladder-pinned GGUF into the endpoint bucket and verify its Metadata.sha256 against the
@@ -5190,6 +5195,10 @@ llm-endpoint-selftest:
         ts="$(python3 -I -c 'import datetime, sys; print((datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=int(sys.argv[1]))).strftime("%Y-%m-%dT%H:%M:%SZ"))' "${1:-0}")"
         printf '{"function":"%s","image_digest":"%s","statusCode":401,"measured_at":"%s","event_sha256":"x"}\n' "$FN" "$DIGEST" "$ts" > "$W/prove-401.json"
     }
+    # jget_selftest <file> <key>: one key of a JSON record, empty when the file or key is absent
+    jget_selftest() {
+        python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' "$1" "$2" 2> /dev/null || true
+    }
     # seen <log> <pattern>: 1 when the argv log holds the pattern, else 0
     seen() {
         if grep -qE -- "$2" "$1"; then
@@ -5314,6 +5323,66 @@ llm-endpoint-selftest:
     [ "$RC" -eq 0 ] || x=0
     RC=$UP_RC
     row 25 "up: env-specific repository, posture calls, and an aws.json that DRY_RUN deploy accepts" "$T/c25.log" zero '^UP OK aprender-llm-endpoint-dev' "$x"
+    # V3-V8: the variant. A variant names its own function, repository, bucket and ids; a record names the
+    # function it was written for, and a reader refuses a record that names another.
+    rm -rf "${T:?}/up2b"
+    mkdir -p "$T/up2b"
+    cp "$IDS/image-local.json" "$IDS/image-pushed.json" "$T/up2b/"
+    : > "$T/a-v3.log"
+    run_just "$T/c-v3.log" LLM_ENDPOINT_IDS_DIR="$T/up2b" SHIM_LOG="$T/a-v3.log" just llm-endpoint-up dev ze-kasher-dev variant=2b
+    x=1
+    [ "$(jget_selftest "$T/up2b/aws.json" name)" = "aprender-llm-endpoint-2b-dev" ] || x=0
+    [ "$(jget_selftest "$T/up2b/aws.json" variant)" = "2b" ] || x=0
+    [ "$(jget_selftest "$T/up2b/aws.json" suffix)" = "2b-dev" ] || x=0
+    [ "$(jget_selftest "$T/up2b/aws.json" ecr_repo_name)" = "aprender-llm-endpoint-2b-dev" ] || x=0
+    case "$(jget_selftest "$T/up2b/aws.json" bucket)" in
+        *-2b-dev) ;;
+        *) x=0 ;;
+    esac
+    grep -qE 'repository-names aprender-llm-endpoint-2b-dev( |$)' "$T/a-v3.log" || x=0
+    grep -q 'variant=2b' "$T/a-v3.log" || x=0
+    grep -qE 'aprender-llm-endpoint-dev( |$)' "$T/a-v3.log" && x=0
+    row V3 "up variant=2b: 2b-dev names in aws.json and in the calls, tagged variant=2b, no default-name call" "$T/c-v3.log" zero '^UP OK aprender-llm-endpoint-2b-dev' "$x"
+    # V4: the 2b ids and a 2b pin pass the offline deploy ladder
+    cp "$IDS/image-pushed.json" "$IDS/image-local.json" "$T/up2b/"
+    sed -e 's/^GGUF_RUNG=.*/GGUF_RUNG=qwen35-2b-q4km/' -e 's/^GGUF_OBJECT=.*/GGUF_OBJECT=Qwen3.5-2B-Q4_K_M.gguf/' "$PIN" > "$T/pin-2b.env"
+    : > "$T/a-v4.log"
+    run_just "$T/c-v4.log" LLM_ENDPOINT_IDS_DIR="$T/up2b" LLM_ENDPOINT_PIN_FILE="$T/pin-2b.env" SHIM_MODE=refuse SHIM_LOG="$T/a-v4.log" DRY_RUN=1 \
+        just llm-endpoint-deploy dev ze-kasher-dev variant=2b
+    row V4 "deploy variant=2b DRY_RUN with the up2b ids and a 2b pin -> DRY-RUN OK aprender-llm-endpoint-2b-dev, zero aws calls" "$T/c-v4.log" zero \
+        '^DRY-RUN OK aprender-llm-endpoint-2b-dev ' "$([ "$(lines "$T/a-v4.log")" -eq 0 ] && echo 1 || echo 0)"
+    # V5: the default-variant record cannot serve variant 2b, and the 2b record cannot serve the default
+    : > "$T/a-v5.log"
+    run_just "$T/c-v5.log" LLM_ENDPOINT_IDS_DIR="$IDS" SHIM_MODE=refuse SHIM_LOG="$T/a-v5.log" DRY_RUN=1 just llm-endpoint-deploy dev ze-kasher-dev variant=2b
+    row V5 "deploy variant=2b against the legacy dev record -> REFUSED ids, zero aws calls" "$T/c-v5.log" nonzero '^REFUSED ids:' \
+        "$([ "$(lines "$T/a-v5.log")" -eq 0 ] && echo 1 || echo 0)"
+    : > "$T/a-v5b.log"
+    run_just "$T/c-v5b.log" LLM_ENDPOINT_IDS_DIR="$T/up2b" SHIM_MODE=refuse SHIM_LOG="$T/a-v5b.log" DRY_RUN=1 just llm-endpoint-deploy
+    row V5b "deploy with no variant against the 2b record -> REFUSED ids, zero aws calls" "$T/c-v5b.log" nonzero '^REFUSED ids:' \
+        "$([ "$(lines "$T/a-v5b.log")" -eq 0 ] && echo 1 || echo 0)"
+    # V6: a bad variant is refused before any pin, ids or aws work
+    : > "$T/a-v6.log"
+    run_just "$T/c-v6.log" SHIM_MODE=refuse SHIM_LOG="$T/a-v6.log" DRY_RUN=1 just llm-endpoint-deploy dev ze-kasher-dev variant=2B
+    row V6 "deploy variant=2B (uppercase) -> REFUSED variant, zero aws calls" "$T/c-v6.log" nonzero '^REFUSED variant:' \
+        "$([ "$(lines "$T/a-v6.log")" -eq 0 ] && echo 1 || echo 0)"
+    : > "$T/a-v6b.log"
+    run_just "$T/c-v6b.log" SHIM_MODE=refuse SHIM_LOG="$T/a-v6b.log" DRY_RUN=1 just llm-endpoint-deploy dev ze-kasher-dev variant=aprender-llm-endpoint-2b
+    row V6b "deploy variant=aprender-llm-endpoint-2b (a whole name) -> REFUSED variant, zero aws calls" "$T/c-v6b.log" nonzero '^REFUSED variant:' \
+        "$([ "$(lines "$T/a-v6b.log")" -eq 0 ] && echo 1 || echo 0)"
+    : > "$T/a-v6c.log"
+    run_just "$T/c-v6c.log" SHIM_MODE=refuse SHIM_LOG="$T/a-v6c.log" just llm-endpoint-up dev ze-kasher-dev variant=2B
+    row V6c "up variant=2B (uppercase) -> REFUSED variant, zero aws calls" "$T/c-v6c.log" nonzero '^REFUSED variant:' \
+        "$([ "$(lines "$T/a-v6c.log")" -eq 0 ] && echo 1 || echo 0)"
+    # V7: a named default-variant record (the new format) is accepted with no variant
+    rm -rf "${T:?}/named-default"
+    mkdir -p "$T/named-default"
+    cp "$IDS/image-local.json" "$IDS/image-pushed.json" "$T/named-default/"
+    python3 -I -c 'import json, sys; d = json.load(open(sys.argv[1])); d.update({"name": "aprender-llm-endpoint-dev", "variant": "", "suffix": "dev"}); json.dump(d, open(sys.argv[2], "w"))' \
+        "$IDS/aws.json" "$T/named-default/aws.json"
+    : > "$T/a-v7.log"
+    run_just "$T/c-v7.log" LLM_ENDPOINT_IDS_DIR="$T/named-default" SHIM_MODE=refuse SHIM_LOG="$T/a-v7.log" DRY_RUN=1 just llm-endpoint-deploy
+    row V7 "deploy, no variant, a record that names aprender-llm-endpoint-dev -> DRY-RUN OK, zero aws calls" "$T/c-v7.log" zero \
+        '^DRY-RUN OK aprender-llm-endpoint-dev ' "$([ "$(lines "$T/a-v7.log")" -eq 0 ] && echo 1 || echo 0)"
     # 26-28: the live deploy under the permissive shim
     fresh_ids
     rm -f "$W/function.json"

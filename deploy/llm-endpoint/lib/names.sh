@@ -57,6 +57,26 @@ llm_endpoint_names() {
     return 0
 }
 
+# llm_endpoint_check_record FILE: does this ids record belong to the function FN? Reads the globals
+# FN, VARIANT and ENV the recipe set. A record with a `name` key must equal FN. A record without one
+# is legacy (written before variants) and serves only the default variant, in the same env.
+# Returns 0 to accept; otherwise 1 with a one-line reason in LLM_ENDPOINT_NAMES_ERR.
+llm_endpoint_check_record() {
+    local file="${1-}"
+    local rc=0
+    # one program line: bashrs mis-parses a python body inside the command substitution itself
+    local prog='import json,sys;p,fn,v,e=sys.argv[1:5];r=json.load(open(p));r=r if isinstance(r,dict) else {};m=("%s belongs to %s, not %s"%(p,r["name"],fn) if r["name"]!=fn else "") if "name" in r else ("%s has no name key (a record from before variants) and cannot serve variant %s"%(p,v) if v else ("%s has no name key and its env is %s, not %s"%(p,r.get("env"),e) if r.get("env")!=e else ""));print(m);sys.exit(1 if m else 0)'
+    LLM_ENDPOINT_NAMES_ERR="$(python3 -I -c "$prog" "$file" "${FN-}" "${VARIANT-}" "${ENV-}" 2>&1)"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        LLM_ENDPOINT_NAMES_ERR="${LLM_ENDPOINT_NAMES_ERR//$'\n'/ }"
+        [ -n "$LLM_ENDPOINT_NAMES_ERR" ] || LLM_ENDPOINT_NAMES_ERR="$file could not be checked"
+        return 1
+    fi
+    LLM_ENDPOINT_NAMES_ERR=""
+    return 0
+}
+
 # ---- self-test (case table first; the functions are defined above this block) ----
 llm_endpoint_names_selftest() {
     local fails=0
@@ -134,6 +154,32 @@ llm_endpoint_names_selftest() {
     # longest legal bucket
     llm_endpoint_names a1b2c3d4e5f6g7 prod 816069129666
     eq "longest bucket length" "${#BUCKET}" 62
+    # check_record: a record names its function; a record without a name is legacy and serves only the default variant
+    local rd
+    rd="${TMPDIR:-/tmp}/names-selftest.$$"
+    mkdir -p "$rd" || return 1
+    printf '{"name":"aprender-llm-endpoint-2b-dev","env":"dev"}\n' > "$rd/named.json"
+    printf '{"env":"dev"}\n' > "$rd/legacy.json"
+    printf '{"env":"prod"}\n' > "$rd/legacy-prod.json"
+    printf '{"name":"aprender-llm-endpoint-dev","env":"dev"}\n' > "$rd/named-default.json"
+    printf 'not json\n' > "$rd/garbage.json"
+    FN=aprender-llm-endpoint-2b-dev VARIANT=2b ENV=dev
+    row "record: matching name accepted" 0 llm_endpoint_check_record "$rd/named.json"
+    FN=aprender-llm-endpoint-4b-dev VARIANT=4b ENV=dev
+    row "record: mismatched name refused" 1 llm_endpoint_check_record "$rd/named.json"
+    llm_endpoint_check_record "$rd/named.json"
+    eq "record: mismatch reason names both" "$LLM_ENDPOINT_NAMES_ERR" "$rd/named.json belongs to aprender-llm-endpoint-2b-dev, not aprender-llm-endpoint-4b-dev"
+    FN=aprender-llm-endpoint-dev VARIANT="" ENV=dev
+    row "record: legacy accepted for the default variant" 0 llm_endpoint_check_record "$rd/legacy.json"
+    row "record: named default accepted" 0 llm_endpoint_check_record "$rd/named-default.json"
+    row "record: 2b-named record refused for the default" 1 llm_endpoint_check_record "$rd/named.json"
+    FN=aprender-llm-endpoint-2b-dev VARIANT=2b ENV=dev
+    row "record: legacy refused for a variant" 1 llm_endpoint_check_record "$rd/legacy.json"
+    FN=aprender-llm-endpoint-dev VARIANT="" ENV=dev
+    row "record: legacy with the wrong env refused" 1 llm_endpoint_check_record "$rd/legacy-prod.json"
+    row "record: unreadable file refused" 1 llm_endpoint_check_record "$rd/garbage.json"
+    row "record: missing file refused" 1 llm_endpoint_check_record "$rd/absent.json"
+    rm -rf "${rd:?}" || true
     echo "names.sh self-test: $passes passed, $fails failed"
     (( fails == 0 ))
 }
