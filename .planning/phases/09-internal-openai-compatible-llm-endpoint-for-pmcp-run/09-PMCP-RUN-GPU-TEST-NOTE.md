@@ -1,6 +1,6 @@
 # Note for the pmcp.run dev team: the GPU instance for your test
 
-DRAFT, NOT SENT. From Aprender, 2026-10-19. This answers your request to run the same tests on a GPU with the same harness. **Do not start until we tell you the instance reports READY**; this note says what to expect.
+DRAFT, NOT SENT. From Aprender, 2026-10-19. This answers your request to run the same tests on a GPU with the same harness. **The instance reports READY** (checked 2026-10-20 01:05 UTC); you can start. This note says what to expect.
 
 ## What it is
 
@@ -29,12 +29,14 @@ The host is persistent, so there is no cold start to measure. We send one warm-u
 
 ## What we know, and what we do not
 
-Known, from our earlier probe on the same instance type (0.8B and 2B): the CUDA build starts and serves on an A10G; one request with 278 prompt tokens took 204 ms to prefill (about 1,360 tokens/s) and decoded at about 149 tokens/s. One request, one host.
+Known:
+- **The 4B runs on the A10G through the proxy.** We sent one chat and one tool-call request through `aprender-llm-endpoint-dev-gpu-4b` after READY. The chat answered `ready`; the tool-call request returned a `get_weather` tool call (`finish_reason: tool_calls`). Both responses carried `used_gpu: true`. Wall time at the caller, proxy included: 1.0 s and 1.6 s. The server's own timings: prefill about 1,460 tokens/s on the tool-call prompt and decode about 47 tokens/s. Two requests, one host; use them as a smoke check, not as figures.
+- The host answers `GET /health` through the proxy (`compute_mode: gpu`, `model_loaded: true`), and a blocked path (`/v1/gpu/status`) is refused by the proxy with a 404.
+- From our earlier probe on the same instance type with the 0.8B and 2B: one request with 278 prompt tokens took 204 ms to prefill (about 1,360 tokens/s) and decoded at about 149 tokens/s.
 
 **Not known:**
-- **The 4B has not run on this GPU yet.** If it fails to load, `check.sh` will report it before you start and we will tell you.
 - Concurrency on the GPU path. On the CPU path the server serializes requests. We have not measured the GPU path, so plan your first run at concurrency 1 and tell us what you see.
-- Tool-call reliability. In our probe the 2B called the tool and the 0.8B answered in prose, one sample each.
+- Tool-call reliability beyond one request. The 4B made the call once; in our earlier probe the 2B called the tool and the 0.8B answered in prose.
 - Cost per agent turn. That is what your 72 calls per model will measure.
 
 ## Cost, for your report
@@ -45,11 +47,11 @@ Known, from our earlier probe on the same instance type (0.8B and 2B): the CUDA 
 
 ## What we need from you
 
-1. **Which principal will invoke the function?** With no resource policy, only IAM principals allowed `lambda:InvokeFunction` on it can call it. Tell us the role or account and we will add the permission.
-2. **When you will start and how long you expect to run.** We will tell you when it is READY and do not want it billing overnight.
-3. **Tell us before you launch any GPU instance in this account.** The quota is 8 vCPUs and this host uses 4.
+1. **Invocation is settled:** `arn:aws:iam::816069129666:user/Guy` can already invoke the function through its group, so no grant was added and the function still has no resource policy. A role for the platform path is a separate step when you want it.
+2. **Tell us when you start and when you finish.** You said under an hour; the instance stops itself at 04:00 UTC regardless.
+3. **Tell us before you launch any GPU instance in this account** (you said you will not). The quota is 8 vCPUs and this host uses 4.
 4. **Tell us when you are done,** and send us your raw per-call results. We will tear it down and confirm every resource is gone.
-5. **Which other sizes you want.** Only the 4B is staged. A 9B would fit this card in principle but is not staged and has not run on it; the 27B and larger need more than this quota allows.
+5. **Other sizes:** you said only the 4B for now. Only the 4B is staged. A 9B would fit this card in principle but is not staged and has not run on it; the 27B and larger need more than this quota allows.
 
 ## Not changed
 
