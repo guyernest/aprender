@@ -1,0 +1,91 @@
+{
+  "recorded": "2026-10-20",
+  "what": "Reachable GPU host (g5.xlarge, A10G) + reference proxy Lambda, Qwen3.5-4B Q4_K_M, apr v0.71.4 x86_64 CUDA. Short test for pmcp.run.",
+  "host": {
+    "instance_id": "i-0383c9fea24296ce6",
+    "az": "us-east-1b",
+    "private_ip": "172.31.84.181",
+    "ami": "ami-087ef74ac8fb33f72",
+    "proxy_function": "aprender-llm-endpoint-dev-gpu-4b",
+    "host_sg_ingress": "tcp 8080 from the proxy security group only; no CIDR",
+    "function_url": "none",
+    "function_resource_policy": "none"
+  },
+  "launch_timeline_utc": {
+    "2026-10-20T01:00:11Z": "EC2 LaunchTime (run-instances accepted)",
+    "01:00:26": "OS boot (+15 s)",
+    "01:00:31.459": "proxy Lambda created (Pending)",
+    "01:01:06": "userdata starts (+55 s: first-boot cloud-init, modules-final 40.9 s of 43.6 s total)",
+    "01:01:06.8": "CUDA tarball downloaded and verified",
+    "01:01:18.6": "4B GGUF (2,740,937,888 bytes) downloaded and sha256-verified: 12 s, about 230 MB/s",
+    "01:01:21": "apr-serve started under systemd",
+    "01:01:32": "Model ready, 32 layers on the GPU, listening (11 s after start)",
+    "01:01:46.98": "warm-up request done (13.4 s), READY marker (+96 s from LaunchTime)",
+    "about 01:04:15": "proxy Lambda Active (observed by 15 s polling; about 3 min 44 s after creation, so 209-224 s)"
+  },
+  "launch_summary": {
+    "host_launch_to_ready_s": 96,
+    "host_first_boot_overhead_s": 55,
+    "model_download_s": 12,
+    "server_load_s": 11,
+    "warmup_s": 13.4,
+    "proxy_lambda_create_to_active_s": "about 210-225",
+    "note": "One launch, one environment, us-east-1b. The proxy Lambda (VPC network interface setup) is the longer pole, not the GPU host."
+  },
+  "our_smoke_after_ready": {
+    "via": "the proxy Lambda",
+    "health": "200, compute_mode gpu, model_loaded true",
+    "blocked_path_v1_gpu_status": "404 from the proxy",
+    "chat": {
+      "wall_s": 1.03,
+      "finish": "stop",
+      "content": "ready",
+      "used_gpu": true
+    },
+    "tool_call": {
+      "wall_s": 1.56,
+      "finish": "tool_calls",
+      "tool": "get_weather",
+      "used_gpu": true,
+      "server_prefill_tps": 1462,
+      "server_decode_tps": 47
+    },
+    "caveat": "two requests, one host"
+  },
+  "pmcp_run_reported": {
+    "source": "pasted by the operator from pmcp.run, 2026-10-20; their commit de24a0ccb in their repository; raw per-call results not yet received by us; NOT verified by us",
+    "calls": 72,
+    "http_200": 72,
+    "shape1_single_agent": {
+      "wall_s_min_median_max": [
+        1.04,
+        1.26,
+        1.43
+      ],
+      "any_tool_call": "36/36",
+      "correct_first_tool_on_30_nonword": "30/30"
+    },
+    "shape2_team_of_one": {
+      "wall_s_min_median_max": [
+        1.09,
+        1.37,
+        1.58
+      ],
+      "any_tool_call": "36/36",
+      "correct_first_tool_on_30_nonword": "30/30"
+    },
+    "tool_order_effect": "none (10/10/10)",
+    "word_problems": "made a tool call every time; arguments not scored",
+    "their_caveat": "size and hardware are mixed (4B on GPU vs smaller models on CPU), so the two effects are not separable",
+    "their_comparison": "2B on Lambda: 270-560 s per call"
+  },
+  "cost_basis": {
+    "g5_xlarge_on_demand_usd_per_h": 1.006,
+    "source": "AWS price list, us-east-1, Linux, shared tenancy, queried 2026-10-19",
+    "gp3_120gb_usd_per_h": 0.0132,
+    "per_call_at_100pct_utilization_usd": 0.000363,
+    "per_call_at_10pct_utilization_usd": 0.00363,
+    "note": "1.3 s is the reported median of about 1.3 s. Instance time to READY alone costs 96 s x $1.006/h = $0.027."
+  },
+  "teardown": "PENDING: run gpu-host/down.sh; this file gets the verified counts after"
+}
