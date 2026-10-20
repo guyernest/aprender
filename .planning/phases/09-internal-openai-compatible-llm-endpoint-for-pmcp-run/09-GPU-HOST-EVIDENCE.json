@@ -87,5 +87,23 @@
     "per_call_at_10pct_utilization_usd": 0.00363,
     "note": "1.3 s is the reported median of about 1.3 s. Instance time to READY alone costs 96 s x $1.006/h = $0.027."
   },
-  "teardown": "PENDING: run gpu-host/down.sh; this file gets the verified counts after"
+  "teardown": {
+    "status": "PARTIAL: everything removed except one empty security group",
+    "verified_at": "2026-10-20T04:43Z",
+    "down_sh_counts": "0 1 0 1 1 1 1 (want 0 0 0 1 1 1 1)",
+    "removed": [
+      "instance i-0383c9fea24296ce6 (terminated)",
+      "proxy Lambda aprender-llm-endpoint-dev-gpu-4b",
+      "host security group",
+      "both IAM roles",
+      "instance profile",
+      "volumes (0)"
+    ],
+    "leftover": {
+      "security_group": "aprender-gpu-proxy sg-0de78ba241eca2150",
+      "why": "two Lambda VPC ENIs (eni-086d41ba39148664a, eni-0e86670facebef5f3) still exist, status available (detached) at 04:43Z, not yet deleted by Lambda; down.sh's group delete fails while they exist",
+      "cost_and_exposure": "no ingress rules, no cost, nothing reachable"
+    },
+    "next": "rerun gpu-host/down.sh later; replace this field with 0 0 0 1 1 1 1 when clean"
+  }
 }
