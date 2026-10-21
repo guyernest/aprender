@@ -6,8 +6,8 @@ current_phase_name: "Laya Decision Model: Local Fine-Tune and Thin MCP Server"
 status: executing
 stopped_at: "Completed 08-33-PLAN.md (contract-hygiene repair, local commits, NOT pushed). Next: plan 08-34 (CI audit, push, maintainer approval, CI evidence)"
 last_updated: "2026-09-29T21:46:01.311Z"
-last_activity: 2026-09-28
-last_activity_desc: Phase 08 execution started
+last_activity: 2026-10-21
+last_activity_desc: Completed quick task 261021-ia2 (aprender-side reply to the experiment-coach decide-server request)
 state_head: 3b75bfd7450ffcc5d2ac052c3575152bac343207
 progress:
   total_phases: 9
@@ -47,7 +47,7 @@ now depend on 05-10, so the 80 expensive cells cannot be generated before the ga
 them exists (waves 5→6, 6→7, 7→8); (c) cold latency and inference peak RSS move to a dedicated
 fresh child process with a true kernel high-water mark on both platforms, and train peak becomes
 a separate, separately-labelled field.
-Last activity: 2026-09-28 — Phase 08 execution started
+Last activity: 2026-10-21 — Completed quick task 261021-ia2: aprender-side reply to the experiment-coach antisemitism-v1 decide-server request (contract check, gaps, ready-by date)
 
 **Phase 04 UAT ran 2026-08-16 at `b3f816c25` (macOS/arm64): 12 tests, 12 passed, 0 issues —
 see `04-UAT.md`.** Every gate was executed in-session, not read off a SUMMARY: codec 17,
@@ -578,6 +578,7 @@ Recent decisions affecting current work:
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
 | 261018-go4 | Aprender-side reply to the pmcp.run in-account LLM model-ladder brief | 2026-10-18 | 503686883 | [261018-go4-aprender-side-reply-to-the-pmcp-run-in-a](./quick/261018-go4-aprender-side-reply-to-the-pmcp-run-in-a/) |
+| 261021-ia2 | aprender-side reply to the experiment-coach antisemitism-v1 decide-server request: contract check, gaps, ready-by date | 2026-10-21 | 4eba6e7c9 | [261021-ia2-aprender-side-reply-to-the-experiment-co](./quick/261021-ia2-aprender-side-reply-to-the-experiment-co/) |
 
 ### Roadmap Evolution
 
