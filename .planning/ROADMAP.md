@@ -823,3 +823,40 @@ Plans:
 
 **Wave 7** *(blocked on Wave 6 completion)*
 - [ ] 09-10-PLAN.md — (skipped to a bounded `phase-incomplete-awaiting-auth-release` close when 09-08 halted) the three pmcp.run data actions + secret (blocking-human), the SC1 platform two-tool turn accepted by `verify_platform_turn.py` (both tools, wire properties, accepted tool result, derived timing, request-id-correlated endpoint evidence; nine-refusal self-test), switch-back by configuration, final record `deployed-passed-e2e` (wave 7, autonomous: false)
+
+### Phase 10: antisemitism-v1 Decide Server for experiment-coach
+
+**Goal:** Deliver the first production decider for a sibling project: a Laya artifact `antisemitism-v1`
+fine-tuned on motivation-experiment's `datasets/antisemite/GoldStandard2024.csv` (11,311 posts, 1,953
+positive) with labels `[not_antisemitic, antisemitic]` and a condensed form of the published annotation
+guide (Jikeli et al., arXiv 2304.14599) as its `task.json`, passing `laya-finetune-gate-v1` under the
+three-seed median rule, packed and verified as `.apr`, compared against a SetFit `s64e1b16` cell on the
+same eval split, and redeployed through the EXISTING pmcp.run path (the Phase 8 decide server, 10,240 MB)
+with the artifact sha256 handed to experiment-coach for pinning and the acceptance replay recorded. The
+request is motivation-experiment `docs/requests/aprender.md`; aprender's reply and the owner's decisions of
+2026-10-21 are `08-EXPERIMENT-COACH-DECIDE-REQUEST-REPLY.md` sections 1-9. Decisions: `10-CONTEXT.md`.
+**Target**: 2026-10-29 (proposed to experiment-coach in the reply's section 4; its conditions are recorded there).
+**Requirements**: TBD
+**Requirements note**: `.planning/REQUIREMENTS.md` is the SetFit milestone's. The binding requirements are the
+request document's Contract and "Tests we will run against it" sections as amended by the owner's decisions
+(batch 8, condensed guide, pmcp.run deployment, cold start not gated, motivation-v1 deferred), transcribed as
+decisions in `10-CONTEXT.md`, plus the Success Criteria below.
+**Depends on:** Phase 8 (the Laya back office `scripts/laya_train`, `crates/aprender-decide`, the `.apr` packer
+and verifier, `crates/aprender-mcp-decide` and `-lambda`, the `laya-*` just recipes, and the contracts
+`laya-finetune-gate-v1`, `laya-parity-v1`, `decide-apr-v1`, `decide-tool-boundary-v1`). Independent of Phase 9.
+The partner-side changes (classify batch at most 8, client transport to the pmcp.run endpoint) live in
+`~/projects/mcp/motivation-experiment` and are theirs.
+**UI hint**: no
+**Success Criteria** (what must be TRUE):
+
+  1. A `prepare_goldstandard.py` (sibling of `scripts/laya_train/prepare_stance.py`) writes the data dir from the CSV by a declared, seeded, stratified, text-group-disjoint rule (20 % held-out eval; the 667 duplicate texts collapsed; the 5 conflicting-label texts resolved by a declared rule), never commits or prints tweet text, and the `task.json` carries the condensed guide within a declared prefix token budget that is measured with the served tokenizer and recorded, its sha256 in the run record.
+  2. One declared production run (seeds 13/17/23, `--epochs` chosen from a one-epoch probe, early stopping) produces a gate report whose SHIPPED seed passes both clauses (margin over zero-shot >= 0.05, top-label ECE <= 0.10); the record carries the device read back, the measured per-step time and the re-score noise record; a gate fail halts for the owner.
+  3. `pack_laya` produces and verifies a deploy-eligible `.apr` (decide-apr-v1), and its sha256 and labels in task order are in the hand-off record.
+  4. The SetFit comparison cell (s64 drawn from the same train split, evaluated on the same eval split) is recorded beside the Laya numbers under the Phase 5 claims discipline, labelled "same eval split, subsampled train".
+  5. The artifact is live through the existing pmcp.run path at 10,240 MB (server name and auth posture decided at the deploy checkpoint), identity-checked by the probe with `--expect-sha256`, and the acceptance replay (one result per text, labels in task order, probabilities summing to 1, the returned sha equal to the pin) is recorded with timings reported and not gated; every gate green (`cargo fmt --all -- --check`, strict clippy on touched crates, their tests, `pv validate` on any touched contract, `bashrs lint` on new scripts).
+
+**Branch base**: continues on `gsd/phase-2-contract-gate` per the 02-01 policy.
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 10 to break down)

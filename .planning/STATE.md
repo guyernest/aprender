@@ -10,7 +10,7 @@ last_activity: 2026-10-21
 last_activity_desc: Completed quick task 261021-ia2 (aprender-side reply to the experiment-coach decide-server request)
 state_head: 3b75bfd7450ffcc5d2ac052c3575152bac343207
 progress:
-  total_phases: 9
+  total_phases: 10
   completed_phases: 1
   total_plans: 126
   completed_plans: 125
@@ -607,3 +607,4 @@ Resume file: None
 - Phase 7 added: Tier-Resolved Door Limits — CR-01 disposition (UAT item 4, decided 2026-09-07): door bounds become a resolved profile, not hard constants, so one binary serves four deployment envelopes
 - Phase 8 added (2026-09-25): Laya Decision Model — local fine-tune and thin MCP server, productising spikes 024–026; independent track
 - Phase 9 added (2026-10-15): Internal OpenAI-Compatible LLM Endpoint for pmcp.run — productising spikes 029–031 with the smallest Qwen3.5 (0.8B) end-to-end through pmcp.run, pmcp.run-side pieces planned with its dev team (user direction at /gsd-plan-phase); independent track
+- Phase 10 added (2026-10-21): antisemitism-v1 Decide Server for experiment-coach — from the experiment-coach request (motivation-experiment `docs/requests/aprender.md`) and the owner's decisions of 2026-10-21 recorded in `08-EXPERIMENT-COACH-DECIDE-REQUEST-REPLY.md` section 9; existing pmcp.run deployment path, condensed guide from the published paper, motivation-v1 deferred; proposed ready-by 2026-10-29; decisions transcribed in `10-CONTEXT.md`
