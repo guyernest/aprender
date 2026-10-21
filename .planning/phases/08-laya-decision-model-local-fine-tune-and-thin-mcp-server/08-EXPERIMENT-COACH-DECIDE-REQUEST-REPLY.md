@@ -292,3 +292,20 @@ Dependencies on experiment-coach: the guide file and condensation approval (Plan
 - SetFit regime: the owner; same-eval-split `s64e1b16` cell recommended, a new regime not promised (R5).
 - Door bounds for the Function URL envelope: the owner; not started (R1).
 - Confirmation of the date 2026-10-29 and of the phase: the owner (sections 4 and 7).
+
+## 9. Decisions received from the owner (2026-10-21)
+
+The owner of both repos answered sections 2, 4 and 8 on 2026-10-21. Each decision is recorded with what it changes in the build; nothing above is rewritten.
+
+| Item | Decision | Consequence |
+|---|---|---|
+| R1 batch | 8 texts per call is fine | experiment-coach sets `classify_batch` to at most 8 (their change); the 800-token budget still applies per call. Closed. |
+| R2 guide as prefix | Fit the guide to the allotted size; a concise form is acceptable. Direction for the decider in general: combine examples and textual instructions, with the balance varying per task (more examples in some, the guide carrying more in others). This first production decider measures accuracy before any investment in the builder or inference. | The prefix budget is a design parameter of Plan 1, recorded with its token count; the accuracy readout on the eval split and the live labelled set decides whether builder or inference work follows. Closed as a decision, open as a measurement. |
+| R6 guide source | Add the guide text as needed from the published paper | aprender derives `task.json` instructions and the two criterion descriptions from Jikeli et al., "Antisemitic Messages? A Guide to High-Quality Annotation and a Labeled Dataset of Tweets" (arXiv 2304.14599), with the owner's review at the Plan 1 checkpoint. The condensation is aprender's work. Closed. |
+| R3 / B5 deployment | Exactly the same as an MCP server on the pmcp.run platform; no new deployment model | B5 becomes a redeploy through the existing path (`just laya-build-bootstrap`, `just laya-deploy-config`, cargo-pmcp, plan 08-30 analog) on the 10,240 MB tier. The Lambda-direct IAM Function URL recipe is dropped. Two things follow for experiment-coach: its client signs SigV4 to a Function URL and its stack grants `lambda:InvokeFunctionUrl`, whereas a pmcp.run endpoint is a plain HTTPS MCP POST with the auth posture of that deployment (today: off), and its spec's decision table records "server-to-server MCP through pmcp.run is not a supported path from a tool"; both need their reconciliation. One thing follows for aprender: `laya-deploy-config` resolves only the server name `aprender-mcp-decide`, so deploying the new artifact there replaces the stance demo; a second server name needs recipe work. Default proposal: replace, since the pinned sha carries the identity; the owner decides at Plan 4. |
+| R7 / C9 cold start | No problem; the classifier runs inside agent work, which is less latency-sensitive | The acceptance replay (B6) tests function and identity; timings are reported, not gated. Closed. |
+| R4 / R5 dataset and comparison | Accepted | 20 % stratified text-disjoint eval split; duplicate and conflicting-label handling in the prepare script; SetFit `s64e1b16` cell on the same eval split. Closed. |
+| Section 6 scope | Start with the antisemitism classifier; build the motivation classifier later based on the first one's success | `motivation-v1` is out of Phase 10. Section 6 stays as information. |
+| Section 4 date | Not contested | 2026-10-29 stands. The guide condition is now internal (aprender derives it from the paper); the access condition becomes pmcp.run deploy access under the existing profile before B5. |
+
+Open after these decisions: the server name (replace `aprender-mcp-decide` or add a second name) and the auth posture of the new deployment, both the owner's call at Plan 4; the experiment-coach client change from SigV4 Function URL to the pmcp.run endpoint, theirs.
