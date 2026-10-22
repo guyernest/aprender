@@ -172,5 +172,76 @@
   "live": null,
   "retirement": {
     "state": "pending"
+  },
+  "access": {
+    "checked_at": "2026-10-22T20:30:03Z",
+    "aws_profile": {
+      "command": "aws sts get-caller-identity --profile ze-kasher-dev",
+      "rc": 0,
+      "ok": true,
+      "principal": "IAM user (account id deliberately not recorded)"
+    },
+    "pmcp_run_login": {
+      "source": "~/.pmcp/credentials.toml key pmcp-run.expires_at only (no token read or printed; never refreshed or rewritten)",
+      "line": "pmcp.run token expires_at 2026-10-22T21:28:29.706321+00:00 (58 min left)",
+      "ok": true
+    },
+    "owner_note": "the owner confirmed a fresh pmcp.run login on 2026-10-22; the coordinator relayed it and asked for the deploy to be HELD for a fresh login after the upload"
+  },
+  "old_server_before": {
+    "endpoint": "https://aprender-mcp-decide.us-east.true-mcp.com/mcp",
+    "recorded_at": "2026-10-22T20:31Z",
+    "identity_probe": {
+      "probe": "identity",
+      "one_tool_named_classify": true,
+      "description_has_labels_in_order": true,
+      "response_labels_match": true,
+      "identity_matches": true,
+      "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+      "elapsed_ms": [
+        18280,
+        206,
+        983
+      ],
+      "load_header": "cold;load_ms=15466",
+      "retries": 0
+    },
+    "read_only_ops": [
+      "probe --url https://aprender-mcp-decide.us-east.true-mcp.com/mcp --apr models/decide/laya-antisemitism-v1.apr --expect-sha256 2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+      "aws lambda get-function-configuration --profile ze-kasher-dev --function-name aprender-mcp-decide",
+      "aws lambda get-function-concurrency --profile ze-kasher-dev --function-name aprender-mcp-decide"
+    ],
+    "lambda": {
+      "LastModified": "2026-10-22T17:32:32.000+0000",
+      "CodeSha256": "7ErhcI1ApHE1ys48GqkxLUaDhx6Tx7oNOqdsC7N+BSo=",
+      "MemorySize": 10240,
+      "State": "Active",
+      "LastUpdateStatus": "Successful",
+      "Architectures": [
+        "arm64"
+      ],
+      "env_APRENDER_DECIDE_SHA256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+      "reserved_concurrency": null
+    }
+  },
+  "pre_deploy_steps": {
+    "deploy_config": {
+      "command": "just laya-deploy-config models/decide/laya-antisemitism-v1.apr off aprender-mcp-decide-antisemite dev ze-kasher-dev",
+      "rc": 0,
+      "auth": "off",
+      "sha_pin": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+      "tier_mb_in_template": 10240,
+      "iam": "Allow s3:GetObject on decide/aprender-mcp-decide-antisemite/* and nothing else",
+      "file": "models/decide/deploy-config-aprender-mcp-decide-antisemite.toml (gitignored; holds the real bucket name)"
+    },
+    "upload": {
+      "state": "NOT RUN",
+      "reason": "the launch of `just laya-upload ... aprender-mcp-decide-antisemite dev ze-kasher-dev` was denied by the Claude Code permission classifier ([Production Deploy]); nothing was uploaded and no workaround was attempted",
+      "aws_write_count": 0
+    },
+    "deploy": {
+      "state": "NOT RUN",
+      "reason": "held for a fresh pmcp.run login on the coordinator's instruction; the token had 58 min left at the start, below the plan's 60-minute gate"
+    }
   }
 }
