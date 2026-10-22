@@ -1,23 +1,29 @@
 # TEMPLATE for the Laya decide MCP server's pmcp.run deploy config (Phase 8 D-15, D-18).
 #
-# This file is tracked. The `deploy.toml` beside it is GENERATED from it by
-# `just laya-deploy-config` and is gitignored, because the artifact bucket's name
-# embeds the AWS account id. cargo-pmcp reads the generated file.
+# This file is tracked and shared by every served model. `just laya-deploy-config` GENERATES
+# `models/decide/deploy-config-<server>.toml` from it, one file per server id, gitignored
+# because the artifact bucket's name embeds the AWS account id. cargo-pmcp reads that file
+# (`just laya-deploy` installs it at the deploy root for the duration of the deploy).
 #
 # THE PACKAGE-RESOLUTION TRAP. cargo-pmcp picks the package to build in
 # `find_lambda_package_dir`: first `<deploy-root>/{server_name}-lambda`, then the FIRST
-# `*-lambda` workspace package with a `bootstrap` binary. With this crate's own
-# directory as the deploy root the first branch cannot match, and the fallback's first
-# hit is NOT this crate in either plausible order (workspace-member order puts
-# aprender-mcp-setfit-lambda first, alphabetical order aprender-mcp-chronos-lambda), so
-# a plain `cargo pmcp deploy --manifest-path crates/aprender-mcp-decide-lambda` would
-# build and ship ANOTHER server's binary under this name without a warning. Plan 08-10
-# settled the deploy root: the SHARED crates root, `--manifest-path crates` with server
-# name `aprender-mcp-decide`, so the resolver's first branch finds
-# `crates/aprender-mcp-decide-lambda` (`just laya-resolver-proof` executes that resolver).
-# `crates/.pmcp/` and `crates/deploy/` belong to the setfit training server, so
+# `*-lambda` workspace package with a `bootstrap` binary. With a per-crate deploy root the
+# first branch cannot match, and the fallback's first hit is NOT the server's crate in either
+# plausible order (workspace-member order puts aprender-mcp-setfit-lambda first, alphabetical
+# order aprender-mcp-chronos-lambda), so a per-crate `cargo pmcp deploy --manifest-path` would
+# build and ship ANOTHER server's binary under this name without a warning. The deploy root
+# is the SHARED crates root, `--manifest-path crates`, with the SERVER ID as the server name,
+# so the resolver's first branch finds `crates/<server>-lambda` (`just laya-resolver-proof`
+# executes that resolver for one server id and records models/decide/resolver-proof-<server>.txt).
+#
+# ONE SERVER ID, ONE THIN CRATE (D-19, plan 10-12). A served model is a server id named for
+# its dataset, `aprender-mcp-decide-<dataset>`, and its crate is `<server>-lambda`: a shim
+# `bootstrap` over the model-agnostic runtime in aprender-mcp-decide-lambda (a library, which
+# ships no `bootstrap`, so the fallback branch cannot pick it either). The server id is a
+# REQUIRED argument of every deploy recipe and `_laya-server-check` refuses an id with no thin
+# crate. `crates/.pmcp/` and `crates/deploy/` belong to the setfit training server, so
 # `just laya-deploy` swaps them out and restores them byte-identically around the deploy
-# (`_laya-crates-root-swap`; one decide model per workspace, D-ITEM-08-10-A).
+# (`_laya-crates-root-swap`): servers serve in parallel, deploys run one at a time.
 #
 # THE TELL that the right binary shipped is the identity probe over POST
 # (examples/probe.rs): `tools/call classify` answers `model.artifact_sha256` equal to
@@ -28,7 +34,8 @@
 # THE DEPLOY FLOW (plan 08-10; nothing in plan 08-07 touches AWS):
 #   1. pack the trained artifact and upload it content-addressed:
 #        s3://<bucket>/decide/<server>/<sha256>.apr
-#   2. just laya-deploy-config   # fills the UNSET values below into ./deploy.toml
+#   2. just laya-deploy-config <apr> <on|off> <server>   # fills the UNSET values below into
+#      models/decide/deploy-config-<server>.toml
 #   3. cargo pmcp deploy --manifest-path crates   # the shared crates root, run by
 #      `just laya-deploy` inside `_laya-crates-root-swap` (plan 08-10, D-ITEM-08-10-A)
 #   4. verify the stack-declared s3:GetObject below is on the function's role (read-only)

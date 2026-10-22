@@ -1,0 +1,176 @@
+{
+  "schema": "laya-rename-deploy-v1",
+  "phase": "10",
+  "plan": "10-12",
+  "server": "aprender-mcp-decide-antisemite",
+  "previous_server": "aprender-mcp-decide",
+  "endpoint_expected": "https://aprender-mcp-decide-antisemite.us-east.true-mcp.com/mcp",
+  "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+  "artifact_path": "models/decide/laya-antisemitism-v1.apr",
+  "labels": [
+    "not_antisemitic",
+    "antisemitic"
+  ],
+  "run_dir": "models/decide/laya-antisemitism-v1",
+  "decision": {
+    "rename": {
+      "owner_statement_date": "2026-10-22",
+      "d19": "the deployed MCP server, its Lambda and its endpoint are renamed to reflect the dataset/decision, because several classifiers from different datasets must run in parallel under their own server ids; the first is aprender-mcp-decide-antisemite and the rule for later models is aprender-mcp-decide-<dataset>",
+      "d20": "the OLD server aprender-mcp-decide is deleted by the owner from the pmcp.run admin UI; it keeps serving, unchanged, until the new server is verified, and no executor tears it down, contains it, redeploys it, resumes it or writes to its S3 prefix"
+    },
+    "register_swap_approval": {
+      "state": "owner-approved",
+      "date": "2026-10-22",
+      "owner_reply": "approved.",
+      "scope": "FALSIFY-MONO-011 deployment-unit register swap 9 -> 9 (the shared lambda crate stops shipping a bin, the thin crate replaces it) without the growth gate; the owner's wording was just `approved.` in reply to the plan summary that asked for approval of the plan and for confirmation of this reading",
+      "not_covered": "a SECOND model's thin crate is growth (9 -> 10) and needs its own recorded decision"
+    },
+    "auth": "off",
+    "choice": "replace-auth-off",
+    "choice_carried_from": "10-LIVE-DEPLOY-EVIDENCE.json decision"
+  },
+  "door": {
+    "chosen_max_texts": 8,
+    "compiled_max_texts": 8,
+    "p_python": 86,
+    "min_row_tokens_rust": 86,
+    "instruction_retention": {
+      "head_cut": false,
+      "options_cut": false,
+      "head_kept_tokens": 54
+    },
+    "tokens_planned": {
+      "distributed": 800,
+      "concentrated": 800
+    },
+    "tokens_planned_note": "the request TOTAL (<= 800), never B x P (688)",
+    "door_evidence_commit": "a8734c53c1d798ec499a96f02eb04042ff810847",
+    "door_evidence_note": "plan 10-11 was a no-op at B = 8 (owner reply door-8 p90); no production commit, evidence recorded on top of 024565d196baddefa17335df600f777b158b3821",
+    "contract_version": "9.0.0"
+  },
+  "design": {
+    "chosen": "the shared crate aprender-mcp-decide-lambda becomes a model-agnostic library carrying the bootstrap runtime (bootstrap::run(package)); each served model gets a THIN <server>-lambda crate (Cargo.toml, a shim main.rs, README) that cargo-pmcp's resolver finds first; the server id is a required argument of the six AWS-touching recipes and _laya-server-check refuses an id with no thin crate",
+    "rejected": {
+      "rename_in_place": "renaming aprender-mcp-decide-lambda to the new id would bind the shared runtime to one model and break the next model's name",
+      "keep_both_bins": "two bootstrap bins in two crates grows the FALSIFY-MONO-011 register 9 -> 10 (a human gate) and leaves the old id resolvable by the resolver as a trap",
+      "symlinked_crate_dir": "a symlinked crate directory is a second path to the same package; cargo metadata, git and the resolver disagree about it",
+      "bin_path_outside_package": "a [[bin]] path pointing outside the package is refused or fragile across cargo versions and hides the real source from the package",
+      "per_model_deploy_root_under_crates": "a deploy root per model under crates/ duplicates the .pmcp/ and deploy/ state the setfit training server already owns at the shared root"
+    },
+    "s3_artifact_placement": {
+      "chosen": "re-upload via laya-upload",
+      "priced": {
+        "re_upload": "reuses the existing just laya-upload, which already takes the server id and whose refusals have offline proof; costs one laya-verify pass and one 846,220,868-byte transfer (plan 10-08 measured the whole upload step at 1473 s; the split between verify and transfer is unmeasured)",
+        "server_side_copy": "saves the transfer and the verify pass but needs a NEW AWS-writing recipe with its own refusals and offline proof, so it adds unproven code to the path that writes to AWS"
+      }
+    },
+    "register": {
+      "before": 9,
+      "after": 9,
+      "swapped": true
+    },
+    "deploy_concurrency_limit": "servers SERVE in parallel but DEPLOYS run one at a time: the shared crates root's .pmcp/ and deploy/ belong to the setfit training server and _laya-crates-root-swap installs one config alone; it refuses while a leftover backup exists, so a second concurrent deploy fails closed"
+  },
+  "offline": {
+    "baselines_before_task_1": {
+      "head": "1ce27bf35a5caac761aa6b7affb20894b080a9d5",
+      "monorepo_invariants": "15 passed",
+      "readme_contract": "16 passed",
+      "duplicate_bin_guard": "PASS",
+      "laya_claims_check": "LAYA CLAIMS OK 133 rows",
+      "clippy_lambda_all_targets": "clean (-D warnings)",
+      "clippy_monorepo_invariants_test": "clean (-D warnings)"
+    },
+    "resolver_proof": {
+      "command": "just laya-resolver-proof /Users/guy/Development/mcp/sdk/rust-mcp-sdk d0348451 /tmp/p10-12-proof aprender-mcp-decide-antisemite",
+      "rc": 0,
+      "first_line": "crates/aprender-mcp-decide-antisemite-lambda",
+      "cargo_pmcp_version": "0.28.1",
+      "sdk_commit": "d03484517dce988355b7e9bf3dd2746eec188019",
+      "builder_rs_last_commit": "b65d354ff23c971b8353476ed7fcbde661b2ae41",
+      "server": "aprender-mcp-decide-antisemite",
+      "control_per_crate_root": "crates/aprender-mcp-chronos-lambda",
+      "control_shows_trap": true,
+      "proven_at": "2026-10-22T18:57:13Z"
+    },
+    "bootstrap_build": {
+      "command": "just laya-build-bootstrap aprender-mcp-decide-antisemite",
+      "rc": 0,
+      "line": "BOOTSTRAP aarch64 OK <target>/release/bootstrap (26058784 bytes)"
+    },
+    "deploy_selftest": {
+      "command": "DRY_RUN=1 LAYA_ELIGIBLE_APR=models/decide/laya-antisemitism-v1.apr LAYA_ELIGIBLE_RUN=models/decide/laya-antisemitism-v1 LAYA_ELIGIBLE_DATA=data/decide/goldstandard-2024 LAYA_ELIGIBLE_BASE=<laya snapshot 55cf4c4e> lockf -k -t 3600 /tmp/aprender-laya-real-weights.lock just laya-deploy-selftest",
+      "rc": 0,
+      "started": "2026-10-22T19:18:31Z",
+      "ended": "2026-10-22T19:41:35Z",
+      "wall_s": 1384,
+      "positive_leg_line": "DRY-RUN OK aprender-mcp-decide-antisemite (sha256 2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e; nothing deployed)",
+      "resolver_proof_line": "RESOLVER PROOF: crates/aprender-mcp-decide-antisemite-lambda",
+      "bootstrap_line": "BOOTSTRAP aarch64 OK <target>/release/bootstrap (26058784 bytes)",
+      "refusal_cases": 10,
+      "swap_cases": 6,
+      "aws_calls": 0,
+      "deploy_markers": 0,
+      "final_line": "DEPLOY SELFTEST OK"
+    },
+    "deploy_config_dry_run": {
+      "command": "DRY_RUN=1 just laya-deploy-config models/decide/laya-antisemitism-v1.apr off aprender-mcp-decide-antisemite dev ze-kasher-dev",
+      "rc": 0,
+      "server_name": "aprender-mcp-decide-antisemite",
+      "memory_mb": 10240,
+      "auth_enabled": false,
+      "sha_pin": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+      "key": "decide/aprender-mcp-decide-antisemite/2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e.apr",
+      "bucket": "dry-run-bucket",
+      "iam": "exactly one statement: Allow s3:GetObject on decide/aprender-mcp-decide-antisemite/* and nothing else",
+      "config_file": "models/decide/deploy-config-aprender-mcp-decide-antisemite.toml (gitignored; this one holds the dry-run bucket and MUST be regenerated by Task 3 step 1 without DRY_RUN)"
+    },
+    "gate_rows": {
+      "command": "LAYA_GATES_ONLY=<rows> just laya-gates-selftest",
+      "green": [
+        "bootstrap-build",
+        "claims-check",
+        "crates-root-swap",
+        "deploy-selftest-skip",
+        "deploy-verify",
+        "dup-bin-names",
+        "edge-health-check",
+        "edge-health-url",
+        "grant-check",
+        "grant-listing-failure",
+        "iam-check",
+        "resolver-proof",
+        "resolver-proof-sed",
+        "server-check",
+        "sha256-helper",
+        "teardown-classify",
+        "upload-eligibility"
+      ],
+      "red_first_pass": [
+        "grant-check"
+      ],
+      "red_note": "grant-check was RED on its first run: the new old-prefix-for-new case matched the wrong refusal text (the check refuses a prefix with `*` as `a wildcard S3 resource broader than`, not `an S3 grant other than`); the case's pattern was corrected and the row re-run GREEN. The check itself refused correctly both times",
+      "aws_calls": 0,
+      "deploy_selftest_skip_row": {
+        "command": "LAYA_GATES_ONLY=deploy-selftest-skip lockf -k -t 3600 /tmp/aprender-laya-real-weights.lock just laya-gates-selftest",
+        "rc": 0,
+        "wall_s": 515,
+        "default_armed_note": "the row's default-armed leg runs the selftest on the previously deployed stance artifact (laya-stance-64.apr) under the NEW server id and printed DRY-RUN OK aprender-mcp-decide-antisemite for it: the server id is independent of the artifact",
+        "drift_check": "DRIFT CHECK OK: 34 laya recipes enumerated (private included), 31 gates, all covered; 32 rows"
+      },
+      "rows_not_run_here": [
+        "deploy-refusals and verify (the two rows that need the armed real-weights leg of the full sweep; the antisemitism-armed selftest above is that leg)"
+      ]
+    },
+    "contract_audit_phase8": {
+      "command": "rtk proxy make contract-audit-phase8",
+      "rc": 0,
+      "result": "Phase 8 binding audit: 4 contract(s) audited, no binding finding outside PHASE8_LIVE_EXEMPT=''"
+    }
+  },
+  "live_attempts": [],
+  "live": null,
+  "retirement": {
+    "state": "pending"
+  }
+}

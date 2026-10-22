@@ -5,8 +5,10 @@ It adds no tool, no bound and no inference path: the server crate owns the one `
 tool, its bounds (`contracts/decide-tool-boundary-v1.yaml`) and the decide-apr-v1 load
 doors, and this crate is a transport shim in front of them.
 
-The Custom Runtime API requires the executable to be named `bootstrap`, so that is the
-binary this crate produces. Each invocation is proxied over loopback to an in-process
+This crate is a model-agnostic **library** (since D-19): the runtime is `bootstrap::run`, and
+each served model has its own thin `aprender-mcp-decide-<dataset>-lambda` crate that calls it
+(see "One server id, one thin crate"). The Custom Runtime API requires the executable to be
+named `bootstrap`, so that is the binary each thin crate produces. Each invocation is proxied over loopback to an in-process
 pmcp streamable-HTTP server configured `stateless()`. That is the only mode that survives
 serverless: API Gateway routes successive requests to different containers, so a cold
 container can receive a `tools/call` whose `initialize` landed on another one. A loopback
@@ -138,16 +140,46 @@ The served model passed laya-finetune-gate-v1. Its claim (`eval_set.claim`) is:
 It is in-distribution calibration, not shift robustness. On the SemEval-2016 test split, the reported
 shift probe measured ece_post 0.1896. That would fail the gate's 0.10 clause if it were one.
 
+## One server id, one thin crate
+
+A served model is a server id named for its dataset, `aprender-mcp-decide-<dataset>` (the first
+is `aprender-mcp-decide-antisemite`).
+One server id has one thin crate named `<id>-lambda`, and that crate is a shim over this one: its `main.rs` calls `bootstrap::run` and nothing else.
+The server id equals the crate name minus `-lambda`, because `cargo pmcp deploy` resolves a server id to
+`<deploy-root>/<server>-lambda` before any other search. `tests::thin_server_crates_are_shims` fails a
+thin crate that grows a handler, a route, a tool or a second dependency.
+
+To add a model:
+
+1. Create the thin crate: `Cargo.toml` (a `bootstrap` bin and this crate as its only dependency),
+   a shim `main.rs`, and a `README.md`.
+2. Add it to the workspace, and swap or grow the deployment-unit register FALSIFY-MONO-011 in
+   `crates/aprender-core/tests/monorepo_invariants.rs` (and the `bootstrap` line of
+   `scripts/duplicate_bin_names_allowlist.txt`). The first thin crate swapped the shared crate's
+   entry (9 to 9). Every further thin crate is growth and needs the owner's recorded CONTEXT
+   decision with a `blocking-human` checkpoint, never a same-PR edit.
+3. Run `just laya-resolver-proof <sdk> <commit> <scratch> <server>` for the new id.
+4. Deploy through the recipes with that id: `laya-deploy-config`, `laya-upload`, `laya-deploy`,
+   `laya-grant`, `laya-deploy-verify`. The id is a required argument of each, with no default.
+
+Servers SERVE in parallel, but DEPLOYS run one at a time. The shared crates root's `.pmcp/` and
+`deploy/` belong to the setfit training server. `_laya-crates-root-swap` installs one config alone
+and restores the rest byte-identically, and it refuses while a leftover backup exists, so a second
+concurrent deploy fails closed.
+
 ## Build
 
 ```bash
 cargo test -p aprender-mcp-decide-lambda --lib
 ulimit -n 65536
-cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.34 \
-    -p aprender-mcp-decide-lambda --bin bootstrap
+just laya-build-bootstrap <server>   # e.g. aprender-mcp-decide-antisemite
+# which runs: cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.34 \
+#     -p <server>-lambda --bin bootstrap
 ```
 
-The deploy config template is `.pmcp/deploy.toml.template`. The generated `deploy.toml`
-is gitignored, because the bucket name carries the AWS account id.
+The `bootstrap` bin now comes from the thin crate, not from this one. The deploy config template
+is `.pmcp/deploy.toml.template`. `just laya-deploy-config` writes the generated
+`models/decide/deploy-config-<server>.toml` from it, one file per server id, gitignored because
+the bucket name carries the AWS account id.
 
 Part of the [aprender](https://github.com/paiml/aprender) monorepo.

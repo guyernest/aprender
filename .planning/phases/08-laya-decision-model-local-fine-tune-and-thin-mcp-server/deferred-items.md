@@ -257,6 +257,15 @@ not fixed by it.
   the trap, so it leaves the backup at `models/decide/swap-backup/crates`, and the next swap
   refuses until a human restores from it.
 - **Owner:** D-ITEM-08-10-B removes the constraint.
+- **Continuation, 2026-10-22 (plan 10-12, D-19):** the NAME half is resolved. The owner's statement that
+  several classifiers from different datasets must run in parallel under their own server ids is met by
+  one thin crate per server id (`aprender-mcp-decide-<dataset>-lambda`, a shim `bootstrap` over the
+  model-agnostic `aprender-mcp-decide-lambda` library) and by the server id being a REQUIRED argument of
+  every deploy recipe (`_laya-server-check` refuses an id with no thin crate). The first is
+  `aprender-mcp-decide-antisemite`. The CONCURRENCY half stays open as a stated limit: servers serve in
+  parallel but deploys run one at a time, because the shared crates root's `.pmcp/` and `deploy/` belong to
+  the setfit training server and `_laya-crates-root-swap` installs one config alone; it refuses while a
+  leftover backup exists, so a second concurrent deploy fails closed. D-ITEM-08-10-B would remove it.
 
 ### D-ITEM-08-10-B: fix the resolver upstream in cargo-pmcp (recommended future SDK work, not done)
 

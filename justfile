@@ -1535,24 +1535,66 @@ laya-pack-fixture run data out:
 # Laya decide server: fail-closed deploy to pmcp.run (plan 08-10, D-07, D-11, D-18)
 #
 # DEPLOY ROOT (user decision 2026-09-26, shared-crates-root): `cargo pmcp deploy
-# --manifest-path crates` with server name `aprender-mcp-decide`. cargo-pmcp's
+# --manifest-path crates` with the SERVER ID as the server name. cargo-pmcp's
 # `find_lambda_package_dir` returns `<root>/<server>-lambda` when it exists, BEFORE its
-# workspace-wide search, so this root resolves to crates/aprender-mcp-decide-lambda by
-# construction. The per-crate root (`--manifest-path crates/aprender-mcp-decide-lambda`)
-# misses that branch and falls through to the FIRST `*-lambda` package with a `bootstrap`
-# bin, which is aprender-mcp-chronos-lambda: the Chronos binary would ship under the decide
-# name, healthy-looking (RESEARCH Pitfall 1). `just laya-resolver-proof` EXECUTES that
-# resolver on this workspace; `laya-deploy` refuses without its proof.
+# workspace-wide search, so this root resolves a server id to the crate `crates/<server>-lambda`
+# by construction. The per-crate root misses that branch and falls through to the FIRST
+# `*-lambda` package with a `bootstrap` bin, which is aprender-mcp-chronos-lambda: the Chronos
+# binary would ship under the decide name, healthy-looking (RESEARCH Pitfall 1). `just
+# laya-resolver-proof` EXECUTES that resolver on this workspace for one server id;
+# `laya-deploy` refuses without that server's proof.
 #
-# Limits of this choice: the server name is forced to the package stem, so ONE decide model
-# per workspace; and `crates/.pmcp/` + `crates/deploy/` belong to the setfit training server,
-# so `laya-deploy` swaps them out and restores them byte-identically on every exit path
-# (`_laya-crates-root-swap`, proven by `laya-deploy-selftest`). The durable fix is upstream:
-# in cargo-pmcp, return the project root when it is itself a `*-lambda` package with a
-# `bootstrap` bin (recommended future SDK work, not done here).
+# ONE SERVER ID, ONE THIN CRATE (owner statement 2026-10-22, D-19, plan 10-12): several
+# classifiers from different datasets serve in parallel, each under its own id
+# `aprender-mcp-decide-<dataset>` and its own thin crate `<id>-lambda` (a shim `bootstrap` over
+# the model-agnostic runtime library aprender-mcp-decide-lambda). The id is a REQUIRED argument of
+# every deploy recipe, with no default, so a stale call site fails loudly instead of silently
+# targeting another server, and `_laya-server-check` refuses an id with no thin crate. The
+# retired id `aprender-mcp-decide` has no thin crate (its crate is a library), so no recipe can
+# deploy to it; `laya-teardown` still names it, because containment must reach any deployed function.
+#
+# Limit of this choice: SERVING is parallel, DEPLOYING is one at a time. `crates/.pmcp/` +
+# `crates/deploy/` belong to the setfit training server, so `laya-deploy` swaps them out and
+# restores them byte-identically on every exit path (`_laya-crates-root-swap`, proven by
+# `laya-deploy-selftest`); the swap refuses while a leftover backup exists, so a second concurrent
+# deploy fails closed. The durable fix is upstream: in cargo-pmcp, return the project root when it is
+# itself a `*-lambda` package with a `bootstrap` bin (recommended future SDK work, not done here).
 #
 # Nothing here writes to AWS unless `just laya-verify` accepted the exact file first.
 # ---------------------------------------------------------------------------
+
+# Refuse a server id the deploy path must not touch (plan 10-12, D-19). <mode> `named`: the id is a
+# cargo-pmcp server name that is also a crate directory and an S3 prefix, so it is lower-case ASCII
+# letters, digits and hyphens, starts with a letter, does not end with a hyphen and is at most 64
+# characters (cargo-pmcp's own limit; lower-case only is stricter, because the id also names a crate).
+# <mode> `deployable`: the same AND `crates/<server>-lambda/Cargo.toml` exists AND declares the
+# `bootstrap` bin, so an id with no thin crate (and the retired shared crate, which ships no bin) is
+# refused before any file or AWS action. Exit 2 with `REFUSED server: ...`. Pure: no network.
+[positional-arguments]
+_laya-server-check server mode:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    SERVER="$1"
+    MODE="$2"
+    refuse() { echo "REFUSED server: $1" >&2; exit 2; }
+    case "$MODE" in
+        named|deployable) ;;
+        *) refuse "unknown mode '$MODE' (expected named or deployable)" ;;
+    esac
+    [ -n "$SERVER" ] || refuse "the server id is empty"
+    [ "${#SERVER}" -le 64 ] || refuse "'$SERVER' is ${#SERVER} characters; a server name is at most 64"
+    printf '%s' "$SERVER" | grep -Eq '^[a-z][a-z0-9-]*$' \
+        || refuse "'$SERVER' is not a server id: lower-case ASCII letters, digits and hyphens, starting with a letter"
+    case "$SERVER" in
+        *-) refuse "'$SERVER' ends with a hyphen" ;;
+    esac
+    if [ "$MODE" = "deployable" ]; then
+        MANIFEST="crates/$SERVER-lambda/Cargo.toml"
+        [ -f "$MANIFEST" ] || refuse "'$SERVER' has no thin crate: $MANIFEST does not exist (one server id, one crate named <id>-lambda)"
+        grep -Eq '^name = "bootstrap"$' "$MANIFEST" \
+            || refuse "$MANIFEST declares no bootstrap bin, so cargo-pmcp could not deploy it as '$SERVER'"
+    fi
+    echo "server ok: $SERVER ($MODE)"
 
 # Execute cargo-pmcp's own `find_lambda_package_dir` on THIS workspace (root `crates`, server id
 # <server>) from a `git archive` of <sdk> at <commit> unpacked under <work> (a scratch dir; the SDK
@@ -1566,6 +1608,7 @@ laya-resolver-proof sdk commit work server:
     SDK="{{sdk}}"
     WORK="{{work}}"
     SERVER="{{server}}"
+    just _laya-server-check "$SERVER" named
     REPO="$(pwd -P)"
     PROOF="models/decide/resolver-proof-$SERVER.txt"
     EXPECT="crates/$SERVER-lambda"
@@ -1644,15 +1687,18 @@ _laya-resolver-parse log server:
     [ -n "$RESOLVED" ] || { echo "REFUSED resolver-parse: no RESOLVED line in $LOG" >&2; exit 1; }
     printf 'RESOLVED=%s\nCONTROL=%s\n' "$RESOLVED" "$CONTROL"
 
-# Write the gitignored crates/aprender-mcp-decide-lambda/.pmcp/deploy.toml from its tracked
-# template for <apr>: server name, s3://<bucket>/decide/<server>/<sha256>.apr, the sha256 pin,
-# and [auth] enabled from <auth> (on|off, the plan 08-11 decision). LOCAL ONLY: eligibility is
-# enforced by the recipes that write to AWS. DRY_RUN=1 uses the literal bucket dry-run-bucket.
-laya-deploy-config apr auth server="aprender-mcp-decide" env="dev" profile="ze-kasher-dev":
+# Write the gitignored models/decide/deploy-config-<server>.toml from the tracked template
+# crates/aprender-mcp-decide-lambda/.pmcp/deploy.toml.template for <apr>: server name,
+# s3://<bucket>/decide/<server>/<sha256>.apr, the sha256 pin, and [auth] enabled from <auth> (on|off,
+# the plan 08-11 decision). The server id is REQUIRED (D-19): one config file per server, none shared.
+# LOCAL ONLY: eligibility is enforced by the recipes that write to AWS. DRY_RUN=1 uses the literal
+# bucket dry-run-bucket.
+laya-deploy-config apr auth server env="dev" profile="ze-kasher-dev":
     #!/usr/bin/env bash
     set -euo pipefail
     APR="{{apr}}"
     SERVER="{{server}}"
+    just _laya-server-check "$SERVER" deployable
     ENV="{{ trim_start_match(env, "env=") }}"
     case "$ENV" in
         dev|prod) ;;
@@ -1663,8 +1709,6 @@ laya-deploy-config apr auth server="aprender-mcp-decide" env="dev" profile="ze-k
         off) AUTH=false ;;
         *) echo "ERROR: auth must be on or off, got '{{auth}}'" >&2; exit 2 ;;
     esac
-    # shared-crates-root: only this name resolves to the decide package (see the section header).
-    test "$SERVER" = "aprender-mcp-decide" || { echo "ERROR: server must be aprender-mcp-decide under the shared-crates-root deploy (got '$SERVER')" >&2; exit 2; }
     test -f "$APR" || { echo "ERROR: $APR does not exist" >&2; exit 2; }
     # shasum directly (plan 08-22, V11-c): the rtk hook never rewrites a command inside a recipe, so a
     # proxy branch added nothing and made the identity pin depend on which `rtk` is on PATH.
@@ -1676,8 +1720,10 @@ laya-deploy-config apr auth server="aprender-mcp-decide" env="dev" profile="ze-k
         ACCOUNT="$(aws sts get-caller-identity --profile "{{profile}}" --query Account --output text)"
         BUCKET="aprender-decide-weights-${ACCOUNT}-${ENV}"
     fi
-    DIR="crates/aprender-mcp-decide-lambda/.pmcp"
-    python3 - "$DIR/deploy.toml.template" "$DIR/deploy.toml" "$SERVER" \
+    TEMPLATE="crates/aprender-mcp-decide-lambda/.pmcp/deploy.toml.template"
+    OUT="models/decide/deploy-config-$SERVER.toml"
+    mkdir -p models/decide
+    python3 - "$TEMPLATE" "$OUT" "$SERVER" \
         "s3://$BUCKET/decide/$SERVER/$H.apr" "$H" "$AUTH" <<'PY'
     import re, sys, tomllib
     template, out, server, uri, sha, auth = sys.argv[1:7]
@@ -1709,8 +1755,8 @@ laya-deploy-config apr auth server="aprender-mcp-decide" env="dev" profile="ze-k
     open(out, "w").write(text)
     print(f"  server   {server}\n  s3 uri   {uri}\n  sha256   {sha}\n  auth     {auth}\n  iam      Allow s3:GetObject {arn}")
     PY
-    just _laya-iam-check "$DIR/deploy.toml" || { rm -f "$DIR/deploy.toml"; echo "ERROR: the generated config failed the iam check; removed it" >&2; exit 1; }
-    echo "  wrote $DIR/deploy.toml (gitignored) for env=$ENV"
+    just _laya-iam-check "$OUT" || { rm -f "$OUT"; echo "ERROR: the generated config failed the iam check; removed it" >&2; exit 1; }
+    echo "  wrote $OUT (gitignored) for env=$ENV"
 
 # The decide config's [iam] must be EXACTLY one statement: Allow, actions ["s3:GetObject"],
 # resources ["arn:aws:s3:::<bucket-of-APRENDER_DECIDE_S3_URI>/decide/<server.name>/*"], and no
@@ -1868,16 +1914,18 @@ laya-build-bootstrap server:
 # touch -> DEPLOYING -> cargo pmcp deploy (crates root, swapped) -> compile-log, edge-health
 # serverId and live identity-probe assertions; any identity failure runs `just laya-teardown`
 # (containment).
-laya-deploy apr run data base server="aprender-mcp-decide" env="dev" profile="ze-kasher-dev":
+laya-deploy apr run data base server env="dev" profile="ze-kasher-dev":
     #!/usr/bin/env bash
     set -euo pipefail
     APR="{{apr}}"
     SERVER="{{server}}"
+    # The server id is a REQUIRED argument (D-19) and must have a thin crate: the retired id has none.
+    just _laya-server-check "$SERVER" deployable
     ENV="{{ trim_start_match(env, "env=") }}"
     PROFILE="{{profile}}"
-    CFG="crates/aprender-mcp-decide-lambda/.pmcp/deploy.toml"
-    PROOF="models/decide/resolver-proof.txt"
-    EXPECT_PKG="crates/aprender-mcp-decide-lambda"
+    CFG="models/decide/deploy-config-$SERVER.toml"
+    PROOF="models/decide/resolver-proof-$SERVER.txt"
+    EXPECT_PKG="crates/$SERVER-lambda"
     refuse() { echo "REFUSED $1: $2" >&2; exit "${3:-2}"; }
     # shasum directly (plan 08-22, V11-c): the rtk hook never rewrites a command inside a recipe, so a
     # proxy branch added nothing and made the identity pin depend on which `rtk` is on PATH.
@@ -1886,13 +1934,12 @@ laya-deploy apr run data base server="aprender-mcp-decide" env="dev" profile="ze
         dev|prod) ;;
         *) refuse env "'$ENV' is not a known environment (expected dev or prod)" ;;
     esac
-    [ "$SERVER" = "aprender-mcp-decide" ] || refuse server "only aprender-mcp-decide resolves to the decide package from the crates root (got '$SERVER')"
     [ -f "$APR" ] || refuse artifact "$APR does not exist"
     # (1) the generated config
-    [ -f "$CFG" ] || refuse config "$CFG does not exist -- generate it: just laya-deploy-config <apr> <on|off>"
+    [ -f "$CFG" ] || refuse config "$CFG does not exist -- generate it: just laya-deploy-config <apr> <on|off> $SERVER"
     # (2) no placeholder left
     if grep -q 'UNSET-run-just-laya-deploy-config' "$CFG"; then
-        refuse placeholder "$CFG still holds an UNSET placeholder -- regenerate it with just laya-deploy-config"
+        refuse placeholder "$CFG still holds an UNSET placeholder -- regenerate it with just laya-deploy-config <apr> <on|off> $SERVER"
     fi
     # (3) the pin: the config names THIS file, by content
     H="$(sha256 "$APR")"
@@ -1908,12 +1955,12 @@ laya-deploy apr run data base server="aprender-mcp-decide" env="dev" profile="ze
     # (3b) the stack-declared weights read: exactly s3:GetObject on decide/$SERVER/* and nothing broader
     IAMLOG="$(just _laya-iam-check "$CFG" 2>&1)" || refuse iam "$(printf '%s' "$IAMLOG" | grep -m 1 '^REFUSED' | sed 's/^REFUSED iam: //')"
     # (4) the resolver proof for the installed cargo-pmcp
-    [ -f "$PROOF" ] || refuse resolver-proof "$PROOF does not exist -- run: just laya-resolver-proof <sdk> <commit> <scratch>"
+    [ -f "$PROOF" ] || refuse resolver-proof "$PROOF does not exist -- run: just laya-resolver-proof <sdk> <commit> <scratch> $SERVER"
     [ "$(head -n 1 "$PROOF")" = "$EXPECT_PKG" ] || refuse resolver-proof "$PROOF names '$(head -n 1 "$PROOF")', not $EXPECT_PKG"
     PROVEN_VER="$(sed -n 's/^cargo_pmcp_version=//p' "$PROOF")"
     INSTALLED_VER="$(cargo pmcp --version 2>/dev/null | awk '{print $2}' || true)"
     if [ -z "$INSTALLED_VER" ] || [ "$INSTALLED_VER" != "$PROVEN_VER" ]; then
-        refuse resolver-proof "the proof is for cargo-pmcp ${PROVEN_VER:-?}, the installed tool is ${INSTALLED_VER:-absent}; re-run just laya-resolver-proof"
+        refuse resolver-proof "the proof is for cargo-pmcp ${PROVEN_VER:-?}, the installed tool is ${INSTALLED_VER:-absent}; re-run just laya-resolver-proof <sdk> <commit> <scratch> $SERVER"
     fi
     # (5) ELIGIBILITY -- the Rust verifier on the exact file (decide-apr-v1 deploy_eligibility),
     # never `inspect`, and nothing below reaches AWS unless it accepted.
@@ -1940,7 +1987,7 @@ laya-deploy apr run data base server="aprender-mcp-decide" env="dev" profile="ze
     SIZE="$(wc -c < "$APR" | tr -d ' ')"
     if [ "${DRY_RUN:-0}" = "1" ]; then
         echo "DRY-RUN: skipping the head-object check of s3://$BUCKET/$KEY (expected ContentLength $SIZE)"
-        just laya-build-bootstrap
+        just laya-build-bootstrap "$SERVER"
         echo "RESOLVER PROOF: $(head -n 1 "$PROOF")"
         echo "DRY-RUN OK $SERVER (sha256 $H; nothing deployed)"
         exit 0
@@ -1955,12 +2002,12 @@ laya-deploy apr run data base server="aprender-mcp-decide" env="dev" profile="ze
         || refuse env "the config's weights bucket is $BUCKET but env=$ENV expects $WANT_BUCKET -- regenerate it: just laya-deploy-config $APR <on|off> $SERVER $ENV $PROFILE"
     REMOTE="$(aws s3api head-object --profile "$PROFILE" --bucket "$BUCKET" --key "$KEY" \
         --query ContentLength --output text 2>/dev/null)" \
-        || refuse s3-object "s3://$BUCKET/$KEY is absent -- upload it: just laya-upload $APR {{run}} {{data}} {{base}}"
+        || refuse s3-object "s3://$BUCKET/$KEY is absent -- upload it: just laya-upload $APR {{run}} {{data}} {{base}} $SERVER"
     [ "$REMOTE" = "$SIZE" ] || refuse s3-object "s3://$BUCKET/$KEY is $REMOTE bytes, $APR is $SIZE"
     # Live. The touch makes the decide package ALWAYS recompile, so its absence from the log
     # means cargo-pmcp built something else (a cached build prints no Compiling line).
     ulimit -n 65536 || echo "WARNING: could not raise the fd limit; a link may fail with ProcessFdQuotaExceeded" >&2
-    touch crates/aprender-mcp-decide-lambda/src/main.rs
+    touch "crates/$SERVER-lambda/src/main.rs"
     LOG="models/decide/deploy-$SERVER.log"
     SNAP="models/decide/deploy-$SERVER.state"
     rm -rf "$SNAP"
@@ -1990,8 +2037,9 @@ laya-deploy apr run data base server="aprender-mcp-decide" env="dev" profile="ze
         echo "ERROR: the deploy exited $rc (log: $LOG). If it created the function, contain it: just laya-teardown $SERVER $ENV $PROFILE" >&2
         exit "$rc"
     fi
-    grep -q 'Compiling aprender-mcp-decide-lambda ' "$LOG" || contain "the compile log does not name aprender-mcp-decide-lambda"
-    OTHER="$(grep -oE 'Compiling [A-Za-z0-9_-]+-lambda ' "$LOG" | grep -v 'aprender-mcp-decide-lambda' | sort -u | tr '\n' ' ' || true)"
+    grep -q "Compiling $SERVER-lambda " "$LOG" || contain "the compile log does not name $SERVER-lambda"
+    # The shared runtime library aprender-mcp-decide-lambda is the one other -lambda crate a thin crate builds.
+    OTHER="$(grep -oE 'Compiling [A-Za-z0-9_-]+-lambda ' "$LOG" | grep -v -e "Compiling $SERVER-lambda " -e 'Compiling aprender-mcp-decide-lambda ' | sort -u | tr '\n' ' ' || true)"
     [ -z "$OTHER" ] || contain "the compile log also builds $OTHER"
     ENDPOINT="$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["deployment"]["endpoint"])' "$SNAP/deployment.toml" 2>/dev/null)" \
         || contain "no endpoint in $SNAP/deployment.toml"
@@ -2079,7 +2127,10 @@ _laya-edge-health-check body server:
 # sha-pin, resolver-proof, deploy-eligibility, upload-eligibility (the last two from laya-verify:
 # SyntheticNotDeployable); the crates-root swap restored byte-identical on success, forced
 # failure, SIGTERM and an absent root; the edge-health step's URL and body tables and its wiring
-# into laya-deploy (D-ITEM-08-17-A); resolver proof; bootstrap build. The POSITIVE dry run (a full
+# into laya-deploy (D-ITEM-08-17-A); resolver proof; bootstrap build; and (plan 10-12, D-19) the two-name
+# cases: the retired id is REFUSED by laya-deploy and laya-upload before any file or AWS action, the old and
+# new S3 prefixes can never satisfy each other's IAM or grant check, and two config files for two server
+# names swap in and out of the shared crates root byte-identically. The POSITIVE dry run (a full
 # `laya-deploy` DRY_RUN on an artifact `laya-verify` must accept; loads the multi-GB base, run it under
 # the host's real-weights lock) is ARMED BY DEFAULT when the deployed artifact
 # models/decide/laya-stance-64.apr, its run dir, data/decide/tweet-stance-64 and the pinned base
@@ -2094,8 +2145,11 @@ laya-deploy-selftest:
     ST="models/decide/selftest"
     A="$ST/laya_tiny.apr"
     CASES="$ST/cases"
-    CFG="crates/aprender-mcp-decide-lambda/.pmcp/deploy.toml"
-    PROOF="models/decide/resolver-proof.txt"
+    # ONE variable for the server id, passed explicitly to every call (D-19); LAYA_SELFTEST_SERVER overrides it.
+    SRV="${LAYA_SELFTEST_SERVER:-aprender-mcp-decide-antisemite}"
+    RETIRED_SERVER="aprender-mcp-decide"   # the retired id: it has no thin crate, so no deploy recipe may accept it
+    CFG="models/decide/deploy-config-$SRV.toml"
+    PROOF="models/decide/resolver-proof-$SRV.txt"
     GOLDEN="37d65159b2be0fa091aa840cd56c1a84b73c0bcd9e2df5906d1f8218f5448561"
     FAILS=0
     fail() { echo "FAIL $1" >&2; FAILS=$((FAILS + 1)); }
@@ -2140,9 +2194,9 @@ laya-deploy-selftest:
     # Set-up: the synthetic artifact and a consistent config for it.
     just laya-pack-fixture "$T" "$T/data" "$A" > "$CASES/0-fixture.log" 2>&1 || { tail -5 "$CASES/0-fixture.log" >&2; exit 1; }
     grep -q "sha256=$GOLDEN" "$CASES/0-fixture.log" || { echo "ERROR: laya-pack-fixture did not reproduce the golden $GOLDEN" >&2; exit 1; }
-    regen() { just laya-deploy-config "$A" off > "$CASES/config-$1.log" 2>&1 || { tail -5 "$CASES/config-$1.log" >&2; exit 1; }; }
+    regen() { just laya-deploy-config "$A" off "$SRV" > "$CASES/config-$1.log" 2>&1 || { tail -5 "$CASES/config-$1.log" >&2; exit 1; }; }
     regen setup
-    [ -f "$PROOF" ] || { echo "ERROR: $PROOF is missing -- run just laya-resolver-proof first" >&2; exit 1; }
+    [ -f "$PROOF" ] || { echo "ERROR: $PROOF is missing -- run just laya-resolver-proof <sdk> <commit> <scratch> $SRV first" >&2; exit 1; }
     # One refusal case: non-zero AND the expected reason, or it is a FAIL.
     expect_refused() {
         local n="$1" name="$2" pat="$3" log rc reason
@@ -2160,7 +2214,7 @@ laya-deploy-selftest:
             tail -5 "$log" >&2
         fi
     }
-    deploy_tiny() { just laya-deploy "$A" "$T" "$T/data" "$T/checkpoint"; }
+    deploy_tiny() { just laya-deploy "$A" "$T" "$T/data" "$T/checkpoint" "$SRV"; }
     # Each mutation leaves VALID TOML, so the refusal is the check under test, not a parse error.
     mutate() { python3 -c 'import re, sys; p, key, value = sys.argv[1:4]; t = open(p).read(); t, n = re.subn(r"^(" + key + r" = )\"[^\"]*\"$", lambda m: m.group(1) + chr(34) + value + chr(34), t, count=1, flags=re.M); assert n == 1, key; open(p, "w").write(t)' "$CFG" "$1" "$2"; }
     mutate APRENDER_DECIDE_S3_URI UNSET-run-just-laya-deploy-config
@@ -2174,7 +2228,23 @@ laya-deploy-selftest:
     mv "$BK/proof.moved" "$PROOF"
     expect_refused 4 deploy-eligibility 'REFUSED eligibility: .*SyntheticNotDeployable' deploy_tiny
     expect_refused 5 upload-eligibility 'REFUSED eligibility: .*SyntheticNotDeployable' \
-        just laya-upload "$A" "$T" "$T/data" "$T/checkpoint"
+        just laya-upload "$A" "$T" "$T/data" "$T/checkpoint" "$SRV"
+    # D-19, D-20: the retired id has no thin crate. Both AWS-writing recipes refuse it naming `server`, and they
+    # do so BEFORE any file or AWS action: no eligibility log is written for it, and the recorder stays empty.
+    expect_refused 5a retired-deploy 'REFUSED server: .*declares no bootstrap bin' \
+        just laya-deploy "$A" "$T" "$T/data" "$T/checkpoint" "$RETIRED_SERVER"
+    expect_refused 5b retired-upload 'REFUSED server: .*declares no bootstrap bin' \
+        just laya-upload "$A" "$T" "$T/data" "$T/checkpoint" "$RETIRED_SERVER"
+    expect_refused 5c retired-config 'REFUSED server: .*declares no bootstrap bin' \
+        just laya-deploy-config "$A" off "$RETIRED_SERVER"
+    expect_refused 5d no-such-thin-crate 'REFUSED server: .*no thin crate' \
+        just laya-deploy "$A" "$T" "$T/data" "$T/checkpoint" "$SRV-nonexistent"
+    if [ -e "models/decide/eligibility-$RETIRED_SERVER.log" ] && [ "models/decide/eligibility-$RETIRED_SERVER.log" -nt "$CASES/0-fixture.log" ]; then
+        fail "CASE 5a: a refused retired id still wrote an eligibility log (the refusal came too late)"
+    fi
+    if [ -e "models/decide/eligibility-upload-$RETIRED_SERVER.log" ] && [ "models/decide/eligibility-upload-$RETIRED_SERVER.log" -nt "$CASES/0-fixture.log" ]; then
+        fail "CASE 5b: a refused retired id still wrote an upload eligibility log (the refusal came too late)"
+    fi
     # The shared-root swap: the setfit-train state comes back byte-identical on every path.
     SNAP="$ST/snap"
     swap_case() {
@@ -2197,6 +2267,16 @@ laya-deploy-selftest:
         sh -c 'cmp -s crates/.pmcp/deploy.toml "$1" && test ! -e crates/deploy && test ! -e crates/.pmcp/deployment.toml' _ "$CFG"
     swap_case 2 forced-failure 1 crates "$CFG" "$SNAP" false
     swap_case 3 sigterm 143 crates "$CFG" "$SNAP" sh -c 'kill -TERM "$PPID"'
+    # D-19: two DIFFERENT server names, two different config files, one after the other. Each install is that
+    # server's config alone, and the shared crates root is byte-identical after EACH (a second deploy for
+    # another server finds exactly what the first one found).
+    OTHER_CFG="$CASES/deploy-config-other-server.toml"
+    python3 -c 'import re, sys; t = open(sys.argv[1]).read(); t, n = re.subn(r"^(name = )\"[^\"]*\"$", lambda m: m.group(1) + chr(34) + sys.argv[3] + chr(34), t, count=1, flags=re.M); assert n == 1; open(sys.argv[2], "w").write(t)' "$CFG" "$OTHER_CFG" "aprender-mcp-decide-second-example"
+    cmp -s "$CFG" "$OTHER_CFG" && fail "SWAP 5: the second server's config is identical to the first"
+    swap_case 5 server-a 0 crates "$CFG" "$SNAP" \
+        sh -c 'cmp -s crates/.pmcp/deploy.toml "$1" && grep -q "^name = \"$2\"" crates/.pmcp/deploy.toml && test ! -e crates/deploy' _ "$CFG" "$SRV"
+    swap_case 6 server-b 0 crates "$OTHER_CFG" "$SNAP" \
+        sh -c 'cmp -s crates/.pmcp/deploy.toml "$1" && grep -q "^name = \"aprender-mcp-decide-second-example\"" crates/.pmcp/deploy.toml && test ! -e crates/deploy' _ "$OTHER_CFG"
     # 4: a root with no prior state gets none back.
     mkdir -p "$ST/root-absent"
     set +e
@@ -2212,7 +2292,7 @@ laya-deploy-selftest:
     # over the two pure helpers laya-deploy calls. No network: the bodies are the ones measured
     # on pmcp.run on 2026-09-27 (decide, chronos, the edge's 405 error) plus the bootstrap's own
     # body, which carries package/server but no serverId and so must NOT pass.
-    EP="https://aprender-mcp-decide.us-east.true-mcp.com/mcp"
+    EP="https://$SRV.us-east.true-mcp.com/mcp"
     url_case() {
         local want="$1" in="$2" expect="${3:-}" got rc
         set +e; got="$(just _laya-edge-health-url "$in" 2> /dev/null)"; rc=$?; set -e
@@ -2224,27 +2304,29 @@ laya-deploy-selftest:
             fail "EDGE HEALTH url $want '$in': exit $rc, got '$got'"
         fi
     }
-    url_case accept "$EP" "https://aprender-mcp-decide.us-east.true-mcp.com/health"
-    url_case refuse "https://aprender-mcp-decide.us-east.true-mcp.com/mcp/"
-    url_case refuse "https://aprender-mcp-decide.us-east.true-mcp.com/health"
-    url_case refuse "http://aprender-mcp-decide.us-east.true-mcp.com/mcp"
-    url_case refuse "https://aprender-mcp-decide.us-east.true-mcp.com/x/mcp"
+    url_case accept "$EP" "https://$SRV.us-east.true-mcp.com/health"
+    url_case refuse "https://$SRV.us-east.true-mcp.com/mcp/"
+    url_case refuse "https://$SRV.us-east.true-mcp.com/health"
+    url_case refuse "http://$SRV.us-east.true-mcp.com/mcp"
+    url_case refuse "https://$SRV.us-east.true-mcp.com/x/mcp"
     url_case refuse ""
     body_case() {
         local want="$1" name="$2" body="$3" rc
-        set +e; just _laya-edge-health-check "$body" aprender-mcp-decide > /dev/null 2>&1; rc=$?; set -e
+        set +e; just _laya-edge-health-check "$body" "$SRV" > /dev/null 2>&1; rc=$?; set -e
         if { [ "$want" = accept ] && [ "$rc" -eq 0 ]; } || { [ "$want" = refuse ] && [ "$rc" -ne 0 ]; }; then
             echo "EDGE HEALTH body $want: $name (exit $rc)"
         else
             fail "EDGE HEALTH body $want $name: exit $rc"
         fi
     }
-    body_case accept decide-edge '{"status":"healthy","serverId":"aprender-mcp-decide","serverName":"aprender-mcp-decide","hasDeployment":true}'
+    body_case accept decide-edge "{\"status\":\"healthy\",\"serverId\":\"$SRV\",\"serverName\":\"$SRV\",\"hasDeployment\":true}"
     body_case refuse chronos-edge '{"status":"healthy","serverId":"chronos-forecaster","serverName":"chronos-forecaster","hasDeployment":true}'
-    body_case refuse bootstrap-body '{"package":"aprender-mcp-decide-lambda","server":"aprender-mcp-decide"}'
+    body_case refuse bootstrap-body "{\"package\":\"$SRV-lambda\",\"server\":\"$SRV\"}"
+    # The reverse-prefix edge case: the retired server's own healthy edge body must NOT satisfy the new id.
+    body_case refuse retired-server-edge "{\"status\":\"healthy\",\"serverId\":\"$RETIRED_SERVER\",\"serverName\":\"$RETIRED_SERVER\",\"hasDeployment\":true}"
     body_case refuse edge-405 '{"jsonrpc":"2.0","error":{"code":-32600,"message":"SSE streams are not offered at this endpoint. Use POST /mcp."},"id":null}'
-    body_case refuse prefix-server '{"serverId":"aprender-mcp-decide-2"}'
-    body_case refuse not-an-object '["aprender-mcp-decide"]'
+    body_case refuse prefix-server "{\"serverId\":\"$SRV-2\"}"
+    body_case refuse not-an-object "[\"$SRV\"]"
     body_case refuse not-json '<html>503</html>'
     body_case refuse empty ''
     # Wiring: laya-deploy calls both helpers and never GETs the /mcp endpoint itself.
@@ -2279,6 +2361,10 @@ laya-deploy-selftest:
         sub(r'^resources = \["arn:aws:s3:::[^"]*"\]$', 'resources = ["*"]')
     elif kind == "other-server":
         sub(r'^resources = \["arn:aws:s3:::([^/"]+)/decide/[^"]*"\]$', r'resources = ["arn:aws:s3:::\1/decide/*"]')
+    elif kind == "old-prefix":
+        sub(r'^resources = \["arn:aws:s3:::([^/"]+)/decide/[^"]*"\]$', r'resources = ["arn:aws:s3:::\1/decide/aprender-mcp-decide/*"]')
+    elif kind == "reverse":
+        sub(r'^name = "[^"]*"$', 'name = "aprender-mcp-decide"')  # the retired id
     elif kind == "two-statements":
         t += '\n[[iam.statements]]\neffect = "Allow"\nactions = ["s3:GetObject"]\nresources = ["arn:aws:s3:::other/x"]\n'
     elif kind == "bucket-sugar":
@@ -2301,22 +2387,23 @@ laya-deploy-selftest:
         fi
     }
     iam_case accept as-generated
-    if python3 -c 'import sys, tomllib; c = tomllib.load(open(sys.argv[1], "rb")); s = c["iam"]["statements"]; sys.exit(0 if s == [{"effect": "Allow", "actions": ["s3:GetObject"], "resources": ["arn:aws:s3:::dry-run-bucket/decide/aprender-mcp-decide/*"]}] and set(c["iam"]) == {"statements"} else 1)' "$CFG"; then
-        echo "IAM config literal: exactly [Allow s3:GetObject arn:aws:s3:::dry-run-bucket/decide/aprender-mcp-decide/*]"
+    if python3 -c 'import sys, tomllib; c = tomllib.load(open(sys.argv[1], "rb")); s = c["iam"]["statements"]; sys.exit(0 if s == [{"effect": "Allow", "actions": ["s3:GetObject"], "resources": ["arn:aws:s3:::dry-run-bucket/decide/" + sys.argv[2] + "/*"]}] and set(c["iam"]) == {"statements"} and c["server"]["name"] == sys.argv[2] else 1)' "$CFG" "$SRV"; then
+        echo "IAM config literal: exactly [Allow s3:GetObject arn:aws:s3:::dry-run-bucket/decide/$SRV/*]"
     else
         fail "IAM config literal: the generated [iam] is not exactly the scoped read"
     fi
-    for k in s3-star list-too bucket-wide star-resource other-server two-statements bucket-sugar no-iam; do iam_case refuse "$k"; done
+    for k in s3-star list-too bucket-wide star-resource other-server old-prefix reverse two-statements bucket-sugar no-iam; do iam_case refuse "$k"; done
     cp "$CASES/iam-s3-star.toml" "$CFG"
     expect_refused 6 iam-broadened 'REFUSED iam:' deploy_tiny
     regen 7
     # GRANT: the read-only role check, over policy documents shaped like `aws iam get-role-policy`.
     GB="dry-run-bucket"
-    SCOPED='{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::dry-run-bucket/decide/aprender-mcp-decide/*"}'
+    SCOPED="{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::dry-run-bucket/decide/$SRV/*\"}"
+    SCOPED_RETIRED="{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::dry-run-bucket/decide/$RETIRED_SERVER/*\"}"
     XRAY='{"Effect":"Allow","Action":["xray:PutTraceSegments","xray:PutTelemetryRecords"],"Resource":"*"}'
     grant_case() {
-        local want="$1" name="$2" docs="$3" rc
-        set +e; just _laya-grant-check "$docs" "$GB" aprender-mcp-decide aprender-decide-weights-dev > "$CASES/grant-$name.log" 2>&1; rc=$?; set -e
+        local want="$1" name="$2" docs="$3" srv="${4:-$SRV}" rc
+        set +e; just _laya-grant-check "$docs" "$GB" "$srv" aprender-decide-weights-dev > "$CASES/grant-$name.log" 2>&1; rc=$?; set -e
         if { [ "$want" = accept ] && [ "$rc" -eq 0 ]; } || { [ "$want" = refuse ] && [ "$rc" -ne 0 ] && grep -q '^REFUSED grant:' "$CASES/grant-$name.log"; }; then
             echo "GRANT $want: $name"
         else
@@ -2334,7 +2421,12 @@ laya-deploy-selftest:
     LOGS='{"Effect":"Allow","Action":["logs:CreateLogStream","logs:PutLogEvents"],"Resource":"*"}'
     grant_case accept attached-logs-only "[{\"name\":\"pmcp-declared\",\"document\":{\"Statement\":[$XRAY,$SCOPED]}},{\"name\":\"arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole\",\"kind\":\"attached\",\"document\":{\"Statement\":[$LOGS]}}]"
     grant_case refuse attached-s3-any "[{\"name\":\"pmcp-declared\",\"document\":{\"Statement\":[$SCOPED]}},{\"name\":\"arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess\",\"kind\":\"attached\",\"document\":{\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::*\"}]}}]"
-    grant_case refuse get-star "[{\"name\":\"pmcp-declared\",\"document\":{\"Statement\":[$SCOPED,{\"Effect\":\"Allow\",\"Action\":\"s3:Get*\",\"Resource\":\"arn:aws:s3:::dry-run-bucket/decide/aprender-mcp-decide/*\"}]}}]"
+    # D-19 prefix collision, both ways: a role holding the retired server's prefix grant does not satisfy the new
+    # server's check, and the new prefix does not satisfy the retired server's.
+    grant_case refuse old-prefix-for-new "[{\"name\":\"pmcp-declared\",\"document\":{\"Statement\":[$XRAY,$SCOPED_RETIRED]}}]"
+    grant_case refuse new-prefix-for-old "[{\"name\":\"pmcp-declared\",\"document\":{\"Statement\":[$XRAY,$SCOPED]}}]" "$RETIRED_SERVER"
+    grant_case refuse both-prefixes "[{\"name\":\"pmcp-declared\",\"document\":{\"Statement\":[$SCOPED,$SCOPED_RETIRED]}}]"
+    grant_case refuse get-star "[{\"name\":\"pmcp-declared\",\"document\":{\"Statement\":[$SCOPED,{\"Effect\":\"Allow\",\"Action\":\"s3:Get*\",\"Resource\":\"arn:aws:s3:::dry-run-bucket/decide/$SRV/*\"}]}}]"
     grant_case refuse decide-prefix-star "[{\"name\":\"pmcp-declared\",\"document\":{\"Statement\":[$SCOPED,{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::dry-run-bucket/decide/*\"}]}}]"
     grant_case refuse not-action "[{\"name\":\"pmcp-declared\",\"document\":{\"Statement\":[$SCOPED,{\"Effect\":\"Allow\",\"NotAction\":\"iam:*\",\"Resource\":\"*\"}]}}]"
     # Wiring: laya-grant only READS IAM, and laya-deploy runs the config check and the role check.
@@ -2380,13 +2472,14 @@ laya-deploy-selftest:
     fi
     if [ -n "$P_APR" ]; then
         echo "POSITIVE dry run armed: $P_APR"
-        just laya-deploy-config "$P_APR" off > "$CASES/positive-config.log" 2>&1 || fail "positive: laya-deploy-config"
+        just laya-deploy-config "$P_APR" off "$SRV" > "$CASES/positive-config.log" 2>&1 || fail "positive: laya-deploy-config"
         set +e
-        just laya-deploy "$P_APR" "$P_RUN" "$P_DATA" "$P_BASE" > "$CASES/positive.log" 2>&1
+        just laya-deploy "$P_APR" "$P_RUN" "$P_DATA" "$P_BASE" "$SRV" > "$CASES/positive.log" 2>&1
         rc=$?
         set -e
-        if [ "$rc" -eq 0 ] && grep -q '^DRY-RUN OK' "$CASES/positive.log"; then
-            grep '^DRY-RUN OK' "$CASES/positive.log"
+        # The exact server: the retired id's prefix can no longer satisfy this match.
+        if [ "$rc" -eq 0 ] && grep -q "^DRY-RUN OK $SRV " "$CASES/positive.log"; then
+            grep "^DRY-RUN OK $SRV " "$CASES/positive.log"
         else
             fail "positive dry run: exit $rc without DRY-RUN OK (log: $CASES/positive.log)"
         fi
@@ -2396,8 +2489,8 @@ laya-deploy-selftest:
     # Independent checks: the resolver proof on file, and the bootstrap build.
     RP="$(head -n 1 "$PROOF")"
     echo "RESOLVER PROOF: $RP ($(sed -n 's/^cargo_pmcp_version=/cargo-pmcp /p' "$PROOF"), sdk $(sed -n 's/^sdk_commit=//p' "$PROOF" | cut -c 1-12))"
-    [ "$RP" = "crates/aprender-mcp-decide-lambda" ] || fail "resolver proof names $RP"
-    if just laya-build-bootstrap > "$CASES/bootstrap.log" 2>&1 && grep -q '^BOOTSTRAP aarch64 OK' "$CASES/bootstrap.log"; then
+    [ "$RP" = "crates/$SRV-lambda" ] || fail "resolver proof names $RP"
+    if just laya-build-bootstrap "$SRV" > "$CASES/bootstrap.log" 2>&1 && grep -q '^BOOTSTRAP aarch64 OK' "$CASES/bootstrap.log"; then
         grep '^BOOTSTRAP aarch64 OK' "$CASES/bootstrap.log"
     else
         fail "laya-build-bootstrap (log: $CASES/bootstrap.log)"
@@ -2456,11 +2549,13 @@ laya-weights-bucket env="dev" profile="ze-kasher-dev":
 # `just laya-verify` on the exact file runs FIRST and must accept it before any AWS call (sts
 # included): nothing leaves this machine that the Rust verifier did not accept. The key's hash is
 # verify's artifact_sha256; the upload is checked by head-object size and is idempotent.
-laya-upload apr run data base server="aprender-mcp-decide" env="dev" profile="ze-kasher-dev":
+laya-upload apr run data base server env="dev" profile="ze-kasher-dev":
     #!/usr/bin/env bash
     set -euo pipefail
     APR="{{apr}}"
     SERVER="{{server}}"
+    # REQUIRED server id (D-19): checked before any file or AWS action; the retired id has no thin crate.
+    just _laya-server-check "$SERVER" deployable
     ENV="{{ trim_start_match(env, "env=") }}"
     P="{{profile}}"
     refuse() { echo "REFUSED $1: $2" >&2; exit "${3:-2}"; }
@@ -2520,10 +2615,11 @@ laya-upload apr run data base server="aprender-mcp-decide" env="dev" profile="ze
 # deletes nothing, so there is nothing to re-run after a redeploy: the stack re-declares the grant.
 # A failed IAM read exits 1 as an IAM READ FAILURE, never as a missing grant. The role is
 # discovered from the function (pmcp.run owns it).
-laya-grant server="aprender-mcp-decide" env="dev" profile="ze-kasher-dev":
+laya-grant server env="dev" profile="ze-kasher-dev":
     #!/usr/bin/env bash
     set -euo pipefail
     SERVER="{{server}}"
+    just _laya-server-check "$SERVER" deployable
     ENV="{{ trim_start_match(env, "env=") }}"
     P="{{profile}}"
     case "$ENV" in
@@ -2533,7 +2629,7 @@ laya-grant server="aprender-mcp-decide" env="dev" profile="ze-kasher-dev":
     read_failed() { echo "ERROR: IAM read failed: $1 -- the role's policies are UNKNOWN, not missing; nothing was concluded" >&2; exit 1; }
     ROLE_ARN="$(aws lambda get-function --profile "$P" --function-name "$SERVER" \
         --query Configuration.Role --output text 2>/dev/null)" || {
-        echo "ERROR: no Lambda named '$SERVER' (or it cannot be read) -- deploy it first: just laya-deploy ..." >&2
+        echo "ERROR: no Lambda named '$SERVER' (or it cannot be read) -- deploy it first: just laya-deploy <apr> <run> <data> <base> $SERVER" >&2
         exit 1
     }
     ROLE="${ROLE_ARN##*/}"
@@ -2671,11 +2767,12 @@ _laya-grant-check docs bucket server legacy:
 # and DISTRIBUTED, EVERY one < 30000 ms; then an identity probe (labels in order) and 5 warm calls.
 # Evidence: models/decide/deploy-evidence-<server>.json. The env bump is out-of-band drift the next
 # `laya-deploy` resets. DRY_RUN=1 sizes both shapes from <apr> offline and prints the plan.
-laya-deploy-verify apr server="aprender-mcp-decide" profile="ze-kasher-dev" samples="2":
+laya-deploy-verify apr server profile="ze-kasher-dev" samples="2":
     #!/usr/bin/env bash
     set -euo pipefail
     APR="{{apr}}"
     SERVER="{{server}}"
+    just _laya-server-check "$SERVER" deployable
     P="{{profile}}"
     N="{{samples}}"
     CAP_MS=30000
@@ -2715,7 +2812,7 @@ laya-deploy-verify apr server="aprender-mcp-decide" profile="ze-kasher-dev" samp
         echo "DRY-RUN: stopped before the network (no AWS call, no HTTP request)"
         exit 0
     fi
-    [ -f "$STATE" ] || { echo "ERROR: $STATE does not exist -- it is written by just laya-deploy" >&2; exit 2; }
+    [ -f "$STATE" ] || { echo "ERROR: $STATE does not exist -- it is written by just laya-deploy <apr> <run> <data> <base> $SERVER" >&2; exit 2; }
     ENDPOINT="$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["deployment"]["endpoint"])' "$STATE")"
     LOG_GROUP="$(aws lambda get-function-configuration --profile "$P" --function-name "$SERVER" --query LoggingConfig.LogGroup --output text)"
     case "$LOG_GROUP" in ''|None) LOG_GROUP="/aws/lambda/$SERVER" ;; esac
@@ -2814,10 +2911,12 @@ laya-deploy-verify apr server="aprender-mcp-decide" profile="ze-kasher-dev" samp
 # once, warm instances included; undo with `aws lambda delete-function-concurrency`), verify it,
 # then delete the inline weights policy. The bucket stays (idle-free). Removing the deployment and
 # the object is the human's call: the commands are PRINTED, never run.
-laya-teardown server="aprender-mcp-decide" env="dev" profile="ze-kasher-dev":
+laya-teardown server env="dev" profile="ze-kasher-dev":
     #!/usr/bin/env bash
     set -euo pipefail
     SERVER="{{server}}"
+    # `named`, not `deployable`: containment must be able to name ANY deployed function, the retired one included.
+    just _laya-server-check "$SERVER" named
     ENV="{{ trim_start_match(env, "env=") }}"
     P="{{profile}}"
     case "$ENV" in
@@ -2856,7 +2955,7 @@ laya-teardown server="aprender-mcp-decide" env="dev" profile="ze-kasher-dev":
     ACCOUNT="$(aws sts get-caller-identity --profile "$P" --query Account --output text)"
     echo "  NOT RUN -- the human's call:"
     echo "    remove the deployment (the decide config must be at the shared root while it runs):"
-    echo "      just _laya-crates-root-swap crates crates/aprender-mcp-decide-lambda/.pmcp/deploy.toml models/decide/destroy-$SERVER.state cargo pmcp deploy destroy --manifest-path crates"
+    echo "      just _laya-crates-root-swap crates models/decide/deploy-config-$SERVER.toml models/decide/destroy-$SERVER.state cargo pmcp deploy destroy --manifest-path crates"
     echo "    remove the weights:"
     echo "      aws s3 rm --profile $P --recursive s3://aprender-decide-weights-${ACCOUNT}-${ENV}/decide/$SERVER/"
     echo "    or resume serving instead: aws lambda delete-function-concurrency --profile $P --function-name $SERVER"
@@ -2894,8 +2993,11 @@ laya-gates-selftest:
     W="$(mktemp -d)"
     LOGD="$W/logs"
     mkdir -p "$LOGD"
-    CFG="crates/aprender-mcp-decide-lambda/.pmcp/deploy.toml"
-    PROOF="models/decide/resolver-proof.txt"
+    # ONE variable for the server id, passed explicitly to every call (D-19); LAYA_SELFTEST_SERVER overrides it.
+    SRV="${LAYA_SELFTEST_SERVER:-aprender-mcp-decide-antisemite}"
+    RETIRED_SERVER="aprender-mcp-decide"   # the retired id: it has no thin crate, so no deploy recipe may accept it
+    CFG="models/decide/deploy-config-$SRV.toml"
+    PROOF="models/decide/resolver-proof-$SRV.txt"
     BK="$W/backup"
     mkdir -p "$BK"
     # Files a case may rewrite (all gitignored) come back byte-identical on every exit path.
@@ -3034,13 +3136,14 @@ laya-gates-selftest:
     printf '%s\n' "$*" >> "${FAKE_AWS_LOG:-/dev/null}"
     mode="${FAKE_AWS_MODE:-ok}"
     B="aprender-decide-weights-123456789012-dev"
+    S="${FAKE_SERVER:?FAKE_SERVER names the server whose role policy this fake returns}"
     case "$1 $2" in
         "lambda get-function") echo "arn:aws:iam::123456789012:role/decide-fn-role" ;;
         "sts get-caller-identity") echo "123456789012" ;;
         "iam list-role-policies")
             [ "$mode" = list-fail ] && { echo "An error occurred (AccessDenied) when calling the ListRolePolicies operation" >&2; exit 255; }
             echo '["pmcp-declared"]' ;;
-        "iam get-role-policy") echo "{\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::$B/decide/aprender-mcp-decide/*\"}]}" ;;
+        "iam get-role-policy") echo "{\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::$B/decide/$S/*\"}]}" ;;
         "iam list-attached-role-policies")
             [ "$mode" = attached-fail ] && { echo "An error occurred (Throttling) when calling the ListAttachedRolePolicies operation" >&2; exit 255; }
             echo '["arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"]' ;;
@@ -3060,6 +3163,7 @@ laya-gates-selftest:
     chmod +x "$W/fakeaws/aws"
     FAKE="$W/fakeaws"
     export FAKE_AWS_LOG="$W/fake-aws-calls.log"
+    export FAKE_SERVER="$SRV"
     CUR=""; ROW_RED=0; RC=0; FULL_SKIPPED=""
     run() { local name="$1"; shift; set +e; "$@" < /dev/null > "$LOGD/$CUR-$name.log" 2>&1; RC=$?; set -e; }
     red() { echo "  RED  $CUR: $1" >&2; ROW_RED=1; }
@@ -3109,7 +3213,7 @@ laya-gates-selftest:
         ARMED_RC=$?
         set -e
         cp models/decide/selftest/cases/positive.log "$W/armed-positive.log" 2>/dev/null || : > "$W/armed-positive.log"
-        cp models/decide/eligibility-aprender-mcp-decide.log "$W/armed-eligibility.log" 2>/dev/null || : > "$W/armed-eligibility.log"
+        cp "models/decide/eligibility-$SRV.log" "$W/armed-eligibility.log" 2>/dev/null || : > "$W/armed-eligibility.log"
     }
     set_pin() { python3 -c 'import re, sys; p, key, value = sys.argv[1:4]; t = open(p).read(); t, n = re.subn(r"^(" + key + r" = )\"[^\"]*\"$", lambda m: m.group(1) + chr(34) + value + chr(34), t, count=1, flags=re.M); assert n == 1, key; open(p, "w").write(t)' "$CFG" "$1" "$2"; }
     pinned() { python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["environment"]["APRENDER_DECIDE_SHA256"])' "$CFG"; }
@@ -3148,31 +3252,37 @@ laya-gates-selftest:
             must_pass "$leg" "LEG OK: $leg\$" just _laya-leg-verdict "$leg" "$d/$leg.log"
         done
     }
-    SCOPED='{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::dry-run-bucket/decide/aprender-mcp-decide/*"}'
+    SCOPED="{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::dry-run-bucket/decide/$SRV/*\"}"
     LOGS='{"Effect":"Allow","Action":["logs:CreateLogStream","logs:PutLogEvents"],"Resource":"*"}'
-    grant() { just _laya-grant-check "$1" dry-run-bucket aprender-mcp-decide aprender-decide-weights-dev; }
+    grant() { just _laya-grant-check "$1" dry-run-bucket "${2:-$SRV}" aprender-decide-weights-dev; }
     row_grant_check() {
         local inl="{\"name\":\"pmcp-declared\",\"document\":{\"Statement\":[$SCOPED]}}"
         local att='"kind":"attached","name":"arn:aws:iam::aws:policy/X","document":{"Statement":'
         must_fail attached-s3-any 'REFUSED grant: attached policy .* an attached managed policy reaches S3' \
             grant "[$inl,{$att[{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::*\"}]}}]"
         must_fail get-star 'REFUSED grant: .*a wildcard S3 action' \
-            grant "[{\"name\":\"pmcp-declared\",\"document\":{\"Statement\":[$SCOPED,{\"Effect\":\"Allow\",\"Action\":\"s3:Get*\",\"Resource\":\"arn:aws:s3:::dry-run-bucket/decide/aprender-mcp-decide/*\"}]}}]"
+            grant "[{\"name\":\"pmcp-declared\",\"document\":{\"Statement\":[$SCOPED,{\"Effect\":\"Allow\",\"Action\":\"s3:Get*\",\"Resource\":\"arn:aws:s3:::dry-run-bucket/decide/$SRV/*\"}]}}]"
         must_fail decide-prefix-star 'REFUSED grant: .*a wildcard S3 resource' \
             grant "[{\"name\":\"pmcp-declared\",\"document\":{\"Statement\":[$SCOPED,{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::dry-run-bucket/decide/*\"}]}}]"
         must_fail not-action 'REFUSED grant: .*NotAction/NotResource' \
             grant "[{\"name\":\"pmcp-declared\",\"document\":{\"Statement\":[$SCOPED,{\"Effect\":\"Allow\",\"NotAction\":\"iam:*\",\"Resource\":\"*\"}]}}]"
         must_pass stack-declared 'grant ok: checked 1 inline and 1 attached policies' grant "[$inl,{$att[$LOGS]}}]"
+        # D-19, both directions: neither server's prefix grant satisfies the other server's check.
+        local old="{\"name\":\"pmcp-declared\",\"document\":{\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::dry-run-bucket/decide/$RETIRED_SERVER/*\"}]}}"
+        must_fail old-prefix-for-new 'REFUSED grant: .*(wildcard S3 resource broader than|an S3 grant other than|no inline policy grants)' grant "[$old]"
+        must_fail new-prefix-for-old 'REFUSED grant: ' grant "[$inl]" "$RETIRED_SERVER"
     }
     row_grant_listing_failure() {
-        must_fail list-fail 'ERROR: IAM read failed: listing the inline policies' env PATH="$FAKE:$PATH" FAKE_AWS_MODE=list-fail just laya-grant
+        must_fail list-fail 'ERROR: IAM read failed: listing the inline policies' env PATH="$FAKE:$PATH" FAKE_AWS_MODE=list-fail just laya-grant "$SRV"
         if grep -q 'REFUSED grant' "$(logof list-fail)"; then red "a failed listing was reported as a grant verdict"; fi
-        must_fail attached-fail 'ERROR: IAM read failed: listing the attached managed policies' env PATH="$FAKE:$PATH" FAKE_AWS_MODE=attached-fail just laya-grant
-        must_pass ok 'grant ok: checked 1 inline and 1 attached policies' env PATH="$FAKE:$PATH" FAKE_AWS_MODE=ok just laya-grant
+        must_fail attached-fail 'ERROR: IAM read failed: listing the attached managed policies' env PATH="$FAKE:$PATH" FAKE_AWS_MODE=attached-fail just laya-grant "$SRV"
+        must_pass ok 'grant ok: checked 1 inline and 1 attached policies' env PATH="$FAKE:$PATH" FAKE_AWS_MODE=ok just laya-grant "$SRV"
     }
     row_teardown_classify() {
-        must_fail access-denied 'ERROR: deleting the legacy policy aprender-decide-weights-dev from decide-fn-role failed' env PATH="$FAKE:$PATH" FAKE_AWS_MODE=teardown-denied just laya-teardown
-        must_pass no-such-entity 'no legacy policy aprender-decide-weights-dev on decide-fn-role' env PATH="$FAKE:$PATH" FAKE_AWS_MODE=teardown-nosuch just laya-teardown
+        must_fail access-denied 'ERROR: deleting the legacy policy aprender-decide-weights-dev from decide-fn-role failed' env PATH="$FAKE:$PATH" FAKE_AWS_MODE=teardown-denied just laya-teardown "$SRV"
+        must_pass no-such-entity 'no legacy policy aprender-decide-weights-dev on decide-fn-role' env PATH="$FAKE:$PATH" FAKE_AWS_MODE=teardown-nosuch just laya-teardown "$SRV"
+        # Containment must reach ANY deployed function, the retired one included (`named` mode, not `deployable`).
+        must_pass retired-contained 'CONTAINED: aprender-mcp-decide reserved concurrency 0' env PATH="$FAKE:$PATH" FAKE_AWS_MODE=teardown-nosuch just laya-teardown "$RETIRED_SERVER"
     }
     row_sha256_helper() {
         tiny
@@ -3180,29 +3290,33 @@ laya-gates-selftest:
         H="$(shasum -a 256 "$W/tiny.apr" | awk '{print $1}')"
         F="$W/foreign-rtk"; mkdir -p "$F"
         printf '#!/bin/sh\necho "rtk 0.1.0 (Rust Type Kit): unknown subcommand $1"\nexit 0\n' > "$F/rtk"; chmod +x "$F/rtk"
-        must_pass foreign-rtk "sha256   $H" env PATH="$F:$PATH" just laya-deploy-config "$W/tiny.apr" off
+        must_pass foreign-rtk "sha256   $H" env PATH="$F:$PATH" just laya-deploy-config "$W/tiny.apr" off "$SRV"
         [ "$RC" -eq 0 ] && [ "$(pinned)" = "$H" ] || red "with a foreign rtk first on PATH the pin is '$(pinned 2>/dev/null || echo none)', not shasum's $H"
         NP="$(nortk_path)"
         if env PATH="$NP" sh -c 'command -v rtk' > /dev/null 2>&1; then red "could not build a PATH without rtk"; fi
-        must_pass rtk-absent "sha256   $H" env PATH="$NP" just laya-deploy-config "$W/tiny.apr" off
+        must_pass rtk-absent "sha256   $H" env PATH="$NP" just laya-deploy-config "$W/tiny.apr" off "$SRV"
         [ "$RC" -eq 0 ] && [ "$(pinned)" = "$H" ] || red "with rtk absent the pin is '$(pinned 2>/dev/null || echo none)', not shasum's $H"
         set_pin APRENDER_DECIDE_SHA256 0000000000000000000000000000000000000000000000000000000000000000
-        must_fail sha-pin 'REFUSED sha-pin:' env PATH="$F:$PATH" just laya-deploy "$W/tiny.apr" "$T" "$T/data" "$T/checkpoint"
+        must_fail sha-pin 'REFUSED sha-pin:' env PATH="$F:$PATH" just laya-deploy "$W/tiny.apr" "$T" "$T/data" "$T/checkpoint" "$SRV"
     }
     row_resolver_proof_sed() {
         local d="$W/rp"; mkdir -p "$d"
-        printf 'running 1 test\ntest deployment::builder::aprender_resolver_proof::aprender_decide_resolves_from_shared_crates_root ... RESOLVED root=crates server=aprender-mcp-decide -> crates/aprender-mcp-decide-lambda\nCONTROL root=crates/aprender-mcp-decide-lambda server=aprender-mcp-decide -> crates/aprender-mcp-chronos-lambda\nok\n' > "$d/prefixed.log"
+        printf 'running 1 test\ntest deployment::builder::aprender_resolver_proof::aprender_decide_resolves_from_shared_crates_root ... RESOLVED root=crates server=%s -> crates/%s-lambda\nCONTROL root=crates/%s-lambda server=%s -> crates/aprender-mcp-chronos-lambda\nok\n' "$SRV" "$SRV" "$SRV" "$SRV" > "$d/prefixed.log"
+        # The same log shape for the RETIRED id: its RESOLVED line must not be read as the new server's.
+        printf 'running 1 test\ntest deployment::builder::aprender_resolver_proof::aprender_decide_resolves_from_shared_crates_root ... RESOLVED root=crates server=%s -> crates/%s-lambda\nok\n' "$RETIRED_SERVER" "$RETIRED_SERVER" > "$d/retired.log"
         printf 'running 1 test\ntest deployment::builder::aprender_resolver_proof::aprender_decide_resolves_from_shared_crates_root ... ok\n' > "$d/none.log"
-        must_fail no-resolved 'REFUSED resolver-parse: no RESOLVED line' just _laya-resolver-parse "$d/none.log"
-        must_pass libtest-prefixed '^RESOLVED=crates/aprender-mcp-decide-lambda$' just _laya-resolver-parse "$d/prefixed.log"
+        must_fail no-resolved 'REFUSED resolver-parse: no RESOLVED line' just _laya-resolver-parse "$d/none.log" "$SRV"
+        must_fail retired-id-line 'REFUSED resolver-parse: no RESOLVED line' just _laya-resolver-parse "$d/retired.log" "$SRV"
+        must_pass libtest-prefixed "^RESOLVED=crates/$SRV-lambda\$" just _laya-resolver-parse "$d/prefixed.log" "$SRV"
         grep -qx 'CONTROL=crates/aprender-mcp-chronos-lambda' "$(logof libtest-prefixed)" || red "the CONTROL value was not read"
     }
     row_resolver_proof() {
         local nogit="$W/not-a-checkout"; mkdir -p "$nogit"
         if git -C "$nogit" rev-parse --git-dir > /dev/null 2>&1; then red "environment: $nogit is inside a git checkout"; return; fi
-        must_fail not-git 'is not a git checkout' just laya-resolver-proof "$nogit" 0000000 "$W/rp-scratch"
+        must_fail not-git 'is not a git checkout' just laya-resolver-proof "$nogit" 0000000 "$W/rp-scratch" "$SRV"
+        must_fail bad-server 'REFUSED server: ' just laya-resolver-proof "$nogit" 0000000 "$W/rp-scratch" "Bad Server"
         local body; body="$(just --show laya-resolver-proof)"
-        if printf '%s' "$body" | grep -qF 'PARSED="$(just _laya-resolver-parse "$LOG")"' && ! printf '%s' "$body" | grep -qF "s/^RESOLVED root="; then
+        if printf '%s' "$body" | grep -qF 'PARSED="$(just _laya-resolver-parse "$LOG" "$SERVER")"' && ! printf '%s' "$body" | grep -qF "s/^RESOLVED root="; then
             echo "  must-pass wiring: RESOLVED/CONTROL come from _laya-resolver-parse (no column-0 sed)"
         else
             red "laya-resolver-proof does not read its tokens through _laya-resolver-parse"
@@ -3211,7 +3325,7 @@ laya-gates-selftest:
             local sdk commit
             sdk="${LAYA_GATES_SDK:-$HOME/Development/mcp/sdk/rust-mcp-sdk}"
             commit="$(sed -n 's/^sdk_commit=//p' "$BK/$PROOF")"
-            must_pass real 'RESOLVER PROOF: crates/aprender-mcp-decide-lambda ' just laya-resolver-proof "$sdk" "$commit" "$W/rp-scratch"
+            must_pass real "RESOLVER PROOF: crates/$SRV-lambda " just laya-resolver-proof "$sdk" "$commit" "$W/rp-scratch" "$SRV"
         else
             full_only "the real resolver proof (cargo-pmcp test in an SDK archive)"
         fi
@@ -3225,7 +3339,7 @@ laya-gates-selftest:
         if grep -qx 'DEPLOY SELFTEST OK' "$(logof disarmed)"; then red "a skipped positive dry run printed the bare DEPLOY SELFTEST OK"; fi
         need_deployed || return 0
         armed_deploy_selftest < /dev/null
-        if [ "$ARMED_RC" -eq 0 ] && grep -q '^DRY-RUN OK aprender-mcp-decide' "$W/armed-selftest.log" && grep -qx 'DEPLOY SELFTEST OK' "$W/armed-selftest.log"; then
+        if [ "$ARMED_RC" -eq 0 ] && grep -q "^DRY-RUN OK $SRV " "$W/armed-selftest.log" && grep -qx 'DEPLOY SELFTEST OK' "$W/armed-selftest.log"; then
             echo "  must-pass default-armed: exit 0, $(grep -m 1 '^DRY-RUN OK' "$W/armed-selftest.log" | cut -c 1-120), then the bare DEPLOY SELFTEST OK"
         else
             red "must-pass default-armed: exit $ARMED_RC without DRY-RUN OK and the bare OK line (log $W/armed-selftest.log)"
@@ -3234,15 +3348,16 @@ laya-gates-selftest:
     }
     row_deploy_refusals() {
         tiny
-        run setup just laya-deploy-config "$W/tiny.apr" off
+        run setup just laya-deploy-config "$W/tiny.apr" off "$SRV"
         [ "$RC" -eq 0 ] || { red "laya-deploy-config on the synthetic fixture failed"; return; }
         set_pin APRENDER_DECIDE_S3_URI UNSET-run-just-laya-deploy-config
-        must_fail placeholder 'REFUSED placeholder:' just laya-deploy "$W/tiny.apr" "$T" "$T/data" "$T/checkpoint"
-        run regen just laya-deploy-config "$W/tiny.apr" off
-        must_fail eligibility 'REFUSED eligibility: .*SyntheticNotDeployable' just laya-deploy "$W/tiny.apr" "$T" "$T/data" "$T/checkpoint"
+        must_fail placeholder 'REFUSED placeholder:' just laya-deploy "$W/tiny.apr" "$T" "$T/data" "$T/checkpoint" "$SRV"
+        run regen just laya-deploy-config "$W/tiny.apr" off "$SRV"
+        must_fail eligibility 'REFUSED eligibility: .*SyntheticNotDeployable' just laya-deploy "$W/tiny.apr" "$T" "$T/data" "$T/checkpoint" "$SRV"
+        must_fail retired-id 'REFUSED server: ' just laya-deploy "$W/tiny.apr" "$T" "$T/data" "$T/checkpoint" "$RETIRED_SERVER"
         need_deployed || return 0
         armed_deploy_selftest
-        if grep -q '^DRY-RUN OK aprender-mcp-decide' "$W/armed-positive.log"; then
+        if grep -q "^DRY-RUN OK $SRV " "$W/armed-positive.log"; then
             echo "  must-pass deployed: $(grep -m 1 '^DRY-RUN OK' "$W/armed-positive.log" | cut -c 1-120) (the default-armed selftest's positive dry run)"
         else
             red "must-pass deployed: the positive dry run printed no DRY-RUN OK (log $W/armed-positive.log)"
@@ -3250,10 +3365,11 @@ laya-gates-selftest:
     }
     row_upload_eligibility() {
         tiny
-        must_fail synthetic 'REFUSED eligibility: .*SyntheticNotDeployable' just laya-upload "$W/tiny.apr" "$T" "$T/data" "$T/checkpoint"
+        must_fail synthetic 'REFUSED eligibility: .*SyntheticNotDeployable' just laya-upload "$W/tiny.apr" "$T" "$T/data" "$T/checkpoint" "$SRV"
+        must_fail retired-id 'REFUSED server: ' just laya-upload "$W/tiny.apr" "$T" "$T/data" "$T/checkpoint" "$RETIRED_SERVER"
         if [ "$FULL" = "1" ]; then
             need_deployed || return 0
-            must_pass deployed '^DRY-RUN: would upload ' just laya-upload "$DEP_APR" "$DEP_RUN" "$DEP_DATA" "$BASE"
+            must_pass deployed '^DRY-RUN: would upload ' just laya-upload "$DEP_APR" "$DEP_RUN" "$DEP_DATA" "$BASE" "$SRV"
         else
             full_only "the DRY_RUN upload of the deployed artifact (laya-verify, multi-GB)"
         fi
@@ -3352,25 +3468,49 @@ laya-gates-selftest:
     }
     row_deploy_verify() {
         need_deployed || return 0
-        must_fail one-sample 'samples must be >= 2' just laya-deploy-verify "$DEP_APR" aprender-mcp-decide ze-kasher-dev 1
-        must_fail missing-apr 'does not exist' just laya-deploy-verify "$W/no-such.apr"
-        must_pass dry-run '^DRY-RUN: stopped before the network' just laya-deploy-verify "$DEP_APR"
+        must_fail one-sample 'samples must be >= 2' just laya-deploy-verify "$DEP_APR" "$SRV" ze-kasher-dev 1
+        must_fail missing-apr 'does not exist' just laya-deploy-verify "$W/no-such.apr" "$SRV"
+        must_fail retired-id 'REFUSED server: ' just laya-deploy-verify "$DEP_APR" "$RETIRED_SERVER"
+        must_pass dry-run '^DRY-RUN: stopped before the network' just laya-deploy-verify "$DEP_APR" "$SRV"
     }
     row_bootstrap_build() {
         local Z="$W/zigshim"; mkdir -p "$Z"
         printf '#!/bin/sh\necho "cargo-zigbuild shim: built nothing"\nexit 0\n' > "$Z/cargo-zigbuild"; chmod +x "$Z/cargo-zigbuild"
-        must_fail stale 'ERROR: .*(is older than this build|does not exist after the build)' env PATH="$Z:$PATH" just laya-build-bootstrap
-        must_pass real '^BOOTSTRAP aarch64 OK ' just laya-build-bootstrap
+        must_fail stale 'ERROR: .*(is older than this build|does not exist after the build)' env PATH="$Z:$PATH" just laya-build-bootstrap "$SRV"
+        must_pass real '^BOOTSTRAP aarch64 OK ' just laya-build-bootstrap "$SRV"
     }
     row_edge_health_url() {
-        must_fail health-path 'REFUSED edge-health-url' just _laya-edge-health-url https://aprender-mcp-decide.us-east.true-mcp.com/health
-        must_fail http 'REFUSED edge-health-url' just _laya-edge-health-url http://aprender-mcp-decide.us-east.true-mcp.com/mcp
-        must_pass mcp '^https://aprender-mcp-decide.us-east.true-mcp.com/health$' just _laya-edge-health-url https://aprender-mcp-decide.us-east.true-mcp.com/mcp
+        must_fail health-path 'REFUSED edge-health-url' just _laya-edge-health-url "https://$SRV.us-east.true-mcp.com/health"
+        must_fail http 'REFUSED edge-health-url' just _laya-edge-health-url "http://$SRV.us-east.true-mcp.com/mcp"
+        must_pass mcp "^https://$SRV.us-east.true-mcp.com/health\$" just _laya-edge-health-url "https://$SRV.us-east.true-mcp.com/mcp"
     }
     row_edge_health_check() {
-        must_fail chronos "REFUSED edge-health: serverId is 'chronos-forecaster'" just _laya-edge-health-check '{"serverId":"chronos-forecaster"}' aprender-mcp-decide
-        must_fail bootstrap-body 'REFUSED edge-health: serverId is None' just _laya-edge-health-check '{"package":"aprender-mcp-decide-lambda","server":"aprender-mcp-decide"}' aprender-mcp-decide
-        must_pass decide '^edge-health ok: serverId aprender-mcp-decide$' just _laya-edge-health-check '{"status":"healthy","serverId":"aprender-mcp-decide"}' aprender-mcp-decide
+        must_fail chronos "REFUSED edge-health: serverId is 'chronos-forecaster'" just _laya-edge-health-check '{"serverId":"chronos-forecaster"}' "$SRV"
+        must_fail bootstrap-body 'REFUSED edge-health: serverId is None' just _laya-edge-health-check "{\"package\":\"$SRV-lambda\",\"server\":\"$SRV\"}" "$SRV"
+        # The reverse-prefix case: the retired server's healthy edge body is not the new server's.
+        must_fail retired-server "REFUSED edge-health: serverId is '$RETIRED_SERVER'" just _laya-edge-health-check "{\"status\":\"healthy\",\"serverId\":\"$RETIRED_SERVER\"}" "$SRV"
+        must_pass decide "^edge-health ok: serverId $SRV\$" just _laya-edge-health-check "{\"status\":\"healthy\",\"serverId\":\"$SRV\"}" "$SRV"
+    }
+    row_server_check() {
+        must_fail space 'REFUSED server: .*not a server id' just _laya-server-check "bad name" named
+        must_fail digit-led 'REFUSED server: .*not a server id' just _laya-server-check 1-bad-id named
+        must_fail upper-case-led 'REFUSED server: .*not a server id' just _laya-server-check Aprender-bad named
+        must_fail too-long 'REFUSED server: .*is 65 characters' just _laya-server-check "$(printf 'a%.0s' $(seq 1 65))" named
+        must_fail hyphen-ended 'REFUSED server: .*ends with a hyphen' just _laya-server-check aprender-mcp-decide-x- named
+        must_fail no-thin-crate 'REFUSED server: .*no thin crate' just _laya-server-check "$SRV-nonexistent" deployable
+        must_fail retired-deployable 'REFUSED server: .*declares no bootstrap bin' just _laya-server-check "$RETIRED_SERVER" deployable
+        must_fail unknown-mode 'REFUSED server: unknown mode' just _laya-server-check "$SRV" sometimes
+        must_pass thin-crate "^server ok: $SRV \\(deployable\\)\$" just _laya-server-check "$SRV" deployable
+        must_pass retired-named "^server ok: $RETIRED_SERVER \\(named\\)\$" just _laya-server-check "$RETIRED_SERVER" named
+        # Wiring: every recipe that reaches AWS checks the id before it does anything else (teardown by name only).
+        local r body
+        for r in laya-deploy-config laya-deploy laya-upload laya-grant laya-deploy-verify; do
+            body="$(just --show "$r")"
+            printf '%s' "$body" | grep -qF 'just _laya-server-check "$SERVER" deployable' || red "$r does not check the server id in deployable mode"
+        done
+        body="$(just --show laya-teardown)"
+        printf '%s' "$body" | grep -qF 'just _laya-server-check "$SERVER" named' || red "laya-teardown does not check the server id in named mode"
+        echo "  must-pass wiring: the five deploy-path recipes check the id (deployable) and laya-teardown names it (named)"
     }
     row_crates_root_swap() {
         local R="$W/swaproot" C="$W/swapcfg.toml" before after bkdir
@@ -3389,12 +3529,15 @@ laya-gates-selftest:
     }
     row_iam_check() {
         local ok="$W/iam-ok.toml" star="$W/iam-star.toml" two="$W/iam-two.toml"
-        printf '[server]\nname = "aprender-mcp-decide"\n[environment]\nAPRENDER_DECIDE_S3_URI = "s3://b/decide/aprender-mcp-decide/h.apr"\n[[iam.statements]]\neffect = "Allow"\nactions = ["s3:GetObject"]\nresources = ["arn:aws:s3:::b/decide/aprender-mcp-decide/*"]\n' > "$ok"
+        printf '[server]\nname = "%s"\n[environment]\nAPRENDER_DECIDE_S3_URI = "s3://b/decide/%s/h.apr"\n[[iam.statements]]\neffect = "Allow"\nactions = ["s3:GetObject"]\nresources = ["arn:aws:s3:::b/decide/%s/*"]\n' "$SRV" "$SRV" "$SRV" > "$ok"
+        local oldp="$W/iam-old-prefix.toml"
+        sed "s#decide/$SRV/\*#decide/$RETIRED_SERVER/*#" "$ok" > "$oldp"
         sed 's/actions = \["s3:GetObject"\]/actions = ["s3:*"]/' "$ok" > "$star"
         { cat "$ok"; printf '[[iam.statements]]\neffect = "Allow"\nactions = ["s3:GetObject"]\nresources = ["arn:aws:s3:::other/x"]\n'; } > "$two"
         must_fail s3-star 'REFUSED iam: the statement' just _laya-iam-check "$star"
         must_fail two-statements 'REFUSED iam: expected exactly one' just _laya-iam-check "$two"
-        must_pass scoped '^iam ok: Allow s3:GetObject arn:aws:s3:::b/decide/aprender-mcp-decide/\*' just _laya-iam-check "$ok"
+        must_fail old-prefix 'REFUSED iam: the statement' just _laya-iam-check "$oldp"
+        must_pass scoped "^iam ok: Allow s3:GetObject arn:aws:s3:::b/decide/$SRV/\\*" just _laya-iam-check "$ok"
     }
     row_resolver_ere() {
         must_fail pre-08-22-fn 'FAIL fn expected no-match, got match: /// fn name' \
