@@ -7,7 +7,7 @@ status: executing
 stopped_at: "Completed 08-33-PLAN.md (contract-hygiene repair, local commits, NOT pushed). Next: plan 08-34 (CI audit, push, maintainer approval, CI evidence)"
 last_updated: "2026-09-29T21:46:01.311Z"
 last_activity: 2026-10-21
-last_activity_desc: Phase 10 planned (10 plans, 6 waves); ready to execute
+last_activity_desc: Phase 10 replanned with reviews (11 plans, 7 waves); ready to execute
 state_head: 3b75bfd7450ffcc5d2ac052c3575152bac343207
 progress:
   total_phases: 10
@@ -47,7 +47,7 @@ now depend on 05-10, so the 80 expensive cells cannot be generated before the ga
 them exists (waves 5→6, 6→7, 7→8); (c) cold latency and inference peak RSS move to a dedicated
 fresh child process with a true kernel high-water mark on both platforms, and train peak becomes
 a separate, separately-labelled field.
-Last activity: 2026-10-21 — Phase 10 planned: 10 plans in 6 waves, plan checker passed after one revision round; next /gsd-execute-phase 10
+Last activity: 2026-10-21 — Phase 10 replanned after cross-AI review (Codex + Fable; Gemini lane failed on quota): 11 plans in 7 waves, plan checker passed on round 3; next /gsd-execute-phase 10
 
 **Phase 04 UAT ran 2026-08-16 at `b3f816c25` (macOS/arm64): 12 tests, 12 passed, 0 issues —
 see `04-UAT.md`.** Every gate was executed in-session, not read off a SUMMARY: codec 17,
