@@ -864,7 +864,7 @@ Plans:
 - [ ] 10-02-PLAN.md — `probe --replay N` (1..=the compiled door, `--replay-from`), `--replay-over-limit`, a pure evaluator with negative tests, typed count and token-budget refusals, plan-only `min_row_tokens` / door keys; proven on the loopback fixture and live against the stance server
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 10-03-PLAN.md — probe_epoch.py (one epoch, seed 13, no run dir) measures s/step and the per-epoch monitor cost on this host, raw vs retained post lengths; E declared from it; re-prices the date if over 3.0 s (D-10); an OOM is an owner checkpoint
+- [ ] 10-03-PLAN.md — probe_epoch.py (one epoch, seed 13, no run dir) measures s/step and the per-epoch monitor cost on this host, raw vs retained post lengths; E declared from it; re-prices the date if over 3.0 s (D-10); host-load record (a contended window is not trusted); an OOM, an over-threshold or cpu probe or a contended window reaches the owner at a Task 3 checkpoint whose reply is a recorded file
 - [ ] 10-11-PLAN.md — the served door before any deploy: ClassifyLimits::CONTRACTED.max_texts, `classify_max_texts`, the FALSIFY-001/-009 predictions, claims rows 75 and 112, the decide README / deploy-template / CLAUDE.md door phrases, pv-diff version bump (a recorded no-op when the owner keeps 8)
 
 **Wave 3** *(blocked on Wave 2 completion)*
@@ -879,7 +879,7 @@ Plans:
 - [ ] 10-08-PLAN.md — live redeploy through the existing pmcp.run path, identity probe + negative control, deploy-verify timings reported and normalized; a failed verify halts for the owner (it does not contain)
 
 **Wave 6** *(blocked on Wave 5 completion)*
-- [ ] 10-10-PLAN.md — documentation only after the deploy: contract (served_task_min_row_tokens, FALSIFY-DECIDE-TOOL-009) / lambda README / CLAUDE.md / claims ledger say what is served, with one sha, one door and one P cross-checked
+- [ ] 10-10-PLAN.md — documentation only after the deploy: contract (served_task_min_row_tokens, FALSIFY-DECIDE-TOOL-009) / lambda README / CLAUDE.md / claims ledger say what is served, with one sha, one door and one P cross-checked; then the phase-wide SC-5 static gates (no new `.sh`, bashrs justfile baseline, strict clippy on every touched crate)
 
 **Wave 7** *(blocked on Wave 6 completion)*
 - [ ] 10-09-PLAN.md — acceptance replay against the live classifier (one-text calls, the largest admitted multi-text call, the expected count refusal at the door plus one), 10-HANDOFF.md (D-17 with D-14/D-15/D-04/D-07/D-18/D-01 stated, limits as deployed), the D-13 amendment; released only after 10-10's gates
