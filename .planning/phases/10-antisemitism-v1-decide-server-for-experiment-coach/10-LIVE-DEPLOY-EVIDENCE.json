@@ -6,7 +6,10 @@
   "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
   "artifact_path": "models/decide/laya-antisemitism-v1.apr",
   "run_dir": "models/decide/laya-antisemitism-v1",
-  "labels": ["not_antisemitic", "antisemitic"],
+  "labels": [
+    "not_antisemitic",
+    "antisemitic"
+  ],
   "served_task_min_row_tokens": 86,
   "served_task_min_row_tokens_note": "P from 10-TASK-EVIDENCE.json; the committed contract still reads 57 (the stance task's value) until plan 10-10 rewrites it after the deploy",
   "door": {
@@ -34,8 +37,36 @@
     "wall_s": 31,
     "stopped_line": "DRY-RUN: stopped before the network (no AWS call, no HTTP request)",
     "shapes": {
-      "concentrated": {"probe": "plan", "shape": "concentrated", "texts": 2, "max_text_bytes": 16384, "tokens_planned": 800, "min_row_tokens": 86, "max_texts": 8, "max_total_tokens": 800, "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e", "labels": ["not_antisemitic", "antisemitic"]},
-      "distributed": {"probe": "plan", "shape": "distributed", "texts": 8, "max_text_bytes": 78, "tokens_planned": 800, "min_row_tokens": 86, "max_texts": 8, "max_total_tokens": 800, "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e", "labels": ["not_antisemitic", "antisemitic"]}
+      "concentrated": {
+        "probe": "plan",
+        "shape": "concentrated",
+        "texts": 2,
+        "max_text_bytes": 16384,
+        "tokens_planned": 800,
+        "min_row_tokens": 86,
+        "max_texts": 8,
+        "max_total_tokens": 800,
+        "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+        "labels": [
+          "not_antisemitic",
+          "antisemitic"
+        ]
+      },
+      "distributed": {
+        "probe": "plan",
+        "shape": "distributed",
+        "texts": 8,
+        "max_text_bytes": 78,
+        "tokens_planned": 800,
+        "min_row_tokens": 86,
+        "max_texts": 8,
+        "max_total_tokens": 800,
+        "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+        "labels": [
+          "not_antisemitic",
+          "antisemitic"
+        ]
+      }
     }
   },
   "resolver_proof": {
@@ -81,23 +112,27 @@
     "decided_at": "2026-10-22T14:11:06Z",
     "decided_by": "owner",
     "owner_reply": "replace-auth-off",
-    "access_confirmed": false,
-    "access_confirmed_note": "The owner's reply did not state that the AWS profile and cargo pmcp login are in place, so access was established by read-only checks, not taken from silence. The AWS half passed; the pmcp.run half did not: the cached pmcp.run access token is expired. Plan 10-08 must not start its live steps until a fresh `cargo pmcp deploy login --target-type pmcp-run` (or a confirmed successful refresh) is done by the owner or authorised by them.",
+    "access_confirmed": true,
+    "access_confirmed_note": "Re-established by the plan 10-08 executor on 2026-10-22T14:19Z by read-only checks, after the owner stated the environment is logged into the dev environment: the AWS half passed (aws sts get-caller-identity --profile ze-kasher-dev, rc 0) and the pmcp.run cached access token's expires_at is now 2026-10-22T15:17:34Z (about 58 min left; only the expires_at key was read, no token value). Superseded the earlier false value recorded by plan 10-07 (token expired 2026-10-21T19:08:45Z).",
     "access_checks": {
       "aws_profile": {
         "profile": "ze-kasher-dev",
         "command": "aws sts get-caller-identity --profile ze-kasher-dev",
         "rc": 0,
         "ok": true,
-        "principal": "IAM user (account id deliberately not recorded)"
+        "principal": "IAM user (account id deliberately not recorded)",
+        "rechecked_at": "2026-10-22T14:19:19Z"
       },
       "pmcp_run_login": {
         "command": "read of the local cache ~/.pmcp/credentials.toml, key pmcp-run.expires_at only (no token read or printed); cargo pmcp 0.28.1 has no read-only login-status verb for the pmcp.run deploy target",
-        "ok": false,
-        "failing_check": "pmcp-run access token expires_at 2026-10-21T19:08:45Z is before the check time 2026-10-22T14:11Z (about 19 h expired)",
+        "ok": true,
+        "failing_check": null,
         "refresh_token_present": true,
         "refresh_attempted": false,
-        "refresh_not_attempted_because": "a refresh rewrites ~/.pmcp/credentials.toml and calls the pmcp.run identity provider; the instruction allowed read-only checks only. Whether the refresh token still works is therefore UNKNOWN."
+        "refresh_not_attempted_because": "a refresh rewrites ~/.pmcp/credentials.toml and calls the pmcp.run identity provider; the instruction allowed read-only checks only. Whether the refresh token still works is therefore UNKNOWN.",
+        "rechecked_at": "2026-10-22T14:19:19Z",
+        "expires_at": "2026-10-22T15:17:34Z",
+        "note": "refreshed by the owner outside this plan; the executor never refreshes or rewrites ~/.pmcp credentials"
       }
     },
     "auth_token_env": null,
@@ -109,5 +144,37 @@
     "sha": "24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a",
     "endpoint": "https://aprender-mcp-decide.us-east.true-mcp.com/mcp",
     "note": "replaced only after the owner's D-13 decision"
+  },
+  "pre_deploy_steps": {
+    "note": "Task 1 steps 1-2 of plan 10-08, run by the first 10-08 executor; neither needs the pmcp.run token (AWS profile only). Step 3 (laya-deploy) has NOT started.",
+    "deploy_config": {
+      "command": "just laya-deploy-config models/decide/laya-antisemitism-v1.apr off aprender-mcp-decide dev ze-kasher-dev",
+      "rc": 0,
+      "auth": "off",
+      "sha_pin": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+      "tier_mb_in_template": 10240,
+      "iam": "Allow s3:GetObject on decide/aprender-mcp-decide/* and nothing else",
+      "file": "crates/aprender-mcp-decide-lambda/.pmcp/deploy.toml (gitignored; holds the real bucket name)"
+    },
+    "upload": {
+      "command": "just laya-upload models/decide/laya-antisemitism-v1.apr models/decide/laya-antisemitism-v1 data/decide/goldstandard-2024 <laya snapshot 55cf4c4e>",
+      "rc": 0,
+      "started": "2026-10-22T14:20:46Z",
+      "ended": "2026-10-22T14:45:19Z",
+      "wall_s": 1473,
+      "line": "UPLOADED s3://<weights bucket>/decide/aprender-mcp-decide/2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e.apr (846220868 bytes, sha256 2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e)",
+      "s3_key": "decide/aprender-mcp-decide/2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e.apr",
+      "bytes": 846220868,
+      "laya_verify_accepted": true,
+      "aws_write_count": 1,
+      "aws_write_note": "one S3 PutObject (content-addressed, inert until a function reads it); no function, role, or pmcp.run change"
+    },
+    "halted_before_deploy": {
+      "at": "2026-10-22T14:45:33Z",
+      "token_expires_at": "2026-10-22T15:17:34Z",
+      "token_minutes_left": 32,
+      "reason": "laya-deploy re-runs laya-verify first (the upload's verify took about 24 min of the 24.5 min step on this host) and only then builds the arm64 bootstrap and calls cargo pmcp deploy, which needs the pmcp.run token; the remaining 32 min do not cover verify + build + deploy + edge settle, and an interrupted deploy would leave a half-deployed function. Per the owner's credential rule the executor stopped BEFORE starting the deploy and asks for a fresh `cargo pmcp deploy login --target-type pmcp-run`.",
+      "function_touched": false
+    }
   }
 }
