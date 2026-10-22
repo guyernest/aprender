@@ -1554,18 +1554,21 @@ laya-pack-fixture run data out:
 # Nothing here writes to AWS unless `just laya-verify` accepted the exact file first.
 # ---------------------------------------------------------------------------
 
-# Execute cargo-pmcp's own `find_lambda_package_dir` on THIS workspace (root `crates`, server
-# `aprender-mcp-decide`) from a `git archive` of <sdk> at <commit> unpacked under <work> (a
-# scratch dir; the SDK checkout is only read). The source version must equal the installed
-# `cargo pmcp --version`. Writes models/decide/resolver-proof.txt, which `laya-deploy` requires.
-laya-resolver-proof sdk commit work:
+# Execute cargo-pmcp's own `find_lambda_package_dir` on THIS workspace (root `crates`, server id
+# <server>) from a `git archive` of <sdk> at <commit> unpacked under <work> (a scratch dir; the SDK
+# checkout is only read). The source version must equal the installed `cargo pmcp --version`.
+# The server id is REQUIRED (plan 10-12, D-19): it must resolve to `crates/<server>-lambda`, the
+# thin per-server crate. Writes models/decide/resolver-proof-<server>.txt, which `laya-deploy`
+# requires for that server.
+laya-resolver-proof sdk commit work server:
     #!/usr/bin/env bash
     set -euo pipefail
     SDK="{{sdk}}"
     WORK="{{work}}"
+    SERVER="{{server}}"
     REPO="$(pwd -P)"
-    PROOF="models/decide/resolver-proof.txt"
-    EXPECT="crates/aprender-mcp-decide-lambda"
+    PROOF="models/decide/resolver-proof-$SERVER.txt"
+    EXPECT="crates/$SERVER-lambda"
     INJECT="scripts/laya_deploy/cargo_pmcp_resolver_proof.rs"
     TEST="deployment::builder::aprender_resolver_proof::aprender_decide_resolves_from_shared_crates_root"
     git -C "$SDK" rev-parse --git-dir >/dev/null 2>&1 || { echo "ERROR: $SDK is not a git checkout" >&2; exit 2; }
@@ -1589,7 +1592,7 @@ laya-resolver-proof sdk commit work:
     [ -f "$SDK/Cargo.lock" ] && cp "$SDK/Cargo.lock" "$DEST/Cargo.lock"
     LOG="$WORK/resolver-proof-test.log"
     set +e
-    (cd "$DEST" && APRENDER_WORKSPACE="$REPO" CARGO_TARGET_DIR="$WORK/target" \
+    (cd "$DEST" && APRENDER_WORKSPACE="$REPO" APRENDER_PROOF_SERVER="$SERVER" CARGO_TARGET_DIR="$WORK/target" \
         cargo test -p cargo-pmcp --bin cargo-pmcp aprender_resolver_proof -- --nocapture) \
         > "$LOG" 2>&1
     rc=$?
@@ -1600,7 +1603,7 @@ laya-resolver-proof sdk commit work:
         exit 1
     fi
     grep -q 'test result: ok. 1 passed' "$LOG" || { echo "ERROR: the filter did not run exactly one test (log: $LOG)" >&2; exit 1; }
-    PARSED="$(just _laya-resolver-parse "$LOG")" || { echo "ERROR: the resolver test printed no RESOLVED line (log: $LOG)" >&2; exit 1; }
+    PARSED="$(just _laya-resolver-parse "$LOG" "$SERVER")" || { echo "ERROR: the resolver test printed no RESOLVED line (log: $LOG)" >&2; exit 1; }
     RESOLVED="$(printf '%s\n' "$PARSED" | sed -n 's/^RESOLVED=//p')"
     CONTROL="$(printf '%s\n' "$PARSED" | sed -n 's/^CONTROL=//p')"
     test "$RESOLVED" = "$EXPECT" || { echo "ERROR: the resolver returned '$RESOLVED', not $EXPECT" >&2; exit 1; }
@@ -1614,7 +1617,7 @@ laya-resolver-proof sdk commit work:
         echo "sdk_commit=$FULL"
         echo "builder_rs_last_commit=$BUILDER_LAST"
         echo "deploy_root=crates"
-        echo "server=aprender-mcp-decide"
+        echo "server=$SERVER"
         echo "control_per_crate_root=$CONTROL"
         echo "proven_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     } > "$PROOF"
@@ -1622,19 +1625,22 @@ laya-resolver-proof sdk commit work:
     echo "  cargo-pmcp $INST_VER, source $FULL (builder.rs last changed in $BUILDER_LAST)"
     echo "  wrote $PROOF (gitignored)"
 
-# The RESOLVED / CONTROL values of a resolver-proof test log (plan 08-22, D3-1). The tokens are read
-# ANYWHERE on a line: under --nocapture libtest writes `test <name> ... ` onto the first output line,
-# so a column-0 anchor can miss them. Prints `RESOLVED=<dir>` and `CONTROL=<dir>` (the first of each);
-# no RESOLVED line exits 1. Pure: no cargo. Row `resolver-proof-sed` of scripts/laya_gates.tsv.
+# The RESOLVED / CONTROL values of a resolver-proof test log (plan 08-22, D3-1) for <server>. The tokens
+# are read ANYWHERE on a line: under --nocapture libtest writes `test <name> ... ` onto the first output
+# line, so a column-0 anchor can miss them. Prints `RESOLVED=<dir>` and `CONTROL=<dir>` (the first of
+# each); no RESOLVED line exits 1. Only lines for exactly this server match (a server id is ASCII
+# letters, digits and hyphens, so it is safe inside the pattern). Pure: no cargo. Row
+# `resolver-proof-sed` of scripts/laya_gates.tsv.
 [positional-arguments]
-_laya-resolver-parse log:
+_laya-resolver-parse log server:
     #!/usr/bin/env bash
     set -euo pipefail
     LOG="$1"
+    SERVER="$2"
     [ -f "$LOG" ] || { echo "REFUSED resolver-parse: $LOG does not exist" >&2; exit 1; }
     first() { awk -v pat="$1" 'match($0, pat) { print substr($0, RSTART + RLENGTH); exit }' "$LOG"; }
-    RESOLVED="$(first 'RESOLVED root=crates server=aprender-mcp-decide -> ')"
-    CONTROL="$(first 'CONTROL root=[^ ]* server=aprender-mcp-decide -> ')"
+    RESOLVED="$(first "RESOLVED root=crates server=$SERVER -> ")"
+    CONTROL="$(first "CONTROL root=[^ ]* server=$SERVER -> ")"
     [ -n "$RESOLVED" ] || { echo "REFUSED resolver-parse: no RESOLVED line in $LOG" >&2; exit 1; }
     printf 'RESOLVED=%s\nCONTROL=%s\n' "$RESOLVED" "$CONTROL"
 
@@ -1821,10 +1827,11 @@ _laya-crates-root-swap root cfg snap +cmd:
     set -e
     exit "$rc"
 
-# Cross-compile the decide bootstrap for Lambda arm64 and prove it: rebuilt now (the output is
-# newer than the build's start), an aarch64 ELF, and carrying `aprender-mcp-decide-lambda` (08-07
-# found a stale bootstrap from another crate at this path). A BUILD check, never resolver evidence.
-laya-build-bootstrap:
+# Cross-compile the bootstrap of <server> (the thin crate `<server>-lambda`, D-19) for Lambda arm64
+# and prove it: rebuilt now (the output is newer than the build's start), an aarch64 ELF, and
+# carrying `<server>-lambda` (08-07 found a stale bootstrap from another crate at this path). A
+# BUILD check, never resolver evidence.
+laya-build-bootstrap server:
     #!/usr/bin/env bash
     set -euo pipefail
     ulimit -n 65536 || echo "WARNING: could not raise the fd limit; a link may fail with ProcessFdQuotaExceeded" >&2
@@ -1835,9 +1842,9 @@ laya-build-bootstrap:
     trap 'rm -f "$STAMP"' EXIT
     sleep 1
     # A cached build relinks nothing, so "newer than the start" needs the package to rebuild.
-    touch crates/aprender-mcp-decide-lambda/src/main.rs
+    touch "crates/{{server}}-lambda/src/main.rs"
     set +e
-    cargo zigbuild --release --target {{target}}.2.34 -p aprender-mcp-decide-lambda --bin bootstrap
+    cargo zigbuild --release --target {{target}}.2.34 -p "{{server}}-lambda" --bin bootstrap
     rc=$?
     set -e
     [ "$rc" -eq 0 ] || { echo "ERROR: cargo zigbuild exited $rc" >&2; exit "$rc"; }
@@ -1848,8 +1855,8 @@ laya-build-bootstrap:
         *"ARM aarch64"*) ;;
         *) echo "ERROR: not an aarch64 binary: $FT" >&2; exit 1 ;;
     esac
-    NAMED="$(strings "$OUT" | grep -c 'aprender-mcp-decide-lambda' || true)"
-    [ "${NAMED:-0}" -gt 0 ] || { echo "ERROR: $OUT does not name aprender-mcp-decide-lambda -- a stale bootstrap from another crate" >&2; exit 1; }
+    NAMED="$(strings "$OUT" | grep -c -F -- '{{server}}-lambda' || true)"
+    [ "${NAMED:-0}" -gt 0 ] || { echo "ERROR: $OUT does not name {{server}}-lambda -- a stale bootstrap from another crate" >&2; exit 1; }
     echo "BOOTSTRAP aarch64 OK $OUT ($(wc -c < "$OUT" | tr -d ' ') bytes)"
 
 # Deploy <apr> as the decide server, FAIL-CLOSED. Refusals, each `REFUSED <check>: ...` before
