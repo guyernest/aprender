@@ -74,7 +74,35 @@
     "auth": "off"
   },
   "not_exercised_offline": "remote authentication, the cold path and the live identity are first exercised by plan 10-08",
-  "decision": null,
+  "decision": {
+    "choice": "replace-auth-off",
+    "auth": "off",
+    "date": "2026-10-22",
+    "decided_at": "2026-10-22T14:11:06Z",
+    "decided_by": "owner",
+    "owner_reply": "replace-auth-off",
+    "access_confirmed": false,
+    "access_confirmed_note": "The owner's reply did not state that the AWS profile and cargo pmcp login are in place, so access was established by read-only checks, not taken from silence. The AWS half passed; the pmcp.run half did not: the cached pmcp.run access token is expired. Plan 10-08 must not start its live steps until a fresh `cargo pmcp deploy login --target-type pmcp-run` (or a confirmed successful refresh) is done by the owner or authorised by them.",
+    "access_checks": {
+      "aws_profile": {
+        "profile": "ze-kasher-dev",
+        "command": "aws sts get-caller-identity --profile ze-kasher-dev",
+        "rc": 0,
+        "ok": true,
+        "principal": "IAM user (account id deliberately not recorded)"
+      },
+      "pmcp_run_login": {
+        "command": "read of the local cache ~/.pmcp/credentials.toml, key pmcp-run.expires_at only (no token read or printed); cargo pmcp 0.28.1 has no read-only login-status verb for the pmcp.run deploy target",
+        "ok": false,
+        "failing_check": "pmcp-run access token expires_at 2026-10-21T19:08:45Z is before the check time 2026-10-22T14:11Z (about 19 h expired)",
+        "refresh_token_present": true,
+        "refresh_attempted": false,
+        "refresh_not_attempted_because": "a refresh rewrites ~/.pmcp/credentials.toml and calls the pmcp.run identity provider; the instruction allowed read-only checks only. Whether the refresh token still works is therefore UNKNOWN."
+      }
+    },
+    "auth_token_env": null,
+    "token_source": null
+  },
   "live_attempts": [],
   "live": null,
   "stance_demo": {
