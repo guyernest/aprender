@@ -856,7 +856,7 @@ The partner-side changes (classify batch at most 8, client transport to the pmcp
   5. The artifact is live through the existing pmcp.run path at 10,240 MB (server name and auth posture decided at the deploy checkpoint), identity-checked by the probe with `--expect-sha256`, and the acceptance replay (one result per text, labels in task order, probabilities summing to 1, the returned sha equal to the pin) is recorded with timings reported and not gated; every gate green (`cargo fmt --all -- --check`, strict clippy on touched crates, their tests, `pv validate` on any touched contract, `bashrs lint` on new scripts).
 
 **Branch base**: continues on `gsd/phase-2-contract-gate` per the 02-01 policy.
-**Plans:** 5/11 plans executed
+**Plans:** 6/11 plans executed
 
 Plans:
 **Wave 1**
@@ -872,7 +872,7 @@ Plans:
 
 **Wave 4** *(blocked on Wave 3 completion)*
 - [ ] 10-05-PLAN.md — SetFit s64e1b16 cell through an attested two-label adapter, an explicit validated e1b16 CPU config and the apr doors (same train split, same eval split), `laya-setfit-cell`; domain refusals classified, SC-4 acceptance checkpoint on a refusal
-- [ ] 10-07-PLAN.md — resolver re-proof for cargo-pmcp 0.28.1, DRY_RUN deploy selftest on the new artifact, the offline door check (`DRY_RUN=1 just laya-deploy-verify`), the owner's D-13 decision (replace / auth posture and the probe token convention)
+- [x] 10-07-PLAN.md — resolver re-proof for cargo-pmcp 0.28.1, DRY_RUN deploy selftest on the new artifact, the offline door check (`DRY_RUN=1 just laya-deploy-verify`), the owner's D-13 decision (replace / auth posture and the probe token convention)
 
 **Wave 5** *(blocked on Wave 4 completion)*
 - [ ] 10-06-PLAN.md — `apr eval --split test --dump-probabilities` on the existing lock-gated door; accuracy-to-accuracy control with a mutation check; house macro-F1, per-class F1 and ECE from the dump; the Laya side-by-side table (D-07 readout form)
