@@ -31,6 +31,7 @@ use aprender_decide::ArtifactError;
 pub use aprender_mcp_decide::{build_server as build_decide_server, Model, ModelLoadError};
 use pmcp::server::streamable_http_server::{StreamableHttpServer, StreamableHttpServerConfig};
 
+pub mod bootstrap;
 pub mod probe;
 pub mod s3;
 
@@ -108,9 +109,6 @@ pub async fn watch_loopback(handle: tokio::task::JoinHandle<()>, exit: impl FnOn
 
 /// The server name when `PMCP_SERVER_ID` is unset.
 pub const DEFAULT_SERVER_NAME: &str = "aprender-decide";
-/// This package, named in the health body so a post-deploy GET tells this binary apart
-/// from the Chronos one.
-pub const PACKAGE: &str = env!("CARGO_PKG_NAME");
 /// The methods the bootstrap answers: the `allow` header of a 405 and the CORS preflight.
 pub const ALLOWED_METHODS: &str = "POST, GET, OPTIONS";
 
@@ -153,16 +151,24 @@ const HEALTH_MESSAGE: &str = "Laya decide MCP server (aprender-mcp-decide via ap
 /// `APRENDER_DECIDE_MODEL` cannot load answers 503 with `ok: false` and `config_error`
 /// naming what is missing or malformed ([`SourceError`]'s Display, which never echoes a
 /// value). Neither answer loads the model: `loaded` only reports whether one already did.
+///
+/// `package` is the crate the BINARY was built from (a thin per-server crate, D-19), named
+/// in the body so a post-deploy GET tells this binary apart from the Chronos one and a
+/// server's binary from another server's.
 #[allow(clippy::disallowed_methods)] // serde_json::json! expands to .unwrap()
 #[must_use]
-pub fn health(source: &Result<ModelSource, SourceError>, loaded: bool) -> (u16, serde_json::Value) {
+pub fn health(
+    source: &Result<ModelSource, SourceError>,
+    loaded: bool,
+    package: &str,
+) -> (u16, serde_json::Value) {
     match source {
         Ok(_) => (
             200,
             serde_json::json!({
                 "ok": true,
                 "server": server_name(),
-                "package": PACKAGE,
+                "package": package,
                 "loaded": loaded,
                 "message": HEALTH_MESSAGE,
             }),
@@ -172,7 +178,7 @@ pub fn health(source: &Result<ModelSource, SourceError>, loaded: bool) -> (u16, 
             serde_json::json!({
                 "ok": false,
                 "server": server_name(),
-                "package": PACKAGE,
+                "package": package,
                 "loaded": loaded,
                 "config_error": e.to_string(),
                 "message": "the model-source configuration is invalid; MCP requests cannot load the model until it is fixed",

@@ -934,6 +934,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "aprender-mcp-decide-antisemite-lambda"
+version = "0.69.3"
+dependencies = [
+ "aprender-mcp-decide-lambda",
+]
+
+[[package]]
 name = "aprender-mcp-decide-lambda"
 version = "0.69.3"
 dependencies = [

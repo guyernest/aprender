@@ -318,7 +318,7 @@ fn test_no_unauthorized_binaries() {
         "aprender-mcp-chronos",         // Chronos-Bolt server (Phase 6 D-06; created in plan 06-07)
         "aprender-mcp-chronos-lambda",  // Chronos-Bolt AWS Lambda custom runtime (bootstrap)
         "aprender-mcp-decide",          // Laya decision server (Phase 8 D-15)
-        "aprender-mcp-decide-lambda",   // its AWS Lambda custom runtime (bootstrap) (Phase 8 D-15)
+        "aprender-mcp-decide-antisemite-lambda", // server id `aprender-mcp-decide-antisemite`: the decide runtime's Lambda bootstrap (Phase 10 D-19)
     ]
     .into();
 
@@ -436,6 +436,12 @@ fn test_no_unauthorized_binaries() {
     // discuss-phase, before the crate existed).
     // 8 -> 9: `aprender-mcp-decide-lambda` (plan 08-07), its Lambda `bootstrap`, which
     // the same D-15 decision names as the pmcp.run deployment unit.
+    // 9 -> 9: SWAPPED, not grown (plan 10-12, the owner's 2026-10-22 statement, D-19). cargo-pmcp
+    // resolves a server id to `<deploy-root>/<server>-lambda`, so each served model needs a crate
+    // of that exact name. The shared `aprender-mcp-decide-lambda` stopped shipping a bin (it is a
+    // model-agnostic runtime library now) and the thin `aprender-mcp-decide-antisemite-lambda`
+    // replaced it as the deployment unit. The NEXT model's thin crate is growth (9 -> 10) and
+    // needs a recorded CONTEXT decision with a blocking-human checkpoint.
     const DEPLOYMENT_UNIT_BASELINE: usize = 9;
     assert!(
         deployment_unit_bins.len() <= DEPLOYMENT_UNIT_BASELINE,

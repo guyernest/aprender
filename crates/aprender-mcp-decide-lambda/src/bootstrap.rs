@@ -1,4 +1,6 @@
-//! `bootstrap` — the AWS Lambda entry for the thin decide MCP server (Phase 8 D-15).
+//! The AWS Lambda runtime of the thin decide MCP server (Phase 8 D-15), shared by every
+//! per-server `bootstrap` binary (D-19): a thin `aprender-mcp-decide-<dataset>-lambda` crate
+//! calls [`run`] and nothing else.
 //!
 //! The loopback-proxy pattern of `aprender-mcp-chronos-lambda`: the pmcp
 //! streamable-HTTP server runs as an in-process background task bound to 127.0.0.1,
@@ -22,16 +24,17 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use aprender_mcp_decide_lambda::{
+use lambda_http::{run as run_lambda, service_fn, Body, Error, Request, RequestExt as _, Response};
+use once_cell::sync::OnceCell;
+use reqwest::Client;
+use tracing_subscriber::EnvFilter;
+
+use crate::{
     build_server, download_budget, health, load_header_value, load_log_line, parse_probe_id,
     proxied_headers, remaining_before, resolve_model_within, route, s3, server_name,
     start_loopback, watch_loopback, LoadOnce, LoadTimeline, ModelSource, Route, ALLOWED_METHODS,
     PROBE_ID_HEADER,
 };
-use lambda_http::{run, service_fn, Body, Error, Request, RequestExt as _, Response};
-use once_cell::sync::OnceCell;
-use reqwest::Client;
-use tracing_subscriber::EnvFilter;
 
 /// What the first MCP request builds: the loopback server over the loaded model.
 struct Loaded {
@@ -122,8 +125,9 @@ fn json_response(status: u16, body: String) -> Result<Response<Body>, Error> {
         .map_err(|e| Error::from(e.to_string()))
 }
 
-/// Proxy one Lambda invocation to the loopback MCP server.
-async fn handler(event: Request) -> Result<Response<Body>, Error> {
+/// Proxy one Lambda invocation to the loopback MCP server. `package` is the crate the binary
+/// was built from, named in the health body.
+async fn handler(event: Request, package: &str) -> Result<Response<Body>, Error> {
     let method = event.method().clone();
     let path_q = event
         .uri()
@@ -136,7 +140,7 @@ async fn handler(event: Request) -> Result<Response<Body>, Error> {
         // so a post-deploy GET tells this binary apart from the Chronos one, and it says ok
         // only when the model-source config parses (A4-6).
         Route::Health => {
-            let (status, body) = health(&ModelSource::from_env(), LOADED.get().is_some());
+            let (status, body) = health(&ModelSource::from_env(), LOADED.get().is_some(), package);
             return json_response(status, body.to_string());
         }
         Route::Preflight => {
@@ -247,14 +251,27 @@ async fn handler(event: Request) -> Result<Response<Body>, Error> {
         .map_err(|e| Error::from(e.to_string()))
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Error> {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .with_ansi(false)
-        .try_init();
+/// Run the Lambda runtime for the binary built from `package` (a thin crate passes
+/// `env!("CARGO_PKG_NAME")`, so the health body names the crate that was built, not this
+/// library). Builds its own multi-thread tokio runtime, so a thin crate needs no tokio
+/// dependency. Returns only when the Lambda runtime ends.
+///
+/// # Errors
+///
+/// The tokio runtime cannot be built, or the Lambda runtime ends with an error.
+pub fn run(package: &'static str) -> Result<(), Error> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| Error::from(e.to_string()))?;
+    runtime.block_on(async move {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(
+                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+            )
+            .with_ansi(false)
+            .try_init();
 
-    run(service_fn(handler)).await
+        run_lambda(service_fn(move |event| handler(event, package))).await
+    })
 }

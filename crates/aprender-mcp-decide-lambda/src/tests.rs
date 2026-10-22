@@ -552,11 +552,11 @@ fn health_is_not_ok_on_invalid_config() {
     ]));
     let good_local = ModelSource::from_lookup(lookup(&[(ENV_MODEL, "/m.apr")]));
     for (source, loaded) in [(&good_s3, false), (&good_local, true)] {
-        let (status, body) = health(source, loaded);
+        let (status, body) = health(source, loaded, THIS_CRATE);
         assert_eq!(status, 200, "{body}");
         assert_eq!(body["ok"], true, "{body}");
         assert_eq!(body["loaded"], loaded, "{body}");
-        assert_eq!(body["package"], PACKAGE, "{body}");
+        assert_eq!(body["package"], THIS_CRATE, "{body}");
         assert!(body.get("config_error").is_none(), "{body}");
     }
 
@@ -578,7 +578,7 @@ fn health_is_not_ok_on_invalid_config() {
     ];
     for (source, expected) in &cases {
         assert_eq!(source.as_ref().err(), Some(expected));
-        let (status, body) = health(source, false);
+        let (status, body) = health(source, false, THIS_CRATE);
         assert_eq!(status, 503, "{expected:?}: {body}");
         assert_eq!(body["ok"], false, "{expected:?}: {body}");
         assert_eq!(body["loaded"], false, "{expected:?}: {body}");
@@ -588,6 +588,106 @@ fn health_is_not_ok_on_invalid_config() {
             "{expected:?}: {body}"
         );
         assert!(!body.to_string().contains(&secret_ish), "{body}");
+    }
+}
+
+/// D-19: the health body names the package the BINARY was built from (the thin per-server
+/// crate that called `bootstrap::run`), not the shared library that holds the code, for the
+/// 200 answer and for the 503 answer alike.
+#[test]
+fn health_reports_the_package_it_is_given() {
+    let sha = "a".repeat(64);
+    let good = ModelSource::from_lookup(lookup(&[
+        (ENV_S3_URI, "s3://bucket/decide/abc.apr"),
+        (ENV_SHA256, &sha),
+    ]));
+    let bad = ModelSource::from_lookup(lookup(&[]));
+    for package in [
+        "aprender-mcp-decide-antisemite-lambda",
+        "some-other-thin-lambda",
+    ] {
+        let (status, body) = health(&good, false, package);
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["package"], package, "{body}");
+        let (status, body) = health(&bad, false, package);
+        assert_eq!(status, 503, "{body}");
+        assert_eq!(body["package"], package, "{body}");
+    }
+}
+
+/// D-19: a served model is a THIN crate named `aprender-mcp-decide-<dataset>-lambda`: a
+/// `bootstrap` bin that calls the shared runtime and nothing else. This sweeps every such
+/// directory, so a thin crate that grows a handler, a route, a tool or a second dependency
+/// fails here (and the sweep cannot pass vacuously: at least one must exist).
+#[test]
+fn thin_server_crates_are_shims() {
+    let crates = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let mut thin: Vec<PathBuf> = std::fs::read_dir(&crates)
+        .expect("the crates directory is readable")
+        .map(|e| e.expect("a directory entry").path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_prefix("aprender-mcp-decide-"))
+                .and_then(|rest| rest.strip_suffix("-lambda"))
+                .is_some_and(|dataset| !dataset.is_empty())
+        })
+        .collect();
+    thin.sort();
+    assert!(
+        !thin.is_empty(),
+        "no aprender-mcp-decide-<dataset>-lambda crate found: the sweep would be vacuous"
+    );
+    for dir in &thin {
+        let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+        let manifest = std::fs::read_to_string(dir.join("Cargo.toml"))
+            .unwrap_or_else(|e| panic!("{name}/Cargo.toml: {e}"));
+        assert!(
+            manifest.contains("[[bin]]") && manifest.contains("name = \"bootstrap\""),
+            "{name}: Cargo.toml must declare the `bootstrap` bin"
+        );
+        // Dependencies: exactly one, the shared crate (string checks only, no TOML parser).
+        let mut in_deps = false;
+        let mut deps = Vec::new();
+        for line in manifest.lines().map(str::trim) {
+            if line.starts_with('[') {
+                in_deps = line == "[dependencies]";
+                assert!(
+                    !matches!(line, "[dev-dependencies]" | "[build-dependencies]"),
+                    "{name}: a thin crate has no {line}"
+                );
+            } else if in_deps && !line.is_empty() && !line.starts_with('#') {
+                deps.push(line.to_string());
+            }
+        }
+        assert!(
+            deps.len() == 1 && deps[0].starts_with("aprender-mcp-decide-lambda"),
+            "{name}: the only dependency is the shared crate, found {deps:?}"
+        );
+        let main = std::fs::read_to_string(dir.join("src/main.rs"))
+            .unwrap_or_else(|e| panic!("{name}/src/main.rs: {e}"));
+        let code: Vec<&str> = main
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with("//"))
+            .collect();
+        assert!(
+            code.len() <= 15,
+            "{name}: main.rs is {} code lines; a thin crate is a shim of at most 15",
+            code.len()
+        );
+        assert_eq!(
+            main.matches("bootstrap::run(").count(),
+            1,
+            "{name}: main.rs must call the shared `bootstrap::run` exactly once"
+        );
+        let code_text = code.join("\n");
+        for banned in ["service_fn", "async ", "route", "tool", "handler", "tokio"] {
+            assert!(
+                !code_text.contains(banned),
+                "{name}: main.rs declares `{banned}`; handlers, routes and tools live in the shared crates"
+            );
+        }
     }
 }
 
