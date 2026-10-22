@@ -1,0 +1,85 @@
+{
+  "schema": "laya-live-redeploy-v1",
+  "phase": "10-antisemitism-v1-decide-server-for-experiment-coach",
+  "plan": "10-07",
+  "server": "aprender-mcp-decide",
+  "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+  "artifact_path": "models/decide/laya-antisemitism-v1.apr",
+  "run_dir": "models/decide/laya-antisemitism-v1",
+  "labels": ["not_antisemitic", "antisemitic"],
+  "served_task_min_row_tokens": 86,
+  "served_task_min_row_tokens_note": "P from 10-TASK-EVIDENCE.json; the committed contract still reads 57 (the stance task's value) until plan 10-10 rewrites it after the deploy",
+  "door": {
+    "chosen_max_texts": 8,
+    "compiled_max_texts": 8,
+    "p_python": 86,
+    "min_row_tokens_rust": 86,
+    "instruction_retention": {
+      "head_cut": false,
+      "options_cut": false,
+      "head_kept_tokens": 54
+    },
+    "tokens_planned": {
+      "distributed": 800,
+      "concentrated": 800
+    },
+    "tokens_planned_note": "the request TOTAL (<= 800), never B x P (688)",
+    "door_evidence_commit": "a8734c53c1d798ec499a96f02eb04042ff810847",
+    "door_evidence_note": "plan 10-11 was a no-op at B = 8 (owner reply door-8 p90); no production commit, evidence recorded on top of 024565d196baddefa17335df600f777b158b3821",
+    "contract_version": "9.0.0"
+  },
+  "offline_door_check": {
+    "command": "DRY_RUN=1 just laya-deploy-verify models/decide/laya-antisemitism-v1.apr",
+    "rc": 0,
+    "wall_s": 31,
+    "stopped_line": "DRY-RUN: stopped before the network (no AWS call, no HTTP request)",
+    "shapes": {
+      "concentrated": {"probe": "plan", "shape": "concentrated", "texts": 2, "max_text_bytes": 16384, "tokens_planned": 800, "min_row_tokens": 86, "max_texts": 8, "max_total_tokens": 800, "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e", "labels": ["not_antisemitic", "antisemitic"]},
+      "distributed": {"probe": "plan", "shape": "distributed", "texts": 8, "max_text_bytes": 78, "tokens_planned": 800, "min_row_tokens": 86, "max_texts": 8, "max_total_tokens": 800, "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e", "labels": ["not_antisemitic", "antisemitic"]}
+    }
+  },
+  "resolver_proof": {
+    "cargo_pmcp_version": "0.28.1",
+    "sdk_commit": "d03484517dce988355b7e9bf3dd2746eec188019",
+    "builder_rs_last_commit": "b65d354ff23c971b8353476ed7fcbde661b2ae41",
+    "proven_at": "2026-10-22T13:31:36Z",
+    "command": "just laya-resolver-proof /Users/guy/Development/mcp/sdk/rust-mcp-sdk d0348451 /tmp/p10-07-proof",
+    "rc": 0,
+    "previous": {
+      "cargo_pmcp_version": "0.24.3",
+      "sdk_commit": "e0561f8c9086aec56a7f70a3a51537f0671d3ffa",
+      "builder_rs_last_commit": "c04fb4ccb1418e7f6283954d2686bdbf3fec7ce8",
+      "proven_at": "2026-09-27T04:05:49Z"
+    }
+  },
+  "offline_dry_run": {
+    "ok": true,
+    "commit": "659dbeb05f140ce92db2a63a0df5eb366631e434",
+    "command": "DRY_RUN=1 LAYA_ELIGIBLE_APR=models/decide/laya-antisemitism-v1.apr LAYA_ELIGIBLE_RUN=models/decide/laya-antisemitism-v1 LAYA_ELIGIBLE_DATA=data/decide/goldstandard-2024 LAYA_ELIGIBLE_BASE=<laya snapshot 55cf4c4e> just laya-deploy-selftest",
+    "rc": 0,
+    "wall_s": 1456,
+    "positive_leg": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+    "positive_leg_line": "DRY-RUN OK aprender-mcp-decide (sha256 2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e; nothing deployed)",
+    "bootstrap_line": "BOOTSTRAP aarch64 OK (26193480 bytes)",
+    "aws_calls": 0,
+    "final_line": "DEPLOY SELFTEST OK"
+  },
+  "deploy_config_dry_run": {
+    "ok": true,
+    "command": "DRY_RUN=1 just laya-deploy-config models/decide/laya-antisemitism-v1.apr off aprender-mcp-decide dev ze-kasher-dev",
+    "rc": 0,
+    "sha_pin": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+    "key": "decide/aprender-mcp-decide/2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e.apr",
+    "bucket": "dry-run-bucket",
+    "auth": "off"
+  },
+  "not_exercised_offline": "remote authentication, the cold path and the live identity are first exercised by plan 10-08",
+  "decision": null,
+  "live_attempts": [],
+  "live": null,
+  "stance_demo": {
+    "sha": "24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a",
+    "endpoint": "https://aprender-mcp-decide.us-east.true-mcp.com/mcp",
+    "note": "replaced only after the owner's D-13 decision"
+  }
+}
