@@ -39,6 +39,7 @@
   },
   "historical_residue_unchanged": [],
   "docs_edited": [],
+  "task2_skip": "action is no-op: the decide README, the lambda deploy-template comment, CLAUDE.md and ledger row 112 keep saying 8 and stay true; plan 10-10 owns the post-deploy documentation",
   "probe": {
     "replay_range": "1..=8",
     "replay_above_door": {
