@@ -875,7 +875,7 @@ Plans:
 - [x] 10-07-PLAN.md — resolver re-proof for cargo-pmcp 0.28.1, DRY_RUN deploy selftest on the new artifact, the offline door check (`DRY_RUN=1 just laya-deploy-verify`), the owner's D-13 decision (replace / auth posture and the probe token convention)
 
 **Wave 5** *(blocked on Wave 4 completion)*
-- [ ] 10-06-PLAN.md — `apr eval --split test --dump-probabilities` on the existing lock-gated door; accuracy-to-accuracy control with a mutation check; house macro-F1, per-class F1 and ECE from the dump; the Laya side-by-side table (D-07 readout form)
+- [ ] 10-06-PLAN.md — `apr eval --split test --dump-probabilities` on the existing lock-gated door; accuracy-to-accuracy control with a mutation check; house macro-F1, per-class F1 and ECE from the dump; the Laya side-by-side table (D-07 readout form) — DEFERRED 2026-10-22 by the owner: blocked by SC-4 (no SetFit cell to measure; apr eval memory defect). Revisit with the apr eval memory fix.
 - [ ] 10-08-PLAN.md — live redeploy through the existing pmcp.run path, identity probe + negative control, deploy-verify timings reported and normalized; a failed verify halts for the owner (it does not contain)
 
 **Wave 6** *(blocked on Wave 5 completion)*
