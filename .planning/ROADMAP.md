@@ -856,7 +856,7 @@ The partner-side changes (classify batch at most 8, client transport to the pmcp
   5. The artifact is live through the existing pmcp.run path at 10,240 MB (server name and auth posture decided at the deploy checkpoint), identity-checked by the probe with `--expect-sha256`, and the acceptance replay (one result per text, labels in task order, probabilities summing to 1, the returned sha equal to the pin) is recorded with timings reported and not gated; every gate green (`cargo fmt --all -- --check`, strict clippy on touched crates, their tests, `pv validate` on any touched contract, `bashrs lint` on new scripts).
 
 **Branch base**: continues on `gsd/phase-2-contract-gate` per the 02-01 policy.
-**Plans:** 7/11 plans executed
+**Plans:** 8/11 plans executed
 
 Plans:
 **Wave 1**
@@ -876,7 +876,7 @@ Plans:
 
 **Wave 5** *(blocked on Wave 4 completion)*
 - [ ] 10-06-PLAN.md — `apr eval --split test --dump-probabilities` on the existing lock-gated door; accuracy-to-accuracy control with a mutation check; house macro-F1, per-class F1 and ECE from the dump; the Laya side-by-side table (D-07 readout form) — DEFERRED 2026-10-22 by the owner: blocked by SC-4 (no SetFit cell to measure; apr eval memory defect). Revisit with the apr eval memory fix.
-- [ ] 10-08-PLAN.md — live redeploy through the existing pmcp.run path, identity probe + negative control, deploy-verify timings reported and normalized; a failed verify halts for the owner (it does not contain)
+- [x] 10-08-PLAN.md — live redeploy through the existing pmcp.run path, identity probe + negative control, deploy-verify timings reported and normalized; a failed verify halts for the owner (it does not contain)
 
 **Wave 6** *(blocked on Wave 5 completion)*
 - [ ] 10-10-PLAN.md — documentation only after the deploy: contract (served_task_min_row_tokens, FALSIFY-DECIDE-TOOL-009) / lambda README / CLAUDE.md / claims ledger say what is served, with one sha, one door and one P cross-checked; then the phase-wide SC-5 static gates (no new `.sh`, `bash -n` on every justfile recipe added or changed, strict clippy on every touched crate)
