@@ -59,6 +59,15 @@ the reply proposed that the owner accepted. The reply's section numbers (C, R, B
   per row at the served `head_max_len` 192 / `max_len` 512). The budget is measured with the served tokenizer
   (Laya-en snapshot 55cf4c4e) before training, recorded in the run record, and the measured number — not the
   estimate — goes into the hand-off.
+  — **Amended 2026-10-21 (owner, with the /gsd-review request):** "the batch requirement is not critical, and we can
+  use the model for a single post classification if it improves the accuracy thanks to better instructions or
+  otherwise." Accuracy of the instructions now outranks eight-tweets-per-call. The prefix budget P is therefore no
+  longer anchored to "eight median tweets fit" (P <= 44) or to the 8 x P <= 800 ceiling (P <= 100) as a goal. What is
+  NOT decided: the served door (`classify_max_texts: 8`, `served_task_min_row_tokens`, `check_served_task_fits`) still
+  refuses to build a server whose task exceeds 8 x P <= 800, and Laya's builder silently cuts instructions past
+  `head_max_len` 192. Allowing a larger P means lowering `classify_max_texts` in `decide-tool-boundary-v1` (a contract
+  change; experiment-coach would send one text per call), or keeping P <= 100. That choice, and the P value itself, is
+  made at the plan 10-01 owner checkpoint with the measured table; the plans must present both options.
 - **D-06 (owner):** "We can add the guide text as needed based on the published paper." The source text is
   Jikeli, Karali, Miehling, Soemer, "Antisemitic Messages? A Guide to High-Quality Annotation and a Labeled
   Dataset of Tweets" (arXiv 2304.14599; the 12-paragraph IHRA-based guideline). aprender drafts the condensation;
@@ -112,6 +121,9 @@ the reply proposed that the owner accepted. The reply's section numbers (C, R, B
 - **D-15 (owner):** "Batch size can be smaller and 8 is fine." The door stays 8 texts / 800 built tokens
   (decide-tool-boundary-v1); experiment-coach lowers `classify_batch` from 32 to at most 8 on their side. No door
   re-derivation in this phase.
+  — **Amended 2026-10-21 (owner):** batch size is not critical; single-text calls are acceptable if they improve
+  accuracy (see the D-05 amendment). experiment-coach's batch change (32 to at most 8) becomes "at most the served
+  `classify_max_texts`", which may be 1.
 - **D-16 (owner):** "No problem with cold start, as we are running it as part of an agent work, which is less
   sensitive to latency." The acceptance replay tests function and identity (one result per text, labels in task
   order, probabilities summing to 1, returned sha equal to the pin); cold and warm timings are REPORTED from the
