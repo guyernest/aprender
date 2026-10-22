@@ -1342,6 +1342,18 @@ laya-train data out *args:
     uv run --project scripts/laya_train --frozen python scripts/laya_train/train.py \
         --data "{{data}}" --out "{{out}}" {{args}}
 
+# The D-10 one-epoch probe: a MEASUREMENT, not a gate run. One epoch of seed 13 through train.train_seed on the
+# real fit rows, the device read back, the per-step time, the per-epoch monitor cost, the row-length record and
+# the host load -> the evidence JSON <out> (only). No run dir, recipe or checkpoint. A thin wrapper: its own exit is
+# the missing-task.json error; the run-dir guard (REFUSED run-dir-exists once models/decide/laya-antisemitism-v1
+# exists) and the measurement are probe_epoch.py's. `--dry-run` validates and prints the planned steps.
+laya-probe-epoch data out *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    test -f "{{data}}/task.json" || { echo "ERROR: {{data}}/task.json does not exist" >&2; exit 2; }
+    uv run --project scripts/laya_train --frozen python -I scripts/laya_train/probe_epoch.py \
+        --data "{{data}}" --out "{{out}}" {{args}}
+
 # The tracer's thin slice: a real train -> F16 save -> complete dir -> reload -> calibrate -> gate on
 # the committed tiny checkpoint, on CPU in seconds (synthetic-fixture variant), once per declared
 # stopping rule (early_stopping, fixed_epochs). Prints LIFECYCLE OK.
