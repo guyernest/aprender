@@ -1342,6 +1342,51 @@ laya-train data out *args:
     uv run --project scripts/laya_train --frozen python scripts/laya_train/train.py \
         --data "{{data}}" --out "{{out}}" {{args}}
 
+# The D-11 SetFit comparison cell (plan 10-05): s64e1b16 at seed 13 on the Laya splits as adapted by
+# crates/aprender-contrastive-data/examples/laya_dir_to_canonical.rs (test == the Laya eval set). select (only when
+# no selection manifest exists; written to a temporary sibling and moved) -> train with the tracked explicit config
+# (CPU, about 30 min) -> eval validation (--lock-out) -> eval test (--selection-lock). `apr eval` reports ACCURACY.
+# Exit 0 = SETFIT CELL OK, 2 = SETFIT CELL REFUSED <step>: <detail>. The args are <data> <out> <config> <sel>; an
+# empty <sel> means <data>/selection-s64-seed13.
+laya-setfit-cell data="data/decide/goldstandard-2024-setfit" out="models/setfit/goldstandard-2024-s64e1b16-seed13" config="scripts/laya_train/setfit_cell_e1b16_cpu.json" sel="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    refuse() { echo "SETFIT CELL REFUSED $1: $2"; exit 2; }
+    test -f "{{data}}/benchmark-manifest.json" || refuse select "no benchmark-manifest.json under {{data}} (run the laya_dir_to_canonical adapter, plan 10-05)"
+    test -f "{{config}}" || refuse config "no config file {{config}} (apr setfit train requires --config)"
+    MINILM="${SETFIT_MINILM_DIR:-$HOME/.cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2/snapshots/1110a243fdf4706b3f48f1d95db1a4f5529b4d41}"
+    test -d "$MINILM" || refuse train "no MiniLM snapshot at the pinned revision (set SETFIT_MINILM_DIR)"
+    OUT="{{out}}"
+    test ! -e "$OUT/cell.apr" || refuse train "$OUT/cell.apr already exists; move it aside, apr setfit train will not replace it"
+    . scripts/apr_bin.sh || exit 1
+    export CARGO_INCREMENTAL=0
+    SELDIR="{{sel}}"; [ -n "$SELDIR" ] || SELDIR="{{data}}/selection-s64-seed13"
+    SEL="$SELDIR/selection-manifest.json"
+    mkdir -p "$OUT"
+    if [ ! -f "$SEL" ]; then
+        test ! -e "$SELDIR" || refuse select "$SELDIR exists but holds no selection-manifest.json"
+        TMPSEL="$SELDIR.tmp.$$"
+        rc=0
+        "$APR" data select --data "{{data}}" --shots 64 --seed 13 --output "$TMPSEL" > "$OUT/select.log" 2>&1 || rc=$?
+        if [ "$rc" -ne 0 ]; then rm -rf "$TMPSEL"; refuse select "$(grep -m 1 -E 'rror|REFUSED|efus' "$OUT/select.log" || echo "exit $rc")"; fi
+        mv "$TMPSEL" "$SELDIR"
+    fi
+    T0="$(date +%s)"
+    rc=0
+    "$APR" setfit train --config "{{config}}" --data "{{data}}" --selection "$SEL" --model-dir "$MINILM" \
+        --output "$OUT/cell.apr" --seed 13 > "$OUT/train.log" 2>&1 || rc=$?
+    TRAIN_SECONDS=$(( $(date +%s) - T0 ))
+    if [ "$rc" -ne 0 ]; then refuse train "$(grep -m 1 -E 'setfit training: |rror|REFUSED|efus' "$OUT/train.log" || echo "exit $rc")"; fi
+    rc=0
+    "$APR" eval "$OUT/cell.apr" --task classify --data "{{data}}" --selection "$SEL" --split validation \
+        --lock-out "$OUT/selection.lock" --json > "$OUT/eval-validation.json" 2> "$OUT/eval-validation.log" || rc=$?
+    if [ "$rc" -ne 0 ]; then refuse eval-validation "$(grep -m 1 -E 'rror|REFUSED|efus' "$OUT/eval-validation.log" || echo "exit $rc")"; fi
+    rc=0
+    "$APR" eval "$OUT/cell.apr" --task classify --data "{{data}}" --selection "$SEL" --split test \
+        --selection-lock "$OUT/selection.lock" --json > "$OUT/eval-test.json" 2> "$OUT/eval-test.log" || rc=$?
+    if [ "$rc" -ne 0 ]; then refuse eval-test "$(grep -m 1 -E 'rror|REFUSED|efus' "$OUT/eval-test.log" || echo "exit $rc")"; fi
+    python3 -I -c 'import json, sys; r = json.load(open(sys.argv[1])); print("SETFIT CELL OK cell=s64e1b16 seed=13 artifact_sha256=%s metric_tag=%s value=%s n_rows=%s train_seconds=%s" % (r["artifact_sha256"], r["metric"], r["value"], r["n_rows"], sys.argv[2]))' "$OUT/eval-test.json" "$TRAIN_SECONDS"
+
 # The D-10 one-epoch probe: a MEASUREMENT, not a gate run. One epoch of seed 13 through train.train_seed on the
 # real fit rows, the device read back, the per-step time, the per-epoch monitor cost, the row-length record and
 # the host load -> the evidence JSON <out> (only). No run dir, recipe or checkpoint. A thin wrapper: its own exit is
@@ -3250,6 +3295,22 @@ laya-gates-selftest:
         must_fail cut 'REFUSED prefix-cut' just laya-prepare-goldstandard --measure --task "$W/pb-cut.json"
         must_pass bare '"markers": ?2,.*"fits_door": ?true' just laya-prepare-goldstandard --measure --task "$W/pb-bare.json"
         must_pass report-only '"door_enforced": ?false,.*"max_texts_that_fit": ?[1-7][,}]' just laya-prepare-goldstandard --measure --task "$W/pb-over.json"
+    }
+    row_setfit_cell() {
+        # Plan 10-05. The refusals are the default tier: they fire before the apr pin, any build or any
+        # output dir. The cell itself trains on CPU for about 30 min, so it is FULL tier only; its selection
+        # is written under $W (the fourth argument), never into the real data dir.
+        must_fail no-data '^SETFIT CELL REFUSED select: no benchmark-manifest.json' just laya-setfit-cell "$W/setfit-no-data" "$W/setfit-out"
+        mkdir -p "$W/setfit-stub"
+        printf '{}\n' > "$W/setfit-stub/benchmark-manifest.json"
+        must_fail no-config '^SETFIT CELL REFUSED config:' just laya-setfit-cell "$W/setfit-stub" "$W/setfit-out2" "$W/no-such-config.json"
+        test ! -e "$W/setfit-out" || red "no-data: the refused cell created its output dir"
+        test ! -e "$W/setfit-out2" || red "no-config: the refused cell created its output dir"
+        if [ "$FULL" = "1" ]; then
+            must_pass cell '^SETFIT CELL OK cell=s64e1b16 seed=13 ' just laya-setfit-cell data/decide/goldstandard-2024-setfit "$W/setfit-cell" scripts/laya_train/setfit_cell_e1b16_cpu.json "$W/setfit-sel"
+        else
+            full_only "the s64e1b16 cell (CPU SetFit training, about 30 min)"
+        fi
     }
     row_verify_suite() {
         mkdir -p "$W/no-model"
