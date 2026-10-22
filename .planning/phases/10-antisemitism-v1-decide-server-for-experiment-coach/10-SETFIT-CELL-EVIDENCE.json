@@ -1,0 +1,96 @@
+{
+  "schema": "laya-setfit-cell-evidence-v1",
+  "cell": "s64e1b16",
+  "seed": 13,
+  "recipe": "SetFitTrainConfig::reference_defaults(13) as the explicit file scripts/laya_train/setfit_cell_e1b16_cpu.json",
+  "config": {
+    "path": "scripts/laya_train/setfit_cell_e1b16_cpu.json",
+    "sha256": "19f7b10bd418f2047570c7f02ee7c7b7bcec89252b95c81938d191f1350212a9",
+    "equals_reference_defaults_seed13": true,
+    "proof": "apr-cli test goldstandard_cell_config_equals_the_reference_recipe: parse_config on the file == SetFitTrainConfig::reference_defaults(13), ok"
+  },
+  "encoder": "all-MiniLM-L6-v2 @ 1110a243 (full_model.apr checkout at ~/.cache/aprender/minilm-l6-v2-1110a243, apr_sha256 980becb4b853b5043b8c87f001eb3d4b5bc3a12d724b8ca2c04423bce7c59831, source safetensors sha256 53aa51172d142c89d9012cce15ae4d6cc0ca6895895114379cacb4fab128d9db)",
+  "regime_note": "would be judged under the production regime's thresholds, which were measured on TweetEval stance (setfit-train-lifecycle-v1); never reached, because the real cell was not run",
+  "adapted_dir": "data/decide/goldstandard-2024-setfit (gitignored)",
+  "dataset_fingerprint": "6324c53561157e6c1ab2b573064da95e92d335985b03f09d7f1ee19344928abe",
+  "adapted_counts": {
+    "label_order": ["not_antisemitic", "antisemitic"],
+    "train": [6314, 1344],
+    "validation": [702, 150],
+    "test": [1755, 374]
+  },
+  "selection": {
+    "path": "data/decide/goldstandard-2024-setfit/selection-s64-seed13/selection-manifest.json",
+    "semantic_hash": "923a4afca4707336b30d1c8fcea6030f687744df3726b55f6d9d51d50123cf7c",
+    "shots_per_class": 64,
+    "root_seed": 13,
+    "excluded_train_rows": 0
+  },
+  "same_eval_split": {
+    "laya_eval_rows": 2129,
+    "test_rows": 2129,
+    "normalized_hash_sets_equal": true,
+    "train_plus_validation_rows": 8510,
+    "train_validation_partition_of_laya_train": true,
+    "validation_disjoint_from_test": true,
+    "validation_carve": {"fraction": 0.1, "seed": 13, "rows": 852, "per_class": {"not_antisemitic": 702, "antisemitic": 150}},
+    "measured_by": "python check with the Laya data.normalized_sha256 over the Laya files and the adapted files (SAME EVAL SPLIT OK test 2129 train 7658 validation 852)"
+  },
+  "train_subsample": "64 shots per class of 7658 adapted train rows (6314 not_antisemitic, 1344 antisemitic)",
+  "dry_run": {
+    "ok": true,
+    "scope": "request, config, attested boundary and selection replay only; the calibration regime and evidence thresholds are first checked by the real run",
+    "command": "apr setfit train --data data/decide/goldstandard-2024-setfit --selection <selection-manifest.json> --model-dir ~/.cache/aprender/minilm-l6-v2-1110a243 --output models/setfit/goldstandard-2024-s64e1b16-seed13/cell.apr --config scripts/laya_train/setfit_cell_e1b16_cpu.json --seed 13 --dry-run",
+    "note": "the dry run reported here was made with the HF snapshot as --model-dir, which a dry run does not open; the real run needs the full_model.apr checkout (plan deviation, commit 659dbeb05)"
+  },
+  "train": null,
+  "eval_validation": null,
+  "eval_test": null,
+  "metric_tag": null,
+  "metric_note": "apr eval measures ACCURACY (EVAL_METRIC = Accuracy); per-class F1, the second summary metric and ECE would come from plan 10-06's probability dump. No SetFit number of any kind exists for this dataset, and none is claimed.",
+  "commands": [
+    "cargo run --release -p aprender-contrastive-data --example laya_dir_to_canonical -- --laya-dir data/decide/goldstandard-2024 --output data/decide/goldstandard-2024-setfit",
+    "apr data select --data data/decide/goldstandard-2024-setfit --shots 64 --seed 13 --output data/decide/goldstandard-2024-setfit/selection-s64-seed13",
+    "apr setfit train ... --config scripts/laya_train/setfit_cell_e1b16_cpu.json --seed 13 --dry-run",
+    "(not run) just laya-setfit-cell"
+  ],
+  "label": "same eval split, subsampled train (64 shots/class of 7658 train rows); outside setfit-benchmark-claims-v1's 40-cell matrix; thresholds would be judged under the TweetEval-measured production regime. NO CELL WAS RUN: no number exists.",
+  "outcome": "blocked: the real cell was not run because apr eval cannot evaluate this dataset's splits within this host's memory (implementation limit, not a domain refusal)",
+  "failure_class": "implementation",
+  "failure_class_note": "NOT a domain-refusal: no lifecycle refusal (uncalibrated regime, evidence threshold, cross-split duplicate, split-role mismatch) was observed, because the real training and test evaluation were never reached. The plan's own verify has only 'completed' and 'refused (domain-refusal)' branches; this record adds the narrowest honest third branch, 'blocked' with failure_class implementation, and asserts nothing that was not performed.",
+  "blocker": {
+    "what": "apr eval memory grows with the number of rows in the evaluated split and exceeds the host before the 852-row validation split finishes",
+    "code_path": "predict_rows in crates/aprender-train/src/train/setfit/apr_evaluate.rs, chunking rows by core's MAX_BATCH_TEXTS = 256 (crates/aprender-core/src/setfit/classify.rs) and calling VerifiedSetFitModel::classify per chunk",
+    "host_memory_bytes": 51539607552,
+    "host_load_note": "load averages between 35 and 396 with 32 users logged in during the measurements; the footprint is intrinsic to the eval path, but wall-clock numbers are upper bounds",
+    "measurement": "/usr/bin/time -l apr eval <s8 artifact> --task classify --split validation --lock-out --json, apr 0.69.3 built at HEAD",
+    "table": [
+      {"eval_rows": 61, "batches": 1, "exit": 0, "wall_seconds": 3, "max_rss_bytes": 9395765248, "peak_memory_footprint_bytes": 9388154488, "dataset": "first 600 train / 100 eval Laya lines through the adapter"},
+      {"eval_rows": 241, "batches": 1, "exit": 0, "wall_seconds": 14.8, "max_rss_bytes": 29005332480, "peak_memory_footprint_bytes": 40329229472, "dataset": "first 2400 train / 100 eval Laya lines through the adapter"},
+      {"eval_rows": 852, "batches": 4, "exit": "killed (time: command terminated abnormally)", "wall_seconds": 40.9, "max_rss_bytes_at_death": 11489951744, "peak_memory_footprint_bytes_at_death": 90002768672, "dataset": "the real adapted dir, validation split"}
+    ],
+    "reading": "about 9 GB baseline plus roughly 0.13 GB per row between 61 and 241 rows; the 852-row run reached at least 90 GB, well above the one-batch 40 GB, so memory appears to accumulate across the 256-row batches (not confirmed). The test split has 2129 rows. An earlier identical attempt ended with exit 137.",
+    "training_not_the_problem": "the s8 train used 9.0 GB peak and took 28 s wall (exit 0)",
+    "not_changed": "apr_evaluate.rs was not modified: crates/aprender-train/CLAUDE.md requires a provable contract before code, a test pins the MAX_BATCH_TEXTS chunking, and core documents batched vs singleton classification as equal only within 1e-6"
+  },
+  "training_time_estimate": {
+    "pair_budget": "2*max(pos_capacity, neg_capacity) pairs = 8192 at s64 with 2 classes, i.e. 512 steps at batch 16 (stance 3-class s64: 24576 pairs, 1536 steps, about 29 min)",
+    "estimate_minutes": "about 10 by step scaling; about 30 if per-step time is 3x the stance cell's; upper bound about 45 on this loaded host",
+    "caveats": "an estimate from the contract formula and one 28 s s8 measurement on a loaded host (load 35 to 396); not a measurement of the real cell; the cell was not started",
+    "under_one_hour": true
+  },
+  "sc4_status": "refused-open",
+  "sc4_status_note": "the vocabulary value 'refused-open' is the plan's name for 'comparison incomplete, SC-4 held open'; here the cause is a blocked implementation, not a refusal. SC-4 is NOT met.",
+  "sc4_owner_decision": "C",
+  "sc4_owner_reply": "C. Record the SetFit comparison as blocked/refused and hold SC-4 open. Do not run the cell, do not change apr eval code, no cloud.",
+  "sc4_decided_on": "2026-10-22",
+  "task3": "the owner's decision was taken at the blocked-cell checkpoint in place of the plan's refusal checkpoint; recorded here",
+  "measured_on": "2026-10-22",
+  "commit": "659dbeb05",
+  "accuracy_from_dump": null,
+  "macro_f1_from_probabilities": null,
+  "per_class_f1": null,
+  "ece_top_label": null,
+  "laya_beside": null,
+  "follow_up_suggested_not_done": "an item for the apr eval memory defect: bound the per-batch autograd/activation memory in the classify path used by predict_rows (contract-first), then re-run the s64e1b16 cell; or run the eval on a larger-memory host"
+}
