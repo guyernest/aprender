@@ -1354,8 +1354,8 @@ laya-setfit-cell data="data/decide/goldstandard-2024-setfit" out="models/setfit/
     refuse() { echo "SETFIT CELL REFUSED $1: $2"; exit 2; }
     test -f "{{data}}/benchmark-manifest.json" || refuse select "no benchmark-manifest.json under {{data}} (run the laya_dir_to_canonical adapter, plan 10-05)"
     test -f "{{config}}" || refuse config "no config file {{config}} (apr setfit train requires --config)"
-    MINILM="${SETFIT_MINILM_DIR:-$HOME/.cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2/snapshots/1110a243fdf4706b3f48f1d95db1a4f5529b4d41}"
-    test -d "$MINILM" || refuse train "no MiniLM snapshot at the pinned revision (set SETFIT_MINILM_DIR)"
+    MINILM="{{minilm_dir}}"
+    test -f "$MINILM/full_model.apr" || refuse train "no full_model.apr under $MINILM (the pinned 1110a243 checkout; set APRENDER_MINILM_DIR)"
     OUT="{{out}}"
     test ! -e "$OUT/cell.apr" || refuse train "$OUT/cell.apr already exists; move it aside, apr setfit train will not replace it"
     . scripts/apr_bin.sh || exit 1
