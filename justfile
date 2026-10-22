@@ -1316,6 +1316,17 @@ laya-prepare-stance cell="s64":
     done
     uv run --project scripts/laya_train --frozen python scripts/laya_train/prepare_stance.py --cell "{{cell}}"
 
+# GoldStandard2024 (antisemitism-v1, phase 10): the partner CSV is read IN PLACE (never copied) and written as a
+# Laya data dir by the rule prepare_goldstandard.py declares (nfc-trim-ws-v1 grouping, conflicting-label texts
+# dropped, a seed-13 stratified group-disjoint 20 % eval draw) -> data/decide/goldstandard-2024. The same script
+# measures a task's prefix with the SERVED tokenizer: `just laya-prepare-goldstandard --measure --task <task.json>
+# [--csv <csv>] [--max-texts N]`, and runs its own `--selftest` / `--selftest-tokenizer`. A thin wrapper: the
+# script owns the default CSV path and every refusal. Output is under the root-anchored, gitignored /data/.
+laya-prepare-goldstandard *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    uv run --project scripts/laya_train --frozen python -I scripts/laya_train/prepare_goldstandard.py {{args}}
+
 # Fine-tune Laya on <data> (task.json + train.jsonl + a REQUIRED eval.jsonl + an OPTIONAL shift.jsonl),
 # calibrate and gate into the run dir <out>. Exit 0 = GATE PASS, 3 = GATE FAIL, 2 = input refused.
 # Production (laya-finetune-gate-v1 1.4.0) trains the three gate seeds 13/17/23 and ships the MEDIAN-ECE
@@ -3217,6 +3228,16 @@ laya-gates-selftest:
         head -c 1000 "$W/tiny.apr" > "$W/truncated.apr"
         must_fail truncated 'REFUSED Artifact load ladder' just laya-inspect "$W/truncated.apr"
         must_pass tiny "\"artifact_sha256\":\"$GOLDEN\".*\"variant\":\"synthetic-fixture\"" just laya-inspect "$W/tiny.apr"
+    }
+    row_prefix_budget() {
+        # Plan 10-01. Every case here asserts a fact that is a function of the task's prefix P or of an EXPLICIT
+        # --max-texts, never the relation of P to the live contract door: plan 10-11 lowers that constant to the
+        # owner's choice later in the phase, and this row must stay green at every door from 1 to 8.
+        python3 -I -c 'import json, sys; w = sys.argv[1]; crit = {"not_antisemitic": "a", "antisemitic": "b"}; json.dump({"type": "choice", "instructions": " ".join(["the"] * 110), "criteria": crit}, open(w + "/pb-over.json", "w")); json.dump({"type": "choice", "instructions": "Is this tweet antisemitic?", "criteria": {"not_antisemitic": None, "antisemitic": None}}, open(w + "/pb-bare.json", "w")); crit["antisemitic"] = " ".join(["the"] * 60); json.dump({"type": "choice", "instructions": "Is this tweet antisemitic?", "criteria": crit}, open(w + "/pb-cut.json", "w"))' "$W"
+        must_fail over-ceiling 'REFUSED prefix-budget' just laya-prepare-goldstandard --measure --task "$W/pb-over.json" --max-texts 8
+        must_fail cut 'REFUSED prefix-cut' just laya-prepare-goldstandard --measure --task "$W/pb-cut.json"
+        must_pass bare '"markers": ?2,.*"fits_door": ?true' just laya-prepare-goldstandard --measure --task "$W/pb-bare.json"
+        must_pass report-only '"door_enforced": ?false,.*"max_texts_that_fit": ?[1-7][,}]' just laya-prepare-goldstandard --measure --task "$W/pb-over.json"
     }
     row_verify_suite() {
         mkdir -p "$W/no-model"
