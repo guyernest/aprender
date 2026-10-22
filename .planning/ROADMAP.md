@@ -856,11 +856,11 @@ The partner-side changes (classify batch at most 8, client transport to the pmcp
   5. The artifact is live through the existing pmcp.run path at 10,240 MB (server name and auth posture decided at the deploy checkpoint), identity-checked by the probe with `--expect-sha256`, and the acceptance replay (one result per text, labels in task order, probabilities summing to 1, the returned sha equal to the pin) is recorded with timings reported and not gated; every gate green (`cargo fmt --all -- --check`, strict clippy on touched crates, their tests, `pv validate` on any touched contract, `bashrs lint` on new scripts).
 
 **Branch base**: continues on `gsd/phase-2-contract-gate` per the 02-01 policy.
-**Plans:** 1/11 plans executed
+**Plans:** 2/11 plans executed
 
 Plans:
 **Wave 1**
-- [ ] 10-01-PLAN.md — prepare_goldstandard.py (declared rule, --selftest, --selftest-tokenizer, --measure with the served door as a parameter), four measured guide drafts (p44/p60/p90 for door 8, pfull for a lowered door), the owner's blocking choice of guide AND served door (D-06; D-05/D-15 amended 2026-10-21), the data dir written once, 10-TASK-EVIDENCE.json with chosen_max_texts
+- [x] 10-01-PLAN.md — prepare_goldstandard.py (declared rule, --selftest, --selftest-tokenizer, --measure with the served door as a parameter), four measured guide drafts (p44/p60/p90 for door 8, pfull for a lowered door), the owner's blocking choice of guide AND served door (D-06; D-05/D-15 amended 2026-10-21), the data dir written once, 10-TASK-EVIDENCE.json with chosen_max_texts
 - [x] 10-02-PLAN.md — `probe --replay N` (1..=the compiled door, `--replay-from`), `--replay-over-limit`, a pure evaluator with negative tests, typed count and token-budget refusals, plan-only `min_row_tokens` / door keys; proven on the loopback fixture and live against the stance server
 
 **Wave 2** *(blocked on Wave 1 completion)*
