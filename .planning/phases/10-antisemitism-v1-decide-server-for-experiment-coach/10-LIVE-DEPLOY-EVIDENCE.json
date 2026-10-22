@@ -226,7 +226,211 @@
       "aws_write_count_this_attempt": "cargo pmcp deploy to pmcp.run (function update + stack); the upload's one S3 PutObject is under pre_deploy_steps"
     }
   ],
-  "live": null,
+  "live": {
+    "outcome": "verified",
+    "final": true,
+    "tier_mb": 10240,
+    "contract": "decide-tool-boundary-v1 9.0.0",
+    "what": "laya-antisemitism-v1.apr 2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e under aprender-mcp-decide, auth off",
+    "plan_only": {
+      "concentrated": {
+        "probe": "plan",
+        "shape": "concentrated",
+        "texts": 2,
+        "max_text_bytes": 16384,
+        "tokens_planned": 800,
+        "min_row_tokens": 86,
+        "max_texts": 8,
+        "max_total_tokens": 800,
+        "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+        "labels": [
+          "not_antisemitic",
+          "antisemitic"
+        ]
+      },
+      "distributed": {
+        "probe": "plan",
+        "shape": "distributed",
+        "texts": 8,
+        "max_text_bytes": 78,
+        "tokens_planned": 800,
+        "min_row_tokens": 86,
+        "max_texts": 8,
+        "max_total_tokens": 800,
+        "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+        "labels": [
+          "not_antisemitic",
+          "antisemitic"
+        ]
+      }
+    },
+    "cold_samples": [
+      {
+        "shape": "concentrated",
+        "tokens_total": 800,
+        "elapsed_ms": 24639,
+        "probe_id": "f3ce698d-fbbf-4398-8d45-e77dc97a5adf",
+        "load_header": "cold;load_ms=15325",
+        "load_ms": 15325,
+        "cold_evidence": "cloudwatch",
+        "graviton": "graviton2",
+        "log_line": "2026-10-22T17:31:08.019191Z  INFO Lambda runtime invoke{requestId=\"f7bc1c3a-075b-4894-aa28-9611230177f5\" xrayTraceId=\"Root=1-6ada484c-009a4e014842af2b2873412e;Parent=16a02aab93b1e1e8;Sampled=0;Lineage=2:2a108dc4:0\"}: bootstrap: decide.load performed_load=true probe_id=f3ce698d-fbbf-4398-8d45-e77dc97a5adf load_ms=15325 download_ms=9023 sha_ms=3487 build_ms=2729 bytes=846220868 rss_mb=1649 peak_rss_mb=2456 graviton=graviton2 source=s3",
+        "load_fields": {
+          "performed_load": true,
+          "probe_id": "f3ce698d-fbbf-4398-8d45-e77dc97a5adf",
+          "load_ms": 15325,
+          "download_ms": 9023,
+          "sha_ms": 3487,
+          "build_ms": 2729,
+          "bytes": 846220868,
+          "rss_mb": 1649,
+          "peak_rss_mb": 2456,
+          "graviton": "graviton2",
+          "source": "s3"
+        },
+        "proven_cold": true,
+        "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+        "artifact_sha256_source": "deploy-evidence top level: every sample's probe ran with --expect-sha256 and exited 0 (a sample whose probe exited non-zero is a failed check, not a sample)"
+      },
+      {
+        "shape": "distributed",
+        "tokens_total": 800,
+        "elapsed_ms": 22765,
+        "probe_id": "e10b9450-8fba-4f7f-8c3a-bc9ac778d563",
+        "load_header": "cold;load_ms=15312",
+        "load_ms": 15312,
+        "cold_evidence": "cloudwatch",
+        "graviton": "graviton2",
+        "log_line": "2026-10-22T17:31:45.319232Z  INFO Lambda runtime invoke{requestId=\"d4c3e00b-9c61-453a-a01d-becfa0ca18c1\" xrayTraceId=\"Root=1-6ada4871-7eb1d4ce24c9333e655506ab;Parent=7e1c2de7df7497c7;Sampled=0;Lineage=2:2a108dc4:0\"}: bootstrap: decide.load performed_load=true probe_id=e10b9450-8fba-4f7f-8c3a-bc9ac778d563 load_ms=15312 download_ms=8934 sha_ms=3517 build_ms=2775 bytes=846220868 rss_mb=1649 peak_rss_mb=2456 graviton=graviton2 source=s3",
+        "load_fields": {
+          "performed_load": true,
+          "probe_id": "e10b9450-8fba-4f7f-8c3a-bc9ac778d563",
+          "load_ms": 15312,
+          "download_ms": 8934,
+          "sha_ms": 3517,
+          "build_ms": 2775,
+          "bytes": 846220868,
+          "rss_mb": 1649,
+          "peak_rss_mb": 2456,
+          "graviton": "graviton2",
+          "source": "s3"
+        },
+        "proven_cold": true,
+        "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+        "artifact_sha256_source": "deploy-evidence top level: every sample's probe ran with --expect-sha256 and exited 0 (a sample whose probe exited non-zero is a failed check, not a sample)"
+      },
+      {
+        "shape": "concentrated",
+        "tokens_total": 800,
+        "elapsed_ms": 25267,
+        "probe_id": "4ad97388-bfcb-4b72-a888-a373b2c577c2",
+        "load_header": "cold;load_ms=15406",
+        "load_ms": 15406,
+        "cold_evidence": "cloudwatch",
+        "graviton": "graviton2",
+        "log_line": "2026-10-22T17:32:20.855230Z  INFO Lambda runtime invoke{requestId=\"b0df7f4c-41ac-4a17-a670-c031e517c3e7\" xrayTraceId=\"Root=1-6ada4894-5266dc737ddebc373430b613;Parent=27785d5e17b27927;Sampled=0;Lineage=2:2a108dc4:0\"}: bootstrap: decide.load performed_load=true probe_id=4ad97388-bfcb-4b72-a888-a373b2c577c2 load_ms=15406 download_ms=9041 sha_ms=3484 build_ms=2785 bytes=846220868 rss_mb=1649 peak_rss_mb=2456 graviton=graviton2 source=s3",
+        "load_fields": {
+          "performed_load": true,
+          "probe_id": "4ad97388-bfcb-4b72-a888-a373b2c577c2",
+          "load_ms": 15406,
+          "download_ms": 9041,
+          "sha_ms": 3484,
+          "build_ms": 2785,
+          "bytes": 846220868,
+          "rss_mb": 1649,
+          "peak_rss_mb": 2456,
+          "graviton": "graviton2",
+          "source": "s3"
+        },
+        "proven_cold": true,
+        "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+        "artifact_sha256_source": "deploy-evidence top level: every sample's probe ran with --expect-sha256 and exited 0 (a sample whose probe exited non-zero is a failed check, not a sample)"
+      },
+      {
+        "shape": "distributed",
+        "tokens_total": 800,
+        "elapsed_ms": 22794,
+        "probe_id": "77fe6c10-65d0-48f3-96e3-504503f3ea66",
+        "load_header": "cold;load_ms=15465",
+        "load_ms": 15465,
+        "cold_evidence": "cloudwatch",
+        "graviton": "graviton2",
+        "log_line": "2026-10-22T17:32:58.417537Z  INFO Lambda runtime invoke{requestId=\"6210b83c-1186-4750-9fb1-0be3eecb1d7c\" xrayTraceId=\"Root=1-6ada48ba-264c62ee007b5d4e1ecc4185;Parent=fe3d9efe6c9c92d1;Sampled=0;Lineage=2:2a108dc4:0\"}: bootstrap: decide.load performed_load=true probe_id=77fe6c10-65d0-48f3-96e3-504503f3ea66 load_ms=15465 download_ms=8978 sha_ms=3484 build_ms=2846 bytes=846220868 rss_mb=1647 peak_rss_mb=2454 graviton=graviton2 source=s3",
+        "load_fields": {
+          "performed_load": true,
+          "probe_id": "77fe6c10-65d0-48f3-96e3-504503f3ea66",
+          "load_ms": 15465,
+          "download_ms": 8978,
+          "sha_ms": 3484,
+          "build_ms": 2846,
+          "bytes": 846220868,
+          "rss_mb": 1647,
+          "peak_rss_mb": 2454,
+          "graviton": "graviton2",
+          "source": "s3"
+        },
+        "proven_cold": true,
+        "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+        "artifact_sha256_source": "deploy-evidence top level: every sample's probe ran with --expect-sha256 and exited 0 (a sample whose probe exited non-zero is a failed check, not a sample)"
+      }
+    ],
+    "cold_wall_ms": {
+      "min": 22765,
+      "max": 25267,
+      "worst_sample": {
+        "shape": "concentrated",
+        "probe_id": "4ad97388-bfcb-4b72-a888-a373b2c577c2",
+        "elapsed_ms": 25267
+      },
+      "worst_slack_to_cap_ms": 4733
+    },
+    "warm_ms": {
+      "values": [
+        1149,
+        1095,
+        1080,
+        1085,
+        1180
+      ],
+      "min": 1080,
+      "max": 1180,
+      "p50": 1095,
+      "n": 5
+    },
+    "identity": {
+      "probe": "identity",
+      "probe_id": "probe-18e0ea69041f01c0-101d",
+      "one_tool_named_classify": true,
+      "description_has_labels_in_order": true,
+      "response_labels_match": true,
+      "identity_matches": true,
+      "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+      "elapsed_ms": [
+        381,
+        189,
+        919
+      ],
+      "tokens_total": 94,
+      "shape": "identity",
+      "load_header": "warm"
+    },
+    "timings_policy": "reported, not gated (D-16); the deploy-verify recipe's own rule (every cold sample under the 30,000 ms gateway cap, with CloudWatch cold evidence) decides its verdict, and the recipe does not contain the function",
+    "failed_checks": [],
+    "function_state": "serving",
+    "verify_attempts": [
+      {
+        "n": 1,
+        "rc": 0,
+        "verdict_line": "DEPLOY VERIFY OK aprender-mcp-decide: 4 cold samples (both shapes), every one < 30000 ms with CloudWatch cold evidence",
+        "failed_checks": [],
+        "started": "2026-10-22T17:30:12Z",
+        "ended": "2026-10-22T17:33:26Z"
+      }
+    ],
+    "contained": null,
+    "owner_decision": null,
+    "task3": "skipped: Task 2 ended verified (DEPLOY VERIFY OK), no owner decision needed"
+  },
   "stance_demo": {
     "sha": "24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a",
     "endpoint": "https://aprender-mcp-decide.us-east.true-mcp.com/mcp",
