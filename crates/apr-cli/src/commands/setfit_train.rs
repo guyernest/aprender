@@ -1207,6 +1207,33 @@ mod tests {
         assert_eq!(config.root_seed(), 17);
     }
 
+    /// The GoldStandard comparison cell (phase 10, plan 10-05, D-11) is the s64e1b16 cell:
+    /// by definition the reference recipe at seed 13 on CPU.
+    ///
+    /// `apr setfit train` has no implicit reference config -- `--config` is a required
+    /// argument -- so the recipe is a tracked file. This test is what makes that file the
+    /// reference recipe rather than a lookalike: it goes through `parse_config`, the door
+    /// `--config` calls, and must equal `SetFitTrainConfig::reference_defaults(13)` knob for
+    /// knob. If it fails, change the JSON file, never a Rust constant.
+    #[test]
+    fn goldstandard_cell_config_equals_the_reference_recipe() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/laya_train/setfit_cell_e1b16_cpu.json");
+        assert!(
+            path.exists(),
+            "the tracked cell config is missing at {}",
+            path.display()
+        );
+        let config = parse_config(&path).unwrap_or_else(|error| {
+            panic!("the cell config must parse through parse_config, but was rejected: {error}")
+        });
+        assert_eq!(
+            config,
+            SetFitTrainConfig::reference_defaults(13),
+            "the s64e1b16 cell config must equal the reference recipe at seed 13"
+        );
+    }
+
     #[test]
     #[ignore = "integration weight: builds a real benchmark directory and selection. Run as \
                 its own invocation — `cargo test -p apr-cli --features setfit --lib \
