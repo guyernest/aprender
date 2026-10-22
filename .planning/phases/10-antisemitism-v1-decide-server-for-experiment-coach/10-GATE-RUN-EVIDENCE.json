@@ -2,8 +2,8 @@
   "schema": "laya-gate-run-evidence-v1",
   "phase": "10-antisemitism-v1-decide-server-for-experiment-coach",
   "plan": "10-04",
-  "outcome": null,
-  "decided_by": null,
+  "outcome": "gate_pass",
+  "decided_by": "gate",
   "human_option": null,
   "start_commit": "80da239728d258366ccbd5998e23262dced666c1",
   "df_free_gb": 61.3,
@@ -34,18 +34,167 @@
       "line": "REFUSED epochs: above 16 shots/class (7016) --epochs is required, in [4, 12]"
     }
   },
-  "seeds": null,
-  "gate": null,
-  "noise": null,
-  "pack": null,
-  "verify_line": null,
-  "inspect": null,
-  "plan_only": null,
-  "artifact": null,
-  "deploy_eligible": false,
-  "device_used": null,
-  "torch_version": null,
-  "wall_seconds": null,
+  "seeds": {
+    "policy": "median-ECE of 13/17/23 (laya-finetune-gate-v1 seed_policy)",
+    "shipped": 23,
+    "per_seed": [
+      {
+        "seed": 13,
+        "macro_f1": 0.7953504554440622,
+        "ece_post": 0.011745857430937867,
+        "margin": 0.23577475716083562,
+        "t_applied": 1.4109373583837268,
+        "clamp_hit": false,
+        "pass": true,
+        "epochs_run": 4,
+        "best_epoch": 1,
+        "train_seconds": 4944.4,
+        "eval_probs_sha256": "092b94aad78d6b7204557a13ca4646e08716f8ad123851a9cfcc81b622b2077a"
+      },
+      {
+        "seed": 17,
+        "macro_f1": 0.8053952013706585,
+        "ece_post": 0.045630826195286335,
+        "margin": 0.24581950308743183,
+        "t_applied": 5.0,
+        "clamp_hit": true,
+        "pass": true,
+        "epochs_run": 4,
+        "best_epoch": 3,
+        "train_seconds": 4862.3,
+        "eval_probs_sha256": "a3b66e824d01d49daa6e2adf8f0f3b9ba71cf6eec4b2cc0e2e2fc0044ef7eaf4"
+      },
+      {
+        "seed": 23,
+        "macro_f1": 0.7956129081807202,
+        "ece_post": 0.04236402879471284,
+        "margin": 0.23603720989749355,
+        "t_applied": 1.5103581712580827,
+        "clamp_hit": false,
+        "pass": true,
+        "epochs_run": 4,
+        "best_epoch": 1,
+        "train_seconds": 4864.2,
+        "eval_probs_sha256": "15c17393324df0435b5c2264416c7e3cef7c67247dd12ec96532f58fbd8018e4",
+        "model_safetensors_sha256": "672315a3bb33a2b3bc3fcfaecae4caf01d9b805457ebfd2932881736531aa92f"
+      }
+    ]
+  },
+  "gate": {
+    "pass": true,
+    "zero_shot_macro_f1": 0.5595756982832266,
+    "zero_shot_ece": 0.04822738731114614,
+    "ft_macro_f1": 0.7956129081807202,
+    "margin": 0.23603720989749355,
+    "ece_pre": 0.06038589552117366,
+    "ece_post": 0.04236402879471284,
+    "nll": 0.2789003924979575,
+    "t_applied": 1.5103581712580827,
+    "clamp_hit": false,
+    "n": 2129,
+    "thresholds": {
+      "min_macro_f1_margin": 0.05,
+      "max_ece": 0.1,
+      "ece_bins": 15
+    },
+    "rust_recomputed": {
+      "ece_post": 0.04236402879471284,
+      "ft_macro_f1": 0.7956129081807202,
+      "margin": 0.23603720989749355,
+      "zs_macro_f1": 0.5595756982832266
+    }
+  },
+  "noise": {
+    "fine_tuned": {
+      "max_abs": 3.592973853439041e-06,
+      "bound": 1.4371895413756164e-05,
+      "argmax_agree": 2129,
+      "n": 2129
+    },
+    "zero_shot": {
+      "max_abs": 1.5070898052527149e-05,
+      "bound": 6.0283592210108594e-05,
+      "argmax_agree": 2129,
+      "n": 2129
+    }
+  },
+  "pack": {
+    "exit": 0,
+    "rescore_max_abs": 7.554888725280762e-06,
+    "zs_rescore_max_abs": 1.195073127746582e-05,
+    "rescore_bound": 1.4371895413756164e-05,
+    "zs_rescore_bound": 6.0283592210108594e-05,
+    "argmax": "2129/2129",
+    "packed_line": "PACKED models/decide/laya-antisemitism-v1.apr sha256=2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e rescore_max_abs=0.000007554888725280762 zs_rescore_max_abs=0.00001195073127746582 rescore_bound=0.000014371895413756164 zs_rescore_bound=0.000060283592210108594 noise=0.000003592973853439041 zs_noise=0.000015070898052527149 shipped_seed=23 argmax=2129/2129"
+  },
+  "verify_line": {
+    "argmax": "2129/2129",
+    "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+    "deploy_eligible": true,
+    "noise": 3.592973853439041e-06,
+    "recomputed": {
+      "ece_post": 0.04236402879471284,
+      "ft_macro_f1": 0.7956129081807202,
+      "margin": 0.23603720989749355,
+      "zs_macro_f1": 0.5595756982832266
+    },
+    "rescore_bound": 1.4371895413756164e-05,
+    "rescore_max_abs": 7.554888725280762e-06,
+    "shipped_seed": 23,
+    "zs_noise": 1.5070898052527149e-05,
+    "zs_rescore_bound": 6.0283592210108594e-05,
+    "zs_rescore_max_abs": 1.195073127746582e-05
+  },
+  "inspect": {
+    "labels": [
+      "not_antisemitic",
+      "antisemitic"
+    ],
+    "recipe_id": "d70c3f3da0daae129f3ee1ce928eb21a0ef71a83a6f09dc18e0621f3cc8adcbc",
+    "base": "laya-en-root@55cf4c4e",
+    "variant": "production",
+    "method": "laya",
+    "embedded_gate": {
+      "ece_post": 0.04236402879471284,
+      "margin": 0.23603720989749355,
+      "pass": true
+    },
+    "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e"
+  },
+  "plan_only": {
+    "distributed": {
+      "texts": 8,
+      "tokens_planned": 800,
+      "min_row_tokens": 86,
+      "max_texts": 8,
+      "max_total_tokens": 800
+    },
+    "concentrated": {
+      "texts": 2,
+      "tokens_planned": 800,
+      "min_row_tokens": 86,
+      "max_texts": 8,
+      "max_total_tokens": 800
+    },
+    "p_rust": 86,
+    "p_python": 86,
+    "b": 8,
+    "door_check": {
+      "ok": true,
+      "reasons": []
+    },
+    "note": "tokens_planned is the request TOTAL (<= 800), never compared with B x P (688); the stance artifact's min_row_tokens was 57 with tokens_planned 800 for the same reason"
+  },
+  "artifact": {
+    "path": "models/decide/laya-antisemitism-v1.apr",
+    "sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+    "bytes": 846220868,
+    "eligible": true
+  },
+  "deploy_eligible": true,
+  "device_used": "mps:0",
+  "torch_version": "2.14.0",
+  "wall_seconds": 16822.3,
   "shift_jsonl": null,
   "shift_probe": null,
   "owner_reply_to_probe": null,
@@ -54,5 +203,36 @@
   "declared_runs": 1,
   "shipped_run": null,
   "claim_note": null,
-  "checkpoints_found": []
+  "checkpoints_found": [
+    "models/decide/laya-antisemitism-v1/checkpoint/model.safetensors"
+  ],
+  "warn_pack_will_refuse": false,
+  "inputs_sha256_task_json": "33fd8d7cd51b1b2864033ee313d30ae445e76120cc2b26e3849369c0602248e3",
+  "wall_note": "SEEDS total_seconds (train + calibration + scoring, 3 seeds); the SEEDS train_seconds 4864.2 is ONE seed's (the shipped seed 23). Pack and verify walls are separate: pack 2026-10-22T08:47:14Z to about 09:08Z, verify 09:08:48Z to about 09:30Z",
+  "run_started": "2026-10-22T04:06:21Z",
+  "run_ended": "2026-10-22T08:46:45Z",
+  "host_load": {
+    "loadavg_before_launch": [
+      2.46,
+      3.18,
+      4.32
+    ],
+    "sampled_during_run": false,
+    "competing_runs": "this plan started no other compute; the host load was NOT sampled during the run (only the pre-launch load average and a process listing at launch), so contention is unmeasured, not ruled out",
+    "contended": null
+  },
+  "recipe_id": "d70c3f3da0daae129f3ee1ce928eb21a0ef71a83a6f09dc18e0621f3cc8adcbc",
+  "eval_n": 2129,
+  "train_log_lines": {
+    "result": "RESULT zero_shot macro_f1=0.5596 f_avg=null ece=0.0482 | fine_tuned macro_f1=0.7956 f_avg=null ece_pre=0.0604 ece_post=0.0424 nll=0.2789 | margin=0.2360 (need >= 0.05) ece_post (need <= 0.1)",
+    "median": "MEDIAN seeds=13,17,23 rank_keys=117,456,423 shipped=23 (policy median_ece, tie_break smaller_seed)",
+    "noise_ft": "NOISE which=fine_tuned max_abs=3.592974e-06 bound=1.437190e-05 argmax=2129/2129 t_applied=1.510358",
+    "noise_zs": "NOISE which=zero_shot max_abs=1.507090e-05 bound=6.028359e-05 argmax=2129/2129 t_applied=1.906356",
+    "seeds": "SEEDS median-ECE seed of 3 seeds | shipped=23 device_used=mps:0 torch=2.14.0 train_seconds=4864.2 total_seconds=16822.3",
+    "device": [
+      "DEVICE seed=13 requested=mps used=mps:0 torch=2.14.0",
+      "DEVICE seed=17 requested=mps used=mps:0 torch=2.14.0",
+      "DEVICE seed=23 requested=mps used=mps:0 torch=2.14.0"
+    ]
+  }
 }
