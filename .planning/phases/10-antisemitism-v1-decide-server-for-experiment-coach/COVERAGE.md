@@ -1,1 +1,1 @@
-No external API integration: Phase 10 redeploys aprender's own decide MCP server (unchanged classify tool) through the committed laya-* recipes; no new third-party API surface is wrapped.
+No external API integration: Phase 10 redeploys aprender's own decide MCP server (same classify tool; count bound may drop, plan 10-11) via committed laya-* recipes; no third-party API is wrapped.

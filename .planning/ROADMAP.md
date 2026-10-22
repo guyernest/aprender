@@ -839,7 +839,7 @@ request is motivation-experiment `docs/requests/aprender.md`; aprender's reply a
 **Requirements**: TBD
 **Requirements note**: `.planning/REQUIREMENTS.md` is the SetFit milestone's. The binding requirements are the
 request document's Contract and "Tests we will run against it" sections as amended by the owner's decisions
-(batch 8, condensed guide, pmcp.run deployment, cold start not gated, motivation-v1 deferred), transcribed as
+(served door 8 or lower per the owner's 2026-10-21 note that batch size is not critical, condensed guide, pmcp.run deployment, cold start not gated, motivation-v1 deferred), transcribed as
 decisions in `10-CONTEXT.md`, plus the Success Criteria below.
 **Depends on:** Phase 8 (the Laya back office `scripts/laya_train`, `crates/aprender-decide`, the `.apr` packer
 and verifier, `crates/aprender-mcp-decide` and `-lambda`, the `laya-*` just recipes, and the contracts
@@ -856,27 +856,30 @@ The partner-side changes (classify batch at most 8, client transport to the pmcp
   5. The artifact is live through the existing pmcp.run path at 10,240 MB (server name and auth posture decided at the deploy checkpoint), identity-checked by the probe with `--expect-sha256`, and the acceptance replay (one result per text, labels in task order, probabilities summing to 1, the returned sha equal to the pin) is recorded with timings reported and not gated; every gate green (`cargo fmt --all -- --check`, strict clippy on touched crates, their tests, `pv validate` on any touched contract, `bashrs lint` on new scripts).
 
 **Branch base**: continues on `gsd/phase-2-contract-gate` per the 02-01 policy.
-**Plans:** 10 plans
+**Plans:** 11 plans
 
 Plans:
 **Wave 1**
-- [ ] 10-01-PLAN.md — prepare_goldstandard.py (declared rule, --selftest, --measure), three measured guide drafts, the owner's blocking task.json approval (D-06), the data dir written once, 10-TASK-EVIDENCE.json
-- [ ] 10-02-PLAN.md — `probe --replay N` (run_replay, ReplayReport, synthetic texts) proven on the loopback fixture and live against the stance server
+- [ ] 10-01-PLAN.md — prepare_goldstandard.py (declared rule, --selftest, --selftest-tokenizer, --measure with the served door as a parameter), four measured guide drafts (p44/p60/p90 for door 8, pfull for a lowered door), the owner's blocking choice of guide AND served door (D-06; D-05/D-15 amended 2026-10-21), the data dir written once, 10-TASK-EVIDENCE.json with chosen_max_texts
+- [ ] 10-02-PLAN.md — `probe --replay N` (1..=the compiled door, `--replay-from`), `--replay-over-limit`, a pure evaluator with negative tests, typed count and token-budget refusals, plan-only `min_row_tokens` / door keys; proven on the loopback fixture and live against the stance server
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 10-03-PLAN.md — probe_epoch.py (one epoch, seed 13, no run dir) measures s/step on this host; E declared from it; re-prices the date if over 3.0 s (D-10)
+- [ ] 10-03-PLAN.md — probe_epoch.py (one epoch, seed 13, no run dir) measures s/step and the per-epoch monitor cost on this host, raw vs retained post lengths; E declared from it; re-prices the date if over 3.0 s (D-10); an OOM is an owner checkpoint
+- [ ] 10-11-PLAN.md — the served door before any deploy: ClassifyLimits::CONTRACTED.max_texts, `classify_max_texts`, the FALSIFY-001/-009 predictions, claims rows 75 and 112, the decide README / deploy-template / CLAUDE.md door phrases, pv-diff version bump (a recorded no-op when the owner keeps 8)
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 10-04-PLAN.md — the one declared gate run (3 seeds, early stopping), pack / verify / inspect / plan-only cross-check, 10-GATE-RUN-EVIDENCE.json; a FAIL halts for the owner (D-09)
+- [ ] 10-04-PLAN.md — the one declared gate run (3 seeds, early stopping), pack / ONE verify / inspect / plan-only cross-check (min_row_tokens == P, texts == chosen door), outcome-specific evidence, 10-GATE-RUN-EVIDENCE.json; a FAIL or an ineligible artifact halts for the owner (D-09)
 
 **Wave 4** *(blocked on Wave 3 completion)*
-- [ ] 10-05-PLAN.md — SetFit s64e1b16 cell through an attested two-label adapter and the apr doors (same train split, same eval split), `laya-setfit-cell`
-- [ ] 10-07-PLAN.md — resolver re-proof for cargo-pmcp 0.28.1, DRY_RUN deploy selftest on the new artifact, the owner's D-13 decision (replace / auth posture)
+- [ ] 10-05-PLAN.md — SetFit s64e1b16 cell through an attested two-label adapter, an explicit validated e1b16 CPU config and the apr doors (same train split, same eval split), `laya-setfit-cell`; domain refusals classified, SC-4 acceptance checkpoint on a refusal
+- [ ] 10-07-PLAN.md — resolver re-proof for cargo-pmcp 0.28.1, DRY_RUN deploy selftest on the new artifact, the offline door check (`DRY_RUN=1 just laya-deploy-verify`), the owner's D-13 decision (replace / auth posture and the probe token convention)
 
 **Wave 5** *(blocked on Wave 4 completion)*
-- [ ] 10-06-PLAN.md — SetFit test-split probabilities through the lock-gated door; house ECE and per-class F1; the Laya side-by-side table (D-07 readout form)
-- [ ] 10-08-PLAN.md — live redeploy through the existing pmcp.run path, identity probe + negative control, deploy-verify timings reported
+- [ ] 10-06-PLAN.md — `apr eval --split test --dump-probabilities` on the existing lock-gated door; accuracy-to-accuracy control with a mutation check; house macro-F1, per-class F1 and ECE from the dump; the Laya side-by-side table (D-07 readout form)
+- [ ] 10-08-PLAN.md — live redeploy through the existing pmcp.run path, identity probe + negative control, deploy-verify timings reported and normalized; a failed verify halts for the owner (it does not contain)
 
 **Wave 6** *(blocked on Wave 5 completion)*
-- [ ] 10-09-PLAN.md — acceptance replay against the live classifier, 10-HANDOFF.md (D-17 with D-14/D-15/D-04/D-07/D-18/D-01 stated), the D-13 amendment
-- [ ] 10-10-PLAN.md — contract (served_task_min_row_tokens, FALSIFY-DECIDE-TOOL-009) / lambda README / CLAUDE.md / claims ledger say what is served (split from 10-08, wave 6 beside 10-09)
+- [ ] 10-10-PLAN.md — documentation only after the deploy: contract (served_task_min_row_tokens, FALSIFY-DECIDE-TOOL-009) / lambda README / CLAUDE.md / claims ledger say what is served, with one sha, one door and one P cross-checked
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [ ] 10-09-PLAN.md — acceptance replay against the live classifier (one-text calls, the largest admitted multi-text call, the expected count refusal at the door plus one), 10-HANDOFF.md (D-17 with D-14/D-15/D-04/D-07/D-18/D-01 stated, limits as deployed), the D-13 amendment; released only after 10-10's gates
