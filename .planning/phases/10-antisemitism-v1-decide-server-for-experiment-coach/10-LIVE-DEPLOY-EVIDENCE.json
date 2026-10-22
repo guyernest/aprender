@@ -138,7 +138,94 @@
     "auth_token_env": null,
     "token_source": null
   },
-  "live_attempts": [],
+  "live_attempts": [
+    {
+      "attempt": 1,
+      "started": "2026-10-22T17:03:31Z",
+      "ended": "2026-10-22T17:27:57Z",
+      "commit": "c948591e26337fe4215b9287312721db70023aea",
+      "contract": "decide-tool-boundary-v1 9.0.0",
+      "config": {
+        "server": "aprender-mcp-decide",
+        "env": "dev",
+        "auth": "off",
+        "tier_mb": 10240,
+        "sha_pin": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e"
+      },
+      "command": "just laya-deploy models/decide/laya-antisemitism-v1.apr models/decide/laya-antisemitism-v1 data/decide/goldstandard-2024 <laya snapshot 55cf4c4e> aprender-mcp-decide dev ze-kasher-dev",
+      "rc": 0,
+      "passed_before_refusal": [],
+      "refusal": null,
+      "recipe_lines": [
+        "eligible: laya-verify accepted models/decide/laya-antisemitism-v1.apr (sha256 2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e)",
+        "DEPLOYING aprender-mcp-decide (auth enabled=false)",
+        "grant ok: stack-declared s3:GetObject on decide/aprender-mcp-decide/* and no other S3 grant",
+        "edge-health ok: serverId aprender-mcp-decide",
+        "DEPLOYED aprender-mcp-decide at https://aprender-mcp-decide.us-east.true-mcp.com/mcp: compile log, edge health serverId and live identity (sha256 2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e) name the decide server"
+      ],
+      "endpoint": "https://aprender-mcp-decide.us-east.true-mcp.com/mcp",
+      "recipe_identity_probe": {
+        "probe": "identity",
+        "probe_id": "probe-18e0ea1fee548e30-17fdd",
+        "one_tool_named_classify": true,
+        "description_has_labels_in_order": true,
+        "response_labels_match": true,
+        "identity_matches": true,
+        "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+        "elapsed_ms": [
+          1464,
+          195,
+          961
+        ],
+        "tokens_total": 94,
+        "shape": "identity",
+        "load_header": "warm"
+      },
+      "identity_probe": {
+        "probe": "identity",
+        "probe_id": "probe-18e0ea2aebfba910-183aa",
+        "one_tool_named_classify": true,
+        "description_has_labels_in_order": true,
+        "response_labels_match": true,
+        "identity_matches": true,
+        "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+        "elapsed_ms": [
+          396,
+          136,
+          929
+        ],
+        "tokens_total": 94,
+        "shape": "identity",
+        "load_header": "warm"
+      },
+      "identity_probe_retries": 0,
+      "negative_control": {
+        "artifact": "laya-stance-64.apr",
+        "exit": 1,
+        "identity_matches": false,
+        "description_has_labels_in_order": false,
+        "response_labels_match": false,
+        "line": {
+          "probe": "identity",
+          "probe_id": "probe-18e0ea2bcde7ac98-183c2",
+          "one_tool_named_classify": true,
+          "description_has_labels_in_order": false,
+          "response_labels_match": false,
+          "identity_matches": false,
+          "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+          "elapsed_ms": [
+            346,
+            129,
+            931
+          ],
+          "tokens_total": 94,
+          "shape": "identity",
+          "load_header": "warm"
+        }
+      },
+      "aws_write_count_this_attempt": "cargo pmcp deploy to pmcp.run (function update + stack); the upload's one S3 PutObject is under pre_deploy_steps"
+    }
+  ],
   "live": null,
   "stance_demo": {
     "sha": "24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a",
@@ -175,6 +262,21 @@
       "token_minutes_left": 32,
       "reason": "laya-deploy re-runs laya-verify first (the upload's verify took about 24 min of the 24.5 min step on this host) and only then builds the arm64 bootstrap and calls cargo pmcp deploy, which needs the pmcp.run token; the remaining 32 min do not cover verify + build + deploy + edge settle, and an interrupted deploy would leave a half-deployed function. Per the owner's credential rule the executor stopped BEFORE starting the deploy and asks for a fresh `cargo pmcp deploy login --target-type pmcp-run`.",
       "function_touched": false
+    }
+  },
+  "live_function_after": {
+    "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+    "auth": "off",
+    "tier_mb": 10240,
+    "contained": false,
+    "readback": {
+      "command": "aws lambda get-function-configuration (read-only)",
+      "memory_mb": 10240,
+      "state": "Active",
+      "last_update_status": "Successful",
+      "architecture": "arm64",
+      "env_APRENDER_DECIDE_SHA256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+      "read_at": "2026-10-22T17:32Z"
     }
   }
 }
