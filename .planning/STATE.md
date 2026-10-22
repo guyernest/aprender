@@ -47,7 +47,7 @@ now depend on 05-10, so the 80 expensive cells cannot be generated before the ga
 them exists (waves 5→6, 6→7, 7→8); (c) cold latency and inference peak RSS move to a dedicated
 fresh child process with a true kernel high-water mark on both platforms, and train peak becomes
 a separate, separately-labelled field.
-Last activity: 2026-10-21 — Phase 10 replanned after cross-AI review (Codex + Fable; Gemini lane failed on quota): 11 plans in 7 waves, plan checker passed on round 3; next /gsd-execute-phase 10
+Last activity: 2026-10-21 — Phase 10 replanned after cross-AI review (Codex + Fable; Gemini lane failed on quota): 11 plans in 7 waves, plan checker passed on round 3; next /gsd-execute-phase 10. Plan 10-02 executed 2026-10-21 (probe --replay N / --replay-over-limit / plan-only min_row_tokens, commits 9e0b09638 and 7d4fb00de, live-verified against the stance server; 1 of 11 plans). The gsd-tools state verbs (advance-plan, record-metric, add-decision, record-session) all refused, again on 04-VERIFICATION.md status gaps_acknowledged, so this line was edited by hand and the frontmatter was not touched
 
 **Phase 04 UAT ran 2026-08-16 at `b3f816c25` (macOS/arm64): 12 tests, 12 passed, 0 issues —
 see `04-UAT.md`.** Every gate was executed in-session, not read off a SUMMARY: codec 17,

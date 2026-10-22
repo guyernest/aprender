@@ -856,12 +856,12 @@ The partner-side changes (classify batch at most 8, client transport to the pmcp
   5. The artifact is live through the existing pmcp.run path at 10,240 MB (server name and auth posture decided at the deploy checkpoint), identity-checked by the probe with `--expect-sha256`, and the acceptance replay (one result per text, labels in task order, probabilities summing to 1, the returned sha equal to the pin) is recorded with timings reported and not gated; every gate green (`cargo fmt --all -- --check`, strict clippy on touched crates, their tests, `pv validate` on any touched contract, `bashrs lint` on new scripts).
 
 **Branch base**: continues on `gsd/phase-2-contract-gate` per the 02-01 policy.
-**Plans:** 11 plans
+**Plans:** 1/11 plans executed
 
 Plans:
 **Wave 1**
 - [ ] 10-01-PLAN.md — prepare_goldstandard.py (declared rule, --selftest, --selftest-tokenizer, --measure with the served door as a parameter), four measured guide drafts (p44/p60/p90 for door 8, pfull for a lowered door), the owner's blocking choice of guide AND served door (D-06; D-05/D-15 amended 2026-10-21), the data dir written once, 10-TASK-EVIDENCE.json with chosen_max_texts
-- [ ] 10-02-PLAN.md — `probe --replay N` (1..=the compiled door, `--replay-from`), `--replay-over-limit`, a pure evaluator with negative tests, typed count and token-budget refusals, plan-only `min_row_tokens` / door keys; proven on the loopback fixture and live against the stance server
+- [x] 10-02-PLAN.md — `probe --replay N` (1..=the compiled door, `--replay-from`), `--replay-over-limit`, a pure evaluator with negative tests, typed count and token-budget refusals, plan-only `min_row_tokens` / door keys; proven on the loopback fixture and live against the stance server
 
 **Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 10-03-PLAN.md — probe_epoch.py (one epoch, seed 13, no run dir) measures s/step and the per-epoch monitor cost on this host, raw vs retained post lengths; E declared from it; re-prices the date if over 3.0 s (D-10); host-load record (a contended window is not trusted); an OOM, an over-threshold or cpu probe or a contended window reaches the owner at a Task 3 checkpoint whose reply is a recorded file
