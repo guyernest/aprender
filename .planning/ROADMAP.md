@@ -859,13 +859,24 @@ The partner-side changes (classify batch at most 8, client transport to the pmcp
 **Plans:** 10 plans
 
 Plans:
+**Wave 1**
 - [ ] 10-01-PLAN.md — prepare_goldstandard.py (declared rule, --selftest, --measure), three measured guide drafts, the owner's blocking task.json approval (D-06), the data dir written once, 10-TASK-EVIDENCE.json
 - [ ] 10-02-PLAN.md — `probe --replay N` (run_replay, ReplayReport, synthetic texts) proven on the loopback fixture and live against the stance server
+
+**Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 10-03-PLAN.md — probe_epoch.py (one epoch, seed 13, no run dir) measures s/step on this host; E declared from it; re-prices the date if over 3.0 s (D-10)
+
+**Wave 3** *(blocked on Wave 2 completion)*
 - [ ] 10-04-PLAN.md — the one declared gate run (3 seeds, early stopping), pack / verify / inspect / plan-only cross-check, 10-GATE-RUN-EVIDENCE.json; a FAIL halts for the owner (D-09)
+
+**Wave 4** *(blocked on Wave 3 completion)*
 - [ ] 10-05-PLAN.md — SetFit s64e1b16 cell through an attested two-label adapter and the apr doors (same train split, same eval split), `laya-setfit-cell`
-- [ ] 10-06-PLAN.md — SetFit test-split probabilities through the lock-gated door; house ECE and per-class F1; the Laya side-by-side table (D-07 readout form)
 - [ ] 10-07-PLAN.md — resolver re-proof for cargo-pmcp 0.28.1, DRY_RUN deploy selftest on the new artifact, the owner's D-13 decision (replace / auth posture)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [ ] 10-06-PLAN.md — SetFit test-split probabilities through the lock-gated door; house ECE and per-class F1; the Laya side-by-side table (D-07 readout form)
 - [ ] 10-08-PLAN.md — live redeploy through the existing pmcp.run path, identity probe + negative control, deploy-verify timings reported
+
+**Wave 6** *(blocked on Wave 5 completion)*
 - [ ] 10-09-PLAN.md — acceptance replay against the live classifier, 10-HANDOFF.md (D-17 with D-14/D-15/D-04/D-07/D-18/D-01 stated), the D-13 amendment
 - [ ] 10-10-PLAN.md — contract (served_task_min_row_tokens, FALSIFY-DECIDE-TOOL-009) / lambda README / CLAUDE.md / claims ledger say what is served (split from 10-08, wave 6 beside 10-09)
