@@ -12,15 +12,15 @@ provides:
   - "models/decide/resolver-proof.txt re-proven for cargo-pmcp 0.28.1 at SDK d0348451 (gitignored)"
 affects: [10-08, 10-09, 10-10]
 
-status: partial
-status_note: "Task 1 (tracer) complete and committed. Task 2 (checkpoint:decision, gate blocking-human, D-13/D-18) is AWAITING THE OWNER; this plan is NOT complete and no live step may run."
+status: complete
+status_note: "Both tasks done. The owner decided replace-auth-off on 2026-10-22. D-18 access is NOT confirmed (decision.access_confirmed false: the cached pmcp.run token is expired), so plan 10-08 is gated on a fresh pmcp.run login."
 
 actuals:
-  tokens: 6000
-  tasks: 1
-  commits: 1
+  tokens: 9000
+  tasks: 2
+  commits: 3
 plan_head_before: 659dbeb05f140ce92db2a63a0df5eb366631e434
-plan_head_after: 9c5d2170b
+plan_head_after: 9fc9c5371191cedffd71e6ff8e9d2f896b35a36a
 
 key-files:
   created:
@@ -28,10 +28,12 @@ key-files:
   modified: []
 
 key-decisions:
-  - "No decision is recorded: D-13 (replace the stance demo? auth posture?) and D-18 (deploy access) belong to the owner at the blocking checkpoint; the evidence's decision stays null"
+  - "D-13 decided by the owner on 2026-10-22: replace the stance demo under aprender-mcp-decide, auth off (no bearer, auth_token_env null)"
+  - "access_confirmed is false: established by read-only checks, never taken from the owner's silence; AWS profile ok, pmcp.run cached token expired"
 
-requirements-completed: []
-requirements-partial: [SC-5]
+requirements-completed: [D-12, D-13, D-15]
+requirements-partial: [SC-5, D-18]
+requirements-note: "SC-5 is only its offline half (the live half is plan 10-08); D-18 (deploy access) is unmet until a fresh pmcp.run login is confirmed"
 ---
 
 # Phase 10 Plan 07: Offline deploy readiness and the D-13 owner checkpoint Summary
@@ -40,7 +42,20 @@ requirements-partial: [SC-5]
 
 ## Status
 
-Task 1 done and committed (`9c5d2170b`). Task 2 is a `checkpoint:decision` with `gate="blocking-human"`; it is not self-approved. Plans 10-08 and 10-09 must not start until the owner replies and the decision is recorded in `10-LIVE-DEPLOY-EVIDENCE.json`. `requirements-completed` is empty on purpose: SC-5 is only half-met (the offline half).
+Task 1 done (`9c5d2170b`). Task 2 done: the owner replied `replace-auth-off` at the blocking checkpoint and the decision is recorded (`9fc9c5371`). **Plan 10-08 is gated:** `decision.access_confirmed` is `false`.
+
+## Owner decision (Task 2)
+
+Recorded 2026-10-22: choice `replace-auth-off`, auth `off`, decided_by `owner`, `auth_token_env` null, `token_source` null (no bearer exists with auth off). The owner did not state whether the AWS profile and `cargo pmcp login` are in place, so access was checked read-only rather than assumed:
+
+| Check | Result |
+|-------|--------|
+| `aws sts get-caller-identity --profile ze-kasher-dev` | rc 0, an IAM user principal (account id deliberately not recorded) |
+| pmcp.run login | FAILED: `~/.pmcp/credentials.toml` key `pmcp-run.expires_at` is 2026-10-21T19:08:45Z, about 19 h before the check; no token value was read or printed. A refresh token is present, but refreshing writes the credentials file and calls the identity provider, so it was not attempted. Whether the refresh works is unknown. cargo-pmcp 0.28.1 has no read-only verb for pmcp.run deploy-login status (`cargo pmcp auth status` covers per-server MCP OAuth tokens, not this). |
+
+Consequence: `access_confirmed` is false. Before plan 10-08's live steps the owner must run `cargo pmcp deploy login --target-type pmcp-run` (or authorise a refresh and have it confirmed). Plan 10-08 must not start until then.
+
+Side effect to disclose: `cargo pmcp auth status` printed "Migrated 2 cached credential(s) from the previous cache format" and so rewrote the local `~/.pmcp/oauth-cache.json`. That is a local cache of two cost-coach OAuth entries, not an AWS or pmcp.run action, and nothing about this server was touched.
 
 ## Measured results (Task 1)
 
@@ -91,8 +106,9 @@ None to the plan's actions. Orchestrator-directed adjustments, disclosed:
 
 - `just --evaluate` is mangled by the rtk hook; the Laya snapshot dir was read with `rtk proxy` (snapshot `55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851`).
 - `10-LIVE-DEPLOY-EVIDENCE.json` `door.door_evidence_commit` is `a8734c53c` (plan 10-11's evidence commit); 10-11 was a no-op, so there is no production door commit, and `contract_version` is 9.0.0.
+- The access checks in Task 2 were done by the coordinator's instruction (read-only AWS sts and a local credentials-file expiry read) after the owner left access unstated.
 - State verbs refuse (04-VERIFICATION.md `gaps_acknowledged`); STATE.md was hand-edited on its `Last activity:` line only. `roadmap update-plan-progress` was deliberately NOT run: it counts SUMMARY files and would mark this unfinished plan complete.
-- This SUMMARY is written at the checkpoint, at the orchestrator's instruction, and is `status: partial`; the continuation after the owner's reply must complete it (decision block, Task 2 commit, `requirements-completed`, roadmap progress).
+- The SUMMARY was first written at the checkpoint as `status: partial` and finalized here after the owner's reply. `commits: 3` is measured with `git rev-list --count` before the final docs commit that carries this file.
 
 ## Auth Gates
 
@@ -104,7 +120,7 @@ None.
 
 ## Threat Flags
 
-None. No new network surface; T-10-23 held (every recipe under DRY_RUN=1, AWS CALLS: 0), T-10-24 mitigated (proof re-run, equals the installed tool), T-10-25 held (no account id), T-10-26 and T-10-40 are open until the decision is recorded.
+None. No new network surface; T-10-23 held (every recipe under DRY_RUN=1, AWS CALLS: 0), T-10-24 mitigated (proof re-run, equals the installed tool), T-10-25 held (no account id), T-10-26 mitigated (decision block recorded with choice, auth, date, decided_by, access_confirmed); T-10-40 not applicable (auth off).
 
 ## Self-Check: PASSED
 
