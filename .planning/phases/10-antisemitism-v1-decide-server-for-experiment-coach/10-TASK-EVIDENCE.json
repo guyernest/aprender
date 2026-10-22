@@ -1,0 +1,133 @@
+{
+  "schema": "laya-task-evidence-v2",
+  "phase": "10-antisemitism-v1-decide-server-for-experiment-coach",
+  "plan": "10-01",
+  "approved_variant": "p90",
+  "owner_approved_on": "2026-10-21",
+  "owner_reply": "door-8 p90",
+  "owner_approval_notes": "Approved the exact bytes (not_antisemitic first); the door stays at 8 (no contract, runtime, ledger or documentation change). The owner did NOT ask to redraft from arXiv 1910.01214: the text paraphrases the IHRA examples with the 2304.14599 labelling rules, and 2304.14599 cites the 12-paragraph annotation guideline separately (1910.01214, not fetched). A fuller guide is a hypothesis; the owner chose the draft that keeps door 8.",
+  "approved_text": {
+    "instructions_sha256": "3fdcc5af005ccddfdaf9f3827e49ec75edd60dca2ca118e018dc4811212eb371",
+    "descriptions_sha256": {
+      "not_antisemitic": "19fc2873e8971ceb42cf993a8006a7a3299f2a74327649031bd69253238bb78f",
+      "antisemitic": "caff4f5a2f065c5ee1e526e4cdd972bb55706507144557f3252adf4334e34cf9"
+    },
+    "criteria_order": [
+      "not_antisemitic",
+      "antisemitic"
+    ],
+    "sha256": "33fd8d7cd51b1b2864033ee313d30ae445e76120cc2b26e3849369c0602248e3",
+    "sha256_of": "the exact bytes of task.json rendered from the approved strings (identical to task_json_sha256)"
+  },
+  "chosen_max_texts": 8,
+  "previous_max_texts": 8,
+  "door_choice": "keep",
+  "budget_P_max": 100,
+  "door_cost_list_presented": true,
+  "measured": {
+    "P": 86,
+    "markers": 2,
+    "options": [
+      {
+        "name": "not_antisemitic",
+        "raw_tokens": 12,
+        "kept_tokens": 12,
+        "cut": false
+      },
+      {
+        "name": "antisemitic",
+        "raw_tokens": 14,
+        "kept_tokens": 14,
+        "cut": false
+      }
+    ],
+    "head_raw_tokens": 54,
+    "head_kept_tokens": 54,
+    "head_cut": false,
+    "instructions_tokens": 51,
+    "instruction_room_tokens": 161,
+    "p_cap": 196,
+    "state_room_tokens": 426,
+    "door_max_texts": 8,
+    "door_total": 688,
+    "fits_door": true,
+    "max_texts_that_fit": 8
+  },
+  "texts_per_call": {
+    "p50": 5,
+    "p95": 4
+  },
+  "share_fit_100": 0.017,
+  "posts_truncated": {
+    "count": 0,
+    "share": 0.0
+  },
+  "tweet_tokens": {
+    "p50": 56,
+    "p75": 73,
+    "p90": 86,
+    "p95": 94,
+    "p99": 130,
+    "max": 366,
+    "mean": 57.6,
+    "n": 11311
+  },
+  "control": {
+    "stance_task_P": 57,
+    "stance_markers": 3,
+    "source": "prepare_goldstandard.py --selftest-tokenizer (asserts the served_task_min_row_tokens 57 with 3 markers)"
+  },
+  "task_json_sha256": "33fd8d7cd51b1b2864033ee313d30ae445e76120cc2b26e3849369c0602248e3",
+  "data": {
+    "dir": "data/decide/goldstandard-2024",
+    "gitignored": true,
+    "files": {
+      "task.json": {
+        "lines": 8,
+        "sha256": "33fd8d7cd51b1b2864033ee313d30ae445e76120cc2b26e3849369c0602248e3"
+      },
+      "train.jsonl": {
+        "lines": 8510,
+        "sha256": "81a923d4b1b05bfd809e1c04534f714c2bc57c3d3a5e11e33c79fa44f7a79a9e"
+      },
+      "eval.jsonl": {
+        "lines": 2129,
+        "sha256": "f4a0cf7c2ea6d2ebce8580a82287410daa4106688d3e224e081a04fe141b38a8"
+      }
+    },
+    "counts": {
+      "rows_in": 11311,
+      "distinct_texts": 10644,
+      "duplicates_collapsed": 667,
+      "mixed_label_groups_dropped": 5,
+      "mixed_label_rows_dropped": 13,
+      "train": {
+        "antisemitic": 1494,
+        "not_antisemitic": 7016
+      },
+      "eval": {
+        "antisemitic": 374,
+        "not_antisemitic": 1755
+      }
+    },
+    "split_seed": 13,
+    "rule": "nfc-trim-ws-v1 text groups; the 5 mixed-label groups (13 rows) dropped whole; seed 13, label-stratified, group-disjoint, ceil(0.2 x groups of the class) per class to eval.jsonl, the rest to train.jsonl",
+    "csv_sha256": "79f4d0ebc5f5ff529a25c0dfc1f7c8bbca48dbb6b8cff06b0059727da8db992f",
+    "csv_source": "motivation-experiment datasets/antisemite/GoldStandard2024.csv (partner repo, read in place, never copied)"
+  },
+  "guide_source": {
+    "citation": "Jikeli, Karali, Miehling, Soemer, 'Antisemitic Messages? A Guide to High-Quality Annotation and a Labeled Dataset of Tweets', arXiv 2304.14599",
+    "arxiv_id": "2304.14599",
+    "url": "https://arxiv.org/abs/2304.14599",
+    "fetched_on": "2026-10-21",
+    "fetched_text_sha256": "75fbaabdba7f759542a30f0f9dfdf76fe06ddb552f69ba68177ea1f43921ba30",
+    "fetched_bytes": 357202,
+    "fetched_what": "https://arxiv.org/pdf/2304.14599 (PDF bytes)",
+    "derivation": "the approved strings paraphrase the IHRA Working Definition examples with the labelling rules of 2304.14599; the 12-paragraph annotation guideline is cited by that paper separately (Jikeli, Cavar, Miehling 2019, arXiv 1910.01214) and was not fetched"
+  },
+  "accuracy_claim": "hypothesis: no accuracy number exists before the gate run (D-07)",
+  "shift_jsonl": null,
+  "shift_jsonl_note": "D-04: the requester's live labelled sample, when it exists, is a shift.jsonl reported probe for a later run; not written here",
+  "measured_on": "2026-10-21",
+  "measured_at_commit": "02a1689ce (Task 1 tracer head; the Task 3 commit follows it)"
+}

@@ -1,7 +1,7 @@
 """GoldStandard2024 (the partner CSV) -> a Laya data dir, and the measured prefix of the condensed task (plan 10-01).
 
-    uv run --project scripts/laya_train --frozen python -I scripts/laya_train/prepare_goldstandard.py --guide ID [--csv PATH] [--out DIR] [--no-pin]
-    uv run --project scripts/laya_train --frozen python -I scripts/laya_train/prepare_goldstandard.py --measure (--guide ID | --task PATH) [--csv PATH] [--max-texts N]
+    uv run --project scripts/laya_train --frozen python -I scripts/laya_train/prepare_goldstandard.py [--csv PATH] [--out DIR] [--no-pin]
+    uv run --project scripts/laya_train --frozen python -I scripts/laya_train/prepare_goldstandard.py --measure [--task PATH] [--csv PATH] [--max-texts N]
     uv run --project scripts/laya_train --frozen python -I scripts/laya_train/prepare_goldstandard.py --selftest | --selftest-tokenizer
     (or: just laya-prepare-goldstandard <the same arguments>)
 
@@ -57,10 +57,15 @@ paragraphs, and it states the labelling rules the dataset follows (calling out o
 antisemitic; Holocaust distortions mostly fall outside IHRA and carry their own label; a tweet felt to be antisemitic
 with no applicable section of the definition is not antisemitic; "probably not" and "don't know" count as not
 antisemitic). The 12-paragraph annotation guideline itself is a separate document the paper cites (Jikeli, Cavar,
-Miehling 2019, arXiv 1910.01214), so the drafts below paraphrase the IHRA definition's examples as the paper applies
+Miehling 2019, arXiv 1910.01214), so the approved text below paraphrases the IHRA definition's examples as the paper applies
 them; whether a fuller guide improves accuracy is a HYPOTHESIS measured only by the gate run (D-07).
 
-GUIDES holds the DRAFT condensations the owner chooses from at the plan 10-01 checkpoint (select with --guide ID).
+APPROVED 2026-10-21 by the owner (plan 10-01 Task 2): door-8 p90; door 8 (chosen_max_texts 8, no contract, runtime, ledger
+or documentation change); measured P 86. The owner approved the exact bytes of INSTRUCTIONS and DESCRIPTIONS below,
+not_antisemitic first, and did NOT ask for a redraft from arXiv 1910.01214. These strings paraphrase the IHRA working
+definition's examples with the labelling rules of arXiv 2304.14599; that paper cites the 12-paragraph annotation guideline
+separately (1910.01214, not fetched). A fuller guide is a HYPOTHESIS for accuracy, measured only by the gate run (D-07):
+the owner chose the draft that keeps the door at 8. With no --task, --measure measures this approved task.
 """
 import argparse
 import contextlib
@@ -108,34 +113,13 @@ SNAPSHOT_REV = "55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851"
 HEADER_TEXT = "choice question:"
 TOOL_BOUNDARY = "contracts/decide-tool-boundary-v1.yaml"
 
-# DRAFT condensations of the guide (plan 10-01 Task 2: the owner picks one, or edits). Criteria in label order.
-GUIDES = {
-    "p44": {
-        "instructions": "Is this tweet antisemitic (IHRA)? Criticism of Israel is not.",
-        "descriptions": {"not_antisemitic": "not hostile to Jews", "antisemitic": "hostile to Jews"},
-    },
-    "p60": {
-        "instructions": "Is this tweet antisemitic by the IHRA definition? Criticism of Israel or condemning antisemitism is not.",
-        "descriptions": {"not_antisemitic": "no hatred of Jews", "antisemitic": "hatred of Jews or antisemitic tropes"},
-    },
-    "p90": {
-        "instructions": "Is this tweet antisemitic by the IHRA definition? Antisemitic: hostile stereotypes of Jews, Jewish power or "
-                        "conspiracy myths, Holocaust denial, blaming Jews collectively. Not antisemitic: criticism of Israel, or "
-                        "reporting antisemitism.",
-        "descriptions": {"not_antisemitic": "no hostility toward Jews as Jews", "antisemitic": "hostile to Jews or an antisemitic trope"},
-    },
-    "pfull": {
-        "instructions": "Decide whether this tweet is antisemitic under the IHRA working definition. Antisemitic: hatred of Jews as "
-                        "Jews; calling for or justifying harm to Jews; dehumanizing or stereotyped claims about Jews, such as money, "
-                        "media or world-control conspiracy myths; blaming Jews collectively for Israel's acts; Holocaust denial; dual "
-                        "loyalty accusations; denying Jewish self-determination or double standards for Israel; Nazi comparisons for "
-                        "Israel; blood libel. Not antisemitic: criticism of Israel like that of any other state; calling out, "
-                        "reporting or condemning antisemitism, including quoted slurs; news, history or Holocaust remembrance; merely "
-                        "mentioning Jews or Israel; rude tone with no part of the definition applying. Unclear cases are not "
-                        "antisemitic.",
-        "descriptions": {"not_antisemitic": "no hostility toward Jews as Jews", "antisemitic": "hostile to Jews or an antisemitic trope"},
-    },
-}
+# The approved task (plan 10-01 Task 2, owner reply `door-8 p90`, 2026-10-21): ONE task per script (OPS-03). These are the
+# exact approved strings; their bytes become task.json and so inputs_sha256.task_json. Criteria in label order (D-02).
+INSTRUCTIONS = ("Is this tweet antisemitic by the IHRA definition? Antisemitic: hostile stereotypes of Jews, Jewish power or "
+                "conspiracy myths, Holocaust denial, blaming Jews collectively. Not antisemitic: criticism of Israel, or "
+                "reporting antisemitism.")
+DESCRIPTIONS = {"not_antisemitic": "no hostility toward Jews as Jews", "antisemitic": "hostile to Jews or an antisemitic trope"}
+TASK = {"instructions": INSTRUCTIONS, "descriptions": DESCRIPTIONS}
 
 
 class PrepareFailed(Exception):
@@ -399,7 +383,7 @@ def selftest():
         except Exception as e:                           # a traceback-class escape is a FAIL, never a crash
             case(name, False, "raised %s, not a DataError %s" % (type(e).__name__, rule))
 
-    guide = GUIDES["p44"]
+    guide = TASK
     with tempfile.TemporaryDirectory(prefix="goldstandard-selftest-") as tmp:
         tmp = Path(tmp)
         good = tmp / "good.csv"
@@ -480,24 +464,24 @@ def selftest():
             case("P %d at door %d" % (p, n), d["fits_door"] is fits and d["max_texts_that_fit"] == ceil_ and d["door_total"] == p * n, json.dumps(d))
 
         print("no text on stdout or stderr (sentinel %s):" % SENTINEL)
-        rc, o, e = _capture(["--csv", str(good), "--out", str(tmp / "out-a"), "--guide", "p44", "--no-pin"])
+        rc, o, e = _capture(["--csv", str(good), "--out", str(tmp / "out-a"), "--no-pin"])
         case("success path: exit 0, PREPARE OK, no sentinel", rc == 0 and "PREPARE OK" in o and SENTINEL not in o + e, "exit %s" % rc)
-        rc, o, e = _capture(["--csv", str(good), "--out", str(tmp / "out-pin"), "--guide", "p44"])
+        rc, o, e = _capture(["--csv", str(good), "--out", str(tmp / "out-pin")])
         case("a CSV that is not the pinned file: exit 1, no sentinel, nothing written",
              rc == 1 and "PREPARE FAILED" in e and SENTINEL not in o + e and not (tmp / "out-pin").exists(), "exit %s" % rc)
         sentinel_header = tmp / "sentinel-header.csv"
         sentinel_header.write_text("%s,not,a,header\n1,u,d,0,k,t\n" % SENTINEL, encoding="utf-8")
-        rc, o, e = _capture(["--csv", str(sentinel_header), "--out", str(tmp / "out-b"), "--guide", "p44", "--no-pin"])
+        rc, o, e = _capture(["--csv", str(sentinel_header), "--out", str(tmp / "out-b"), "--no-pin"])
         case("header path (the header holds the sentinel): exit 2, no sentinel", rc == 2 and "REFUSED csv-header" in e and SENTINEL not in o + e, "exit %s" % rc)
         bad2 = tmp / "bad2.csv"
         _mutate(good, bad2, lambda r: r.__setitem__(3, "2") if r[0] == "4" else None)
-        rc, o, e = _capture(["--csv", str(bad2), "--out", str(tmp / "out-c"), "--guide", "p44", "--no-pin"])
+        rc, o, e = _capture(["--csv", str(bad2), "--out", str(tmp / "out-c"), "--no-pin"])
         case("label path (Biased 2): exit 2, no sentinel", rc == 2 and "REFUSED csv-label" in e and SENTINEL not in o + e, "exit %s" % rc)
         bad3 = tmp / "bad3.csv"
         _mutate(good, bad3, lambda r: r.__setitem__(5, "") if r[0] == "4" else None)
-        rc, o, e = _capture(["--csv", str(bad3), "--out", str(tmp / "out-d"), "--guide", "p44", "--no-pin"])
+        rc, o, e = _capture(["--csv", str(bad3), "--out", str(tmp / "out-d"), "--no-pin"])
         case("empty-text path: exit 2, no sentinel", rc == 2 and "REFUSED csv-text" in e and SENTINEL not in o + e, "exit %s" % rc)
-        rc, o, e = _capture(["--csv", str(tmp / "absent.csv"), "--out", str(tmp / "out-e"), "--guide", "p44", "--no-pin"])
+        rc, o, e = _capture(["--csv", str(tmp / "absent.csv"), "--out", str(tmp / "out-e"), "--no-pin"])
         case("missing-file path: exit 2, no sentinel", rc == 2 and "REFUSED csv-missing" in e and SENTINEL not in o + e, "exit %s" % rc)
         # The detector itself: prove the capture sees both streams, so the cases above cannot pass vacuously.
         probe_out, probe_err = io.StringIO(), io.StringIO()
@@ -569,8 +553,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--csv", default=None, help="the partner CSV (prepare mode default: the partner repo path; --measure reads a CSV only when given)")
     ap.add_argument("--out", default=None, help="data dir (default data/decide/goldstandard-2024)")
-    ap.add_argument("--guide", choices=sorted(GUIDES), default=None, help="which draft condensation is the task (until the owner approves one)")
-    ap.add_argument("--task", default=None, help="--measure: a task.json file instead of --guide")
+    ap.add_argument("--task", default=None, help="--measure: a task.json file instead of the approved task")
     ap.add_argument("--measure", action="store_true", help="measure the task's prefix with the served tokenizer and print ONE JSON line")
     ap.add_argument("--max-texts", type=int, default=None, help="--measure: ENFORCE this served door (REFUSED prefix-budget when N x P exceeds the total)")
     ap.add_argument("--no-pin", action="store_true", help="accept a CSV that is not the pinned partner file")
@@ -584,11 +567,9 @@ def main(argv=None):
             return selftest_tokenizer()
         if args.measure:
             return measure_main(ap, args)
-        if args.guide is None:
-            ap.error("--guide is required to prepare a data dir (one of %s)" % ", ".join(sorted(GUIDES)))
         csv_path = Path(args.csv) if args.csv else DEFAULT_CSV
         out = Path(args.out) if args.out else DEFAULT_OUT
-        files, summary = build(csv_path, GUIDES[args.guide])
+        files, summary = build(csv_path, TASK)
         if not args.no_pin:
             check_pin(summary)
         status = write_once(out, files)
@@ -613,17 +594,14 @@ def measure_main(ap, args):
     if args.task:
         task = data.load_task(args.task)
         instructions, criteria = task["instructions"], task["criteria"]
-    elif args.guide:
-        instructions, criteria = GUIDES[args.guide]["instructions"], GUIDES[args.guide]["descriptions"]
     else:
-        ap.error("--measure needs --guide ID or --task PATH")
+        instructions, criteria = INSTRUCTIONS, DESCRIPTIONS
     if args.max_texts is not None and args.max_texts < 1:
         ap.error("--max-texts must be at least 1")
     tok = load_tokenizer()
     csv_path = Path(args.csv) if args.csv else None
     print(json.dumps(report(tok, instructions, criteria, args.max_texts, csv_path)))
     return 0
-
 
 
 if __name__ == "__main__":
