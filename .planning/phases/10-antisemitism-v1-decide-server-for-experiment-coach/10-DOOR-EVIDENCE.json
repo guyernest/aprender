@@ -1,0 +1,66 @@
+{
+  "schema": "laya-door-evidence-v1",
+  "phase": "10-antisemitism-v1-decide-server-for-experiment-coach",
+  "plan": "10-11",
+  "chosen_max_texts": 8,
+  "previous_max_texts": 8,
+  "action": "no-op",
+  "action_note": "Owner reply 'door-8 p90' (2026-10-21, 10-TASK-EVIDENCE.json door_choice 'keep'): the door stays 8. No mirror, contract version, ledger row, README, deploy template or CLAUDE.md sentence was edited by this plan.",
+  "p_new_task": 86,
+  "b_times_p": 688,
+  "budget_total_tokens": 800,
+  "contract_version_before": "9.0.0",
+  "contract_version_after": "9.0.0",
+  "pv_diff_suggestion": null,
+  "pv_validate": "0 error(s), 0 warning(s) - Contract is valid.",
+  "mirrors": {
+    "rust_constant": 8,
+    "contract_constant": 8,
+    "claims_row_75_anchor": "classify_max_texts: 8",
+    "claims_row_112_anchor": "at most 8 texts and 800 built tokens per call",
+    "mirror_test": "tests::bounds_match_contract"
+  },
+  "served_task_min_row_tokens_unchanged": 57,
+  "tests": {
+    "decide_lib": 32,
+    "e2e_stdio": 4,
+    "lambda_lib": 56,
+    "named_ok": [
+      "tests::bounds_match_contract",
+      "tests::max_texts_fit_the_budget_at_the_shortest_row",
+      "tests::one_over_max_texts_refused_naming_max_texts"
+    ]
+  },
+  "tests_edited": [],
+  "lint": {
+    "clippy_aprender_mcp_decide": "ok",
+    "fmt_aprender_mcp_decide": "ok",
+    "clippy_command": "cargo clippy -p aprender-mcp-decide --all-targets --no-deps -- -D warnings"
+  },
+  "historical_residue_unchanged": [],
+  "docs_edited": [],
+  "probe": {
+    "replay_range": "1..=8",
+    "replay_above_door": {
+      "argument": 9,
+      "exit_code": 2,
+      "message": "probe: --replay must be in 1..=8 (the compiled classify_max_texts)"
+    },
+    "plan_only_stance": {
+      "texts": 8,
+      "max_texts": 8,
+      "min_row_tokens": 57,
+      "tokens_planned": 800,
+      "max_total_tokens": 800
+    }
+  },
+  "claims_check_rows": 133,
+  "commit": "no production commit (no-op); evidence recorded on top of 024565d19",
+  "measured_at_commit": "024565d196baddefa17335df600f777b158b3821",
+  "measured_on": "2026-10-21",
+  "host_courtesy": {
+    "lock_file": "/tmp/p10-03-probe.running",
+    "lock_present_at_any_check": false,
+    "minutes_waited": 0
+  }
+}
