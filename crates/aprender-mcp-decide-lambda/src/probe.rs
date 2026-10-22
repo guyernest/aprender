@@ -880,7 +880,7 @@ pub fn evaluate_replay(
 /// text/event-stream`) — and evaluate the answer with [`evaluate_replay`].
 ///
 /// A tool error (a bound refusal) is a [`ProbeError::Protocol`] whose detail starts
-/// `tool error: `. The payload is read from `content[0].text`,
+/// `tool error: `; [`refusal_bound`] types it. The payload is read from `content[0].text`,
 /// as the partner's parser does; there is no `structuredContent` fallback.
 ///
 /// # Errors
@@ -909,6 +909,121 @@ pub async fn run_replay(
         probe_id,
         call,
     ))
+}
+
+/// Which contract bound a server refusal names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusalBound {
+    /// `classify_max_texts`.
+    Count,
+    /// `classify_max_total_tokens` — the budget over built rows; plan 10-09 steps down on it.
+    TokenBudget,
+    /// `classify_max_text_bytes`.
+    TextBytes,
+    /// A tool error that names none of the three.
+    Other,
+}
+
+impl RefusalBound {
+    /// The contract key (or `other`).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Count => "classify_max_texts",
+            Self::TokenBudget => "classify_max_total_tokens",
+            Self::TextBytes => "classify_max_text_bytes",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// Which bound a [`ProbeError::Protocol`] detail names. Only a detail that starts
+/// `tool error: ` is a server refusal; each of the server's refusal messages names exactly
+/// one contract key, so the order of the tests is irrelevant.
+#[must_use]
+pub fn refusal_bound(detail: &str) -> RefusalBound {
+    let Some(message) = detail.strip_prefix("tool error: ") else {
+        return RefusalBound::Other;
+    };
+    if message.contains("classify_max_text_bytes") {
+        RefusalBound::TextBytes
+    } else if message.contains("classify_max_texts") {
+        RefusalBound::Count
+    } else if message.contains("classify_max_total_tokens") {
+        RefusalBound::TokenBudget
+    } else {
+        RefusalBound::Other
+    }
+}
+
+/// The over-limit leg's result: `limit + 1` texts must be refused, naming the count bound.
+#[derive(Debug, Clone, Serialize)]
+pub struct CountRefusalReport {
+    /// The probe id sent.
+    pub probe_id: String,
+    /// Texts sent (`limit + 1`).
+    pub n_texts: usize,
+    /// The result carried `isError: true`.
+    pub is_error: bool,
+    /// The refusal names `classify_max_texts`.
+    pub names_count_bound: bool,
+    /// The refusal names the limit value (`classify_max_texts <limit>`).
+    pub names_limit_value: bool,
+    /// The refusal names the contract (`decide-tool-boundary-v1`).
+    pub names_contract: bool,
+    /// The one `tools/call`.
+    pub call: CallTiming,
+}
+
+impl CountRefusalReport {
+    /// The server refused the over-limit count, naming the bound, the value and the contract.
+    #[must_use]
+    pub fn ok(&self) -> bool {
+        self.is_error && self.names_count_bound && self.names_limit_value && self.names_contract
+    }
+}
+
+/// Send `limit + 1` replay texts in one bare `tools/call` and read the refusal. The result is
+/// read directly (not through [`classify_payload`], which turns `isError` into an `Err`).
+///
+/// # Errors
+///
+/// [`ProbeError`] for a transport failure, a non-2xx status or a JSON-RPC error. A server
+/// that ACCEPTS the over-limit count is a false check in the report.
+pub async fn run_count_refusal(
+    url: &str,
+    bearer: Option<&str>,
+    limit: usize,
+    probe_id: &str,
+) -> Result<CountRefusalReport, ProbeError> {
+    let texts = replay_texts(limit.saturating_add(1));
+    let mut rpc = Rpc::new(url, bearer, probe_id)?;
+    let (result, call) = rpc.call("tools/call", classify_params(&texts)).await?;
+    let is_error = result.get("isError") == Some(&Value::Bool(true));
+    let message = result["content"][0]["text"].as_str().unwrap_or("");
+    Ok(CountRefusalReport {
+        probe_id: probe_id.to_string(),
+        n_texts: texts.len(),
+        is_error,
+        names_count_bound: message.contains("classify_max_texts"),
+        names_limit_value: message.contains(&format!("classify_max_texts {limit}")),
+        names_contract: message.contains("decide-tool-boundary-v1"),
+        call,
+    })
+}
+
+/// The served task's shortest built row (one prepare of the empty text) under `limits`, by
+/// the server's OWN build-time check, so an offline measurement is the one the Lambda makes.
+///
+/// # Errors
+///
+/// The server's refusal text when the task does not fit the door (it names
+/// `classify_max_total_tokens`), or when the task cannot be prepared.
+pub fn served_min_row_tokens(
+    model: &crate::Model,
+    limits: &aprender_mcp_decide::ClassifyLimits,
+) -> Result<usize, String> {
+    aprender_mcp_decide::check_served_task_fits(model, limits).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -1350,5 +1465,348 @@ mod tests {
         assert!(report.one_result_per_text, "{report:?}");
         assert!(report.labels_in_task_order, "{report:?}");
         assert!(report.sums_within_tolerance, "{report:?}");
+    }
+
+    const SHA: &str = "24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a";
+
+    fn names(labels: &[&str]) -> Vec<String> {
+        labels.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    fn timing() -> CallTiming {
+        CallTiming {
+            method: "tools/call",
+            elapsed_ms: 1,
+            load_header: None,
+        }
+    }
+
+    /// A clean three-text payload over labels none / against / favor: each result's label is the
+    /// argmax of its probabilities.
+    #[allow(clippy::disallowed_methods)] // serde_json::json! expands to .unwrap()
+    fn clean_payload() -> Value {
+        json!({
+            "labels": ["none", "against", "favor"],
+            "model": { "artifact_sha256": SHA },
+            "results": [
+                { "label": "none", "probabilities": [0.7, 0.2, 0.1], "tokens": 20, "truncated": false },
+                { "label": "against", "probabilities": [0.1, 0.8, 0.1], "tokens": 21, "truncated": false },
+                { "label": "favor", "probabilities": [0.2, 0.2, 0.6], "tokens": 22, "truncated": false }
+            ]
+        })
+    }
+
+    fn evaluate(payload: &Value) -> ReplayReport {
+        evaluate_replay(
+            payload,
+            3,
+            &names(&["none", "against", "favor"]),
+            SHA,
+            "p",
+            timing(),
+        )
+    }
+
+    /// The seven verdict booleans, named, in `ok()` order.
+    fn verdicts(r: &ReplayReport) -> [(&'static str, bool); 7] {
+        [
+            ("one_result_per_text", r.one_result_per_text),
+            ("probabilities_len_match", r.probabilities_len_match),
+            ("probabilities_in_unit_range", r.probabilities_in_unit_range),
+            ("sums_within_tolerance", r.sums_within_tolerance),
+            ("label_is_argmax", r.label_is_argmax),
+            ("labels_in_task_order", r.labels_in_task_order),
+            ("identity_matches", r.identity_matches),
+        ]
+    }
+
+    /// Every malformed payload fails exactly the checks it should, never panics, and fails
+    /// `ok()`; the clean control passes all seven. Each row names the booleans that must be
+    /// false and so also that every other one stays true.
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::disallowed_methods)] // serde_json::json! expands to .unwrap()
+    fn evaluate_replay_names_each_failed_check() {
+        let clean = evaluate(&clean_payload());
+        assert!(clean.ok(), "{clean:?}");
+        assert!(verdicts(&clean).iter().all(|(_, v)| *v), "{clean:?}");
+        assert_eq!((clean.n_texts, clean.n_results), (3, 3));
+        assert_eq!(clean.tokens_total, 63);
+        assert!(clean.max_abs_sum_deviation <= REPLAY_SUM_TOLERANCE);
+
+        #[allow(clippy::type_complexity)]
+        let cases: Vec<(&str, Box<dyn Fn(&mut Value)>, Vec<&str>)> = vec![
+            (
+                "no results key",
+                Box::new(|p| {
+                    if let Some(o) = p.as_object_mut() {
+                        o.remove("results");
+                    }
+                }),
+                vec!["one_result_per_text"],
+            ),
+            (
+                "results is not an array",
+                Box::new(|p| p["results"] = json!("nope")),
+                vec!["one_result_per_text"],
+            ),
+            (
+                "one result short",
+                Box::new(|p| {
+                    if let Some(a) = p["results"].as_array_mut() {
+                        a.pop();
+                    }
+                }),
+                vec!["one_result_per_text"],
+            ),
+            (
+                "one result too many",
+                Box::new(|p| {
+                    let extra = p["results"][0].clone();
+                    if let Some(a) = p["results"].as_array_mut() {
+                        a.push(extra);
+                    }
+                }),
+                vec!["one_result_per_text"],
+            ),
+            (
+                "a result without probabilities",
+                Box::new(|p| {
+                    if let Some(o) = p["results"][1].as_object_mut() {
+                        o.remove("probabilities");
+                    }
+                }),
+                vec![
+                    "probabilities_len_match",
+                    "sums_within_tolerance",
+                    "label_is_argmax",
+                ],
+            ),
+            (
+                "probabilities of the wrong length",
+                Box::new(|p| p["results"][1]["probabilities"] = json!([0.1, 0.9])),
+                vec!["probabilities_len_match"],
+            ),
+            (
+                "a sum of 1.0001",
+                Box::new(|p| p["results"][0]["probabilities"] = json!([0.7001, 0.2, 0.1])),
+                vec!["sums_within_tolerance"],
+            ),
+            (
+                "a negative probability that still sums to one",
+                Box::new(|p| p["results"][2]["probabilities"] = json!([-0.1, 0.5, 0.6])),
+                vec!["probabilities_in_unit_range"],
+            ),
+            (
+                "a probability above one that still sums to one",
+                Box::new(|p| p["results"][0]["probabilities"] = json!([1.2, -0.1, -0.1])),
+                vec!["probabilities_in_unit_range"],
+            ),
+            (
+                "a null probability (how a non-finite f64 serializes)",
+                Box::new(|p| p["results"][2]["probabilities"] = json!([null, 0.4, 0.6])),
+                vec!["probabilities_in_unit_range"],
+            ),
+            (
+                "a string probability",
+                Box::new(|p| p["results"][2]["probabilities"] = json!(["x", 0.4, 0.6])),
+                vec!["probabilities_in_unit_range"],
+            ),
+            (
+                "a label that is not the argmax",
+                Box::new(|p| p["results"][0]["label"] = json!("against")),
+                vec!["label_is_argmax"],
+            ),
+            (
+                "a result with no label",
+                Box::new(|p| {
+                    if let Some(o) = p["results"][0].as_object_mut() {
+                        o.remove("label");
+                    }
+                }),
+                vec!["label_is_argmax"],
+            ),
+            (
+                "reordered labels",
+                Box::new(|p| p["labels"] = json!(["against", "none", "favor"])),
+                vec!["labels_in_task_order"],
+            ),
+            (
+                "labels missing",
+                Box::new(|p| {
+                    if let Some(o) = p.as_object_mut() {
+                        o.remove("labels");
+                    }
+                }),
+                vec!["labels_in_task_order"],
+            ),
+            (
+                "an empty sha",
+                Box::new(|p| p["model"]["artifact_sha256"] = json!("")),
+                vec!["identity_matches"],
+            ),
+            (
+                "a wrong sha",
+                Box::new(|p| p["model"]["artifact_sha256"] = json!("0".repeat(64))),
+                vec!["identity_matches"],
+            ),
+            (
+                "no model object",
+                Box::new(|p| {
+                    if let Some(o) = p.as_object_mut() {
+                        o.remove("model");
+                    }
+                }),
+                vec!["identity_matches"],
+            ),
+        ];
+        for (name, mutate, must_be_false) in &cases {
+            let mut payload = clean_payload();
+            mutate(&mut payload);
+            let report = evaluate(&payload);
+            assert!(!report.ok(), "{name}: ok() must be false: {report:?}");
+            for (check, value) in verdicts(&report) {
+                assert_eq!(
+                    value,
+                    !must_be_false.contains(&check),
+                    "{name}: {check} (false set must be exactly {must_be_false:?}): {report:?}"
+                );
+            }
+        }
+
+        // The sum deviation is measured, not just thresholded.
+        let mut off = clean_payload();
+        off["results"][0]["probabilities"] = json!([0.7001, 0.2, 0.1]);
+        let report = evaluate(&off);
+        assert!(
+            (report.max_abs_sum_deviation - 1e-4).abs() < 1e-6,
+            "{}",
+            report.max_abs_sum_deviation
+        );
+        // A tie resolves to the first maximum, as the server does.
+        let mut tie = clean_payload();
+        tie["results"][0]["probabilities"] = json!([0.45, 0.45, 0.1]);
+        tie["results"][0]["label"] = json!("none");
+        assert!(evaluate(&tie).label_is_argmax);
+        tie["results"][0]["label"] = json!("against");
+        assert!(!evaluate(&tie).label_is_argmax);
+        // Nothing at all is not a pass.
+        let empty = evaluate(&json!({}));
+        assert!(!empty.ok(), "{empty:?}");
+    }
+
+    /// `refusal_bound` types the server's OWN messages: the count text from a loopback server,
+    /// and the token-budget text from `ClassifyFailure::TokenBudget` (the refusal plan 10-09
+    /// steps down on).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn refusal_bound_classifies_the_servers_own_messages() {
+        let model = tiny_model();
+        let labels = model.task().owned_labels();
+        let url = serve(Arc::clone(&model)).await;
+        let over = ClassifyLimits::CONTRACTED.max_texts + 1;
+        let detail = match run_replay(
+            &url,
+            None,
+            crate::tests::tiny_golden_sha256(),
+            &labels,
+            &replay_texts(over),
+            &new_probe_id(),
+        )
+        .await
+        {
+            Err(ProbeError::Protocol { detail, .. }) => detail,
+            other => panic!("expected a tool error, got {other:?}"),
+        };
+        assert!(detail.starts_with("tool error: "), "{detail}");
+        assert_eq!(refusal_bound(&detail), RefusalBound::Count, "{detail}");
+
+        let budget = match check_token_budget(
+            &ClassifyLimits {
+                max_total_tokens: 10,
+                ..ClassifyLimits::CONTRACTED
+            },
+            &[11],
+        ) {
+            Err(failure) => failure,
+            Ok(()) => panic!("11 built tokens must exceed a budget of 10"),
+        };
+        assert!(matches!(
+            budget,
+            aprender_mcp_decide::ClassifyFailure::TokenBudget { .. }
+        ));
+        let token_detail = format!("tool error: {budget}");
+        assert_eq!(
+            refusal_bound(&token_detail),
+            RefusalBound::TokenBudget,
+            "{token_detail}"
+        );
+
+        let bytes_detail = "tool error: classify: texts[0] is 20000 UTF-8 bytes, over \
+                            classify_max_text_bytes 16384 (contracts/decide-tool-boundary-v1.yaml); \
+                            send a shorter document";
+        assert_eq!(refusal_bound(bytes_detail), RefusalBound::TextBytes);
+        assert_eq!(
+            refusal_bound("tool error: classify: something else broke"),
+            RefusalBound::Other
+        );
+        // Not a tool error: never typed as a refusal, even when it names a key.
+        assert_eq!(
+            refusal_bound("http: classify_max_texts connect error"),
+            RefusalBound::Other
+        );
+        for bound in [
+            RefusalBound::Count,
+            RefusalBound::TokenBudget,
+            RefusalBound::TextBytes,
+        ] {
+            assert!(bound.as_str().starts_with("classify_max_"));
+        }
+        assert_eq!(RefusalBound::Other.as_str(), "other");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_count_refusal_reports_the_count_bound() {
+        let url = serve(tiny_model()).await;
+        let limit = ClassifyLimits::CONTRACTED.max_texts;
+        let report = run_count_refusal(&url, None, limit, &new_probe_id())
+            .await
+            .expect("the over-limit call is answered");
+        assert_eq!(report.n_texts, limit + 1);
+        assert!(report.is_error, "{report:?}");
+        assert!(report.names_count_bound, "{report:?}");
+        assert!(report.names_limit_value, "{report:?}");
+        assert!(report.names_contract, "{report:?}");
+        assert!(report.ok(), "{report:?}");
+    }
+
+    /// A server whose door is one text above the claimed limit ACCEPTS `limit + 1` texts, and the
+    /// over-limit check must say so.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_count_refusal_fails_when_the_server_accepts() {
+        let url = serve(tiny_model()).await;
+        let claimed = ClassifyLimits::CONTRACTED.max_texts - 1;
+        let report = run_count_refusal(&url, None, claimed, &new_probe_id())
+            .await
+            .expect("the call is answered");
+        assert_eq!(report.n_texts, ClassifyLimits::CONTRACTED.max_texts);
+        assert!(!report.is_error, "{report:?}");
+        assert!(!report.ok(), "{report:?}");
+    }
+
+    #[test]
+    fn plan_min_row_tokens_equals_the_empty_text_row_and_refuses_an_unservable_task() {
+        let model = tiny_model();
+        let (shortest, _) = row_tokens(&model, "").expect("the empty text builds");
+        assert_eq!(
+            served_min_row_tokens(&model, &ClassifyLimits::CONTRACTED),
+            Ok(shortest)
+        );
+        let tight = ClassifyLimits {
+            max_total_tokens: ClassifyLimits::CONTRACTED.max_texts * shortest - 1,
+            ..ClassifyLimits::CONTRACTED
+        };
+        let refusal = served_min_row_tokens(&model, &tight)
+            .expect_err("max_texts x the shortest row is one over the budget");
+        assert!(refusal.contains("classify_max_total_tokens"), "{refusal}");
     }
 }

@@ -8,6 +8,8 @@
 //!     --plan-only --apr model.apr --maximal concentrated|distributed
 //! cargo run -p aprender-mcp-decide-lambda --example probe -- \
 //!     --url https://<endpoint>/ --apr model.apr --replay N [--replay-from K]
+//! cargo run -p aprender-mcp-decide-lambda --example probe -- \
+//!     --url https://<endpoint>/ --apr model.apr --replay-over-limit
 //! ```
 //!
 //! `--apr` is the source of the expected sha256 and labels (computed locally, through
@@ -24,13 +26,20 @@
 //! `--plan-only` builds the maximal request from `--apr` and prints its size (texts, planned
 //! tokens, identity) WITHOUT any network call — the offline half of `just laya-deploy-verify`'s
 //! DRY_RUN, which proves both shapes can be built for the artifact before anything is deployed.
+//! It also prints the compiled door (`max_texts`, `max_total_tokens`) and `min_row_tokens`, the
+//! shortest built row, measured by the server's own build-time check, and exits non-zero when
+//! the served task does not fit the door.
 //!
 //! `--replay N` is the acceptance replay (Phase 10 D-16): ONE bare `tools/call` of N committed
 //! synthetic texts (N from 1 to the compiled `classify_max_texts`), checked for one result per
 //! text, probabilities that index the labels in task order and sum to one, and the served sha256.
-//! Timings are reported, never gated.
+//! Timings are reported, never gated. A server refusal of a legal-count replay (the token budget
+//! during a step-down) is a typed `refused` line and exit 3, not a transport failure.
+//! `--replay-over-limit` sends the compiled maximum plus one text and passes only when the
+//! server refuses it, naming the bound.
 //!
-//! Prints one JSON line per probe and exits non-zero on any false check or HTTP error.
+//! Prints one JSON line per probe and exits non-zero on any false check or HTTP error (1), a
+//! usage error (2) or a typed server refusal of a replay (3).
 //! The bearer token (`--bearer` or `APRENDER_DECIDE_PROBE_TOKEN`) is never printed.
 
 #![allow(clippy::disallowed_methods)] // serde_json::json! expands to .unwrap() internally
@@ -41,8 +50,9 @@ use std::process::ExitCode;
 use aprender_mcp_decide::ClassifyLimits;
 use aprender_mcp_decide_lambda::parse_probe_id;
 use aprender_mcp_decide_lambda::probe::{
-    build_maximal_request, new_probe_id, replay_texts_from, run_cold_first, run_identity_probe,
-    run_replay, MaximalShape, IDENTITY_PROBE_TEXT, REPLAY_TEXTS,
+    build_maximal_request, new_probe_id, refusal_bound, replay_texts_from, run_cold_first,
+    run_count_refusal, run_identity_probe, run_replay, served_min_row_tokens, MaximalShape,
+    ProbeError, IDENTITY_PROBE_TEXT, REPLAY_TEXTS,
 };
 
 const TOKEN_ENV: &str = "APRENDER_DECIDE_PROBE_TOKEN";
@@ -50,6 +60,7 @@ const TOKEN_ENV: &str = "APRENDER_DECIDE_PROBE_TOKEN";
 const USAGE: &str = "usage: probe --url <mcp url> --apr <local.apr> [--expect-sha256 <hex>] \
 [--maximal concentrated|distributed] [--cold-first] [--probe-id <id>] [--bearer <token>]
        probe --url <mcp url> --apr <local.apr> --replay <N> [--replay-from <K>]
+       probe --url <mcp url> --apr <local.apr> --replay-over-limit
        probe --plan-only --apr <local.apr> --maximal concentrated|distributed
 
   --url           the MCP endpoint (JSON-RPC POST target)
@@ -59,11 +70,13 @@ const USAGE: &str = "usage: probe --url <mcp url> --apr <local.apr> [--expect-sh
   --cold-first     send ONE tools/call as the first and only POST (no initialize)
   --probe-id       id sent as x-decide-probe-id ([A-Za-z0-9-], <= 64); generated if absent
   --bearer         bearer token (else env APRENDER_DECIDE_PROBE_TOKEN); never printed
-  --plan-only      build the --maximal request and print its size; no network, no --url
+  --plan-only      build the --maximal request and print its size, min_row_tokens and the compiled
+                   door; no network, no --url; exits 1 when the task does not fit the door
   --replay         the acceptance replay: ONE call of N synthetic texts (N in 1..=the compiled
-                   classify_max_texts); needs --url
+                   classify_max_texts); needs --url; a server refusal prints a `refused` line, exit 3
   --replay-from    start index into the cycled replay texts (default 0; needs --replay)
-";
+  --replay-over-limit  one call of classify_max_texts + 1 texts; passes only if the server refuses
+                   it, naming the bound; needs --url";
 
 struct Args {
     url: Option<String>,
@@ -76,6 +89,7 @@ struct Args {
     plan_only: bool,
     replay: Option<usize>,
     replay_from: usize,
+    replay_over_limit: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -89,6 +103,7 @@ fn parse_args() -> Result<Args, String> {
     let mut plan_only = false;
     let mut replay = None;
     let mut replay_from = None;
+    let mut replay_over_limit = false;
     // `args_os`, not `args`: `std::env::args` PANICS (exit 101) on an argument that is not
     // valid UTF-8. Such an argument is a usage error (exit 2), reported by position only,
     // never quoted, because it may be the bearer token.
@@ -134,6 +149,7 @@ fn parse_args() -> Result<Args, String> {
                     .ok_or_else(|| format!("--replay-from must be in 0..={last}"))?;
                 replay_from = Some(k);
             }
+            "--replay-over-limit" => replay_over_limit = true,
             "-h" | "--help" => return Err(String::new()),
             other => return Err(format!("unknown argument {other:?}")),
         }
@@ -144,8 +160,14 @@ fn parse_args() -> Result<Args, String> {
     if !plan_only && url.is_none() {
         return Err("--url is required".to_string());
     }
-    if replay.is_some() && (cold_first || plan_only) {
-        return Err("--replay conflicts with --cold-first and --plan-only".to_string());
+    if replay.is_some() && replay_over_limit {
+        return Err("--replay and --replay-over-limit are separate legs".to_string());
+    }
+    if (replay.is_some() || replay_over_limit) && (cold_first || plan_only) {
+        return Err(
+            "--replay and --replay-over-limit conflict with --cold-first and --plan-only"
+                .to_string(),
+        );
     }
     if replay_from.is_some() && replay.is_none() {
         return Err("--replay-from needs --replay".to_string());
@@ -161,6 +183,7 @@ fn parse_args() -> Result<Args, String> {
         plan_only,
         replay,
         replay_from: replay_from.unwrap_or(0),
+        replay_over_limit,
     })
 }
 
@@ -217,7 +240,22 @@ async fn main() -> ExitCode {
     };
     let shape_name = shape.map_or("identity", MaximalShape::as_str);
 
+    // The compiled door every mode reports and the replay range follows.
+    let door = ClassifyLimits::CONTRACTED;
+
+    // `tokens_planned` is the request TOTAL. The distributed shape fills each text to its
+    // share of the budget, so it approaches `max_total_tokens`; it is NOT `max_texts x
+    // min_row_tokens` (that product is only the floor). `min_row_tokens` is the shortest
+    // built row, measured by the server's own build-time check (`served_min_row_tokens`
+    // wraps `aprender_mcp_decide::check_served_task_fits`): a task that does not fit the door
+    // is refused here, as the Lambda would refuse to start.
     if args.plan_only {
+        let min_row_tokens = match served_min_row_tokens(&model, &door) {
+            Ok(n) => n,
+            Err(refusal) => {
+                return fail(&format!("the served task does not fit the door: {refusal}"))
+            }
+        };
         println!(
             "{}",
             serde_json::json!({
@@ -226,6 +264,9 @@ async fn main() -> ExitCode {
                 "texts": texts.len(),
                 "max_text_bytes": texts.iter().map(String::len).max(),
                 "tokens_planned": planned_tokens,
+                "min_row_tokens": min_row_tokens,
+                "max_texts": door.max_texts,
+                "max_total_tokens": door.max_total_tokens,
                 "artifact_sha256": expected,
                 "labels": labels,
             })
@@ -289,12 +330,50 @@ async fn main() -> ExitCode {
                             "tokens_total": report.tokens_total,
                             "truncated": report.truncated,
                             "elapsed_ms": report.call.elapsed_ms,
-                            "door_max_texts": ClassifyLimits::CONTRACTED.max_texts,
+                            "door_max_texts": door.max_texts,
                             "shape": "replay",
                         })
                     );
                 }
+                // A server REFUSAL of a legal-count replay (the token budget, during a
+                // step-down) is a typed outcome, not a transport failure.
+                Err(ProbeError::Protocol { detail, .. }) if detail.starts_with("tool error: ") => {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "probe": "replay",
+                            "refused": true,
+                            "n_texts": n,
+                            "refusal_bound": refusal_bound(&detail).as_str(),
+                            "refusal": detail.trim_start_matches("tool error: "),
+                            "door_max_texts": door.max_texts,
+                        })
+                    );
+                    return ExitCode::from(3);
+                }
                 Err(e) => return fail(&format!("replay failed: {e}")),
+            }
+        }
+        if args.replay_over_limit {
+            match run_count_refusal(url, bearer, door.max_texts, &probe_id).await {
+                Ok(report) => {
+                    ok &= report.ok();
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "probe": "replay_over_limit",
+                            "probe_id": report.probe_id,
+                            "n_texts": report.n_texts,
+                            "is_error": report.is_error,
+                            "names_count_bound": report.names_count_bound,
+                            "names_limit_value": report.names_limit_value,
+                            "names_contract": report.names_contract,
+                            "elapsed_ms": report.call.elapsed_ms,
+                            "door_max_texts": door.max_texts,
+                        })
+                    );
+                }
+                Err(e) => return fail(&format!("over-limit replay failed: {e}")),
             }
         }
         if shape.is_none() {
