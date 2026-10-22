@@ -879,7 +879,7 @@ Plans:
 - [ ] 10-08-PLAN.md — live redeploy through the existing pmcp.run path, identity probe + negative control, deploy-verify timings reported and normalized; a failed verify halts for the owner (it does not contain)
 
 **Wave 6** *(blocked on Wave 5 completion)*
-- [ ] 10-10-PLAN.md — documentation only after the deploy: contract (served_task_min_row_tokens, FALSIFY-DECIDE-TOOL-009) / lambda README / CLAUDE.md / claims ledger say what is served, with one sha, one door and one P cross-checked; then the phase-wide SC-5 static gates (no new `.sh`, bashrs justfile baseline, strict clippy on every touched crate)
+- [ ] 10-10-PLAN.md — documentation only after the deploy: contract (served_task_min_row_tokens, FALSIFY-DECIDE-TOOL-009) / lambda README / CLAUDE.md / claims ledger say what is served, with one sha, one door and one P cross-checked; then the phase-wide SC-5 static gates (no new `.sh`, `bash -n` on every justfile recipe added or changed, strict clippy on every touched crate)
 
 **Wave 7** *(blocked on Wave 6 completion)*
 - [ ] 10-09-PLAN.md — acceptance replay against the live classifier (one-text calls, the largest admitted multi-text call, the expected count refusal at the door plus one), 10-HANDOFF.md (D-17 with D-14/D-15/D-04/D-07/D-18/D-01 stated, limits as deployed), the D-13 amendment; released only after 10-10's gates
