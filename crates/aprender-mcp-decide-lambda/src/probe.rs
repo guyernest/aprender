@@ -670,6 +670,247 @@ pub fn build_maximal_request(
     Ok((texts, per_text.iter().sum()))
 }
 
+// ===========================================================================
+// The acceptance replay (Phase 10 D-16)
+// ===========================================================================
+
+/// Eight made-up, non-tweet sentences the acceptance replay sends. They name no group,
+/// religion, nationality or politics, and each builds a row only a few tokens beyond the
+/// task prefix, so a full door of B texts fits the token budget whenever
+/// `B x (prefix + about 14)` is at most the budget. Never request text from a dataset
+/// (T-10-06).
+pub const REPLAY_TEXTS: [&str; 8] = [
+    "The weather today is mild and sunny.",
+    "Simmer the tomato sauce for twenty minutes.",
+    "The next train to the coast leaves at noon.",
+    "She returned the library book before Friday.",
+    "He patched the bicycle tire with a small kit.",
+    "Tomatoes grow best in a sunny garden bed.",
+    "The chess opening began with a quiet pawn move.",
+    "We spent the afternoon at the museum.",
+];
+
+/// How far a result's probabilities may sum from 1.
+///
+/// An f32 softmax over K classes sums to 1 within a few ULPs (about 1e-7 per class); 1e-5
+/// is far above that noise and far below any real defect (a dropped class, a missing
+/// normalisation, a probability serialized as `null`).
+pub const REPLAY_SUM_TOLERANCE: f64 = 1e-5;
+
+/// `n` replay texts, cycling [`REPLAY_TEXTS`] from index `start` (`n` may exceed eight, for
+/// the over-limit leg). Distinct `start` values give distinct single texts, so several
+/// one-text calls need not repeat one request.
+#[must_use]
+pub fn replay_texts_from(start: usize, n: usize) -> Vec<String> {
+    REPLAY_TEXTS
+        .iter()
+        .cycle()
+        .skip(start % REPLAY_TEXTS.len())
+        .take(n)
+        .map(|s| (*s).to_string())
+        .collect()
+}
+
+/// `n` replay texts from the start of [`REPLAY_TEXTS`].
+#[must_use]
+pub fn replay_texts(n: usize) -> Vec<String> {
+    replay_texts_from(0, n)
+}
+
+/// The acceptance replay's result: one call, several texts, every per-result shape check.
+///
+/// Timings are REPORTED (`call`, `tokens_total`), never gated (D-16): the replay is a
+/// function-and-identity test.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReplayReport {
+    /// The probe id sent.
+    pub probe_id: String,
+    /// Texts sent.
+    pub n_texts: usize,
+    /// Entries in the response's `results` array (0 when it is missing or not an array).
+    pub n_results: usize,
+    /// `results` is an array with exactly one entry per text sent.
+    pub one_result_per_text: bool,
+    /// Every result has a `probabilities` array as long as the expected label list.
+    pub probabilities_len_match: bool,
+    /// Every probability is a finite JSON number in `[0, 1]` (a `null` is how a non-finite
+    /// f64 serializes, and fails here).
+    pub probabilities_in_unit_range: bool,
+    /// Every result's probabilities sum to 1 within [`REPLAY_SUM_TOLERANCE`].
+    pub sums_within_tolerance: bool,
+    /// The largest `|sum - 1|` over the results (1.0 for a result with no array).
+    pub max_abs_sum_deviation: f64,
+    /// Every result's `label` is the expected label at the first maximum of its
+    /// probabilities.
+    pub label_is_argmax: bool,
+    /// The response's `labels` array equals the expected labels, same order.
+    pub labels_in_task_order: bool,
+    /// The response's `model.artifact_sha256` is non-empty and equals the expected sha256.
+    pub identity_matches: bool,
+    /// The identity the endpoint reported.
+    pub artifact_sha256: String,
+    /// The labels the response carried.
+    pub labels: Vec<String>,
+    /// Built-row tokens the call was charged.
+    pub tokens_total: usize,
+    /// Results with `truncated: true`.
+    pub truncated: usize,
+    /// The one `tools/call`.
+    pub call: CallTiming,
+}
+
+impl ReplayReport {
+    /// All seven checks passed. A report boolean that is evidence and is not in this AND
+    /// would be a check the verdict ignores.
+    #[must_use]
+    pub fn ok(&self) -> bool {
+        self.one_result_per_text
+            && self.probabilities_len_match
+            && self.probabilities_in_unit_range
+            && self.sums_within_tolerance
+            && self.label_is_argmax
+            && self.labels_in_task_order
+            && self.identity_matches
+    }
+}
+
+/// The index of the first maximum (ties resolve to the first, as the server does); a
+/// `None` entry (not a number) ranks below every number.
+fn first_argmax(values: &[Option<f64>]) -> Option<usize> {
+    let mut best: Option<(usize, f64)> = None;
+    for (i, v) in values.iter().enumerate() {
+        let v = v.unwrap_or(f64::NEG_INFINITY);
+        if best.is_none_or(|(_, b)| v > b) {
+            best = Some((i, v));
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
+/// Evaluate a parsed classify payload against what the replay sent and the artifact it
+/// expects. PURE: no I/O, so each failing direction is tested on a hand-built payload.
+///
+/// A missing or non-array `results` fails only `one_result_per_text` (the per-result checks
+/// then range over nothing); a result with no `probabilities` array fails
+/// `probabilities_len_match`, `sums_within_tolerance` and `label_is_argmax` (there is nothing
+/// to sum, and the label cannot be confirmed). Never panics on a malformed payload.
+#[must_use]
+pub fn evaluate_replay(
+    payload: &Value,
+    n_texts: usize,
+    expected_labels: &[String],
+    expected_sha256: &str,
+    probe_id: &str,
+    call: CallTiming,
+) -> ReplayReport {
+    let results = payload["results"].as_array().map_or(&[][..], Vec::as_slice);
+    let one_result_per_text = payload["results"]
+        .as_array()
+        .is_some_and(|r| r.len() == n_texts);
+
+    let mut probabilities_len_match = true;
+    let mut probabilities_in_unit_range = true;
+    let mut sums_within_tolerance = true;
+    let mut label_is_argmax = true;
+    let mut max_abs_sum_deviation = 0.0_f64;
+    for result in results {
+        let Some(array) = result["probabilities"].as_array() else {
+            probabilities_len_match = false;
+            sums_within_tolerance = false;
+            label_is_argmax = false;
+            max_abs_sum_deviation = max_abs_sum_deviation.max(1.0);
+            continue;
+        };
+        let values: Vec<Option<f64>> = array.iter().map(Value::as_f64).collect();
+        if values.len() != expected_labels.len() {
+            probabilities_len_match = false;
+        }
+        if !values
+            .iter()
+            .all(|v| v.is_some_and(|p| p.is_finite() && (0.0..=1.0).contains(&p)))
+        {
+            probabilities_in_unit_range = false;
+        }
+        let deviation = (values.iter().flatten().sum::<f64>() - 1.0).abs();
+        max_abs_sum_deviation = max_abs_sum_deviation.max(deviation);
+        if deviation > REPLAY_SUM_TOLERANCE {
+            sums_within_tolerance = false;
+        }
+        let expected_label = first_argmax(&values).and_then(|i| expected_labels.get(i));
+        if result["label"].as_str() != expected_label.map(String::as_str) {
+            label_is_argmax = false;
+        }
+    }
+
+    let labels: Vec<String> = payload["labels"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|l| l.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let artifact_sha256 = payload["model"]["artifact_sha256"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    let (tokens_total, truncated) = tokens_and_truncated(payload);
+    ReplayReport {
+        probe_id: probe_id.to_string(),
+        n_texts,
+        n_results: results.len(),
+        one_result_per_text,
+        probabilities_len_match,
+        probabilities_in_unit_range,
+        sums_within_tolerance,
+        max_abs_sum_deviation,
+        label_is_argmax,
+        labels_in_task_order: payload["labels"].is_array() && labels.as_slice() == expected_labels,
+        identity_matches: !artifact_sha256.is_empty() && artifact_sha256 == expected_sha256,
+        artifact_sha256,
+        labels,
+        tokens_total,
+        truncated,
+        call,
+    }
+}
+
+/// Send `texts` in ONE bare `tools/call classify` — the form the requesting partner sends
+/// (no `initialize` first; `content-type: application/json`, `accept: application/json,
+/// text/event-stream`) — and evaluate the answer with [`evaluate_replay`].
+///
+/// A tool error (a bound refusal) is a [`ProbeError::Protocol`] whose detail starts
+/// `tool error: `. The payload is read from `content[0].text`,
+/// as the partner's parser does; there is no `structuredContent` fallback.
+///
+/// # Errors
+///
+/// [`ProbeError`] for a transport failure, a non-2xx status, a tool error or a malformed
+/// response. A wrong identity or a malformed payload is a false check in the report.
+pub async fn run_replay(
+    url: &str,
+    bearer: Option<&str>,
+    expected_sha256: &str,
+    expected_labels: &[String],
+    texts: &[String],
+    probe_id: &str,
+) -> Result<ReplayReport, ProbeError> {
+    let mut rpc = Rpc::new(url, bearer, probe_id)?;
+    let (result, call) = rpc.call("tools/call", classify_params(texts)).await?;
+    let payload = classify_payload(&result).map_err(|detail| ProbeError::Protocol {
+        method: "tools/call",
+        detail,
+    })?;
+    Ok(evaluate_replay(
+        &payload,
+        texts.len(),
+        expected_labels,
+        expected_sha256,
+        probe_id,
+        call,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -976,5 +1217,138 @@ mod tests {
             assert_eq!(sample.texts, texts.len());
             assert_eq!(sample.artifact_sha256, crate::tests::tiny_golden_sha256());
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // The acceptance replay (D-16)
+    // -----------------------------------------------------------------------
+
+    /// How many texts the loopback replay sends: three, or the whole door when the compiled
+    /// door is smaller (plan 10-11 may lower the constant after this plan).
+    fn loopback_replay_count() -> usize {
+        ClassifyLimits::CONTRACTED.max_texts.min(3)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn replay_reports_one_result_per_text_and_sums_within_tolerance() {
+        let model = tiny_model();
+        let labels = model.task().owned_labels();
+        let url = serve(Arc::clone(&model)).await;
+        let n = loopback_replay_count();
+        let report = run_replay(
+            &url,
+            None,
+            crate::tests::tiny_golden_sha256(),
+            &labels,
+            &replay_texts(n),
+            &new_probe_id(),
+        )
+        .await
+        .expect("the replay completes");
+        assert_eq!(report.n_texts, n);
+        assert_eq!(report.n_results, n, "{report:?}");
+        assert!(report.one_result_per_text, "{report:?}");
+        assert!(report.probabilities_len_match, "{report:?}");
+        assert!(report.probabilities_in_unit_range, "{report:?}");
+        assert!(report.sums_within_tolerance, "{report:?}");
+        assert!(report.label_is_argmax, "{report:?}");
+        assert!(report.labels_in_task_order, "{report:?}");
+        assert!(report.identity_matches, "{report:?}");
+        assert!(report.ok(), "{report:?}");
+        assert!(
+            report.max_abs_sum_deviation <= REPLAY_SUM_TOLERANCE,
+            "{report:?}"
+        );
+        assert!(report.tokens_total > 0, "{report:?}");
+        assert_eq!(report.labels, labels);
+    }
+
+    /// A one-text served maximum is a legitimate door (D-15 amended 2026-10-21), and
+    /// `replay_texts_from` gives several DISTINCT one-text calls.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn replay_accepts_a_single_text() {
+        let model = tiny_model();
+        let labels = model.task().owned_labels();
+        let url = serve(Arc::clone(&model)).await;
+        let report = run_replay(
+            &url,
+            None,
+            crate::tests::tiny_golden_sha256(),
+            &labels,
+            &replay_texts(1),
+            &new_probe_id(),
+        )
+        .await
+        .expect("a one-text replay completes");
+        assert_eq!((report.n_texts, report.n_results), (1, 1), "{report:?}");
+        assert!(report.ok(), "{report:?}");
+
+        let singles: Vec<Vec<String>> = (0..3).map(|k| replay_texts_from(k, 1)).collect();
+        assert!(singles.iter().all(|t| t.len() == 1));
+        assert_ne!(singles[0], singles[1]);
+        assert_ne!(singles[1], singles[2]);
+        assert_ne!(singles[0], singles[2]);
+        // The cycle wraps: a start past the eighth text lands back on the first.
+        assert_eq!(replay_texts_from(REPLAY_TEXTS.len(), 1), replay_texts(1));
+        assert_eq!(replay_texts(REPLAY_TEXTS.len() + 1).len(), 9);
+    }
+
+    /// With the expected labels swapped, the order check fails and so does `ok()`; the
+    /// count, length, range, sum and identity checks do not depend on the order.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn replay_fails_when_expected_labels_are_reordered() {
+        let model = tiny_model();
+        let labels = model.task().owned_labels();
+        let url = serve(Arc::clone(&model)).await;
+        let mut reordered = labels.clone();
+        reordered.swap(0, 1);
+        assert_ne!(reordered, labels);
+        let report = run_replay(
+            &url,
+            None,
+            crate::tests::tiny_golden_sha256(),
+            &reordered,
+            &replay_texts(loopback_replay_count()),
+            &new_probe_id(),
+        )
+        .await
+        .expect("the replay completes");
+        assert!(!report.labels_in_task_order, "{report:?}");
+        assert!(!report.ok(), "{report:?}");
+        assert!(report.one_result_per_text, "{report:?}");
+        assert!(report.probabilities_len_match, "{report:?}");
+        assert!(report.probabilities_in_unit_range, "{report:?}");
+        assert!(report.sums_within_tolerance, "{report:?}");
+        assert!(report.identity_matches, "{report:?}");
+    }
+
+    /// A pin one hex digit from what the endpoint serves fails ONLY the identity check.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn replay_fails_on_a_wrong_expected_sha() {
+        let model = tiny_model();
+        let labels = model.task().owned_labels();
+        let url = serve(Arc::clone(&model)).await;
+        let golden = crate::tests::tiny_golden_sha256();
+        let flipped = if golden.starts_with('0') { "1" } else { "0" };
+        let pin = format!("{flipped}{}", &golden[1..]);
+        let report = run_replay(
+            &url,
+            None,
+            &pin,
+            &labels,
+            &replay_texts(loopback_replay_count()),
+            &new_probe_id(),
+        )
+        .await
+        .expect("the replay completes");
+        assert_eq!(
+            report.artifact_sha256, golden,
+            "the endpoint reports what it serves"
+        );
+        assert!(!report.identity_matches, "{report:?}");
+        assert!(!report.ok(), "{report:?}");
+        assert!(report.one_result_per_text, "{report:?}");
+        assert!(report.labels_in_task_order, "{report:?}");
+        assert!(report.sums_within_tolerance, "{report:?}");
     }
 }

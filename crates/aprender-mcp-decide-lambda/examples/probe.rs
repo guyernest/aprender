@@ -6,6 +6,8 @@
 //!     [--maximal concentrated|distributed] [--cold-first] [--probe-id <id>] [--bearer <token>]
 //! cargo run -p aprender-mcp-decide-lambda --example probe -- \
 //!     --plan-only --apr model.apr --maximal concentrated|distributed
+//! cargo run -p aprender-mcp-decide-lambda --example probe -- \
+//!     --url https://<endpoint>/ --apr model.apr --replay N [--replay-from K]
 //! ```
 //!
 //! `--apr` is the source of the expected sha256 and labels (computed locally, through
@@ -23,6 +25,11 @@
 //! tokens, identity) WITHOUT any network call — the offline half of `just laya-deploy-verify`'s
 //! DRY_RUN, which proves both shapes can be built for the artifact before anything is deployed.
 //!
+//! `--replay N` is the acceptance replay (Phase 10 D-16): ONE bare `tools/call` of N committed
+//! synthetic texts (N from 1 to the compiled `classify_max_texts`), checked for one result per
+//! text, probabilities that index the labels in task order and sum to one, and the served sha256.
+//! Timings are reported, never gated.
+//!
 //! Prints one JSON line per probe and exits non-zero on any false check or HTTP error.
 //! The bearer token (`--bearer` or `APRENDER_DECIDE_PROBE_TOKEN`) is never printed.
 
@@ -34,24 +41,29 @@ use std::process::ExitCode;
 use aprender_mcp_decide::ClassifyLimits;
 use aprender_mcp_decide_lambda::parse_probe_id;
 use aprender_mcp_decide_lambda::probe::{
-    build_maximal_request, new_probe_id, run_cold_first, run_identity_probe, MaximalShape,
-    IDENTITY_PROBE_TEXT,
+    build_maximal_request, new_probe_id, replay_texts_from, run_cold_first, run_identity_probe,
+    run_replay, MaximalShape, IDENTITY_PROBE_TEXT, REPLAY_TEXTS,
 };
 
 const TOKEN_ENV: &str = "APRENDER_DECIDE_PROBE_TOKEN";
 
 const USAGE: &str = "usage: probe --url <mcp url> --apr <local.apr> [--expect-sha256 <hex>] \
 [--maximal concentrated|distributed] [--cold-first] [--probe-id <id>] [--bearer <token>]
+       probe --url <mcp url> --apr <local.apr> --replay <N> [--replay-from <K>]
        probe --plan-only --apr <local.apr> --maximal concentrated|distributed
 
-  --url            the MCP endpoint (JSON-RPC POST target)
+  --url           the MCP endpoint (JSON-RPC POST target)
   --apr            local copy of the served artifact: expected sha256, labels, maximal sizing
   --expect-sha256  expected identity (must agree with --apr when both are given)
   --maximal        send the maximal legal request of this shape (CONTRACTED limits)
   --cold-first     send ONE tools/call as the first and only POST (no initialize)
   --probe-id       id sent as x-decide-probe-id ([A-Za-z0-9-], <= 64); generated if absent
   --bearer         bearer token (else env APRENDER_DECIDE_PROBE_TOKEN); never printed
-  --plan-only      build the --maximal request and print its size; no network, no --url";
+  --plan-only      build the --maximal request and print its size; no network, no --url
+  --replay         the acceptance replay: ONE call of N synthetic texts (N in 1..=the compiled
+                   classify_max_texts); needs --url
+  --replay-from    start index into the cycled replay texts (default 0; needs --replay)
+";
 
 struct Args {
     url: Option<String>,
@@ -62,6 +74,8 @@ struct Args {
     probe_id: Option<String>,
     bearer: Option<String>,
     plan_only: bool,
+    replay: Option<usize>,
+    replay_from: usize,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -73,6 +87,8 @@ fn parse_args() -> Result<Args, String> {
     let mut probe_id = None;
     let mut bearer = None;
     let mut plan_only = false;
+    let mut replay = None;
+    let mut replay_from = None;
     // `args_os`, not `args`: `std::env::args` PANICS (exit 101) on an argument that is not
     // valid UTF-8. Such an argument is a usage error (exit 2), reported by position only,
     // never quoted, because it may be the bearer token.
@@ -96,6 +112,28 @@ fn parse_args() -> Result<Args, String> {
             "--probe-id" => probe_id = Some(value("--probe-id")?),
             "--bearer" => bearer = Some(value("--bearer")?),
             "--plan-only" => plan_only = true,
+            "--replay" => {
+                // The range is the COMPILED door, read from the constant: the only place it
+                // is decided, so a lowered `classify_max_texts` moves it with no edit here.
+                let max = ClassifyLimits::CONTRACTED.max_texts;
+                let n = value("--replay")?
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|n| (1..=max).contains(n))
+                    .ok_or_else(|| {
+                        format!("--replay must be in 1..={max} (the compiled classify_max_texts)")
+                    })?;
+                replay = Some(n);
+            }
+            "--replay-from" => {
+                let last = REPLAY_TEXTS.len() - 1;
+                let k = value("--replay-from")?
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|k| *k <= last)
+                    .ok_or_else(|| format!("--replay-from must be in 0..={last}"))?;
+                replay_from = Some(k);
+            }
             "-h" | "--help" => return Err(String::new()),
             other => return Err(format!("unknown argument {other:?}")),
         }
@@ -106,6 +144,12 @@ fn parse_args() -> Result<Args, String> {
     if !plan_only && url.is_none() {
         return Err("--url is required".to_string());
     }
+    if replay.is_some() && (cold_first || plan_only) {
+        return Err("--replay conflicts with --cold-first and --plan-only".to_string());
+    }
+    if replay_from.is_some() && replay.is_none() {
+        return Err("--replay-from needs --replay".to_string());
+    }
     Ok(Args {
         url,
         apr: apr.ok_or("--apr is required")?,
@@ -115,6 +159,8 @@ fn parse_args() -> Result<Args, String> {
         probe_id,
         bearer: bearer.or_else(|| std::env::var(TOKEN_ENV).ok().filter(|t| !t.is_empty())),
         plan_only,
+        replay,
+        replay_from: replay_from.unwrap_or(0),
     })
 }
 
@@ -215,6 +261,41 @@ async fn main() -> ExitCode {
                 );
             }
             Err(e) => return fail(&format!("identity probe failed: {e}")),
+        }
+        // The replay legs run BEFORE the early return below: without `--maximal` that return
+        // ends the run, and a replay placed after it would be unreachable.
+        if let Some(n) = args.replay {
+            let texts = replay_texts_from(args.replay_from, n);
+            match run_replay(url, bearer, &expected, &labels, &texts, &probe_id).await {
+                Ok(report) => {
+                    ok &= report.ok();
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "probe": "replay",
+                            "probe_id": report.probe_id,
+                            "n_texts": report.n_texts,
+                            "n_results": report.n_results,
+                            "one_result_per_text": report.one_result_per_text,
+                            "probabilities_len_match": report.probabilities_len_match,
+                            "probabilities_in_unit_range": report.probabilities_in_unit_range,
+                            "sums_within_tolerance": report.sums_within_tolerance,
+                            "max_abs_sum_deviation": report.max_abs_sum_deviation,
+                            "label_is_argmax": report.label_is_argmax,
+                            "labels_in_task_order": report.labels_in_task_order,
+                            "identity_matches": report.identity_matches,
+                            "artifact_sha256": report.artifact_sha256,
+                            "labels": report.labels,
+                            "tokens_total": report.tokens_total,
+                            "truncated": report.truncated,
+                            "elapsed_ms": report.call.elapsed_ms,
+                            "door_max_texts": ClassifyLimits::CONTRACTED.max_texts,
+                            "shape": "replay",
+                        })
+                    );
+                }
+                Err(e) => return fail(&format!("replay failed: {e}")),
+            }
         }
         if shape.is_none() {
             return if ok {
