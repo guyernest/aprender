@@ -1,0 +1,234 @@
+{
+  "schema": "laya-acceptance-replay-v1",
+  "phase": "10-antisemitism-v1-decide-server-for-experiment-coach",
+  "plan": "10-09",
+  "date": "2026-10-23T15:25Z",
+  "commit": "536b01599",
+  "endpoint": "https://aprender-mcp-decide-antisemite.us-east.true-mcp.com/mcp",
+  "endpoint_source": "models/decide/deploy-aprender-mcp-decide-antisemite.state/deployment.toml [deployment] endpoint, equal to 10-RENAME-DEPLOY-EVIDENCE.json live.what / retirement.post_check.new_endpoint",
+  "server": "aprender-mcp-decide-antisemite",
+  "auth_posture": "off (D-13, plan 10-12 decision.auth); no bearer was sent",
+  "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+  "labels": [
+    "not_antisemitic",
+    "antisemitic"
+  ],
+  "chosen_max_texts": 8,
+  "P": 86,
+  "probe": "cargo run --release -p aprender-mcp-decide-lambda --example probe (plan 10-02), read-only calls with synthetic REPLAY_TEXTS only",
+  "identity": {
+    "probe": "identity",
+    "probe_id": "probe-18e131ea26c82030-1181b",
+    "one_tool_named_classify": true,
+    "description_has_labels_in_order": true,
+    "response_labels_match": true,
+    "identity_matches": true,
+    "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+    "elapsed_ms": [
+      14463,
+      181,
+      692
+    ],
+    "tokens_total": 94,
+    "shape": "identity",
+    "load_header": "cold;load_ms=13545"
+  },
+  "replays": [
+    {
+      "n": 1,
+      "from": 0,
+      "line": {
+        "probe": "replay",
+        "probe_id": "probe-18e131ef6358f880-118c2",
+        "n_texts": 1,
+        "n_results": 1,
+        "one_result_per_text": true,
+        "probabilities_len_match": true,
+        "probabilities_in_unit_range": true,
+        "sums_within_tolerance": true,
+        "max_abs_sum_deviation": 1.7695128917694092e-08,
+        "label_is_argmax": true,
+        "labels_in_task_order": true,
+        "identity_matches": true,
+        "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+        "labels": [
+          "not_antisemitic",
+          "antisemitic"
+        ],
+        "tokens_total": 94,
+        "truncated": 0,
+        "elapsed_ms": 806,
+        "door_max_texts": 8,
+        "shape": "replay"
+      }
+    },
+    {
+      "n": 1,
+      "from": 1,
+      "line": {
+        "probe": "replay",
+        "probe_id": "probe-18e131f0583e0a48-118e8",
+        "n_texts": 1,
+        "n_results": 1,
+        "one_result_per_text": true,
+        "probabilities_len_match": true,
+        "probabilities_in_unit_range": true,
+        "sums_within_tolerance": true,
+        "max_abs_sum_deviation": 2.60770320892334e-08,
+        "label_is_argmax": true,
+        "labels_in_task_order": true,
+        "identity_matches": true,
+        "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+        "labels": [
+          "not_antisemitic",
+          "antisemitic"
+        ],
+        "tokens_total": 95,
+        "truncated": 0,
+        "elapsed_ms": 803,
+        "door_max_texts": 8,
+        "shape": "replay"
+      }
+    },
+    {
+      "n": 1,
+      "from": 2,
+      "line": {
+        "probe": "replay",
+        "probe_id": "probe-18e131f150aac7e8-11901",
+        "n_texts": 1,
+        "n_results": 1,
+        "one_result_per_text": true,
+        "probabilities_len_match": true,
+        "probabilities_in_unit_range": true,
+        "sums_within_tolerance": true,
+        "max_abs_sum_deviation": 1.7695128917694092e-08,
+        "label_is_argmax": true,
+        "labels_in_task_order": true,
+        "identity_matches": true,
+        "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+        "labels": [
+          "not_antisemitic",
+          "antisemitic"
+        ],
+        "tokens_total": 96,
+        "truncated": 0,
+        "elapsed_ms": 804,
+        "door_max_texts": 8,
+        "shape": "replay"
+      }
+    },
+    {
+      "n": 8,
+      "from": 0,
+      "line": {
+        "probe": "replay",
+        "probe_id": "probe-18e131f3c22677f8-1196b",
+        "n_texts": 8,
+        "n_results": 8,
+        "one_result_per_text": true,
+        "probabilities_len_match": true,
+        "probabilities_in_unit_range": true,
+        "sums_within_tolerance": true,
+        "max_abs_sum_deviation": 2.60770320892334e-08,
+        "label_is_argmax": true,
+        "labels_in_task_order": true,
+        "identity_matches": true,
+        "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+        "labels": [
+          "not_antisemitic",
+          "antisemitic"
+        ],
+        "tokens_total": 762,
+        "truncated": 0,
+        "elapsed_ms": 4187,
+        "door_max_texts": 8,
+        "shape": "replay"
+      }
+    }
+  ],
+  "largest_multi_text_n": 8,
+  "refused_token_budget": [],
+  "expected_count_refusal": {
+    "n_texts": 9,
+    "line": {
+      "probe": "replay_over_limit",
+      "probe_id": "probe-18e131f6a95f3d38-119de",
+      "n_texts": 9,
+      "is_error": true,
+      "names_count_bound": true,
+      "names_limit_value": true,
+      "names_contract": true,
+      "elapsed_ms": 329,
+      "door_max_texts": 8
+    }
+  },
+  "request_form": {
+    "method": "tools/call",
+    "tool": "classify",
+    "arguments": "{texts: [...]}",
+    "headers": [
+      "content-type: application/json",
+      "accept: application/json, text/event-stream"
+    ],
+    "transport": "plain HTTPS POST to the pmcp.run endpoint; no SigV4, no Function URL",
+    "parser_note": "probabilities are looked up by label name; served order is [not_antisemitic, antisemitic]",
+    "source": "the request document's form as read from docs/requests/aprender.md and crates/core/src/classifier.rs (read-only); this record does not say who calls the server"
+  },
+  "requester_tests": {
+    "one_result_per_text": "pass: n_results == n_texts on every replay (1, 1, 1 and 8)",
+    "probabilities_length_equals_labels": "pass: probabilities_len_match true on every replay (2 labels)",
+    "probabilities_sum_to_1_within_1e-5": "pass: sums_within_tolerance true, max_abs_sum_deviation 2.608e-08 over all replays",
+    "label_is_argmax": "pass: label_is_argmax true on every replay",
+    "labels_in_task_order": "pass: labels_in_task_order true on every replay; served order [not_antisemitic, antisemitic]",
+    "returned_sha_equals_pin": "pass: identity_matches true and artifact_sha256 equal to the pin on the identity probe and on every replay",
+    "count_bound_refuses_above_the_door": "pass: replay_over_limit with 9 texts returned an isError result naming classify_max_texts, the limit 8 and the contract"
+  },
+  "requester_tests_not_run_here": [
+    "Calibration sweep on a labelled sample (the requester's own, needs their live sample; D-04 shift.jsonl slot)",
+    "Cold-start timing as the request document quotes it (22.8 to 25.3 s, a spike-era figure): replaced here by the live record's figures, reported not gated"
+  ],
+  "timings_reported": {
+    "replay_elapsed_ms": {
+      "n1_from0": 806,
+      "n1_from1": 803,
+      "n1_from2": 804,
+      "n8_from0": 4187
+    },
+    "count_refusal_elapsed_ms": 329,
+    "identity_probe_elapsed_ms_this_run": [
+      14463,
+      181,
+      692
+    ],
+    "identity_probe_load_header_this_run": "cold;load_ms=13545",
+    "identity_probe_note": "the first call of this run reached a cold function (load_header cold;load_ms=13545, first POST 14463 ms); the replays that followed were warm. One incidental cold observation, not a gated sample",
+    "cold_wall_ms": {
+      "min": 19759,
+      "max": 25499,
+      "worst_sample": {
+        "shape": "concentrated",
+        "probe_id": "ba6b2b92-f048-41a5-a426-2c49b3d3b9f9",
+        "elapsed_ms": 25499
+      },
+      "worst_slack_to_cap_ms": 4501
+    },
+    "warm_ms": {
+      "values": [
+        1124,
+        1148,
+        1083,
+        1097,
+        1144
+      ],
+      "min": 1083,
+      "max": 1148,
+      "p50": 1124,
+      "n": 5
+    },
+    "source": "cold_wall_ms and warm_ms copied from 10-RENAME-DEPLOY-EVIDENCE.json live (laya-deploy-verify, plan 10-12)",
+    "policy": "reported, not gated (D-16)"
+  },
+  "texts_per_call_rule": "min(classify_max_texts, floor(800 / built_row_tokens)) for equal-length texts, built_row_tokens = P + t with P = 86 and each row capped at 512; mixed-length batches are admitted when the SUM of their built rows is at most 800; budget by the returned tokens field (D-15)",
+  "observed": "replay of 8 synthetic texts totalled 762 built tokens (tokens_total), under the 800 budget; the 8-text replay needed no step-down"
+}
