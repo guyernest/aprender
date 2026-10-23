@@ -194,3 +194,10 @@ docs/roadmaps/*.lock
 # The VERDICT artifact (quorum-*.json) is committed; its .lanes/ working
 # directory is transient and a lane review correctly refused a PR carrying it.
 docs/audits/quorum-*.json.lanes/
+
+# Phase 11 plan 11-01 (embed endpoint Graviton gate): the owner-run raw records and the
+# package record live in .ids/ (never committed); the probe's generated lock and build
+# directory are the probe's own, not the workspace's.
+/deploy/embed-endpoint/.ids/
+/deploy/embed-endpoint/graviton-probe/Cargo.lock
+/deploy/embed-endpoint/graviton-probe/target/

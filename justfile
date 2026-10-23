@@ -6207,3 +6207,61 @@ llm-endpoint-selftest:
         exit 1
     fi
     echo "LLM-ENDPOINT SELFTEST OK $PASS/$PASS"
+
+# ---------------------------------------------------------------------------
+# Phase 11: embed endpoint
+#
+# The Graviton gate (plan 11-01) and, later, the endpoint itself. Every recipe
+# here either runs offline or refuses before it touches an AWS account; the
+# owner-run measurement is `embed-probe-run`, and plan 11-04 drives it.
+# ---------------------------------------------------------------------------
+
+embed_probe_dir := "deploy/embed-endpoint/graviton-probe"
+embed_probe_asset := "deploy-extensions/assets/embed-probe"
+embed_probe_zip := "deploy-extensions/assets/embed-probe.zip"
+embed_ids := "deploy/embed-endpoint/.ids"
+
+# Build the Graviton probe as an arm64 Lambda asset, with its deterministic zip and record.
+#
+# Offline: no AWS contact, installs nothing. The asset is bootstrap plus the pinned
+# encoder subset (never model.safetensors). The rename to `bootstrap` happens here
+# only, as in build-trainer-asset. The probe's lock is a copy of the root Cargo.lock
+# (gitignored), so a version the workspace does not link cannot appear silently.
+
+embed-probe-asset:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    command -v cargo-zigbuild >/dev/null || {
+        echo "ERROR: cargo-zigbuild is not installed (this recipe installs nothing)"
+        echo "       install it yourself: cargo install cargo-zigbuild"
+        exit 1
+    }
+    for f in full_model.apr tokenizer.json config.json modules.json full_manifest.json 1_Pooling/config.json; do
+        test -f "{{minilm_dir}}/$f" || {
+            echo "ERROR: no pinned encoder file {{minilm_dir}}/$f"
+            echo "       set APRENDER_MINILM_DIR to the pinned all-MiniLM-L6-v2 directory"
+            exit 1
+        }
+    done
+    P="{{embed_probe_dir}}"
+    test -f "$P/Cargo.lock" || cp Cargo.lock "$P/Cargo.lock"
+    cargo zigbuild --release --manifest-path "$P/Cargo.toml" --target {{target}}.2.34
+    TD=$(cargo metadata --manifest-path "$P/Cargo.toml" --no-deps --format-version 1 \
+        | python3 -I -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')
+    BIN="$TD/{{target}}/release/aprender-embed-graviton-probe"
+    test -x "$BIN" || { echo "ERROR: no probe binary at $BIN"; exit 1; }
+    A="{{embed_probe_asset}}"
+    rm -rf "$A"
+    mkdir -p "$A/model/1_Pooling" "{{embed_ids}}"
+    cp "$BIN" "$A/bootstrap"
+    chmod 0755 "$A/bootstrap"
+    for f in full_model.apr tokenizer.json config.json modules.json full_manifest.json; do
+        cp "{{minilm_dir}}/$f" "$A/model/$f"
+    done
+    cp "{{minilm_dir}}/1_Pooling/config.json" "$A/model/1_Pooling/config.json"
+    python3 -I scripts/embed_endpoint/glibc_floor.py 34 "$A/bootstrap"
+    file "$A/bootstrap" | grep -q 'ARM aarch64' || { echo "ERROR: bootstrap is not aarch64"; exit 1; }
+    du -sh "$A" | awk '{print "  probe asset: " $1 " (Lambda unzipped limit 250 MB)"}'
+    python3 -I scripts/embed_endpoint/package_zip.py build "$A" "{{embed_probe_zip}}" \
+        --record "{{embed_ids}}/package-embed-probe.json"
+    ls -lh "{{embed_probe_zip}}" | awk '{print "  probe package: " $5 " " $9}'

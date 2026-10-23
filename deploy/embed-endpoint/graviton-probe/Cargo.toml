@@ -1,0 +1,27 @@
+[package]
+name = "aprender-embed-graviton-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone measurement harness for Phase 11's Graviton gate (plan 11-01). It is
+# NOT a member of the aprender workspace: the empty [workspace] table below makes
+# it its own root, so it needs no workspace entry and no FALSIFY-MONO-011 register
+# edit (that register growth is the owner's decision in plan 11-02). It is
+# superseded by the product crate once plan 11-06 lands.
+#
+# Its lock is seeded as a COPY of the root Cargo.lock (see the justfile recipe
+# embed-probe-asset) and is gitignored, so every package it links is one the
+# workspace already links; a gate asserts that on every run.
+[workspace]
+
+[dependencies]
+# The production engine, by path. `conformance-fixtures` is enabled ONLY so this
+# harness can read the batch's truncation and attention-mask facts through the
+# public tokenize(); the product does not enable it (plan 11-05 adds the door).
+aprender = { package = "aprender-core", path = "../../../crates/aprender-core", features = ["setfit", "conformance-fixtures"] }
+lambda_runtime = "=0.13.0"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+serde_json = "1"
+rayon = "1"
+sha2 = "0.10"
