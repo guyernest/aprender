@@ -249,24 +249,38 @@ on the spike-025 rows (measured 3.841e-6 through the `.apr` path, plan 08-09); t
 re-score bar is max(1e-5, 4 x the per-checkpoint float64-referenced torch noise) (amendment A1,
 plan 08-13). Every one of those numbers is aarch64; x86_64 is unmeasured.
 
-What this row may claim is read from two records and nothing else. The one declared gate run
-passed: a TweetEval abortion-stance model (`demo_s64` in `contracts/laya-finetune-gate-v1.yaml`,
-plan 08-16) beat zero-shot macro-F1 by 0.222 with post-calibration ECE 0.044 against the 0.10
+What this row may claim is read from the records named at the end of this paragraph and nothing
+else. The first declared gate run passed: a TweetEval abortion-stance model (`demo_s64` in
+`contracts/laya-finetune-gate-v1.yaml`, plan 08-16) beat zero-shot macro-F1 by 0.222 with post-calibration ECE 0.044 against the 0.10
 bar, the median of three seeds. Claim scope, quoted from that contract's `eval_set.claim`: "The
 gate now certifies margin and calibration on held-out data drawn like the tenant's shots. It
 does NOT certify robustness to a shifted input population." It is in-distribution calibration,
 not shift robustness: this eval set was chosen after the SemEval-2016 test split failed the gate
 (spike 027), and that split is kept as a reported shift probe, where the same model's ECE is
-0.1896. The model is live on pmcp.run as `aprender-mcp-decide` on the 10,240 MB tier (plan
-08-30, deployed-passed): at most 8 texts and 800 built tokens per call. Eight proven-cold samples
-of the two maximal requests took 22.6-27.0 s at the client against the 30 s gateway cap, so the
-worst left 2.99 s; ten warm calls took 0.87-0.98 s. Records: `08-GATE-RUN-EVIDENCE.json` and
-`08-LIVE-REDEPLOY-EVIDENCE.json` in the Phase 8 planning directory.
+0.1896. The second declared gate run (Phase 10, plan 10-04) passed the same way for `antisemitism-v1`,
+trained on GoldStandard2024: macro-F1 0.7956 against 0.5596 zero-shot (margin 0.236) with
+post-calibration ECE 0.0424 on 2,129 held-out rows, the median-ECE seed (23) of three, the same
+in-distribution claim scope and no shift probe. No SetFit comparison number exists for it: the cell
+(plan 10-05) was built but not run, the owner held that criterion (SC-4) open, and plan 10-06 is
+deferred.
+The server is live on pmcp.run as `aprender-mcp-decide-antisemite` on the 10,240 MB tier; since
+2026-10-23 it serves `antisemitism-v1` (`laya-antisemitism-v1.apr`, sha256
+2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e, labels
+`[not_antisemitic, antisemitic]`, plan 10-12; the artifact first went live on 2026-10-22 under the
+previous server id `aprender-mcp-decide`, plan 10-08, which the owner retired) and the stance demo
+above is no longer served: at most 8 texts and 800 built tokens per call. 4 proven-cold samples of
+the two maximal requests took 19.8-25.5 s against the 30 s gateway cap (worst slack 4.5 s); 5 warm
+calls took 1.08-1.15 s (the stance deployment measured 22.6-27.0 s cold, 0.87-0.98 s warm). Records:
+`08-GATE-RUN-EVIDENCE.json` and `08-LIVE-REDEPLOY-EVIDENCE.json` (Phase 8 directory),
+`10-GATE-RUN-EVIDENCE.json`, `10-RENAME-DEPLOY-EVIDENCE.json` and `10-LIVE-DEPLOY-EVIDENCE.json` (the
+first deployment, under the previous id) (Phase 10 directory).
 
 The served artifact is `.apr` (`contracts/decide-apr-v1.yaml`), so the SafeTensors carve-out
 above is NOT widened: safetensors is read only by the back-office packer (`aprender_decide::pack`,
 driven by `crates/aprender-decide/examples/pack_laya.rs`), never by a server. The thin servers
-own transport and the boundary in `contracts/decide-tool-boundary-v1.yaml`, exactly as the
+(`crates/aprender-mcp-decide` and `crates/aprender-mcp-decide-lambda` are transport only, as is the
+per-server crate `crates/aprender-mcp-decide-antisemite-lambda`) own transport and the boundary
+in `contracts/decide-tool-boundary-v1.yaml`, exactly as the
 forecast servers do. Training stays in Python (`scripts/laya_train`, gated by
 `contracts/laya-finetune-gate-v1.yaml`), and Rust re-derives that gate from the packed bytes
 before anything is deployable.
