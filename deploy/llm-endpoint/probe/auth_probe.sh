@@ -83,12 +83,19 @@ split_out() {
     SNIPPET="${body:0:120}"
 }
 
-# post_row LABEL [curl header args...]: sets CODE and prints one table row.
+# post_row LABEL [BEARER]: sets CODE and prints one table row. The bearer goes to curl as a header
+# FILE on stdin (`-H @-`, printf is a builtin), never as an argument: an argv is visible to every
+# local user through `ps`.
 post_row() {
     local label="$1"
-    shift
+    local bearer="${2-}"
     local out=""
-    out=$(curl -s -m 180 -w '\n%{http_code}' -H 'Content-Type: application/json' "$@" -d "$REQ" "${BASE}/v1/chat/completions") || true
+    if [ -n "$bearer" ]; then
+        out=$(printf 'Authorization: Bearer %s\n' "$bearer" \
+            | curl -s -m 180 -w '\n%{http_code}' -H 'Content-Type: application/json' -H @- -d "$REQ" "${BASE}/v1/chat/completions") || true
+    else
+        out=$(curl -s -m 180 -w '\n%{http_code}' -H 'Content-Type: application/json' -d "$REQ" "${BASE}/v1/chat/completions") || true
+    fi
     split_out "$out"
     printf '| %s | %s | %s |\n' "$label" "$CODE" "$SNIPPET"
 }
@@ -107,11 +114,11 @@ get_row() {
 printf '| request | HTTP | body |\n|---|---|---|\n'
 post_row "POST /v1/chat/completions, no Authorization header"
 C_NOHDR="$CODE"
-post_row "POST /v1/chat/completions, Bearer wrong-key" -H "Authorization: Bearer wrong-key"
+post_row "POST /v1/chat/completions, Bearer wrong-key" "wrong-key"
 C_WRONG="$CODE"
 C_RIGHT=""
 if [ -n "$KEY" ]; then
-    post_row "POST /v1/chat/completions, Bearer <the key>" -H "Authorization: Bearer ${KEY}"
+    post_row "POST /v1/chat/completions, Bearer <the key>" "$KEY"
     C_RIGHT="$CODE"
 fi
 get_row "GET /health, no header" "/health"

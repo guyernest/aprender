@@ -1583,8 +1583,13 @@ _laya-server-check server mode:
     esac
     [ -n "$SERVER" ] || refuse "the server id is empty"
     [ "${#SERVER}" -le 64 ] || refuse "'$SERVER' is ${#SERVER} characters; a server name is at most 64"
-    printf '%s' "$SERVER" | grep -Eq '^[a-z][a-z0-9-]*$' \
-        || refuse "'$SERVER' is not a server id: lower-case ASCII letters, digits and hyphens, starting with a letter"
+    # A glob over the WHOLE string, in the C locale: `grep -Eq '^...$'` is line-based, so an id such as
+    # "good-id<newline>../x" would pass on its first line.
+    export LC_ALL=C
+    case "$SERVER" in
+        [!a-z]* | *[!a-z0-9-]*)
+            refuse "'$SERVER' is not a server id: lower-case ASCII letters, digits and hyphens, starting with a letter" ;;
+    esac
     case "$SERVER" in
         *-) refuse "'$SERVER' ends with a hyphen" ;;
     esac
@@ -1880,6 +1885,8 @@ _laya-crates-root-swap root cfg snap +cmd:
 laya-build-bootstrap server:
     #!/usr/bin/env bash
     set -euo pipefail
+    # Refuse an id with no thin crate before the `touch` and the build below name a path from it.
+    just _laya-server-check "{{server}}" deployable
     ulimit -n 65536 || echo "WARNING: could not raise the fd limit; a link may fail with ProcessFdQuotaExceeded" >&2
     command -v cargo-zigbuild >/dev/null || { echo "ERROR: cargo-zigbuild is not installed" >&2; exit 1; }
     TD="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"

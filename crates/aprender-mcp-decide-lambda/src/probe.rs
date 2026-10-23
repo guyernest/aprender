@@ -268,7 +268,18 @@ fn is_loopback(url: &str) -> bool {
         .strip_prefix("http://")
         .or_else(|| url.strip_prefix("https://"))
         .unwrap_or(url);
-    rest.starts_with("127.0.0.1") || rest.starts_with("localhost") || rest.starts_with("[::1]")
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // Userinfo (`localhost@evil.example`) has no trustworthy host here: not loopback.
+    if authority.contains('@') {
+        return false;
+    }
+    // Exact host match only: a prefix test would call `127.0.0.1.evil.example` and
+    // `localhost.evil.example` loopback and bypass the configured proxy for a remote host.
+    let host = match authority.strip_prefix('[') {
+        Some(bracketed) => bracketed.split(']').next().map(|h| format!("[{h}]")),
+        None => authority.split(':').next().map(str::to_string),
+    };
+    matches!(host.as_deref(), Some("127.0.0.1" | "localhost" | "[::1]"))
 }
 
 /// Parse a JSON-RPC response body, JSON or a single-event SSE stream.
@@ -1034,6 +1045,32 @@ mod tests {
 
     use super::*;
     use crate::tests::{serve, tiny_model};
+
+    /// Must-match / must-not-match table for the loopback test (exact host, not a prefix).
+    #[test]
+    fn loopback_is_an_exact_host_match() {
+        for url in [
+            "http://127.0.0.1:8080/mcp",
+            "http://127.0.0.1/mcp",
+            "https://localhost/mcp",
+            "http://localhost:3000",
+            "http://[::1]:8080/mcp",
+            "127.0.0.1:9000",
+        ] {
+            assert!(is_loopback(url), "{url} is loopback");
+        }
+        for url in [
+            "http://127.0.0.1.evil.example/mcp",
+            "https://localhost.evil.example/mcp",
+            "http://localhost@evil.example/mcp",
+            "http://127.0.0.10/mcp",
+            "https://abc.lambda-url.us-east-1.on.aws/mcp",
+            "http://[::2]/mcp",
+            "",
+        ] {
+            assert!(!is_loopback(url), "{url} is not loopback");
+        }
+    }
 
     /// Limits the tiny fixture (rows of at most 64 tokens) can reach: two full rows.
     const SHRUNK: ClassifyLimits = ClassifyLimits {

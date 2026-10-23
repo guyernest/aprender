@@ -51,9 +51,11 @@ if [ "$HSGID" = None ]; then
   HSGID=$("${AWS[@]}" ec2 create-security-group --group-name $HSG --vpc-id "$VPC" --description "aprender gpu host: ingress from the proxy group only" --tag-specifications "ResourceType=security-group,Tags=[$TAG]" --query GroupId --output text)
   "${AWS[@]}" ec2 authorize-security-group-ingress --group-id "$HSGID" --ip-permissions "IpProtocol=tcp,FromPort=$PORT,ToPort=$PORT,UserIdGroupPairs=[{GroupId=$PSG}]" >/dev/null
 fi
-# Refuse unless the host group's ONLY ingress is TCP $PORT from one security group and no CIDR.
-[ "$("${AWS[@]}" ec2 describe-security-groups --group-ids "$HSGID" --query "length(SecurityGroups[0].IpPermissions[?FromPort==\`$PORT\` && length(UserIdGroupPairs)==\`1\` && length(IpRanges)==\`0\` && length(Ipv6Ranges)==\`0\`]) == length(SecurityGroups[0].IpPermissions)" --output text)" = True ] \
-  || { echo "REFUSED sg: $HSGID has ingress other than $PORT from one security group" >&2; exit 2; }
+# Refuse unless the host group's ONLY ingress is TCP $PORT from THIS run's proxy group ($PSG) and no CIDR.
+# A host group left by an earlier run (or a PROXY_SG override) may admit a different group: the Lambda would
+# then be unable to reach the host, and the stale group would keep access to it.
+[ "$("${AWS[@]}" ec2 describe-security-groups --group-ids "$HSGID" --query "length(SecurityGroups[0].IpPermissions[?FromPort==\`$PORT\` && length(UserIdGroupPairs)==\`1\` && UserIdGroupPairs[0].GroupId=='$PSG' && length(IpRanges)==\`0\` && length(Ipv6Ranges)==\`0\`]) == length(SecurityGroups[0].IpPermissions)" --output text)" = True ] \
+  || { echo "REFUSED sg: $HSGID has ingress other than $PORT from the proxy security group $PSG" >&2; exit 2; }
 AMI=$("${AWS[@]}" ssm get-parameter --name /aws/service/deeplearning/ami/x86_64/base-oss-nvidia-driver-gpu-amazon-linux-2023/latest/ami-id --query Parameter.Value --output text)
 { printf '#!/bin/bash\n'; for V in APR_URL APR_TARBALL_SHA256 MODEL_URL MODEL_SHA256 PORT CAP_MINUTES; do printf '%s=%q\n' "$V" "${!V}"; done
   tail -n +2 "$HERE/userdata.sh"; } > "$IDS/userdata.rendered"
