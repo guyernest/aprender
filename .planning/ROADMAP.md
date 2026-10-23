@@ -902,4 +902,38 @@ promised: memory/timeout (>= 30 s), cold and warm latency for 1 and 64 inputs, p
 encoders, Cohere, re-embedding tooling; nothing changes in the pmcp.run repo.
 **Depends on:** Phase 4 (SetFit artifact); deploy path reuses the CDK style of `deploy-extensions/`, not `cargo pmcp deploy`.
 **Open before planning:** the requester's 13-check brief and conformance tool; owner AWS credentials for the live deploy.
-**Plans:** 0/0 (not yet planned)
+**Plans:** 0/13 plans executed
+
+Plans:
+**Wave 1** *(the Wave-0 gate set: nothing here depends on another plan)*
+- [ ] 11-01-PLAN.md — Graviton gate harness, offline and with zero AWS calls: a standalone probe project (outside the workspace, seeded with the root Cargo.lock, no register edit) that makes the production engine call under no_grad on n inputs cut at 256 tokens, its arm64 asset recipe, the no-ingress CDK stack (probe and endpoint variants, training default byte-identical), the allowlist-first ingress scanner with a planted-violation case table, the REPORT-line normalizer, and the owner-run `embed-probe-*` recipes proven by an aws shim (R6, R4)
+- [ ] 11-02-PLAN.md — owner decisions as checkpoints (autonomous: false): D-01 the FALSIFY-MONO-011 register 9 to 10 for the new crate (blocking-human), D-02 the shape of the additive core API (one-way), both recorded in 11-OWNER-DECISIONS.json and as parsed CONTEXT decisions
+- [ ] 11-03-PLAN.md — requester intake (autonomous: false): the thirteen checks, the aprender-embed-conformance tool, the reference-vectors schema, a captured platform event, the function-name allowlist answer and the envelope-policy answers, saved verbatim and normalized with a quote-or-unspecified rule; the checks are never invented
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 11-04-PLAN.md — the Graviton gate run (autonomous: false, owner-run): deploy the probe to the dev account, 15 invokes (1 and 64 inputs, cold and warm), destroy it, normalize into 11-GRAVITON-EVIDENCE.json; REPORTED, not promised
+- [ ] 11-05-PLAN.md — the owner-confirmed additive public door in aprender-core (`embed_texts`: rows plus per-input facts under no_grad, never clear_graph), test-first with a positive control for the autograd tape, real-weight proof on 2,000-wordpiece inputs, nothing existing edited (R2, R5)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 11-06-PLAN.md — product tracer: the `aprender-embed-endpoint` crate (library plus one binary, publish = false), register 9 to 10 citing D-01, the engine over the core door, one event in and an OpenAI list out proven against the committed real-weight reference, the local mock Lambda runtime driving the real binary, load failure as a 500 envelope (R1, R2, R5)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 11-07-PLAN.md — full request validation and OpenAI envelopes with a sourced policy table (intake answer or stated default), a 45-case hostile table at unit level and on the real binary through the runtime protocol, both with and without a loadable model (R1, R5)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [ ] 11-08-PLAN.md — contracts/embed-endpoint-boundary-v1.yaml with every measured bound derived by tested code from the Graviton evidence, mirrored in Rust with equality tests, enforced in cost order before tokenization, plus identity verification at start, the tape guard, panics and load failures as data, identity response headers (R2, R3, R5, R6)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [ ] 11-09-PLAN.md — reference vectors from sentence-transformers 5.7.0 at max_seq_length 256 (frozen environment, --no-sync, boundary 255/256/257, 1,600-plus chunk, at-limit input, 64-item batch), the release identity bundle builder and independent checker with tamper controls, real-weight parity tests with a CI-visible digest fragment (R2, R3)
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [ ] 11-10-PLAN.md — the deploy path: verified arm64 package, endpoint stack from the contract and the intake, template-versus-contract gate, a ten-rung fail-closed deploy ladder with DRY_RUN and PREFLIGHT, readback that contains the function on any ingress, identity probe, cold/warm measurement driver, and an offline selftest with four induced-ingress containments (R1, R3, R4, R6)
+
+**Wave 8** *(blocked on Wave 7 completion)*
+- [ ] 11-11-PLAN.md — the local equivalent of the requester's acceptance (one registered check per requester check, two transports, a defect catalog proving every check can fail), run on our own build; CLAUDE.md's fourth Realizar-first exception row bound to code by eight claims-ledger rows (R7, R4, R1)
+
+**Wave 9** *(blocked on Wave 8 completion)*
+- [ ] 11-12-PLAN.md — the live session (autonomous: false, owner-run, profile ze-kasher-dev): account record, preflight, deploy with readback, identity probe, conformance against the deployed function, cold/warm measurement; evidence and the deployed release bundle with the live CodeSha256; a proven-cold one-input answer at or over 30 s pauses for a decision; the target date stays unset
+
+**Wave 10** *(blocked on Wave 9 completion)*
+- [ ] 11-13-PLAN.md — hand-off with the deliverables per environment checked against their records, the phase-wide static gates and mutation adjudication, and the requester's own `CONFORMANCE RESULT PASS 13/13` recorded verbatim (autonomous: false)
