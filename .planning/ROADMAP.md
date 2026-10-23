@@ -886,3 +886,20 @@ Plans:
 
 **Wave 8** *(blocked on Wave 7 completion)*
 - [ ] 10-09-PLAN.md — acceptance replay against the live classifier on the new endpoint (one-text calls, the largest admitted multi-text call, the expected count refusal at the door plus one), 10-HANDOFF.md (D-17 with D-14/D-15/D-04/D-07/D-18/D-01 stated as items for the partner to confirm, limits as deployed, the SetFit record in its BLOCKED branch: no number, SC-4 open), the D-13/D-14 amendments; released only after 10-10's gates
+
+### Phase 11: aprender-embed-endpoint Lambda (OpenAI-compatible /v1/embeddings, MiniLM-L6-v2)
+
+**Goal:** Ship `aprender-embed-endpoint-<stage>`, an IAM-invoke-only Lambda (no Function URL, API Gateway or
+load balancer; no `*` principal) that serves `POST /v1/embeddings` for sentence-transformers/all-MiniLM-L6-v2
+(384-d, mean pooling, L2) on the in-tree `aprender-core::setfit` encoder, for the pmcp.run graph-rag team.
+Every input is cut so the encoded sequence is at most 256 tokens including [CLS]/[SEP] (`MAX_SEQUENCE_LENGTH`),
+malformed input gets the OpenAI error envelope (400/413/429/500) and never a FunctionError. Each release carries
+a bundle (tag, CodeSha256, .apr/safetensors/tokenizer.json/vocab.txt sha256s, HF revision, encoder config,
+`aprender-embed-reference-vectors.json` computed with sentence-transformers at max_seq_length=256) and passes
+`aprender-embed-conformance` 13/13 (checks come from the requester's brief). Measured and reported, not
+promised: memory/timeout (>= 30 s), cold and warm latency for 1 and 64 inputs, provisioned-concurrency need.
+**Source:** GraphRAG team request 2026-10-23 (quick task 261023-aq0). Out of scope: multilingual/larger
+encoders, Cohere, re-embedding tooling; nothing changes in the pmcp.run repo.
+**Depends on:** Phase 4 (SetFit artifact); deploy path reuses the CDK style of `deploy-extensions/`, not `cargo pmcp deploy`.
+**Open before planning:** the requester's 13-check brief and conformance tool; owner AWS credentials for the live deploy.
+**Plans:** 0/0 (not yet planned)
