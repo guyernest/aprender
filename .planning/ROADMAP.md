@@ -885,7 +885,7 @@ Plans:
 - [x] 10-10-PLAN.md — documentation only after the rename deploy: contract (served_task_min_row_tokens, FALSIFY-DECIDE-TOOL-009 harness on the new server id) / lambda README / CLAUDE.md / claims ledger say what is served and name no client, with one sha, one door and one P cross-checked and the previous server id stated as retired; then the phase-wide SC-5 static gates (no new `.sh`, `bash -n` on every justfile recipe added or changed, strict clippy on every touched crate including the new thin crate and the register test)
 
 **Wave 8** *(blocked on Wave 7 completion)*
-- [ ] 10-09-PLAN.md — acceptance replay against the live classifier on the new endpoint (one-text calls, the largest admitted multi-text call, the expected count refusal at the door plus one), 10-HANDOFF.md (D-17 with D-14/D-15/D-04/D-07/D-18/D-01 stated as items for the partner to confirm, limits as deployed, the SetFit record in its BLOCKED branch: no number, SC-4 open), the D-13/D-14 amendments; released only after 10-10's gates
+- [x] 10-09-PLAN.md — acceptance replay against the live classifier on the new endpoint (one-text calls, the largest admitted multi-text call, the expected count refusal at the door plus one), 10-HANDOFF.md (D-17 with D-14/D-15/D-04/D-07/D-18/D-01 stated as items for the partner to confirm, limits as deployed, the SetFit record in its BLOCKED branch: no number, SC-4 open), the D-13/D-14 amendments; released only after 10-10's gates
 
 ### Phase 11: aprender-embed-endpoint Lambda (OpenAI-compatible /v1/embeddings, MiniLM-L6-v2)
 
