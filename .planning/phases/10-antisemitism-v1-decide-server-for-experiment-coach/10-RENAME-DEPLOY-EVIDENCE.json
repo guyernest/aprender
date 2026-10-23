@@ -209,6 +209,66 @@
         "GET /mcp": 405,
         "at": "2026-10-23T00:41Z"
       }
+    },
+    {
+      "attempt": 2,
+      "run_by": "the owner (wrapper script scratchpad p10-12-redeploy.sh), the deploy step only: touch the thin crate main.rs, then `just _laya-crates-root-swap crates <cfg> <state> cargo pmcp deploy --manifest-path crates --regenerate-stack --no-post-deploy-test --no-oauth --no-color`; no laya-verify, no edge health check, no containment",
+      "started": "2026-10-23T00:51Z",
+      "ended": "2026-10-23T00:53:10Z",
+      "config": {
+        "server": "aprender-mcp-decide-antisemite",
+        "env": "dev",
+        "auth": "off",
+        "tier_mb": 10240,
+        "sha_pin": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e"
+      },
+      "command": "cargo pmcp deploy (same artifact, same generated config as attempt 1, not laya-deploy)",
+      "rc": 0,
+      "refusal": null,
+      "endpoint": "https://aprender-mcp-decide-antisemite.us-east.true-mcp.com/mcp",
+      "token_gate_line": "not applicable as written: the owner re-logged in before the redeploy and ran it themselves; the 60-minute gate of the plan was NOT measured immediately before this deploy by the executor (the last executor read was `pmcp.run token expires_at 2026-10-22T23:41:43.744586+00:00 (59 min left)` at 22:42Z, before attempt 1)",
+      "edge_after": {
+        "GET /health": 200,
+        "POST initialize": "HTTP 200 serverInfo aprender-mcp-decide-antisemite, x-decide-load warm (orchestrator, ~01:08Z)"
+      },
+      "identity_probe": {
+        "probe": "identity",
+        "one_tool_named_classify": true,
+        "description_has_labels_in_order": true,
+        "response_labels_match": true,
+        "identity_matches": true,
+        "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+        "elapsed_ms": [
+          431,
+          238,
+          1051
+        ],
+        "tokens_total": 94,
+        "shape": "identity",
+        "load_header": "warm",
+        "checked_at": "2026-10-23T01:09Z",
+        "retries": 0
+      },
+      "negative_control": {
+        "probe": "identity",
+        "one_tool_named_classify": true,
+        "description_has_labels_in_order": false,
+        "response_labels_match": false,
+        "identity_matches": false,
+        "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+        "elapsed_ms": [
+          400,
+          134,
+          942
+        ],
+        "tokens_total": 94,
+        "shape": "identity",
+        "load_header": "warm",
+        "command": "probe --url <new endpoint> --apr models/decide/laya-stance-64.apr",
+        "exit": 1,
+        "failed_on": "identity_matches false (labels differ), not on a 503"
+      },
+      "aws_write_count_this_attempt": "one cargo pmcp deploy updating the new server (owner-run)"
     }
   ],
   "live": null,
@@ -312,6 +372,18 @@
     {
       "at": "2026-10-23T00:36Z",
       "event": "the owner ran aws lambda delete-function-concurrency on the new function (un-containment); the executor confirmed at 00:37Z that get-function-concurrency returns no ReservedConcurrentExecutions"
+    },
+    {
+      "at": "2026-10-23T00:38Z-00:42Z",
+      "event": "edge state still `Server is in error state` (HTTP 503) on every POST, with /health 200 and no reserved concurrency"
+    },
+    {
+      "at": "2026-10-23T00:51Z-00:53:10Z",
+      "event": "the owner re-ran ONLY the deploy step (cargo pmcp deploy, same artifact and config, no containment): rc 0; the function was updated at 00:52:55Z"
+    },
+    {
+      "at": "2026-10-23T01:08Z",
+      "event": "orchestrator: POST initialize returned 200 (serverInfo aprender-mcp-decide-antisemite, x-decide-load warm); executor identity probe at 01:09Z passed first try"
     }
   ],
   "new_function_observed": {
@@ -338,16 +410,16 @@
   },
   "old_server_after_deploy": {
     "endpoint": "https://aprender-mcp-decide.us-east.true-mcp.com/mcp",
-    "recorded_at": "2026-10-23T00:41Z",
+    "recorded_at": "2026-10-23T01:10Z (final; an earlier read at 00:41Z was identical)",
     "identity_probe": {
       "identity_matches": true,
       "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
       "one_tool_named_classify": true,
       "response_labels_match": true,
       "elapsed_ms": [
-        16286,
-        186,
-        940
+        16424,
+        174,
+        975
       ]
     },
     "read_only_ops": [
@@ -380,7 +452,38 @@
       "id": "F-10-12-2",
       "title": "after the containment, the pmcp.run edge answers every MCP POST with 503 `Server is in error state` even though the function is un-contained and /health is 200",
       "evidence": "9 probe tries over about 3 min at 00:38Z; consistent with D-ITEM-08-17-D (sticky edge error state `/health` cannot see), here probably set by pmcp.run's own post-deploy invocation or the probes landing while the function was throttled. The edge's recovery time is undocumented",
-      "status": "open: the live identity of the new server is NOT established"
+      "status": "resolved by a redeploy, not by waiting",
+      "resolution": "503 `Server is in error state` observed 00:38Z-00:42Z (9 executor probe tries, about 3 min, plus later reads) with the function un-contained and /health 200; after the owner's deploy-only rerun (rc 0, 00:51-00:53Z) POST initialize returned 200 at 01:08Z and the identity probe passed first try at 01:09Z. Waiting about 3 min did not clear it; whether longer waiting would is unknown"
+    },
+    {
+      "id": "F-10-12-3",
+      "title": "cargo-pmcp 0.28.1 can create a brand-new pmcp.run server id with `cargo pmcp deploy` alone",
+      "evidence": "the first laya-deploy (owner-run) created function aprender-mcp-decide-antisemite, which the plan listed as UNVERIFIED; the second deploy updated it"
     }
-  ]
+  ],
+  "live_function_after": {
+    "server": "aprender-mcp-decide-antisemite",
+    "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+    "auth": "off",
+    "tier_mb": 10240,
+    "contained": false,
+    "reserved_concurrency": null,
+    "readback": {
+      "function_name": "aprender-mcp-decide-antisemite",
+      "memory_mb": 10240,
+      "architecture": "arm64",
+      "state": "Active",
+      "last_update_status": "Successful",
+      "last_modified": "2026-10-23T00:52:55.966+0000",
+      "code_sha256": "lhqq6c5ZcCaJh7k8Y68pFIQbJdI70HxeKQE62JteEr0=",
+      "env_APRENDER_DECIDE_SHA256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+      "s3_uri_ends_with_new_prefix_key": true,
+      "env_PMCP_SERVER_ID_present": true,
+      "env_PMCP_SERVER_ID": "aprender-mcp-decide-antisemite"
+    },
+    "read_only_ops": [
+      "aws lambda get-function-configuration --profile ze-kasher-dev --function-name aprender-mcp-decide-antisemite",
+      "aws lambda get-function-concurrency --profile ze-kasher-dev --function-name aprender-mcp-decide-antisemite"
+    ]
+  }
 }
