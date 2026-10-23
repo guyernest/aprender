@@ -68,6 +68,7 @@ the reply proposed that the owner accepted. The reply's section numbers (C, R, B
   `head_max_len` 192. Allowing a larger P means lowering `classify_max_texts` in `decide-tool-boundary-v1` (a contract
   change; experiment-coach would send one text per call), or keeping P <= 100. That choice, and the P value itself, is
   made at the plan 10-01 owner checkpoint with the measured table; the plans must present both options.
+  — **Resolved 2026-10-21 (owner, plan 10-01 Task 2):** guide variant p90 (task.json sha256 33fd8d7cd51b1b2864033ee313d30ae445e76120cc2b26e3849369c0602248e3), P = 86 measured with the served tokenizer, served door 8 (plan 10-11 was a recorded no-op: no contract, runtime or documentation change for the door).
 - **D-06 (owner):** "We can add the guide text as needed based on the published paper." The source text is
   Jikeli, Karali, Miehling, Soemer, "Antisemitic Messages? A Guide to High-Quality Annotation and a Labeled
   Dataset of Tweets" (arXiv 2304.14599; the 12-paragraph IHRA-based guideline). aprender drafts the condensation;
@@ -110,12 +111,15 @@ the reply proposed that the owner accepted. The reply's section numbers (C, R, B
   owner must ask for. The auth posture defaults to the existing deployment's (off, D-ITEM-08-18-A, risk accepted
   by the owner) unless the owner says otherwise at the same checkpoint. The live deploy is a human checkpoint
   (Phase 8 D-18).
+  — **Decided 2026-10-22 (owner, plan 10-07 Task 2):** replace-auth-off (replace the stance demo, auth off, no bearer); auth off; deployed by plan 10-08 on 2026-10-22 under the server id aprender-mcp-decide.
+  — **Renamed 2026-10-22 (owner, plan 10-12):** the served server id is aprender-mcp-decide-antisemite (D-19: each served decide model gets its own server id named for its dataset or decision, so several classifiers run in parallel); the previous server id aprender-mcp-decide was retired by the owner on 2026-10-23 (D-20); deployed by plan 10-12 and verified live on 2026-10-23.
 - **D-14 (consequence for the partner, theirs):** experiment-coach's client signs SigV4 to a Function URL and
   its stack grants `lambda:InvokeFunctionUrl`; a pmcp.run endpoint is a plain HTTPS MCP POST
   (`https://<server>.us-east.true-mcp.com/mcp`, stateless `tools/call`) with the auth posture of that
   deployment. Their spec's decision table also records "server-to-server MCP through pmcp.run is not a
   supported path from a tool". Both are theirs to reconcile; the hand-off record states the endpoint, the auth
   posture and the sha so they can.
+  — **Amended 2026-10-22 (owner, plan 10-09):** the transport items above are to be confirmed by the partner; who calls the classifier is not established by this phase (the owner's current understanding, unconfirmed, is that agents call the classifiers, update counters and consult experiment-coach for decisions; whether experiment-coach is itself a direct client is not known).
 
 ### Door, batch and timings (reply R1, R7, C9; owner's answers)
 - **D-15 (owner):** "Batch size can be smaller and 8 is fine." The door stays 8 texts / 800 built tokens
@@ -124,6 +128,7 @@ the reply proposed that the owner accepted. The reply's section numbers (C, R, B
   — **Amended 2026-10-21 (owner):** batch size is not critical; single-text calls are acceptable if they improve
   accuracy (see the D-05 amendment). experiment-coach's batch change (32 to at most 8) becomes "at most the served
   `classify_max_texts`", which may be 1.
+  — **Resolved 2026-10-21 (owner, plan 10-01 Task 2):** guide variant p90, served door 8 (plan 10-11 was a recorded no-op: the door stays 8 texts and 800 built tokens), so the partner's batch size is at most 8.
 - **D-16 (owner):** "No problem with cold start, as we are running it as part of an agent work, which is less
   sensitive to latency." The acceptance replay tests function and identity (one result per text, labels in task
   order, probabilities summing to 1, returned sha equal to the pin); cold and warm timings are REPORTED from the
