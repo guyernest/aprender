@@ -6265,3 +6265,219 @@ embed-probe-asset:
     python3 -I scripts/embed_endpoint/package_zip.py build "$A" "{{embed_probe_zip}}" \
         --record "{{embed_ids}}/package-embed-probe.json"
     ls -lh "{{embed_probe_zip}}" | awk '{print "  probe package: " $5 " " $9}'
+
+# The Graviton gate's owner-run recipes. Each one begins with the same refuse ladder:
+# `refuse <check> <message>` exits 2 before any AWS call. The ladder refuses a bad
+# environment, a mis-positioned argument, a memory outside 128 to 10240, a missing
+# asset and a package zip that does not verify against its record. DRY_RUN=1 synthesizes
+# and scans and nothing else; PREFLIGHT=1 adds the identity check and cdk diff.
+
+# Validate the probe stack offline: synthesize it, scan the template, print its function.
+embed-probe-synth env="dev" memory="10240":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    refuse() { echo "REFUSED $1: $2" >&2; exit 2; }
+    ENV_NAME="{{ trim_start_match(env, "env=") }}"
+    case "$ENV_NAME" in dev|prod) ;; *) refuse env "environment must be dev or prod, got '$ENV_NAME'" ;; esac
+    MEM="{{ trim_start_match(memory, "memory=") }}"
+    case "$MEM" in ''|*[!0-9]*) refuse memory "memory must be a whole number of MB, got '$MEM'" ;; esac
+    if [ "$MEM" -lt 128 ] || [ "$MEM" -gt 10240 ]; then refuse memory "memory must be 128 to 10240 MB, got $MEM"; fi
+    ASSET="${EMBED_PROBE_ASSET_DIR:-deploy-extensions/assets/embed-probe}"
+    for f in bootstrap model/full_model.apr; do
+        test -f "$ASSET/$f" || refuse asset "missing $ASSET/$f (build it: just embed-probe-asset)"
+    done
+    (cd deploy-extensions && npx cdk synth --context=env="$ENV_NAME" --context=stack=embed-probe --context=embedMemoryMb="$MEM" --quiet)
+    T="deploy-extensions/cdk.out/aprender-embed-probe-$ENV_NAME.template.json"
+    python3 -I scripts/embed_endpoint/ingress_scan.py "$T"
+    python3 -I - "$T" <<'PYSYNTH'
+    import json, sys
+    t = json.load(open(sys.argv[1]))
+    fns = [r["Properties"] for r in t["Resources"].values() if r["Type"] == "AWS::Lambda::Function"]
+    p = fns[0]
+    print(f"TEMPLATE function {p['FunctionName']} memory {p['MemorySize']} MB arch {p['Architectures'][0]} timeout {p['Timeout']} s")
+    PYSYNTH
+    echo "  synth OK for env=$ENV_NAME (no account contact)"
+
+# Show what a probe deploy would change, against the real account (owner-run).
+embed-probe-diff env="dev" profile="ze-kasher-dev" memory="10240":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    refuse() { echo "REFUSED $1: $2" >&2; exit 2; }
+    ENV_NAME="{{ trim_start_match(env, "env=") }}"
+    case "$ENV_NAME" in dev|prod) ;; *) refuse env "environment must be dev or prod, got '$ENV_NAME'" ;; esac
+    PROFILE="{{profile}}"
+    case "$PROFILE" in env=*|label=*|memory=*) refuse position "profile argument '$PROFILE' is mis-positioned" ;; esac
+    MEM="{{ trim_start_match(memory, "memory=") }}"
+    case "$MEM" in ''|*[!0-9]*) refuse memory "memory must be a whole number of MB, got '$MEM'" ;; esac
+    if [ "$MEM" -lt 128 ] || [ "$MEM" -gt 10240 ]; then refuse memory "memory must be 128 to 10240 MB, got $MEM"; fi
+    ASSET="${EMBED_PROBE_ASSET_DIR:-deploy-extensions/assets/embed-probe}"
+    for f in bootstrap model/full_model.apr; do
+        test -f "$ASSET/$f" || refuse asset "missing $ASSET/$f (build it: just embed-probe-asset)"
+    done
+    cd deploy-extensions && npx cdk diff --context=env="$ENV_NAME" --context=stack=embed-probe --context=embedMemoryMb="$MEM" --profile "$PROFILE"
+
+# Deploy the probe stack, one function, no ingress. DRY_RUN=1 and PREFLIGHT=1 never touch
+# the account except PREFLIGHT's identity check, which prints nothing about the account.
+embed-probe-deploy env="dev" profile="ze-kasher-dev" memory="10240":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    refuse() { echo "REFUSED $1: $2" >&2; exit 2; }
+    ENV_NAME="{{ trim_start_match(env, "env=") }}"
+    case "$ENV_NAME" in dev|prod) ;; *) refuse env "environment must be dev or prod, got '$ENV_NAME'" ;; esac
+    PROFILE="{{profile}}"
+    case "$PROFILE" in env=*|label=*|memory=*) refuse position "profile argument '$PROFILE' is mis-positioned" ;; esac
+    MEM="{{ trim_start_match(memory, "memory=") }}"
+    case "$MEM" in ''|*[!0-9]*) refuse memory "memory must be a whole number of MB, got '$MEM'" ;; esac
+    if [ "$MEM" -lt 128 ] || [ "$MEM" -gt 10240 ]; then refuse memory "memory must be 128 to 10240 MB, got $MEM"; fi
+    ASSET="${EMBED_PROBE_ASSET_DIR:-deploy-extensions/assets/embed-probe}"
+    ZIP="${EMBED_PROBE_ZIP:-deploy-extensions/assets/embed-probe.zip}"
+    RECORD="${EMBED_PROBE_RECORD:-deploy/embed-endpoint/.ids/package-embed-probe.json}"
+    for f in bootstrap model/full_model.apr; do
+        test -f "$ASSET/$f" || refuse asset "missing $ASSET/$f (build it: just embed-probe-asset)"
+    done
+    test -f "$ZIP" && test -f "$RECORD" || refuse package "missing the package zip or its record (build it: just embed-probe-asset)"
+    python3 -I scripts/embed_endpoint/package_zip.py verify "$ZIP" "$RECORD" >/dev/null 2>&1 \
+        || refuse package "the zip does not match its record (rebuild: just embed-probe-asset)"
+    if [ "${DRY_RUN:-0}" = "1" ] && [ "${PREFLIGHT:-0}" = "1" ]; then refuse mode "DRY_RUN and PREFLIGHT are exclusive"; fi
+    CTX="--context=env=$ENV_NAME --context=stack=embed-probe --context=embedMemoryMb=$MEM"
+    if [ "${DRY_RUN:-0}" = "1" ]; then
+        (cd deploy-extensions && npx cdk synth $CTX --quiet)
+        python3 -I scripts/embed_endpoint/ingress_scan.py "deploy-extensions/cdk.out/aprender-embed-probe-$ENV_NAME.template.json"
+        echo "DRY-RUN OK aprender-embed-probe-$ENV_NAME (offline; nothing deployed; AWS CALLS 0)"
+        exit 0
+    fi
+    if [ "${PREFLIGHT:-0}" = "1" ]; then
+        (cd deploy-extensions && npx cdk synth $CTX --quiet)
+        python3 -I scripts/embed_endpoint/ingress_scan.py "deploy-extensions/cdk.out/aprender-embed-probe-$ENV_NAME.template.json"
+        aws sts get-caller-identity --profile "$PROFILE" --output json >/dev/null
+        (cd deploy-extensions && npx cdk diff $CTX --profile "$PROFILE")
+        echo "PREFLIGHT OK aprender-embed-probe-$ENV_NAME (identity checked; nothing deployed)"
+        exit 0
+    fi
+    (cd deploy-extensions && npx cdk deploy $CTX --profile "$PROFILE" --require-approval never "aprender-embed-probe-$ENV_NAME")
+
+# The owner-run measurement: refuses on the live account, runs the fixed sample plan
+# (15 nominal invokes), and writes the RAW record under deploy/embed-endpoint/.ids/.
+embed-probe-run env="dev" profile="ze-kasher-dev" label="baseline" memory="10240":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    refuse() { echo "REFUSED $1: $2" >&2; exit 2; }
+    ENV_NAME="{{ trim_start_match(env, "env=") }}"
+    case "$ENV_NAME" in dev|prod) ;; *) refuse env "environment must be dev or prod, got '$ENV_NAME'" ;; esac
+    PROFILE="{{profile}}"
+    case "$PROFILE" in env=*|label=*|memory=*) refuse position "profile argument '$PROFILE' is mis-positioned" ;; esac
+    LABEL="{{label}}"
+    case "$LABEL" in env=*|profile=*|memory=*) refuse position "label argument '$LABEL' is mis-positioned" ;; esac
+    case "$LABEL" in *[!A-Za-z0-9_-]*|'') refuse label "label must be letters, digits, '-' or '_'" ;; esac
+    MEM="{{ trim_start_match(memory, "memory=") }}"
+    case "$MEM" in ''|*[!0-9]*) refuse memory "memory must be a whole number of MB, got '$MEM'" ;; esac
+    if [ "$MEM" -lt 128 ] || [ "$MEM" -gt 10240 ]; then refuse memory "memory must be 128 to 10240 MB, got $MEM"; fi
+    ASSET="${EMBED_PROBE_ASSET_DIR:-deploy-extensions/assets/embed-probe}"
+    RECORD="${EMBED_PROBE_RECORD:-deploy/embed-endpoint/.ids/package-embed-probe.json}"
+    ZIP="${EMBED_PROBE_ZIP:-deploy-extensions/assets/embed-probe.zip}"
+    for f in bootstrap model/full_model.apr; do
+        test -f "$ASSET/$f" || refuse asset "missing $ASSET/$f (build it: just embed-probe-asset)"
+    done
+    test -f "$ZIP" && test -f "$RECORD" || refuse package "missing the package zip or its record"
+    python3 -I scripts/embed_endpoint/package_zip.py verify "$ZIP" "$RECORD" >/dev/null 2>&1 \
+        || refuse package "the zip does not match its record (rebuild: just embed-probe-asset)"
+    python3 -I scripts/embed_endpoint/graviton_run.py run --env "$ENV_NAME" --profile "$PROFILE" \
+        --label "$LABEL" --memory "$MEM" --package-record "$RECORD" --out-dir deploy/embed-endpoint/.ids
+
+# Tear the probe stack down (owner-run). The probe's log group is destroyed with it.
+embed-probe-destroy env="dev" profile="ze-kasher-dev":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    refuse() { echo "REFUSED $1: $2" >&2; exit 2; }
+    ENV_NAME="{{ trim_start_match(env, "env=") }}"
+    case "$ENV_NAME" in dev|prod) ;; *) refuse env "environment must be dev or prod, got '$ENV_NAME'" ;; esac
+    PROFILE="{{profile}}"
+    case "$PROFILE" in env=*|label=*|memory=*) refuse position "profile argument '$PROFILE' is mis-positioned" ;; esac
+    ASSET="${EMBED_PROBE_ASSET_DIR:-deploy-extensions/assets/embed-probe}"
+    for f in bootstrap model/full_model.apr; do
+        test -f "$ASSET/$f" || refuse asset "missing $ASSET/$f (the stack cannot be synthesized without it)"
+    done
+    (cd deploy-extensions && npx cdk destroy --context=env="$ENV_NAME" --context=stack=embed-probe --profile "$PROFILE" --force "aprender-embed-probe-$ENV_NAME")
+
+# The offline gate. Scrubs AWS credentials, puts an aws shim on PATH that records and
+# refuses every call, and an npx shim that passes through `cdk synth` (and the ts-node
+# app runner cdk.json names, which cdk synth itself spawns) and records and refuses
+# everything else. Then the refusal cases, the DRY_RUN path, the scanner, the package
+# and normalizer selftests, and a negative control that proves the recorder can fire.
+embed-gate-selftest:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    unset AWS_PROFILE AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+    export AWS_EC2_METADATA_DISABLED=true
+    REAL_NPX="$(command -v npx)"
+    WORK="$(mktemp -d)"
+    trap 'rm -rf "$WORK"' EXIT
+    mkdir -p "$WORK/shim"
+    cat > "$WORK/shim/aws" <<'SHIMAWS'
+    #!/usr/bin/env bash
+    echo "aws $*" >> "$EMBED_GATE_RECORDER"
+    echo "REFUSED aws: the offline gate makes no AWS call" >&2
+    exit 97
+    SHIMAWS
+    cat > "$WORK/shim/npx" <<'SHIMNPX'
+    #!/usr/bin/env bash
+    if [ "${1:-}" = "cdk" ] && [ "${2:-}" = "synth" ]; then exec "$EMBED_GATE_REAL_NPX" "$@"; fi
+    if [ "${1:-}" = "ts-node" ]; then exec "$EMBED_GATE_REAL_NPX" "$@"; fi
+    echo "npx $*" >> "$EMBED_GATE_NPX_REFUSED"
+    echo "REFUSED npx: only cdk synth passes the offline gate" >&2
+    exit 97
+    SHIMNPX
+    chmod +x "$WORK/shim/aws" "$WORK/shim/npx"
+    export EMBED_GATE_RECORDER="$WORK/recorder" EMBED_GATE_NPX_REFUSED="$WORK/npx-refused" EMBED_GATE_REAL_NPX="$REAL_NPX"
+    : > "$EMBED_GATE_RECORDER"; : > "$EMBED_GATE_NPX_REFUSED"
+    export PATH="$WORK/shim:$PATH"
+
+    CASES=0
+    expect_refusal() {
+        local name="$1" want="$2"; shift 2
+        local out rc
+        set +e; out="$("$@" 2>&1)"; rc=$?; set -e
+        if [ "$rc" -eq 2 ] && printf '%s' "$out" | grep -q "REFUSED $want"; then
+            echo "  refused as expected: $name"; CASES=$((CASES + 1))
+        else
+            echo "GATE FAILED: $name did not refuse (rc=$rc)"; printf '%s\n' "$out" | tail -n 4; exit 1
+        fi
+    }
+    expect_refusal "unknown environment" env just embed-probe-deploy staging
+    expect_refusal "mis-positioned profile" position just embed-probe-deploy dev env=dev
+    expect_refusal "mis-positioned run label" position just embed-probe-run dev ze-kasher-dev profile=x 10240
+    expect_refusal "memory out of range" memory just embed-probe-deploy dev ze-kasher-dev 999999
+    expect_refusal "missing asset through the seam" asset env EMBED_PROBE_ASSET_DIR="$WORK/no-such-asset" just embed-probe-deploy dev
+    mkdir -p "$WORK/tampered"
+    cp deploy-extensions/assets/embed-probe.zip "$WORK/tampered/embed-probe.zip"
+    printf 'x' >> "$WORK/tampered/embed-probe.zip"
+    expect_refusal "zip that does not match its record" package env EMBED_PROBE_ZIP="$WORK/tampered/embed-probe.zip" just embed-probe-deploy dev
+    python3 -I - deploy/embed-endpoint/.ids/package-embed-probe.json "$WORK/record-bad.json" <<'PYBADREC'
+    import json, sys
+    record = json.load(open(sys.argv[1])); record["apr_sha256"] = "0" * 64
+    json.dump(record, open(sys.argv[2], "w"))
+    PYBADREC
+    expect_refusal "package record that does not match its zip" package env EMBED_PROBE_RECORD="$WORK/record-bad.json" just embed-probe-deploy dev
+    expect_refusal "both mode flags" mode env DRY_RUN=1 PREFLIGHT=1 just embed-probe-deploy dev
+
+    DRY_OUT="$(DRY_RUN=1 just embed-probe-deploy dev 2>&1)" || { echo "GATE FAILED: DRY_RUN did not succeed"; printf '%s\n' "$DRY_OUT" | tail -n 5; exit 1; }
+    printf '%s' "$DRY_OUT" | grep -q 'DRY-RUN OK aprender-embed-probe-dev (offline; nothing deployed; AWS CALLS 0)' \
+        || { echo "GATE FAILED: DRY_RUN did not print its offline line"; exit 1; }
+    echo "  DRY_RUN synthesized and scanned the probe offline"; CASES=$((CASES + 1))
+
+    python3 -I scripts/embed_endpoint/ingress_scan.py --selftest deploy-extensions/cdk.out/aprender-embed-probe-dev.template.json
+    python3 -I scripts/embed_endpoint/package_zip.py selftest
+    python3 -I scripts/embed_endpoint/graviton_gate.py selftest
+
+    if [ -s "$EMBED_GATE_RECORDER" ] || [ -s "$EMBED_GATE_NPX_REFUSED" ]; then
+        echo "GATE FAILED: a shim recorded a call the gate must not make"; cat "$EMBED_GATE_RECORDER" "$EMBED_GATE_NPX_REFUSED"; exit 1
+    fi
+    echo "AWS CALLS: 0 (aws shim recorder empty; npx passes through only cdk synth; credentials scrubbed)"
+
+    aws sts get-caller-identity >/dev/null 2>&1 || true
+    if [ ! -s "$EMBED_GATE_RECORDER" ]; then
+        echo "GATE FAILED: negative control: the recorder did not fire on a deliberate call"; exit 1
+    fi
+    : > "$EMBED_GATE_RECORDER"
+    echo "  negative control: the recorder fired once on a deliberate call, then was reset"
+    echo "GATE SELFTEST OK ($CASES refusal and dry-run cases, plus the scanner, package and normalizer selftests)"
