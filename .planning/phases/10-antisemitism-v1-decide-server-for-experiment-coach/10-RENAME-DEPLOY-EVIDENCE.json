@@ -168,7 +168,49 @@
       "result": "Phase 8 binding audit: 4 contract(s) audited, no binding finding outside PHASE8_LIVE_EXEMPT=''"
     }
   },
-  "live_attempts": [],
+  "live_attempts": [
+    {
+      "attempt": 1,
+      "run_by": "the owner (wrapper script); the executor's launch of the same command was refused by the Claude Code permission classifier ([Production Deploy])",
+      "command": "just laya-deploy models/decide/laya-antisemitism-v1.apr models/decide/laya-antisemitism-v1 data/decide/goldstandard-2024 <laya snapshot 55cf4c4e> aprender-mcp-decide-antisemite dev ze-kasher-dev",
+      "config": {
+        "server": "aprender-mcp-decide-antisemite",
+        "env": "dev",
+        "auth": "off",
+        "tier_mb": 10240,
+        "sha_pin": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e"
+      },
+      "rc": 1,
+      "refusal": null,
+      "failure_class": "edge-health-404-on-new-server-id-then-contained",
+      "created_function": true,
+      "created_function_note": "cargo-pmcp 0.28.1 DID create the new server id: function created/updated at 2026-10-22T23:52:28Z",
+      "token_gate_line": "pmcp.run token expires_at 2026-10-22T23:41:43.744586+00:00 (59 min left) (read at 22:42Z, before laya-verify; the deploy itself ran later)",
+      "recipe_lines": [
+        "grant check passed: s3:GetObject on only the new prefix (stack-declared)",
+        "curl: (56) The requested URL returned error: 404",
+        "IDENTITY FAILURE: GET https://aprender-mcp-decide-antisemite.us-east.true-mcp.com/health failed -- containing (reserved concurrency 0)",
+        "CONTAINED: aprender-mcp-decide-antisemite reserved concurrency 0 (no invocation runs, warm instances included)"
+      ],
+      "endpoint_in_state_file": "https://aprender-mcp-decide-antisemite.us-east.true-mcp.com/mcp",
+      "aws_write_count_this_attempt": "one cargo pmcp deploy creating the new server; laya-teardown containment (put-function-concurrency 0) by the recipe"
+    },
+    {
+      "attempt": "1b (not a deploy)",
+      "kind": "post-deploy identity probe by the executor",
+      "started": "2026-10-23T00:38Z",
+      "result": "failed",
+      "probe_tries": 9,
+      "probe_rc": 1,
+      "probe_error": "initialize: HTTP 503 {\"error\":{\"code\":-32004,\"message\":\"Server is in error state\"}} on every try (1 + 8 retries 20 s apart, about 3 min)",
+      "negative_control": "not valid: the stance probe also exited 1 on the same edge 503, not on identity_matches false",
+      "edge_get_after": {
+        "GET /health": 200,
+        "GET /mcp": 405,
+        "at": "2026-10-23T00:41Z"
+      }
+    }
+  ],
   "live": null,
   "retirement": {
     "state": "pending"
@@ -235,13 +277,110 @@
       "file": "models/decide/deploy-config-aprender-mcp-decide-antisemite.toml (gitignored; holds the real bucket name)"
     },
     "upload": {
-      "state": "NOT RUN",
-      "reason": "the launch of `just laya-upload ... aprender-mcp-decide-antisemite dev ze-kasher-dev` was denied by the Claude Code permission classifier ([Production Deploy]); nothing was uploaded and no workaround was attempted",
-      "aws_write_count": 0
+      "command": "just laya-upload models/decide/laya-antisemitism-v1.apr models/decide/laya-antisemitism-v1 data/decide/goldstandard-2024 <laya snapshot 55cf4c4e> aprender-mcp-decide-antisemite dev ze-kasher-dev",
+      "run_by": "the owner, with their own script (the executor's launch was refused by the permission classifier)",
+      "rc": 0,
+      "line": "UPLOADED s3://<weights-bucket>/decide/aprender-mcp-decide-antisemite/2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e.apr (846220868 bytes, sha256 2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e)",
+      "s3_key": "decide/aprender-mcp-decide-antisemite/2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e.apr",
+      "bytes": 846220868,
+      "head_object_by_executor": {
+        "checked_at": "2026-10-22T22:42Z",
+        "content_length": 846220868,
+        "matches_local_size": true
+      },
+      "laya_verify_accepted": true,
+      "aws_write_count": 1,
+      "aws_write_note": "one S3 PutObject under the new prefix, made by the owner"
     },
     "deploy": {
-      "state": "NOT RUN",
-      "reason": "held for a fresh pmcp.run login on the coordinator's instruction; the token had 58 min left at the start, below the plan's 60-minute gate"
+      "state": "SUPERSEDED: see live_attempts[0]; the executor's launch was refused by the permission classifier and the owner ran the deploy with a wrapper script"
     }
-  }
+  },
+  "owner_and_orchestrator_events": [
+    {
+      "at": "2026-10-22T23:52Z",
+      "event": "function aprender-mcp-decide-antisemite created by cargo-pmcp 0.28.1 (LastModified 2026-10-22T23:52:28Z), 10240 MB, arm64, env sha equals H"
+    },
+    {
+      "at": "2026-10-22T23:5xZ",
+      "event": "the recipe's edge check GET /health returned 404; laya-deploy printed IDENTITY FAILURE and laya-teardown set reserved concurrency 0 (CONTAINED); laya-deploy exited 1"
+    },
+    {
+      "at": "2026-10-23T00:00Z",
+      "event": "orchestrator, read-only: GET /health 200, GET /mcp 405 on the new id (inference, not proven: the 404 was edge-registration lag on a brand-new id)"
+    },
+    {
+      "at": "2026-10-23T00:36Z",
+      "event": "the owner ran aws lambda delete-function-concurrency on the new function (un-containment); the executor confirmed at 00:37Z that get-function-concurrency returns no ReservedConcurrentExecutions"
+    }
+  ],
+  "new_function_observed": {
+    "observed_at": "2026-10-23T00:37Z",
+    "read_only_ops": [
+      "aws lambda get-function-configuration --profile ze-kasher-dev --function-name aprender-mcp-decide-antisemite",
+      "aws lambda get-function-concurrency --profile ze-kasher-dev --function-name aprender-mcp-decide-antisemite"
+    ],
+    "readback": {
+      "function_name": "aprender-mcp-decide-antisemite",
+      "last_modified": "2026-10-22T23:52:28.359+0000",
+      "code_sha256": "E/8vIhhm1wX/Dq6fo/nJkQDR9+axmxYKwTa9ul4anQw=",
+      "memory_mb": 10240,
+      "architecture": "arm64",
+      "state": "Active",
+      "last_update_status": "Successful",
+      "env_APRENDER_DECIDE_SHA256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+      "s3_uri_ends_with_new_prefix_key": true,
+      "env_PMCP_SERVER_ID_present": true,
+      "env_PMCP_SERVER_ID": "aprender-mcp-decide-antisemite"
+    },
+    "reserved_concurrency": null,
+    "contained_now": false
+  },
+  "old_server_after_deploy": {
+    "endpoint": "https://aprender-mcp-decide.us-east.true-mcp.com/mcp",
+    "recorded_at": "2026-10-23T00:41Z",
+    "identity_probe": {
+      "identity_matches": true,
+      "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+      "one_tool_named_classify": true,
+      "response_labels_match": true,
+      "elapsed_ms": [
+        16286,
+        186,
+        940
+      ]
+    },
+    "read_only_ops": [
+      "probe --url https://aprender-mcp-decide.us-east.true-mcp.com/mcp --apr models/decide/laya-antisemitism-v1.apr --expect-sha256 2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+      "aws lambda get-function-configuration --profile ze-kasher-dev --function-name aprender-mcp-decide",
+      "aws lambda get-function-concurrency --profile ze-kasher-dev --function-name aprender-mcp-decide"
+    ],
+    "lambda": {
+      "LastModified": "2026-10-22T17:32:32.000+0000",
+      "CodeSha256": "7ErhcI1ApHE1ys48GqkxLUaDhx6Tx7oNOqdsC7N+BSo=",
+      "MemorySize": 10240,
+      "State": "Active",
+      "LastUpdateStatus": "Successful",
+      "Architectures": [
+        "arm64"
+      ],
+      "env_APRENDER_DECIDE_SHA256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+      "reserved_concurrency": null
+    },
+    "unchanged": true
+  },
+  "findings": [
+    {
+      "id": "F-10-12-1",
+      "title": "laya-deploy's first edge /health check can 404 on a brand-new server id and contain the function before the edge has registered it",
+      "evidence": "attempt 1: 404 at the recipe's single GET, then CONTAINED; the same GET returned 200 about 8 minutes later",
+      "suggested_fix": "NOT implemented: a bounded retry/wait on the edge /health check (404 only, e.g. up to 10 tries 15 s apart) before contain(); every other failure keeps containing at once. To be decided by the coordinator/owner."
+    },
+    {
+      "id": "F-10-12-2",
+      "title": "after the containment, the pmcp.run edge answers every MCP POST with 503 `Server is in error state` even though the function is un-contained and /health is 200",
+      "evidence": "9 probe tries over about 3 min at 00:38Z; consistent with D-ITEM-08-17-D (sticky edge error state `/health` cannot see), here probably set by pmcp.run's own post-deploy invocation or the probes landing while the function was throttled. The edge's recovery time is undocumented",
+      "status": "open: the live identity of the new server is NOT established"
+    }
+  ]
 }
