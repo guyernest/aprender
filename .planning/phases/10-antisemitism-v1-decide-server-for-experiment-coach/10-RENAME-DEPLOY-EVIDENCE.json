@@ -465,7 +465,9 @@
     "write_note": "laya-deploy-verify bumps DECIDE_COLD_BUMP in the NEW function's environment before each cold sample (one update-function-configuration per sample, four in all); nothing was written to the old server"
   },
   "retirement": {
-    "state": "pending"
+    "state": "requested",
+    "requested_at": "2026-10-23T01:14Z",
+    "note": "the owner is asked to delete the server aprender-mcp-decide in the pmcp.run admin UI and reply `deleted`; the executor never performs or simulates it; the state becomes deleted_confirmed only after that reply AND a read-only post-check"
   },
   "access": {
     "checked_at": "2026-10-22T20:30:03Z",
