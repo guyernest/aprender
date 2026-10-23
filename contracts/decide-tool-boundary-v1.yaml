@@ -1,6 +1,6 @@
 contract: decide-tool-boundary
 metadata:
-  version: 9.0.0
+  version: 10.0.0
   created: '2026-09-25'
   author: PAIML Engineering
   kind: kernel
@@ -117,6 +117,19 @@ metadata:
     30 000 ms cap; FINAL record 08-LIVE-REDEPLOY-EVIDENCE.json (`live`, final: true). The binding
     row is `implemented` again and FALSIFY-DECIDE-TOOL-009 names that record. `pv diff`
     classifies the invariant edit MAJOR, hence 9.0.0.
+
+    v10.0.0 (plan 10-10, 2026-10-23; one constant moved, no door literal touched). The served task
+    changed in Phase 10 (D-13, plans 10-08 and 10-12): `laya-antisemitism-v1.apr` replaced the
+    stance demo, so `served_task_min_row_tokens` moves 57 -> 86, measured twice and equal (the
+    Python measurement of plan 10-01 and the Rust-side `min_row_tokens` of the live plan-only
+    record). The server id became `aprender-mcp-decide-antisemite` (D-19; the previous
+    `aprender-mcp-decide` was retired by the owner, D-20), and FALSIFY-DECIDE-TOOL-009 names that
+    server, its harness and the Phase 10 rename-deploy record (4 proven-cold samples, every one
+    under the 30 000 ms cap), keeping the 08-30 text under SUPERSEDED ARTIFACT. The count bound
+    (`classify_max_texts` 8) was set by plan 10-11 and is not edited here. `pv diff` reported the
+    two files identical (it does not model `constants:` and does not compare the falsification
+    harness fields), so it offered no bump; the version is raised MAJOR because a served constant
+    moved, as at v7.0.0.
 
     THE 10 240 MB TIER (v7.0.0, THE CONTRACTED TIER). 10 240 MB is 6 vCPU. Every term below is a
     MEASUREMENT: the spike-026 records at this very tier (Graviton2, three forced cold starts,
@@ -299,11 +312,18 @@ constants:
   # Laya's max_len: the most tokens one built row can hold. Cross-reference only; the artifact's
   # own agent config is the authority for the value the forward uses.
   row_max_tokens: 512
-  # The SHORTEST built row of the served stance task (laya-stance-64.apr): task prefix + markers
-  # with an empty state. Measured, not derived: `probe --plan-only --maximal distributed` plans 8
-  # empty texts to 456 tokens. classify_max_texts x this <= classify_max_total_tokens, and the
-  # maximal-request builder refuses to emit a DISTRIBUTED request the budget would refuse.
-  served_task_min_row_tokens: 57
+  # The SHORTEST built row of the served antisemitism-v1 task (laya-antisemitism-v1.apr): task
+  # prefix + markers with an empty state. P = 86, measured twice and equal: by the Python
+  # measurement of plan 10-01 (10-TASK-EVIDENCE.json measured.P) and by the Rust-side
+  # `min_row_tokens` that `probe --plan-only` reports on the live record (the measurement
+  # `check_served_task_fits` makes at build time). `probe --plan-only --maximal distributed` plans
+  # 8 texts totalling 800 built tokens: that figure, `tokens_planned`, is the request's TOTAL
+  # (the distributed shape fills each text toward its share of the 800-token budget), not the
+  # count times P (8 x 86 = 688, which is only the floor the budget must admit).
+  # classify_max_texts x this <= classify_max_total_tokens, and the maximal-request builder
+  # refuses to emit a DISTRIBUTED request the budget would refuse. The superseded stance task
+  # (laya-stance-64.apr) measured 57.
+  served_task_min_row_tokens: 86
   # The SHORTEST caller text refusal_names_bound's no-echo clause quantifies over (v6.0.0, A4-7).
   # A one-character text such as `a` occurs in every refusal message, so a clause over ANY
   # non-empty text is unsatisfiable. 12 characters is past every short word and number the
@@ -650,9 +670,9 @@ falsification_tests:
   - id: FALSIFY-DECIDE-TOOL-009
     rule: 'The maximal legal classify completes under the API Gateway cap on a cold instance, for both shapes and every cold sample'
     prediction: 'At lambda_memory_mb 10240, every recorded cold sample of the CONCENTRATED (2 texts, <= 800 built tokens: one full 512 row and the remainder) and DISTRIBUTED (8 texts, <= 800 built tokens) shapes, each proven cold by its load log line, completes under 30000 ms as the instance''s first POST.'
-    implemented_by: 'plan 08-30, LIVE at 10 240 MB (no unit-test surface: it needs a cold pmcp.run Lambda): deployed-passed, 8 proven-cold samples in the evidence file below (CONCENTRATED 27015, 25076, 25092 and 25305 ms; DISTRIBUTED 22922, 22647, 22855 and 23116 ms), each proven cold by its CloudWatch load line and the invocation''s platform.report init duration. SUPERSEDED TIER: plans 08-17/08-18, outcome deployed-passed at 3008 MB (08-LIVE-DEPLOY-EVIDENCE.json): CONCENTRATED 28527 and 28501 ms, DISTRIBUTED 29350 and 24168 ms, each proven cold by its CloudWatch load line; plan 08-12 replaced the LIVE-PENDING marker with this harness and the evidence path'
-    test_harness: 'just laya-deploy-verify models/decide/laya-stance-64.apr aprender-mcp-decide'
-    evidence: '.planning/phases/08-laya-decision-model-local-fine-tune-and-thin-mcp-server/08-LIVE-REDEPLOY-EVIDENCE.json'
+    implemented_by: 'plan 10-12, LIVE at 10 240 MB as server aprender-mcp-decide-antisemite serving laya-antisemitism-v1.apr (sha256 2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e): deployed-passed, 4 proven-cold samples (CONCENTRATED 25499 and 19759 ms; DISTRIBUTED 22963 and 22788 ms), each proven cold by its load line. SUPERSEDED ARTIFACT: plan 08-30, LIVE at 10 240 MB (no unit-test surface: it needs a cold pmcp.run Lambda): deployed-passed, 8 proven-cold samples in the evidence file below (CONCENTRATED 27015, 25076, 25092 and 25305 ms; DISTRIBUTED 22922, 22647, 22855 and 23116 ms), each proven cold by its CloudWatch load line and the invocation''s platform.report init duration. SUPERSEDED TIER: plans 08-17/08-18, outcome deployed-passed at 3008 MB (08-LIVE-DEPLOY-EVIDENCE.json): CONCENTRATED 28527 and 28501 ms, DISTRIBUTED 29350 and 24168 ms, each proven cold by its CloudWatch load line; plan 08-12 replaced the LIVE-PENDING marker with this harness and the evidence path'
+    test_harness: 'just laya-deploy-verify models/decide/laya-antisemitism-v1.apr aprender-mcp-decide-antisemite'
+    evidence: '.planning/phases/10-antisemitism-v1-decide-server-for-experiment-coach/10-RENAME-DEPLOY-EVIDENCE.json'
     if_fails: 'The token budget admits a request the envelope cannot serve cold: lower classify_max_total_tokens (re-deriving it here first) or move the tier, never raise the margin after the fact.'
 
 kani_harnesses:
