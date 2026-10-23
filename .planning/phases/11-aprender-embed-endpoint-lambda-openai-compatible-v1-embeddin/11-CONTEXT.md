@@ -1,0 +1,31 @@
+# Phase 11 Context: aprender-embed-endpoint Lambda
+
+Source: GraphRAG (pmcp.run graph-rag) request, 2026-10-23, reviewed in quick task 261023-aq0
+(.planning/quick/261023-aq0-review-graphrag-team-request-aprender-em/261023-aq0-SUMMARY.md).
+
+## Locked requirements (from the requester; verbatim intent)
+- R1 Lambda `aprender-embed-endpoint-<stage>` serving POST /v1/embeddings: API Gateway v2 event in, OpenAI-shaped response out, for sentence-transformers/all-MiniLM-L6-v2 (384-d, mean pooling, L2).
+- R2 Server-side truncation: full encoded sequence <= 256 tokens incl. [CLS]/[SEP]. A 1,600+ wordpiece chunk returns 200, never panics, never 5xx. Build-time and query-time vectors identical.
+- R3 Release identity bundle per release: release tag, deployed CodeSha256, sha256 of .apr, safetensors, tokenizer.json, vocab.txt; HF revision; encoder config; `aprender-embed-reference-vectors.json` computed with sentence-transformers at max_seq_length=256.
+- R4 No public ingress: no Function URL, API Gateway or load balancer; resource policy has no `*` principal; access by IAM lambda:InvokeFunction only.
+- R5 Never an unhandled FunctionError: malformed input gets the OpenAI error envelope with 400, 413, 429 or 500.
+- R6 Measure and REPORT (not promise): memory size and timeout (timeout >= 30 s), cold and warm latency for 1 input and for 64 realistic chunks, whether provisioned concurrency is needed. Cold start must answer a one-input canary within 30 s.
+- R7 Acceptance: requester runs `just aprender-embed-conformance lambda://<function-name>/v1/embeddings <reference-vectors.json>` -> `CONFORMANCE RESULT PASS 13/13`. We run the equivalent on our own build first.
+- Deliverables per environment: function name + region, release bundle, reference-vectors file + sha256, deployment-limit numbers.
+- Out of scope: multilingual/larger encoders, Cohere, re-embedding tooling. Nothing changes in the pmcp.run repo. English-only, 384-d accepted.
+
+## Findings that shape the plan (verified in tree 2026-10-23)
+- Engine exists: `aprender-core::setfit` = native all-MiniLM-L6-v2, pinned HF revision (setfit/import.rs:61), MAX_SEQUENCE_LENGTH=256 (setfit/tokenizer.rs:52) with TruncationFact, no-panic `SetFitArtifact::embed` (artifact.rs:1875).
+- aprender-serve `/v1/embeddings` is NOT a zeros stub any more but is the decoder/GGUF path: not reusable.
+- `aprender-mcp-setfit-lambda` is a pmcp loopback proxy, not an API-GW-v2 handler. Write a direct lambda_runtime handler; reuse model resolution only.
+- R4 conflicts with the `cargo pmcp deploy` path (creates ingress). Deploy via CDK/aws under `deploy-extensions/` (training stack style), IAM-invoke only.
+- Phase 10 pattern to follow: thin per-server crate over shared library, fail-closed deploy recipes in justfile, owner-run live deploy, identity probe, evidence JSON, claims ledger.
+
+## Open / blocked inputs
+- The requester's brief with the thirteen conformance checks, and the `aprender-embed-conformance` tool (in the pmcp.run repo): not in hand. Plans must include a checkpoint to obtain them and must not invent the 13 checks.
+- Live deploy needs owner AWS credentials (profile ze-kasher-dev); live steps are owner-run or checkpointed.
+- Reference vectors need Python sentence-transformers + HF download (back-office, not served).
+- Target date: not yet set; to be set after the cold-start measurement.
+
+## Project rules to honor
+justfile for scripts; strict clippy per touched crate; `pv validate` for any contract (new contract for the endpoint boundary); no unwrap; no new .sh without need; pin binaries; measure before reporting; report timings, do not gate on them unless the requester's numbers say so.
