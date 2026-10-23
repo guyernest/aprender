@@ -646,22 +646,23 @@ fn thin_server_crates_are_shims() {
             manifest.contains("[[bin]]") && manifest.contains("name = \"bootstrap\""),
             "{name}: Cargo.toml must declare the `bootstrap` bin"
         );
-        // Dependencies: exactly one, the shared crate (string checks only, no TOML parser).
-        let mut in_deps = false;
-        let mut deps = Vec::new();
-        for line in manifest.lines().map(str::trim) {
-            if line.starts_with('[') {
-                in_deps = line == "[dependencies]";
-                assert!(
-                    !matches!(line, "[dev-dependencies]" | "[build-dependencies]"),
-                    "{name}: a thin crate has no {line}"
-                );
-            } else if in_deps && !line.is_empty() && !line.starts_with('#') {
-                deps.push(line.to_string());
-            }
+        // Dependencies: exactly one, the shared crate, in any table spelling.
+        let doc: toml::Table = manifest
+            .parse()
+            .unwrap_or_else(|e| panic!("{name}/Cargo.toml: {e}"));
+        for table in ["dev-dependencies", "build-dependencies", "target"] {
+            assert!(
+                !doc.contains_key(table),
+                "{name}: a thin crate has no [{table}]"
+            );
         }
+        let deps: Vec<&String> = doc
+            .get("dependencies")
+            .and_then(toml::Value::as_table)
+            .map(|t| t.keys().collect())
+            .unwrap_or_default();
         assert!(
-            deps.len() == 1 && deps[0].starts_with("aprender-mcp-decide-lambda"),
+            deps.len() == 1 && deps[0] == "aprender-mcp-decide-lambda",
             "{name}: the only dependency is the shared crate, found {deps:?}"
         );
         let main = std::fs::read_to_string(dir.join("src/main.rs"))

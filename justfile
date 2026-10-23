@@ -1901,8 +1901,7 @@ laya-build-bootstrap server:
         *"ARM aarch64"*) ;;
         *) echo "ERROR: not an aarch64 binary: $FT" >&2; exit 1 ;;
     esac
-    NAMED="$(strings "$OUT" | grep -c -F -- '{{server}}-lambda' || true)"
-    [ "${NAMED:-0}" -gt 0 ] || { echo "ERROR: $OUT does not name {{server}}-lambda -- a stale bootstrap from another crate" >&2; exit 1; }
+    grep -aqF -- '{{server}}-lambda' "$OUT" || { echo "ERROR: $OUT does not name {{server}}-lambda -- a stale bootstrap from another crate" >&2; exit 1; }
     echo "BOOTSTRAP aarch64 OK $OUT ($(wc -c < "$OUT" | tr -d ' ') bytes)"
 
 # Deploy <apr> as the decide server, FAIL-CLOSED. Refusals, each `REFUSED <check>: ...` before

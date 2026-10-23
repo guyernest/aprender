@@ -52,6 +52,8 @@ tempfile = { workspace = true }
 # tests::lambda_request_rows_are_swept reads decide-tool-boundary-v1's untrusted_input_bounds
 # (the same workspace serde_yaml aprender-mcp-decide's sweep uses; already in Cargo.lock).
 serde_yaml = { workspace = true }
+# tests::thin_server_crates_are_shims parses the thin crates' manifests.
+toml = { workspace = true }
 # `start_paused` clocks for the ATTEMPT_TIMEOUT / DOWNLOAD_DEADLINE tests.
 tokio = { workspace = true, features = ["test-util"] }
 
