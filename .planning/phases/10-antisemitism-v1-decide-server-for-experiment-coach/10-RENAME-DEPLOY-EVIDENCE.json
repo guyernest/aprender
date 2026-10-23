@@ -465,9 +465,66 @@
     "write_note": "laya-deploy-verify bumps DECIDE_COLD_BUMP in the NEW function's environment before each cold sample (one update-function-configuration per sample, four in all); nothing was written to the old server"
   },
   "retirement": {
-    "state": "requested",
+    "state": "deleted_confirmed",
     "requested_at": "2026-10-23T01:14Z",
-    "note": "the owner is asked to delete the server aprender-mcp-decide in the pmcp.run admin UI and reply `deleted`; the executor never performs or simulates it; the state becomes deleted_confirmed only after that reply AND a read-only post-check"
+    "owner_reply": "deleted",
+    "owner_reply_date": "2026-10-23",
+    "owner_reply_approx_time": "about 14:40Z",
+    "deleted_by": "the owner, from the pmcp.run admin UI (the executor never performed or simulated it)",
+    "post_check": {
+      "executor_checked_at": "2026-10-23T14:42Z",
+      "orchestrator_checked_at": "2026-10-23T14:41Z",
+      "old_endpoint": {
+        "GET /health": 404,
+        "POST /mcp initialize": 404,
+        "identity_probe": "exit 1: HTTP 404 {\"error\":{\"code\":-32001,\"message\":\"Server not found: aprender-mcp-decide\"}}",
+        "returns_artifact_identity": false
+      },
+      "new_endpoint": {
+        "GET /health": 200,
+        "POST /mcp initialize": 200,
+        "identity_probe": {
+          "exit": 0,
+          "one_tool_named_classify": true,
+          "description_has_labels_in_order": true,
+          "response_labels_match": true,
+          "identity_matches": true,
+          "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+          "load_header": "warm",
+          "elapsed_ms": [
+            414,
+            162,
+            926
+          ]
+        }
+      },
+      "old_lambda": {
+        "command": "aws lambda get-function-configuration --profile ze-kasher-dev --function-name aprender-mcp-decide",
+        "result": "ResourceNotFoundException: Function not found",
+        "observed": "the admin-UI deletion removed the Lambda function as well as the endpoint (this answers the plan's unknown about what the deletion removes)"
+      },
+      "new_lambda": {
+        "function_name": "aprender-mcp-decide-antisemite",
+        "state": "Active",
+        "last_update_status": "Successful",
+        "memory_mb": 10240,
+        "architecture": "arm64",
+        "env_APRENDER_DECIDE_SHA256_equals_artifact": true,
+        "reserved_concurrency": null,
+        "last_modified": "2026-10-23T01:13:24.000+0000 (the last DECIDE_COLD_BUMP of laya-deploy-verify)"
+      },
+      "read_only_ops": [
+        "aws lambda get-function-configuration --profile ze-kasher-dev --function-name aprender-mcp-decide",
+        "aws lambda get-function-configuration --profile ze-kasher-dev --function-name aprender-mcp-decide-antisemite",
+        "aws lambda get-function-concurrency --profile ze-kasher-dev --function-name aprender-mcp-decide-antisemite"
+      ]
+    },
+    "old_s3_object": {
+      "still_present": true,
+      "prefix": "decide/aprender-mcp-decide/",
+      "note": "the old content-addressed object is STILL in the weights bucket; removing it is the owner's call and this plan did not touch it",
+      "command_as_text_only": "aws s3 rm --profile ze-kasher-dev --recursive s3://aprender-decide-weights-<account>-dev/decide/aprender-mcp-decide/"
+    }
   },
   "access": {
     "checked_at": "2026-10-22T20:30:03Z",
