@@ -57,8 +57,8 @@
     "not_decided_by_this_reply": [
       {
         "item": "which measure admission uses: Lambda Duration or client wall",
-        "status": "open",
-        "owner_of_next_decision": "plan 11-08 planner"
+        "status": "answered",
+        "answered_by": "D-05"
       },
       {
         "item": "whether the 64-input cap changes",
@@ -79,9 +79,19 @@
     "open_items": [
       {
         "item": "admission measure: Lambda Duration or client wall",
-        "status": "open",
-        "owner_of_next_decision": "plan 11-08 planner"
+        "status": "answered",
+        "answered_by": "D-05"
       }
     ]
+  },
+  "admission_measure": {
+    "decision_id": "D-05",
+    "approved": true,
+    "owner_reply": "Let's run the 32-input measurements again, and use the lambda duration.",
+    "decision": "Admission uses Lambda Duration, not client wall time.",
+    "resolves": "the admission-measure question left open by D-03 and D-04",
+    "scope_note": "D-05 decides the measure, not the cap value. The cap stays at 32 under D-04 and is not yet measured.",
+    "approved_measurement": "A 32-input measurement, run again: one redeploy, one run, one destroy, run by the owner. Approved; not yet run.",
+    "measured_32_input_sample": false
   }
 }
