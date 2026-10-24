@@ -34,10 +34,13 @@ import sys
 
 SCHEMA = "embed-graviton-v1"
 RAW_SCHEMA = "embed-graviton-raw-v1"
-EMBED_KINDS = ("cold-1", "warm-1", "cold-64", "warm-64")
+EMBED_KINDS = ("cold-1", "warm-1", "cold-32", "warm-32", "cold-64", "warm-64")
 TOKENIZE_KIND = "tokenize-1mib"
+# Batch kinds share one validity rule (every input truncated, no tape left); the 64-only
+# derived numbers stay on SIXTY_FOUR_KINDS.
+BATCH_KINDS = ("cold-32", "warm-32", "cold-64", "warm-64")
 SIXTY_FOUR_KINDS = ("cold-64", "warm-64")
-WARM_KINDS = ("warm-1", "warm-64", TOKENIZE_KIND)
+WARM_KINDS = ("warm-1", "warm-32", "warm-64", TOKENIZE_KIND)
 DIM = 384
 MIB = 1048576
 THIRTY_S_MS = 30000
@@ -160,9 +163,9 @@ def normalize(raw):
             fail(f"response_ok: {kind}")
         if kind in WARM_KINDS and v["proven_cold"]:
             fail(f"warm sample carries an Init Duration: {kind}")
-        if kind in SIXTY_FOUR_KINDS:
+        if kind in BATCH_KINDS:
             if probe.get("truncated_count") != probe.get("n") or probe.get("tape_len_after") != 0:
-                fail(f"64-input sample truncation or tape check: {kind}")
+                fail(f"{kind.split('-')[1]}-input sample truncation or tape check: {kind}")
     one_cold = [v for v in views if v["kind"] == "cold-1" and v["proven_cold"]
                 and v["response_ok"] and not v["function_error"]]
     if len(one_cold) < 2:
@@ -175,9 +178,9 @@ def normalize(raw):
         if ingress.get(key) != "absent":
             fail(f"ingress {key} is not absent")
 
-    def valid64(v):
+    def valid_batch(v):
         probe = v["probe"] if isinstance(v["probe"], dict) else {}
-        return (v["kind"] in SIXTY_FOUR_KINDS and v["response_ok"] and not v["function_error"]
+        return (v["kind"] in BATCH_KINDS and v["response_ok"] and not v["function_error"]
                 and probe.get("truncated_count") == probe.get("n") and probe.get("tape_len_after") == 0)
 
     warm64 = [v for v in views if v["kind"] == "warm-64" and v["response_ok"] and not v["function_error"]]
@@ -212,7 +215,7 @@ def normalize(raw):
 
     cpu_parts = sorted({v["probe"]["cpu_part"] for v in views
                         if isinstance(v["probe"], dict) and v["probe"].get("cpu_part")})
-    valid_inputs = [v["probe"].get("rows") for v in views if valid64(v)]
+    valid_inputs = [v["probe"].get("rows") for v in views if valid_batch(v)]
     outcome = "failed" if failed else "measured"
 
     evidence = {
@@ -265,8 +268,9 @@ def evidence_text(evidence):
 
 PROBE_NAME = "aprender-embed-graviton-probe"
 EV1 = {"n": 1, "micro_batch": 8, "words": 700}
+EV32 = {"n": 32, "micro_batch": 8, "words": 700}
 EV64 = {"n": 64, "micro_batch": 8, "words": 700}
-EVTOK = {"tokenize_bytes": 1048576, "tokenize_kind": "prose"}
+EVTOK ={"tokenize_bytes": 1048576, "tokenize_kind": "prose"}
 EVTOK_ADV = {"tokenize_bytes": 1048576, "tokenize_kind": "adversarial"}
 REPORT_COLD = ("REPORT RequestId: 0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d\tDuration: 1234.56 ms\t"
                "Billed Duration: 1235 ms\tMemory Size: 10240 MB\tMax Memory Used: 3500 MB\t"
@@ -310,6 +314,16 @@ def raw_run(samples, code="sha-live", expected="sha-live"):
         "ingress": {"function_url": "absent", "policy": "absent"},
         "samples": samples,
     }
+
+
+def batch32_samples():
+    """Two cold and three warm 32-input samples, valid by the same rule as the 64-input ones."""
+    return (
+        [sample("cold-32", EV32, init=290.0, duration=10500.0, wall=10900.0, probe=good_probe(32))
+         for _ in range(2)]
+        + [sample("warm-32", EV32, duration=10100.0, wall=10300.0,
+                  probe=good_probe(32, encode_ms=9500.0)) for _ in range(3)]
+    )
 
 
 def good_samples():
@@ -495,6 +509,64 @@ def selftest():
         refused = True
     expect(refused, "a raw record that contains a 12-digit string is refused")
     expect(evidence_text(good).endswith("\n"), "the evidence text is newline-terminated")
+
+    # The 32-input kinds (owner D-04): the same validity rules as the 64-input kinds, and
+    # they never stand in for a 64-input requirement.
+    import os
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import graviton_run
+
+    base = len(good_samples())  # the first 32-input sample sits right after the 64-input and tokenize samples
+    with_32 = good_samples() + batch32_samples()
+    ok32 = outcome_of(with_32)
+    expect(ok32["outcome"] == "measured", "valid 32-input samples alongside the 64-input ones are measured")
+    expect({s["kind"] for s in ok32["samples"]} == set(EMBED_KINDS) | {TOKENIZE_KIND},
+           "the evidence keeps the 32-input samples under their own kinds")
+    expect(ok32["derived"]["measured_max_inputs"] == 64,
+           "32-input samples do not lower measured_max_inputs below the 64-input maximum")
+
+    s = good_samples() + batch32_samples()
+    for index in range(8, 13):
+        if s[index]["kind"] in SIXTY_FOUR_KINDS:
+            s[index]["probe"]["truncated_count"] = 1
+    expect(outcome_of(s)["derived"]["measured_max_inputs"] == 32,
+           "a valid 32-input sample sets measured_max_inputs when no 64-input sample is valid")
+
+    s = good_samples() + batch32_samples()
+    s[base]["probe"]["rows"] = 16
+    expect(failed_with(s, "response_ok: cold-32"), "a 32-input response with too few rows is failed")
+
+    s = good_samples() + batch32_samples()
+    s[base]["probe"]["truncated_count"] = 31
+    expect(failed_with(s, "32-input sample truncation or tape check: cold-32"),
+           "a 32-input sample that did not truncate all 32 inputs is failed")
+
+    s = good_samples() + batch32_samples()
+    s[base + 2]["report"]["init_duration_ms"] = 300.0
+    expect(failed_with(s, "warm sample carries an Init Duration: warm-32"),
+           "a warm 32-input sample that carries an Init Duration is failed")
+
+    s = good_samples() + batch32_samples()
+    for index in (8, 9):
+        s[index]["report"]["init_duration_ms"] = None
+    expect(failed_with(s, "no proven-cold 64-input sample"),
+           "proven-cold 32-input samples do not satisfy the 64-input cold requirement")
+
+    s = good_samples() + [sample("cold-16", {"n": 16, "micro_batch": 8, "words": 700}, init=300.0,
+                                 probe=good_probe(16))]
+    expect(failed_with(s, "response_ok: cold-16"),
+           "an input-count kind the normalizer does not know is failed, not silently accepted")
+
+    # The driver's PLAN mirrors the 32-input and 64-input counts, and every PLAN label is a
+    # kind this normalizer accepts, so no measured label is refused later.
+    plan = {kind: (event, count) for kind, event, _cold, count in graviton_run.PLAN}
+    expect(graviton_run.EV32 == EV32, "the driver's 32-input event matches the selftest's")
+    expect({kind for kind, _e, _c, _n in graviton_run.PLAN} <= set(EMBED_KINDS) | {TOKENIZE_KIND},
+           "every driver PLAN label is a kind this normalizer accepts")
+    expect(plan["cold-32"][0] == EV32 and plan["warm-32"][0] == EV32,
+           "the driver's 32-input PLAN entries use the 32-input event")
+    expect(plan["cold-32"][1] == plan["cold-64"][1] and plan["warm-32"][1] == plan["warm-64"][1],
+           "the driver's 32-input counts mirror the 64-input counts")
     print(f"GRAVITON GATE SELFTEST OK {cases} cases")
     return 0
 

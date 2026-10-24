@@ -47,13 +47,17 @@ PROBE_PREFIX = "aprender-embed-probe"
 ARCH = "arm64"
 MAX_ATTEMPTS = 3
 EV1 = {"n": 1, "micro_batch": 8, "words": 700}
+EV32 = {"n": 32, "micro_batch": 8, "words": 700}
 EV64 = {"n": 64, "micro_batch": 8, "words": 700}
 EVTOK = {"tokenize_bytes": 1048576, "tokenize_kind": "prose"}
 EVTOK_ADV = {"tokenize_bytes": 1048576, "tokenize_kind": "adversarial"}
-# (kind, event, forced cold before each attempt, count). 3+5+2+3+2 = 15 nominal invokes.
+# (kind, event, forced cold before each attempt, count).
+# 3+5+2+3+2+3+1+1 = 20 nominal invokes (the 32-input counts mirror the 64-input counts).
 PLAN = [
     ("cold-1", EV1, True, 3),
     ("warm-1", EV1, False, 5),
+    ("cold-32", EV32, True, 2),
+    ("warm-32", EV32, False, 3),
     ("cold-64", EV64, True, 2),
     ("warm-64", EV64, False, 3),
     ("tokenize-1mib", EVTOK, False, 1),
