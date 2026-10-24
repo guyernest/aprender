@@ -1,0 +1,235 @@
+{
+  "schema": "embed-brief-intake-v1",
+  "captured_at": "2026-10-23",
+  "intake_state": "complete",
+  "material_complete": true,
+  "acceptance_ready": true,
+  "missing": [],
+  "brief": {
+    "file": "11-BRIEF.md",
+    "sha256": "99fcb8562051cd1e95cd19ba1844e2c2b8ede347d356b461d4a70391fb851612"
+  },
+  "stated_count": {
+    "value": 13,
+    "quote": "must print `CONFORMANCE RESULT PASS 13/13`. The thirteen named checks:",
+    "quote_source": "brief"
+  },
+  "check_count": 13,
+  "checks": [
+    {
+      "id": "shape",
+      "title": "shape",
+      "quote": "**shape** - count matches input, each embedding has 384 floats, all finite.",
+      "quote_source": "brief"
+    },
+    {
+      "id": "l2-normalized",
+      "title": "l2-normalized",
+      "quote": "**l2-normalized** - norm 1 within 1e-3.",
+      "quote_source": "brief"
+    },
+    {
+      "id": "non-degenerate",
+      "title": "non-degenerate",
+      "quote": "**non-degenerate** - three different texts, pairwise cosine < 0.99 (fails the zero-vector stub).",
+      "quote_source": "brief"
+    },
+    {
+      "id": "deterministic",
+      "title": "deterministic",
+      "quote": "**deterministic** - the same text twice, cosine >= 0.99999.",
+      "quote_source": "brief"
+    },
+    {
+      "id": "batch-order-invariant",
+      "title": "batch-order-invariant",
+      "quote": "**batch-order-invariant** - batched result equals the single-input result, cosine >= 0.9999.",
+      "quote_source": "brief"
+    },
+    {
+      "id": "long-input",
+      "title": "long-input",
+      "quote": "**long-input** - an input of at least 1,609 wordpieces returns 200.",
+      "quote_source": "brief"
+    },
+    {
+      "id": "truncation-upper",
+      "title": "truncation-upper",
+      "quote": "**truncation-upper** - T-UPPER-A vs T-UPPER-B, cosine >= 0.9999.",
+      "quote_source": "brief"
+    },
+    {
+      "id": "truncation-lower",
+      "title": "truncation-lower",
+      "quote": "**truncation-lower** - T-LOWER-A vs T-LOWER-B, cosine < 0.999.",
+      "quote_source": "brief"
+    },
+    {
+      "id": "reference-vectors",
+      "title": "reference-vectors",
+      "quote": "**reference-vectors** - every boundary text within cosine 0.9999 of the delivered reference vector.",
+      "quote_source": "brief"
+    },
+    {
+      "id": "semantic-sanity",
+      "title": "semantic-sanity",
+      "quote": "**semantic-sanity** - three query/relevant/irrelevant triples order correctly.",
+      "quote_source": "brief"
+    },
+    {
+      "id": "model-echo",
+      "title": "model-echo",
+      "quote": "**model-echo** - the response `model` equals `all-MiniLM-L6-v2`.",
+      "quote_source": "brief"
+    },
+    {
+      "id": "empty-string-400",
+      "title": "empty-string-400",
+      "quote": "**empty-string-400** - an empty-string input returns 400 with the OpenAI error envelope.",
+      "quote_source": "brief"
+    },
+    {
+      "id": "wrong-dimensions-400",
+      "title": "wrong-dimensions-400",
+      "quote": "**wrong-dimensions-400** - `dimensions` other than 384 returns 400.",
+      "quote_source": "brief"
+    }
+  ],
+  "tool": {
+    "path": "github.com/guyernest/pmcp-run:built-in/graph-rag",
+    "git_commit": "369e8e79b600d5983cd828a49c33a07eaf8f1182",
+    "test_file_last_changed_commit": "602efc9a6",
+    "files": [
+      {
+        "path": "built-in/graph-rag/crates/snapshot-build/tests/aprender_conformance.rs",
+        "sha256": "705edff32d351156378d08496bec1bde76d1e87de1fc65b51bbeb2348094942a",
+        "copied": true
+      },
+      {
+        "path": "built-in/graph-rag/justfile (recipe block)",
+        "sha256": "b9f44c5caa3e0fb98b38fb1051b72c9535ac2f4acf479c80714e12d82e6852f2",
+        "copied": true
+      },
+      {
+        "path": "built-in/graph-rag/crates/snapshot-build/embedding-providers.json",
+        "sha256": "8469124ea72e24605366f8fcd8814fb5b5ee5b258485dd96e9b7d56141ce8c18",
+        "copied": true
+      }
+    ],
+    "invocation": "just aprender-embed-conformance lambda://aprender-embed-endpoint-<stage>/v1/embeddings ./aprender-embed-reference-vectors.json",
+    "pass_line": "CONFORMANCE RESULT PASS 13/13"
+  },
+  "reference_vectors": {
+    "file_name": "aprender-embed-reference-vectors.json",
+    "fields": {
+      "model": "string",
+      "hf_revision": "string",
+      "tokenizer_sha256": "string (64 hex)",
+      "max_seq_length": "integer",
+      "texts": "array of {id: string (required), text: string (optional, compared when present), vector: array of exactly 384 numbers (required)}"
+    },
+    "quote": "`texts[].vector` | array of numbers | yes",
+    "quote_source": "aprender-embed-reference-vectors.schema.md"
+  },
+  "platform_event": {
+    "status": "present",
+    "file": "deploy/embed-endpoint/events/apigw-v2-platform-captured.json",
+    "sha256": "0bdc54f299cb80f26c693844ef8790ac50efafc65af39efa65858f25f57bb4b2",
+    "method_field_path": "requestContext.http.method",
+    "path_field_path": "rawPath",
+    "path_value": "/v1/embeddings",
+    "method_value": "POST",
+    "stage_prefix_present": false,
+    "redacted_paths": [
+      "requestContext.requestId",
+      "requestContext.http.sourceIp"
+    ],
+    "who_builds": "graph-rag's own tool",
+    "quote": "Who builds it: graph-rag's own tool",
+    "quote_source": "answers.md"
+  },
+  "function_name": {
+    "allowlist_applies": true,
+    "required_prefix": "aprender-embed-",
+    "quote": "graph-rag invokes only `lambda://<function-name>/v1/embeddings` where `<function-name>` starts with `aprender-embed-`",
+    "quote_source": "answers.md",
+    "default": "aprender-embed-endpoint-<stage>",
+    "final": "aprender-embed-endpoint-<stage>",
+    "consistency": "default starts with required_prefix; no conflict, so no owner decision branch applies"
+  },
+  "answers": {
+    "usage_prompt_tokens": {
+      "status": "unspecified"
+    },
+    "empty_input": {
+      "value": "refuse with 400, OpenAI error envelope",
+      "normalized": "refuse",
+      "quote": "Empty string: refuse with 400 and the OpenAI error envelope",
+      "quote_source": "answers.md"
+    },
+    "integer_inputs": {
+      "value": "out of scope; never sent; a 400 is fine",
+      "normalized": "refuse",
+      "quote": "Integer-token inputs: out of scope. Never sent. A 400 is fine.",
+      "quote_source": "answers.md"
+    },
+    "dimensions": {
+      "value": "absent or 384",
+      "normalized": "absent_or_384",
+      "quote": "`dimensions`: absent or `384`. Any other value is a 400",
+      "quote_source": "answers.md"
+    },
+    "unknown_fields": {
+      "status": "unspecified",
+      "note": "requester wrote unspecified; either behaviour acceptable; graph-rag sends exactly model and input"
+    },
+    "status_429_trigger": {
+      "value": "Emit it only if you add an in-function admission limit; otherwise never.",
+      "quote": "Emit it only if you add an in-function admission limit; otherwise never.",
+      "quote_source": "answers.md"
+    },
+    "max_inputs_expected": {
+      "value": 64,
+      "quote": "Batch size: at most 64 inputs per invoke",
+      "quote_source": "answers.md"
+    },
+    "input_size_expected": {
+      "value": 2000,
+      "note": "characters; upper end of a stated range",
+      "quote": "Typical input is one chunk of a few hundred to about 2,000 characters",
+      "quote_source": "answers.md"
+    },
+    "models_accepted": {
+      "value": [
+        "all-MiniLM-L6-v2"
+      ],
+      "quote": "Model id: exactly `all-MiniLM-L6-v2`, no aliases.",
+      "quote_source": "answers.md"
+    },
+    "extra_headers_ok": {
+      "value": true,
+      "normalized": true,
+      "quote": "Extra response headers: acceptable.",
+      "quote_source": "answers.md"
+    },
+    "caller": {
+      "same_account": true,
+      "principal_kind": "iam_role",
+      "quote": "Same account: yes, and the same region. Principal kind: an IAM role",
+      "quote_source": "answers.md"
+    },
+    "stages": {
+      "value": [
+        "main",
+        "prod"
+      ],
+      "quote": "Stage names in the environment roster: `main` (the dev environment) and `prod` (every other environment).",
+      "quote_source": "answers.md"
+    },
+    "region": {
+      "value": "us-east-1 (dev, stage main); eu-west-1 (augury-dev, stage prod)",
+      "quote": "First proof target: the **dev** environment — stage `main`, region **us-east-1**, so the function is `aprender-embed-endpoint-main`.",
+      "quote_source": "answers.md"
+    }
+  }
+}
