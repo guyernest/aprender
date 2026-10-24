@@ -39,5 +39,32 @@
     "owner_reply": "embed-texts-api (Recommended)",
     "decided_at": "2026-10-24T00:16:54Z",
     "approved": true
+  },
+  "admission_budget": {
+    "decision_id": "D-03",
+    "subject": "the 64-input client-wall overrun measured in plan 11-04 (11-GRAVITON-EVIDENCE.json)",
+    "measured_client_wall_ms_range": [31735.971, 38947.024],
+    "measured_samples": 5,
+    "measured_lambda_duration_within_30s": true,
+    "scope": "The 64-input client-wall overrun (31.7 to 38.9 s on the measured samples) is accepted as a known condition, not a blocker.",
+    "reasons": [
+      "mixed CPU: the measurement ran on both 0xd0c and 0xd40",
+      "expected Graviton 3 growth in the future",
+      "customers accept in-account latency"
+    ],
+    "owner_reply": "The slightly above cap is acceptable, as we have the mixed CPU, and we can expect more Graviton 3 in the future, and we know that in-account models are coming with latency tax, and the customers accept them.",
+    "approved": true,
+    "not_decided_by_this_reply": [
+      {
+        "item": "which measure admission uses: Lambda Duration or client wall",
+        "status": "open",
+        "owner_of_next_decision": "plan 11-08 planner"
+      },
+      {
+        "item": "whether the 64-input cap changes",
+        "status": "open",
+        "owner_of_next_decision": "plan 11-08 planner"
+      }
+    ]
   }
 }
