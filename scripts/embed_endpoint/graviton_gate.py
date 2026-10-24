@@ -28,6 +28,7 @@ Standard library only. It imports no sibling module and makes no AWS call.
 """
 
 import json
+import os
 import re
 import statistics
 import sys
@@ -123,14 +124,20 @@ def flatten(sample):
     }
 
 
-def _round3(value):
+def round_floats(value, places):
+    """Round every float inside value (recursively) to `places` decimals; other values pass through."""
     if isinstance(value, float):
-        return round(value, 3)
+        return round(value, places)
     if isinstance(value, list):
-        return [_round3(item) for item in value]
+        return [round_floats(item, places) for item in value]
     if isinstance(value, dict):
-        return {key: _round3(item) for key, item in value.items()}
+        return {key: round_floats(item, places) for key, item in value.items()}
     return value
+
+
+def tape_clean(probe):
+    """A batch sample truncated every input and left no tape: the one rule for BATCH_KINDS."""
+    return probe.get("truncated_count") == probe.get("n") and probe.get("tape_len_after") == 0
 
 
 def _max_or_none(values):
@@ -163,9 +170,8 @@ def normalize(raw):
             fail(f"response_ok: {kind}")
         if kind in WARM_KINDS and v["proven_cold"]:
             fail(f"warm sample carries an Init Duration: {kind}")
-        if kind in BATCH_KINDS:
-            if probe.get("truncated_count") != probe.get("n") or probe.get("tape_len_after") != 0:
-                fail(f"{kind.split('-')[1]}-input sample truncation or tape check: {kind}")
+        if kind in BATCH_KINDS and not tape_clean(probe):
+            fail(f"{kind.split('-')[1]}-input sample truncation or tape check: {kind}")
     one_cold = [v for v in views if v["kind"] == "cold-1" and v["proven_cold"]
                 and v["response_ok"] and not v["function_error"]]
     if len(one_cold) < 2:
@@ -181,7 +187,7 @@ def normalize(raw):
     def valid_batch(v):
         probe = v["probe"] if isinstance(v["probe"], dict) else {}
         return (v["kind"] in BATCH_KINDS and v["response_ok"] and not v["function_error"]
-                and probe.get("truncated_count") == probe.get("n") and probe.get("tape_len_after") == 0)
+                and tape_clean(probe))
 
     warm64 = [v for v in views if v["kind"] == "warm-64" and v["response_ok"] and not v["function_error"]]
     cold64 = [v for v in views if v["kind"] == "cold-64" and v["proven_cold"]
@@ -226,13 +232,7 @@ def normalize(raw):
         "function": function,
         "ingress": {"function_url": ingress.get("function_url"), "policy": ingress.get("policy")},
         "cpu_parts": cpu_parts,
-        "samples": [
-            {key: v[key] for key in ("kind", "proven_cold", "response_ok", "attempts",
-                                     "client_wall_ms", "duration_ms", "billed_ms",
-                                     "init_duration_ms", "max_memory_used_mb",
-                                     "function_error", "probe")}
-            for v in views
-        ],
+        "samples": views,
         "derived": {
             "warm_64_encode_ms_median": statistics.median(warm64_encode) if warm64_encode else None,
             "warm_64_encode_ms_max": _max_or_none(warm64_encode),
@@ -251,7 +251,7 @@ def normalize(raw):
             "vs_bracket": vs_bracket,
         },
     }
-    return _round3(evidence)
+    return round_floats(evidence, 3)
 
 
 def evidence_text(evidence):
@@ -267,11 +267,19 @@ def evidence_text(evidence):
 # ---------------------------------------------------------------------------
 
 PROBE_NAME = "aprender-embed-graviton-probe"
-EV1 = {"n": 1, "micro_batch": 8, "words": 700}
-EV32 = {"n": 32, "micro_batch": 8, "words": 700}
-EV64 = {"n": 64, "micro_batch": 8, "words": 700}
-EVTOK ={"tokenize_bytes": 1048576, "tokenize_kind": "prose"}
-EVTOK_ADV = {"tokenize_bytes": 1048576, "tokenize_kind": "adversarial"}
+
+
+def _driver():
+    """The driver module, for its probe events and PLAN. graviton_run imports this module,
+    so it is imported here, at selftest time. `python3 -I` leaves the script directory off
+    sys.path, so the directory is added first; the import does not work without it."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import graviton_run
+    return graviton_run
+
+
 REPORT_COLD = ("REPORT RequestId: 0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d\tDuration: 1234.56 ms\t"
                "Billed Duration: 1235 ms\tMemory Size: 10240 MB\tMax Memory Used: 3500 MB\t"
                "Init Duration: 512.34 ms\n")
@@ -318,29 +326,32 @@ def raw_run(samples, code="sha-live", expected="sha-live"):
 
 def batch32_samples():
     """Two cold and three warm 32-input samples, valid by the same rule as the 64-input ones."""
+    ev = _driver()
     return (
-        [sample("cold-32", EV32, init=290.0, duration=10500.0, wall=10900.0, probe=good_probe(32))
+        [sample("cold-32", ev.EV32, init=290.0, duration=10500.0, wall=10900.0, probe=good_probe(32))
          for _ in range(2)]
-        + [sample("warm-32", EV32, duration=10100.0, wall=10300.0,
+        + [sample("warm-32", ev.EV32, duration=10100.0, wall=10300.0,
                   probe=good_probe(32, encode_ms=9500.0)) for _ in range(3)]
     )
 
 
 def good_samples():
+    ev = _driver()
     return (
-        [sample("cold-1", EV1, init=280.0, wall=1200.0, probe=good_probe(1)) for _ in range(3)]
-        + [sample("warm-1", EV1, wall=300.0, probe=good_probe(1)) for _ in range(5)]
-        + [sample("cold-64", EV64, init=300.0, duration=21000.0, wall=21500.0, probe=good_probe(64))
+        [sample("cold-1", ev.EV1, init=280.0, wall=1200.0, probe=good_probe(1)) for _ in range(3)]
+        + [sample("warm-1", ev.EV1, wall=300.0, probe=good_probe(1)) for _ in range(5)]
+        + [sample("cold-64", ev.EV64, init=300.0, duration=21000.0, wall=21500.0, probe=good_probe(64))
            for _ in range(2)]
-        + [sample("warm-64", EV64, duration=20000.0, wall=20100.0,
+        + [sample("warm-64", ev.EV64, duration=20000.0, wall=20100.0,
                   probe=good_probe(64, encode_ms=19000.0)) for _ in range(3)]
-        + [sample(TOKENIZE_KIND, EVTOK, probe=tok_probe("prose")),
-           sample(TOKENIZE_KIND, EVTOK_ADV, probe=tok_probe("adversarial"))]
+        + [sample(TOKENIZE_KIND, ev.EVTOK, probe=tok_probe("prose")),
+           sample(TOKENIZE_KIND, ev.EVTOK_ADV, probe=tok_probe("adversarial"))]
     )
 
 
 def selftest():
     cases = 0
+    drv = _driver()
 
     def expect(condition, name):
         nonlocal cases
@@ -497,7 +508,7 @@ def selftest():
     expect(good["reported_not_promised"] is True and good["schema"] == SCHEMA, "the schema and the promise flag")
 
     # Rounding and the 12-digit refusal.
-    rounded = outcome_of([sample("cold-1", EV1, init=280.0, probe=good_probe(1, encode_ms=1000.123456))
+    rounded = outcome_of([sample("cold-1", drv.EV1, init=280.0, probe=good_probe(1, encode_ms=1000.123456))
                           for _ in range(2)] + good_samples()[3:])
     expect(rounded["samples"][0]["probe"]["encode_ms"] == 1000.123, "floats are rounded to three decimals")
     leaky = raw_run(good_samples())
@@ -512,10 +523,6 @@ def selftest():
 
     # The 32-input kinds (owner D-04): the same validity rules as the 64-input kinds, and
     # they never stand in for a 64-input requirement.
-    import os
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    import graviton_run
-
     base = len(good_samples())  # the first 32-input sample sits right after the 64-input and tokenize samples
     with_32 = good_samples() + batch32_samples()
     ok32 = outcome_of(with_32)
@@ -559,11 +566,10 @@ def selftest():
 
     # The driver's PLAN mirrors the 32-input and 64-input counts, and every PLAN label is a
     # kind this normalizer accepts, so no measured label is refused later.
-    plan = {kind: (event, count) for kind, event, _cold, count in graviton_run.PLAN}
-    expect(graviton_run.EV32 == EV32, "the driver's 32-input event matches the selftest's")
-    expect({kind for kind, _e, _c, _n in graviton_run.PLAN} <= set(EMBED_KINDS) | {TOKENIZE_KIND},
+    plan = {kind: (event, count) for kind, event, _cold, count in drv.PLAN}
+    expect({kind for kind, _e, _c, _n in drv.PLAN} <= set(EMBED_KINDS) | {TOKENIZE_KIND},
            "every driver PLAN label is a kind this normalizer accepts")
-    expect(plan["cold-32"][0] == EV32 and plan["warm-32"][0] == EV32,
+    expect(plan["cold-32"][0] == drv.EV32 and plan["warm-32"][0] == drv.EV32,
            "the driver's 32-input PLAN entries use the 32-input event")
     expect(plan["cold-32"][1] == plan["cold-64"][1] and plan["warm-32"][1] == plan["warm-64"][1],
            "the driver's 32-input counts mirror the 64-input counts")

@@ -41,7 +41,7 @@ import time
 import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from graviton_gate import RAW_SCHEMA, TWELVE_DIGITS, parse_report  # noqa: E402
+from graviton_gate import RAW_SCHEMA, TWELVE_DIGITS, parse_report, round_floats  # noqa: E402
 
 PROBE_PREFIX = "aprender-embed-probe"
 ARCH = "arm64"
@@ -72,19 +72,6 @@ class Refused(Exception):
         self.check = check
 
 
-def round_floats(value, places=6):
-    """Timings are doubles whose repr can end in exactly 12 fractional digits, which the
-    account-id guard reads as a 12-digit run (a false positive, ~22% of realistic timings).
-    Six places keeps microsecond resolution and leaves the account-id check unchanged."""
-    if isinstance(value, float):
-        return round(value, places)
-    if isinstance(value, dict):
-        return {k: round_floats(v, places) for k, v in value.items()}
-    if isinstance(value, list):
-        return [round_floats(v, places) for v in value]
-    return value
-
-
 def scrub(text):
     """Console text with account ids and ARNs replaced; the record never sees them anyway."""
     text = ARN_RE.sub("<arn>", text or "")
@@ -107,9 +94,7 @@ class Aws:
         return json.loads(proc.stdout) if proc.stdout.strip() else {}
 
     def ok(self, args):
-        proc = self.run(args)
-        if proc.returncode != 0:
-            raise RuntimeError(f"aws {' '.join(args[:2])} failed: {scrub(proc.stderr.strip())[:300]}")
+        self.json(args)
 
 
 def force_cold(aws, fn):
@@ -246,24 +231,19 @@ def run(args):
     original = cfg.get("Description", "")
     changed = False
     samples = []
-    workdir = tempfile.mkdtemp(prefix="graviton-run-")
-    try:
-        for kind, event, cold, count in PLAN:
-            for _ in range(count):
-                if cold:
-                    changed = True
-                samples.append(take_sample(aws, fn, kind, event, cold, workdir))
-                print(f"SAMPLE {kind} attempts={samples[-1]['attempts']}", flush=True)
-    finally:
-        if changed:
-            aws.json(["lambda", "update-function-configuration", "--function-name", fn,
-                      "--description", original])
-            aws.ok(["lambda", "wait", "function-updated-v2", "--function-name", fn])
-        for name in ("out.json", "event.json"):
-            path = os.path.join(workdir, name)
-            if os.path.exists(path):
-                os.remove(path)
-        os.rmdir(workdir)
+    with tempfile.TemporaryDirectory(prefix="graviton-run-") as workdir:
+        try:
+            for kind, event, cold, count in PLAN:
+                for _ in range(count):
+                    if cold:
+                        changed = True
+                    samples.append(take_sample(aws, fn, kind, event, cold, workdir))
+                    print(f"SAMPLE {kind} attempts={samples[-1]['attempts']}", flush=True)
+        finally:
+            if changed:
+                aws.json(["lambda", "update-function-configuration", "--function-name", fn,
+                          "--description", original])
+                aws.ok(["lambda", "wait", "function-updated-v2", "--function-name", fn])
 
     env_vars = (cfg.get("Environment") or {}).get("Variables") or {}
     raw = {
@@ -282,7 +262,10 @@ def run(args):
         "ingress": {"function_url": url_state, "policy": policy_state},
         "samples": samples,
     }
-    text = json.dumps(round_floats(raw), indent=2, sort_keys=True) + "\n"
+    # Timings are doubles whose repr can end in exactly 12 fractional digits, which the
+    # account-id guard reads as a 12-digit run (a false positive, ~22% of realistic timings).
+    # Six places keeps microsecond resolution and leaves the account-id check unchanged.
+    text = json.dumps(round_floats(raw, 6), indent=2, sort_keys=True) + "\n"
     if TWELVE_DIGITS.search(text):
         raise RuntimeError("refusing to write a raw record that contains a 12-digit sequence")
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")

@@ -113,8 +113,8 @@ def describe(zip_path):
     with open(zip_path, "rb") as handle:
         raw = handle.read()
     digest = hashlib.sha256(raw).digest()
-    entries = [(name, data) for name, data, _ in read_entries(zip_path)]
-    by_name = dict(entries)
+    entries = read_entries(zip_path)
+    by_name = {name: data for name, data, _ in entries}  # archive order is kept
     if BOOTSTRAP not in by_name:
         raise PackageError(f"zip has no {BOOTSTRAP} entry")
     if APR_ENTRY not in by_name:
@@ -129,7 +129,7 @@ def describe(zip_path):
         "apr_sha256": sha256_hex(by_name[APR_ENTRY]),
         "files": [
             {"path": name, "size": len(data), "sha256": sha256_hex(data)}
-            for name, data in entries
+            for name, data, _ in entries
         ],
     }
 
@@ -211,8 +211,7 @@ def selftest():
         with zipfile.ZipFile(z1) as archive:
             expect(not any(i.is_dir() for i in archive.infolist()), "no directory entries")
 
-        verify(z1, r1)
-        expect(True, "verify passes on the record it wrote")
+        verify(z1, r1)  # raises on a mismatch, so a clean return is the pass
 
         with open(z1, "rb") as handle:
             data = bytearray(handle.read())

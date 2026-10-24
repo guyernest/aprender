@@ -152,7 +152,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         if not match:
             self._reply(404)
             return
-        kind = "response" if match.group(2) == "response" else "error"
+        kind = match.group(2)  # INVOCATION_RE.fullmatch admits only "response" or "error"
         error_type = self.headers.get(ERROR_TYPE_HEADER) if kind == "error" else None
         accepted = runtime._record(kind, match.group(1), data, error_type)
         self._reply(202 if accepted else 404, b'{"status":"OK"}' if accepted else b"")
