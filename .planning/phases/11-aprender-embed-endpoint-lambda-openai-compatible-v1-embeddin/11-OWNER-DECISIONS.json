@@ -62,6 +62,23 @@
       },
       {
         "item": "whether the 64-input cap changes",
+        "status": "answered",
+        "answered_by": "D-04"
+      }
+    ]
+  },
+  "input_cap": {
+    "decision_id": "D-04",
+    "approved": true,
+    "owner_reply": "We can switch to 32-input for now.",
+    "scope": "The endpoint's input cap changes from 64 to 32, for now.",
+    "resolves": "the open item from D-03 'whether the 64-input cap changes', which now changes to 32",
+    "measured_input_counts": [1, 64],
+    "measured_32_input_sample": false,
+    "note": "No 32-input sample was measured. The raw record graviton-gate1-20261024T013546Z.json has 1-input and 64-input samples only. The 32 figure is an owner decision, not a measurement. It needs a measurement or derivation before plan 11-08 relies on it. Do not infer 32-input timings from the 64-input data.",
+    "open_items": [
+      {
+        "item": "admission measure: Lambda Duration or client wall",
         "status": "open",
         "owner_of_next_decision": "plan 11-08 planner"
       }
