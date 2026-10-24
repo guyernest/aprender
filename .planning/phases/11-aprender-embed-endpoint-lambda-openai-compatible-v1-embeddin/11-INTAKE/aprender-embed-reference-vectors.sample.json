@@ -1,0 +1,16 @@
+{
+  "_note": "Shape sample only. Real vectors hold exactly 384 floats; `text` is optional but must match the brief's definition when present.",
+  "model": "all-MiniLM-L6-v2",
+  "hf_revision": "<hf commit>",
+  "tokenizer_sha256": "<64 hex>",
+  "max_seq_length": 256,
+  "texts": [
+    { "id": "T-UPPER-A", "vector": [0.0123, -0.0456, 0.0789, 0.0001] },
+    { "id": "T-UPPER-B", "vector": [0.0123, -0.0456, 0.0789, 0.0001] },
+    { "id": "T-LOWER-A", "vector": [0.0210, 0.0031, -0.0120, 0.0440] },
+    { "id": "T-LOWER-B", "vector": [-0.0330, 0.0170, 0.0090, 0.0510] },
+    { "id": "T-253", "text": "the the the", "vector": [0.0400, 0.0400, 0.0400, 0.0400] },
+    { "id": "T-254", "vector": [0.0400, 0.0400, 0.0400, 0.0400] },
+    { "id": "T-255", "vector": [0.0400, 0.0400, 0.0400, 0.0400] }
+  ]
+}

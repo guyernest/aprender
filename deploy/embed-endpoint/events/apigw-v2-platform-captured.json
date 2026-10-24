@@ -1,0 +1,24 @@
+{
+  "version": "2.0",
+  "routeKey": "$default",
+  "rawPath": "/v1/embeddings",
+  "rawQueryString": "",
+  "headers": {
+    "content-type": "application/json",
+    "accept": "application/json",
+    "user-agent": "pmcp-graphrag"
+  },
+  "requestContext": {
+    "http": {
+      "method": "POST",
+      "path": "/v1/embeddings",
+      "protocol": "HTTP/1.1",
+      "sourceIp": "REDACTED",
+      "userAgent": "pmcp-graphrag"
+    },
+    "requestId": "REDACTED",
+    "stage": "$default"
+  },
+  "body": "{\"model\":\"all-MiniLM-L6-v2\",\"input\":[\"Where is the customer name stored?\",\"The customers table holds one row per customer, keyed by customer_id, with the display name in the name column.\"]}",
+  "isBase64Encoded": false
+}

@@ -1,0 +1,61 @@
+{
+  "contract_version": 1,
+  "providers": {
+    "openai": {
+      "keyless": false,
+      "base_url": "forbidden",
+      "api_base": "https://api.openai.com/v1",
+      "max_inputs_per_request": 2048,
+      "pairs": [
+        {
+          "model": "text-embedding-3-small",
+          "dimensions": [1536]
+        }
+      ]
+    },
+    "bedrock": {
+      "keyless": true,
+      "base_url": "forbidden",
+      "pairs": [
+        {
+          "model": "amazon.titan-embed-text-v2:0",
+          "dimensions": [256, 512, 1024]
+        }
+      ],
+      "texts_per_call": 1,
+      "max_input_chars": 49000,
+      "empty_input_substitute": ".",
+      "default_concurrency": 16,
+      "normalize": true
+    },
+    "aprender": {
+      "_comment": "The loopback http forms are a development shim with the same 64-input batching; the byte limits (max_request_bytes) apply to the lambda:// form only.",
+      "keyless": true,
+      "base_url": "required",
+      "base_url_forms": [
+        "lambda://<function-name>/v1/embeddings",
+        "http://127.0.0.1:<port>/v1/embeddings",
+        "http://localhost:<port>/v1/embeddings"
+      ],
+      "function_name_prefix": "aprender-embed-",
+      "pairs": [
+        {
+          "model": "all-MiniLM-L6-v2",
+          "dimensions": [384]
+        }
+      ],
+      "max_sequence_tokens": 256,
+      "max_inputs_per_request": 64,
+      "max_request_bytes": 5242880,
+      "empty_input": "zero-vector"
+    }
+  },
+  "canary": {
+    "version": 1,
+    "text": "pmcp graphrag embedding canary: the quick brown fox jumps over the lazy dog",
+    "min_cosine": 0.99,
+    "timeout_secs": 30,
+    "required_providers": ["bedrock", "aprender"],
+    "optional_providers": ["openai"]
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "schema": "embed-intake-manifest-v1",
+  "captured_at": "2026-10-23",
+  "checkouts": [
+    {
+      "path": "~/Development/mcp/sdk/pmcp-run",
+      "git_commit": "369e8e79b600d5983cd828a49c33a07eaf8f1182",
+      "git_commit_at_send": "21f1822a189f649cfb897a9d252d5aed846e321c",
+      "status_before": "89ec5ceeebbbfc6ce7765032dcd810120bf7e058b5c996e67ffa448fc452fc6d",
+      "status_after": "89ec5ceeebbbfc6ce7765032dcd810120bf7e058b5c996e67ffa448fc452fc6d",
+      "status_entries": 151,
+      "status_observed_earliest": "fc6aa0ce66f0c877b2be3cd49c8fe535dacafd9c359e3398d52579ae2df7badc",
+      "drift_note": "The checkout is an active working tree (151 modified or untracked entries, recent mtimes). Its status hash differed at the earliest read in the first run (fc6aa0...), then matched 89ec5c... at the later reads and at both reads of this run. HEAD moved from 21f1822a1 (send time) to 369e8e79b. No write was made by this run: only git status, git show, git rev-parse and read-only grep."
+    },
+    {
+      "path": "~/Development/mcp/sdk/rust-mcp-sdk",
+      "git_commit": "d03484517dce988355b7e9bf3dd2746eec188019",
+      "status_before": "87035dcb62a3a3c62895d5827ef60e5fe6bead1b7956d4fb870e7da00bb60562",
+      "status_after": "87035dcb62a3a3c62895d5827ef60e5fe6bead1b7956d4fb870e7da00bb60562",
+      "status_entries": 19,
+      "status_observed_earliest": "3c8975b9dd947e91e7f987ebefb7cca915392bfa92033dec9391c05dddb443b9",
+      "drift_note": "Searched for aprender-embed-conformance by read-only git grep: no match. Status drift from the earliest read as for pmcp-run; equal across this run."
+    }
+  ],
+  "searched_without_match": [
+    "~/projects/mcp (not a git repository; recursive read-only grep for aprender-embed-conformance found nothing)"
+  ],
+  "tool_files": [
+    {
+      "path": "built-in/graph-rag/crates/snapshot-build/tests/aprender_conformance.rs",
+      "sha256": "705edff32d351156378d08496bec1bde76d1e87de1fc65b51bbeb2348094942a",
+      "copied": true,
+      "note": "byte-identical to requester HEAD 369e8e79b; last changed in 602efc9a6"
+    },
+    {
+      "path": "built-in/graph-rag/justfile (recipe block from the Phase 205-06 header, 20 lines)",
+      "sha256": "b9f44c5caa3e0fb98b38fb1051b72c9535ac2f4acf479c80714e12d82e6852f2",
+      "copied": true,
+      "note": "excerpt: the 20-line recipe block verified identical to HEAD 369e8e79b; the copied file also carries the tail of an unrelated recipe"
+    },
+    {
+      "path": "built-in/graph-rag/crates/snapshot-build/embedding-providers.json",
+      "sha256": "8469124ea72e24605366f8fcd8814fb5b5ee5b258485dd96e9b7d56141ce8c18",
+      "copied": true,
+      "note": "byte-identical to requester HEAD 369e8e79b"
+    }
+  ],
+  "event_redacted_paths": [
+    "requestContext.requestId",
+    "requestContext.http.sourceIp"
+  ],
+  "event_source": "11-INTAKE/apigw-v2-platform-captured.json (delivered); sanitized copy at deploy/embed-endpoint/events/apigw-v2-platform-captured.json"
+}
