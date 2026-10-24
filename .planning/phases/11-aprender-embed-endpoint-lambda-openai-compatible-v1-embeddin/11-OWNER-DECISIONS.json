@@ -1,0 +1,17 @@
+{
+  "schema": "embed-owner-decisions-v1",
+  "register": {
+    "decision_id": "D-01",
+    "option": "grow-new-crate",
+    "crate": "aprender-embed-endpoint",
+    "bin": "aprender-embed-endpoint",
+    "baseline_before": 9,
+    "baseline_after": 10,
+    "category_reading": "The FALSIFY-MONO-011 register category, written in monorepo_invariants.rs as 'publish = false thin MCP servers whose capability IS a protocol surface', is read as 'publish = false deployment-unit binaries', because the endpoint is an IAM-invoke Lambda transport and not an MCP server. Plan 11-06 amends the comment and the assertion message in the same change.",
+    "same_change_allowed": true,
+    "approved": true,
+    "owner_reply": "grow-new-crate (Recommended)",
+    "decided_at": "2026-10-24T00:16:54Z"
+  },
+  "core_api": null
+}

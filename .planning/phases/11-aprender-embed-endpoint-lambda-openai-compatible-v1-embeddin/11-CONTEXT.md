@@ -21,6 +21,12 @@ Source: GraphRAG (pmcp.run graph-rag) request, 2026-10-23, reviewed in quick tas
 - R4 conflicts with the `cargo pmcp deploy` path (creates ingress). Deploy via CDK/aws under `deploy-extensions/` (training stack style), IAM-invoke only.
 - Phase 10 pattern to follow: thin per-server crate over shared library, fail-closed deploy recipes in justfile, owner-run live deploy, identity probe, evidence JSON, claims ledger.
 
+<decisions>
+## Owner decisions recorded by plan 11-02
+
+- **D-01 (owner):** Option grow-new-crate approved, with the owner reply "grow-new-crate (Recommended)" recorded verbatim in 11-OWNER-DECISIONS.json (relayed by the coordinator, 2026-10-24 UTC). The deployment-unit register in crates/aprender-core/tests/monorepo_invariants.rs grows from 9 to 10 so the repository can hold a new publish = false crate, aprender-embed-endpoint, which is a library plus one binary of the same name serving POST /v1/embeddings from Lambda. The register category is read as publish = false deployment-unit binaries, because the endpoint is an IAM-invoke Lambda transport and not an MCP server; plan 11-06 amends the category comment and the assertion message in the same change. The baseline raise and the crate share one change, because this decision precedes it. The duplicate-bin allowlist is untouched. The crate and binary names are fixed as aprender-embed-endpoint.
+</decisions>
+
 ## Open / blocked inputs
 - The requester's brief with the thirteen conformance checks, and the `aprender-embed-conformance` tool (in the pmcp.run repo): not in hand. Plans must include a checkpoint to obtain them and must not invent the 13 checks.
 - Live deploy needs owner AWS credentials (profile ze-kasher-dev); live steps are owner-run or checkpointed.
