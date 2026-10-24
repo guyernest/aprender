@@ -13,5 +13,29 @@
     "owner_reply": "grow-new-crate (Recommended)",
     "decided_at": "2026-10-24T00:16:54Z"
   },
-  "core_api": null
+  "core_api": {
+    "decision_id": "D-02",
+    "option": "embed-texts-api",
+    "method": "embed_texts",
+    "signature": "pub fn embed_texts(&self, texts: &[&str]) -> Result<EmbeddedTexts, SetFitError>",
+    "types": ["EmbeddedTexts", "InputFacts"],
+    "fields": {
+      "EmbeddedTexts": ["dim()", "row access (accessor name not given by the owner; open item)", "len()", "facts()"],
+      "InputFacts": ["truncated", "original_len", "consumed_positions"]
+    },
+    "behavior": [
+      "no_grad inside the method",
+      "does not call clear_graph",
+      "encode_texts, embed and classify unchanged",
+      "constructor seal untouched"
+    ],
+    "panic_safe": "unspecified",
+    "open_items": [
+      "panic_safe: the owner did not specify whether the panic-safe no_grad scope (a crate-private RAII guard that restores the grad flag during unwinding) is wanted. Not chosen by the executor; the planner must resolve it with the owner before plan 11-05 writes it. The behavior statement 'grad flag restored on unwind' is therefore absent.",
+      "EmbeddedTexts row accessor name: the owner confirmed row access but gave no name; the planner proposes one for owner confirmation before plan 11-05 writes it."
+    ],
+    "owner_reply": "embed-texts-api (Recommended)",
+    "decided_at": "2026-10-24T00:16:54Z",
+    "approved": true
+  }
 }
