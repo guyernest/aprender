@@ -23,7 +23,7 @@ use std::time::Instant;
 use aprender::autograd::{graph_tape_len, no_grad};
 use aprender::setfit::SetFitBert;
 use lambda_runtime::{run, service_fn, Error, LambdaEvent};
-use serde_json::{json, Value};
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 const CORPUS: &str = include_str!("../corpus.txt");
@@ -127,13 +127,19 @@ pub fn vmhwm_kb(status: &str) -> Option<u64> {
 fn host_facts() -> Value {
     let cpuinfo = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
     let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
-    json!({
-        "cpu_part": cpu_part(&cpuinfo),
-        "cpu_implementer": cpu_implementer(&cpuinfo),
-        "vmhwm_kb": vmhwm_kb(&status),
-        "available_parallelism": std::thread::available_parallelism().map(|n| n.get()).ok(),
-        "rayon_threads_env": std::env::var("RAYON_NUM_THREADS").ok(),
-    })
+    let mut facts = Map::new();
+    facts.insert("cpu_part".to_string(), Value::from(cpu_part(&cpuinfo)));
+    facts.insert("cpu_implementer".to_string(), Value::from(cpu_implementer(&cpuinfo)));
+    facts.insert("vmhwm_kb".to_string(), Value::from(vmhwm_kb(&status)));
+    facts.insert(
+        "available_parallelism".to_string(),
+        Value::from(std::thread::available_parallelism().map(|n| n.get()).ok()),
+    );
+    facts.insert(
+        "rayon_threads_env".to_string(),
+        Value::from(std::env::var("RAYON_NUM_THREADS").ok()),
+    );
+    Value::Object(facts)
 }
 
 fn bounded(event: &Value, key: &str, default: u64, lo: u64, hi: u64) -> u64 {
@@ -260,29 +266,29 @@ fn run_event(st: &Startup, event: &Value) -> Value {
         .to_string();
 
     let mut out = host_facts();
-    out["probe"] = json!(PROBE);
-    out["n"] = json!(n);
-    out["micro_batch"] = json!(micro_batch);
-    out["words"] = json!(words_per_input);
-    out["first_invocation_in_process"] = json!(invocation == 0);
-    out["load_ms"] = json!(st.load_ms);
-    out["identity_ms"] = json!(st.identity_ms);
-    out["init_ms"] = json!(st.init_ms);
-    out["apr_sha256"] = json!(st.apr_sha256);
+    out["probe"] = Value::from(PROBE);
+    out["n"] = Value::from(n);
+    out["micro_batch"] = Value::from(micro_batch);
+    out["words"] = Value::from(words_per_input);
+    out["first_invocation_in_process"] = Value::from(invocation == 0);
+    out["load_ms"] = Value::from(st.load_ms);
+    out["identity_ms"] = Value::from(st.identity_ms);
+    out["init_ms"] = Value::from(st.init_ms);
+    out["apr_sha256"] = Value::from(st.apr_sha256.clone());
 
     let model = match &st.model {
         Ok(model) => model,
         Err(error) => {
-            out["error"] = json!(error);
-            out["total_ms"] = json!(ms(t_total));
+            out["error"] = Value::from(error.clone());
+            out["total_ms"] = Value::from(ms(t_total));
             return out;
         }
     };
 
     if tokenize_bytes > 0 {
         if tokenize_kind != "prose" && tokenize_kind != "adversarial" {
-            out["error"] = json!("tokenize_kind must be prose or adversarial");
-            out["total_ms"] = json!(ms(t_total));
+            out["error"] = Value::from("tokenize_kind must be prose or adversarial");
+            out["total_ms"] = Value::from(ms(t_total));
             return out;
         }
         let text = synthetic_text(tokenize_bytes, &tokenize_kind);
@@ -291,14 +297,14 @@ fn run_event(st: &Startup, event: &Value) -> Value {
         let tokenize_bytes_ms = ms(t_tokenize);
         match outcome {
             Ok(batch) => {
-                out["tokenize_bytes"] = json!(text.len());
-                out["tokenize_bytes_ms"] = json!(tokenize_bytes_ms);
-                out["tokenize_kind"] = json!(tokenize_kind);
-                out["tokenize_truncated"] = json!(batch.truncation().first().map(|f| f.truncated));
+                out["tokenize_bytes"] = Value::from(text.len());
+                out["tokenize_bytes_ms"] = Value::from(tokenize_bytes_ms);
+                out["tokenize_kind"] = Value::from(tokenize_kind.clone());
+                out["tokenize_truncated"] = Value::from(batch.truncation().first().map(|f| f.truncated));
             }
-            Err(error) => out["error"] = json!(error.to_string()),
+            Err(error) => out["error"] = Value::from(error.to_string()),
         }
-        out["total_ms"] = json!(ms(t_total));
+        out["total_ms"] = Value::from(ms(t_total));
         return out;
     }
 
@@ -317,12 +323,12 @@ fn run_event(st: &Startup, event: &Value) -> Value {
         }
         Err(error) => Err(error.to_string()),
     };
-    out["tokenize_ms"] = json!(ms(t_tokenize));
+    out["tokenize_ms"] = Value::from(ms(t_tokenize));
     let (truncated_count, consumed_positions) = match facts {
         Ok(facts) => facts,
         Err(error) => {
-            out["error"] = json!(error);
-            out["total_ms"] = json!(ms(t_total));
+            out["error"] = Value::from(error.clone());
+            out["total_ms"] = Value::from(ms(t_total));
             return out;
         }
     };
@@ -332,21 +338,21 @@ fn run_event(st: &Startup, event: &Value) -> Value {
     let encode_ms = ms(t_encode);
     let tape_len_after = graph_tape_len();
 
-    out["no_grad"] = json!(true);
-    out["truncated_count"] = json!(truncated_count);
-    out["consumed_positions"] = json!(consumed_positions);
-    out["encode_ms"] = json!(encode_ms);
-    out["tape_len_after"] = json!(tape_len_after);
+    out["no_grad"] = Value::from(true);
+    out["truncated_count"] = Value::from(truncated_count);
+    out["consumed_positions"] = Value::from(consumed_positions);
+    out["encode_ms"] = Value::from(encode_ms);
+    out["tape_len_after"] = Value::from(tape_len_after);
     match encoded {
         Ok(encoded) => {
-            out["rows"] = json!(encoded.rows);
-            out["dim"] = json!(encoded.dim);
-            out["l2_norm_first_row"] = json!(l2_norm(&encoded.first_row));
-            out["rayon_pool_threads"] = json!(encoded.pool_threads);
+            out["rows"] = Value::from(encoded.rows);
+            out["dim"] = Value::from(encoded.dim);
+            out["l2_norm_first_row"] = Value::from(l2_norm(&encoded.first_row));
+            out["rayon_pool_threads"] = Value::from(encoded.pool_threads);
         }
-        Err(error) => out["error"] = json!(error),
+        Err(error) => out["error"] = Value::from(error.clone()),
     }
-    out["total_ms"] = json!(ms(t_total));
+    out["total_ms"] = Value::from(ms(t_total));
     out
 }
 
@@ -356,7 +362,15 @@ async fn handle(st: Arc<Startup>, payload: Value) -> Result<Value, Error> {
     let joined = tokio::task::spawn_blocking(move || run_event(&st, &payload)).await;
     Ok(match joined {
         Ok(response) => response,
-        Err(join) => json!({"probe": PROBE, "error": format!("handler task failed: {join}")}),
+        Err(join) => {
+            let mut error = Map::new();
+            error.insert("probe".to_string(), Value::from(PROBE));
+            error.insert(
+                "error".to_string(),
+                Value::from(format!("handler task failed: {join}")),
+            );
+            Value::Object(error)
+        }
     })
 }
 
