@@ -68,6 +68,19 @@ class Refused(Exception):
         self.check = check
 
 
+def round_floats(value, places=6):
+    """Timings are doubles whose repr can end in exactly 12 fractional digits, which the
+    account-id guard reads as a 12-digit run (a false positive, ~22% of realistic timings).
+    Six places keeps microsecond resolution and leaves the account-id check unchanged."""
+    if isinstance(value, float):
+        return round(value, places)
+    if isinstance(value, dict):
+        return {k: round_floats(v, places) for k, v in value.items()}
+    if isinstance(value, list):
+        return [round_floats(v, places) for v in value]
+    return value
+
+
 def scrub(text):
     """Console text with account ids and ARNs replaced; the record never sees them anyway."""
     text = ARN_RE.sub("<arn>", text or "")
@@ -265,7 +278,7 @@ def run(args):
         "ingress": {"function_url": url_state, "policy": policy_state},
         "samples": samples,
     }
-    text = json.dumps(raw, indent=2, sort_keys=True) + "\n"
+    text = json.dumps(round_floats(raw), indent=2, sort_keys=True) + "\n"
     if TWELVE_DIGITS.search(text):
         raise RuntimeError("refusing to write a raw record that contains a 12-digit sequence")
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
