@@ -28,6 +28,17 @@
 //!     --laya-dir data/decide/goldstandard-2024 --output data/decide/goldstandard-2024-setfit
 //! ```
 //!
+//! Any `K >= 2` criteria are accepted (D-25); the manifest identity defaults to Phase 10's
+//! (`goldstandard-2024`, `antisemitism`, the two-class task text) and is set with `--dataset`,
+//! `--target` and `--task`:
+//!
+//! ```text
+//! cargo run --release -p aprender-contrastive-data --example laya_dir_to_canonical -- \
+//!     --laya-dir data/decide/motivation-v1 --output data/decide/motivation-v1-setfit \
+//!     --dataset motivation-2026-10-26 --target motivation \
+//!     --task "single-label three-class motivational-function classification (pilot)"
+//! ```
+//!
 //! Exit 0 and one `ADAPTED ...` line on success; exit 2 and one `REFUSED ...` line when the
 //! crate refuses the rows (a result, never something to bypass by dropping rows); exit 1 and
 //! one `ERROR ...` line for usage, IO and malformed-input failures.
@@ -58,6 +69,11 @@ use sha2::{Digest, Sha256};
 const CARVE_DOMAIN: &str = "laya-goldstandard-validation-carve";
 const DEFAULT_LAYA_DIR: &str = "data/decide/goldstandard-2024";
 const DEFAULT_OUTPUT_DIR: &str = "data/decide/goldstandard-2024-setfit";
+/// The manifest identity of Phase 10's cell. The defaults reproduce its adapted directory
+/// byte for byte; another dataset passes `--dataset`, `--target` and `--task`.
+const DEFAULT_DATASET: &str = "goldstandard-2024";
+const DEFAULT_TARGET: &str = "antisemitism";
+const DEFAULT_TASK: &str = "single-label two-class antisemitism classification";
 const MANIFEST_FILE: &str = "benchmark-manifest.json";
 const OUTPUT_FILES: [&str; 4] = [
     "train.jsonl",
@@ -158,9 +174,9 @@ fn label_names_from_task(bytes: &[u8]) -> Result<Vec<String>, AdaptError> {
         )));
     }
     let names = doc.criteria.0;
-    if names.len() != 2 {
+    if names.len() < 2 {
         return Err(AdaptError::Data(format!(
-            "task.json has {} criteria; this adapter writes the two-label cell only",
+            "task.json has {} criteria; a classification task needs at least two criteria",
             names.len()
         )));
     }
@@ -379,9 +395,9 @@ struct SourceManifest {
 #[derive(Serialize)]
 struct Manifest {
     schema_version: u32,
-    dataset: &'static str,
-    target: &'static str,
-    task: &'static str,
+    dataset: String,
+    target: String,
+    task: String,
     profile: &'static str,
     labels: Vec<String>,
     source: SourceManifest,
@@ -411,6 +427,10 @@ struct Inputs<'a> {
     eval: &'a [u8],
     fraction: f64,
     seed: u64,
+    /// Manifest identity strings (`--dataset`, `--target`, `--task`).
+    dataset: &'a str,
+    target: &'a str,
+    task_text: &'a str,
 }
 
 struct Adapted {
@@ -456,9 +476,9 @@ fn adapt(inputs: &Inputs<'_>) -> Result<Adapted, AdaptError> {
 
     let manifest = Manifest {
         schema_version: DATASET_ATTESTATION_SCHEMA_VERSION,
-        dataset: "goldstandard-2024",
-        target: "antisemitism",
-        task: "single-label two-class antisemitism classification",
+        dataset: inputs.dataset.to_string(),
+        target: inputs.target.to_string(),
+        task: inputs.task_text.to_string(),
         profile: "canonical",
         labels: label_names.clone(),
         source: SourceManifest {
@@ -539,6 +559,9 @@ struct Args {
     fraction: f64,
     seed: u64,
     force: bool,
+    dataset: String,
+    target: String,
+    task: String,
 }
 
 fn parse_args(raw: &[String]) -> Result<Args, AdaptError> {
@@ -548,6 +571,9 @@ fn parse_args(raw: &[String]) -> Result<Args, AdaptError> {
         fraction: 0.1,
         seed: 13,
         force: false,
+        dataset: DEFAULT_DATASET.to_string(),
+        target: DEFAULT_TARGET.to_string(),
+        task: DEFAULT_TASK.to_string(),
     };
     let mut iter = raw.iter();
     while let Some(flag) = iter.next() {
@@ -569,8 +595,20 @@ fn parse_args(raw: &[String]) -> Result<Args, AdaptError> {
                     AdaptError::Usage("--seed is not an unsigned integer".to_string())
                 })?;
             }
+            "--dataset" => args.dataset = value("--dataset")?,
+            "--target" => args.target = value("--target")?,
+            "--task" => args.task = value("--task")?,
             "--force" => args.force = true,
             other => return Err(AdaptError::Usage(format!("unknown argument {other:?}"))),
+        }
+    }
+    for (name, given) in [
+        ("--dataset", &args.dataset),
+        ("--target", &args.target),
+        ("--task", &args.task),
+    ] {
+        if given.is_empty() {
+            return Err(AdaptError::Usage(format!("{name} must not be empty")));
         }
     }
     if !(args.fraction > 0.0 && args.fraction < 1.0) {
@@ -598,6 +636,9 @@ fn run(raw: &[String]) -> Result<String, AdaptError> {
         eval: &eval,
         fraction: args.fraction,
         seed: args.seed,
+        dataset: &args.dataset,
+        target: &args.target,
+        task_text: &args.task,
     })?;
     write_outputs(&args.output, &adapted, args.force)?;
     Ok(format!(
@@ -691,6 +732,9 @@ mod tests {
             eval: &eval,
             fraction: 0.1,
             seed,
+            dataset: DEFAULT_DATASET,
+            target: DEFAULT_TARGET,
+            task_text: DEFAULT_TASK,
         })
         .expect("the synthetic Laya dir must adapt")
     }
@@ -924,9 +968,14 @@ mod tests {
         // A criteria object that repeats a name.
         let duplicate = br#"{"type":"choice","instructions":"x","criteria":{"a":"1","a":"2"}}"#;
         assert!(label_names_from_task(duplicate).is_err());
-        // Three labels are not the two-label cell.
+        // One label is not a classification task; three are (D-25).
+        let one = br#"{"type":"choice","instructions":"x","criteria":{"a":"1"}}"#;
+        assert!(label_names_from_task(one).is_err());
         let three = br#"{"type":"choice","instructions":"x","criteria":{"a":"1","b":"2","c":"3"}}"#;
-        assert!(label_names_from_task(three).is_err());
+        assert_eq!(
+            label_names_from_task(three).expect("three criteria are accepted"),
+            vec!["a", "b", "c"]
+        );
         // A good dir still adapts after all that.
         assert!(adapt(&Inputs {
             laya_dir_label: "synthetic".to_string(),
@@ -935,6 +984,9 @@ mod tests {
             eval: &eval,
             fraction: 0.1,
             seed: 13,
+            dataset: DEFAULT_DATASET,
+            target: DEFAULT_TARGET,
+            task_text: DEFAULT_TASK,
         })
         .is_ok());
     }
@@ -958,6 +1010,9 @@ mod tests {
             eval,
             fraction: 0.5,
             seed: 13,
+            dataset: DEFAULT_DATASET,
+            target: DEFAULT_TARGET,
+            task_text: DEFAULT_TASK,
         });
         match outcome {
             Ok(adapted) => {
@@ -988,6 +1043,158 @@ mod tests {
         );
         write_outputs(&dir, &adapted, true).expect("--force replaces known outputs");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    const TASK_THREE: &str = r#"{
+  "type": "choice",
+  "instructions": "Which function does this sentence serve?",
+  "criteria": {
+    "zeta": "first described option",
+    "alpha": "second described option",
+    "mu": "third described option"
+  }
+}"#;
+
+    /// `counts[k]` rows of label k, interleaved round-robin so file order is not sorted by class.
+    fn synthetic_three(prefix: &str, counts: [usize; 3]) -> Vec<u8> {
+        const LABELS: [&str; 3] = ["zeta", "alpha", "mu"];
+        let mut lines = Vec::new();
+        for i in 0..counts.iter().copied().max().unwrap_or(0) {
+            for (class, label) in LABELS.iter().enumerate() {
+                if i < counts[class] {
+                    lines.push(format!(
+                        r#"{{"text":"{prefix} {label} sentence {i} about harbours","label":"{label}"}}"#
+                    ));
+                }
+            }
+        }
+        let mut body = lines.join("\n");
+        body.push('\n');
+        body.into_bytes()
+    }
+
+    fn three_names() -> Vec<String> {
+        vec!["zeta".to_string(), "alpha".to_string(), "mu".to_string()]
+    }
+
+    #[test]
+    fn three_criteria_are_labels_0_1_2_in_document_order() {
+        let names = label_names_from_task(TASK_THREE.as_bytes()).expect("three criteria");
+        assert_eq!(names, three_names());
+        let mut lexical = names.clone();
+        lexical.sort();
+        assert_ne!(
+            names, lexical,
+            "document order z, a, m is not lexical order"
+        );
+    }
+
+    #[test]
+    fn three_label_dir_adapts_with_per_class_ceil_carve_and_eval_as_test() {
+        let train = synthetic_three("tr", [41, 17, 23]);
+        let eval = synthetic_three("ev", [12, 5, 9]);
+        let adapted = adapt(&Inputs {
+            laya_dir_label: "synthetic".to_string(),
+            task: TASK_THREE.as_bytes(),
+            train: &train,
+            eval: &eval,
+            fraction: 0.1,
+            seed: 13,
+            dataset: "motivation-test",
+            target: "motivation",
+            task_text: "single-label three-class test",
+        })
+        .expect("a three-label Laya dir must adapt");
+        assert_eq!(adapted.label_names, three_names());
+        // ceil(0.1 * 41) = 5, ceil(0.1 * 17) = 2, ceil(0.1 * 23) = 3
+        assert_eq!(adapted.validation_counts, vec![5, 2, 3]);
+        assert_eq!(adapted.train_counts, vec![36, 15, 20]);
+        assert_eq!(adapted.test_counts, vec![12, 5, 9]);
+        let value: serde_json::Value =
+            serde_json::from_slice(&adapted.manifest_bytes).expect("manifest is JSON");
+        assert_eq!(value["labels"], serde_json::json!(["zeta", "alpha", "mu"]));
+        let test = parse_jsonl_bytes(adapted.jsonl.get("test").expect("test bytes"), "test")
+            .expect("parse test");
+        for (index, row) in test.iter().enumerate() {
+            assert_eq!(row.id, format!("test:{index}"));
+            assert_eq!(row.label_text, three_names()[row.label]);
+        }
+    }
+
+    #[test]
+    fn a_criterion_with_an_empty_or_repeated_name_is_still_refused_for_k_3() {
+        let empty = br#"{"type":"choice","instructions":"x","criteria":{"a":"1","":"2","c":"3"}}"#;
+        assert!(label_names_from_task(empty).is_err());
+        let repeated =
+            br#"{"type":"choice","instructions":"x","criteria":{"a":"1","b":"2","a":"3"}}"#;
+        assert!(label_names_from_task(repeated).is_err());
+    }
+
+    #[test]
+    fn manifest_identity_defaults_to_phase_10_and_follows_the_given_strings() {
+        let defaults = adapt_synthetic(13);
+        let value: serde_json::Value =
+            serde_json::from_slice(&defaults.manifest_bytes).expect("manifest is JSON");
+        assert_eq!(value["dataset"], "goldstandard-2024");
+        assert_eq!(value["target"], "antisemitism");
+        assert_eq!(
+            value["task"],
+            "single-label two-class antisemitism classification"
+        );
+        let train = synthetic_three("tr", [41, 17, 23]);
+        let eval = synthetic_three("ev", [12, 5, 9]);
+        let given = adapt(&Inputs {
+            laya_dir_label: "synthetic".to_string(),
+            task: TASK_THREE.as_bytes(),
+            train: &train,
+            eval: &eval,
+            fraction: 0.1,
+            seed: 13,
+            dataset: "motivation-2026-10-26",
+            target: "motivation",
+            task_text: "single-label three-class motivational-function classification (pilot)",
+        })
+        .expect("adapts");
+        let value: serde_json::Value =
+            serde_json::from_slice(&given.manifest_bytes).expect("manifest is JSON");
+        assert_eq!(value["dataset"], "motivation-2026-10-26");
+        assert_eq!(value["target"], "motivation");
+        assert_eq!(
+            value["task"],
+            "single-label three-class motivational-function classification (pilot)"
+        );
+    }
+
+    #[test]
+    fn identity_arguments_are_parsed_and_an_empty_value_is_a_usage_error() {
+        let ok = parse_args(&[]).expect("defaults");
+        assert_eq!(ok.dataset, "goldstandard-2024");
+        assert_eq!(ok.target, "antisemitism");
+        assert_eq!(
+            ok.task,
+            "single-label two-class antisemitism classification"
+        );
+        let given = parse_args(&[
+            "--dataset".into(),
+            "d".into(),
+            "--target".into(),
+            "t".into(),
+            "--task".into(),
+            "a task".into(),
+        ])
+        .expect("given");
+        assert_eq!((given.dataset.as_str(), given.target.as_str()), ("d", "t"));
+        assert_eq!(given.task, "a task");
+        for flag in ["--dataset", "--target", "--task"] {
+            assert!(
+                matches!(
+                    parse_args(&[flag.into(), String::new()]),
+                    Err(AdaptError::Usage(_))
+                ),
+                "{flag} with an empty value must be a usage error"
+            );
+        }
+        assert!(parse_args(&["--dataset".into()]).is_err());
     }
 
     #[test]
