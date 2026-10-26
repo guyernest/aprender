@@ -109,5 +109,7 @@
   }
  ],
  "measured_on": "2026-10-26",
- "commit": null
+ "commit": null,
+ "token_gate_line": "pmcp.run token expires_at 2026-10-26T23:08:32.571574+00:00 (59 min left)",
+ "owner_login_reply": "logged-in"
 }
