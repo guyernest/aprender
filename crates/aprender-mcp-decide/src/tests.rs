@@ -198,6 +198,71 @@ fn max_texts_fit_the_budget_at_the_shortest_row() {
     assert!(min_row > 0 && min_row <= constant_u64(TOOL_CONTRACT, "row_max_tokens"));
 }
 
+/// Phase 12 (D-09, plan 12-09): the contract serves TWO decide tasks, so the "count fits the
+/// budget" claim is checked for EVERY row of `served_tasks`, not only the antisemitism task
+/// `served_task_min_row_tokens` names. Each row's door must not exceed the contracted
+/// `classify_max_texts`, must be at least the minimum count, and `door x shortest row` must fit
+/// `classify_max_total_tokens`; the antisemite row repeats the legacy constant and must equal it.
+#[test]
+fn every_served_task_fits_its_door() {
+    let rows = contract_rows("served_tasks");
+    let budget = constant_u64(TOOL_CONTRACT, "classify_max_total_tokens");
+    let contracted_texts = constant_u64(TOOL_CONTRACT, "classify_max_texts");
+    let min_texts = constant_u64(TOOL_CONTRACT, "classify_min_texts");
+    let row_max = constant_u64(TOOL_CONTRACT, "row_max_tokens");
+    let field = |row: &serde_yaml::Value, name: &str| {
+        row.get(name)
+            .and_then(serde_yaml::Value::as_u64)
+            .unwrap_or_else(|| panic!("served_tasks row {row:?} must carry an integer `{name}`"))
+    };
+    let mut servers = Vec::new();
+    for row in &rows {
+        let server = row_str(row, "served_tasks", "server").to_string();
+        row_str(row, "served_tasks", "artifact");
+        row_str(row, "served_tasks", "record");
+        let (min_row, door) = (field(row, "min_row_tokens"), field(row, "served_max_texts"));
+        assert!(
+            field(row, "label_count") >= 2,
+            "{server}: a task has >= 2 labels"
+        );
+        assert!(
+            min_row > 0 && min_row <= row_max,
+            "{server}: min_row_tokens {min_row} must be in 1..={row_max}"
+        );
+        assert!(
+            door >= min_texts && door <= contracted_texts,
+            "{server}: door {door} must be in {min_texts}..={contracted_texts} (classify_max_texts)"
+        );
+        assert!(
+            door * min_row <= budget,
+            "{server}: {door} texts x {min_row}-token rows = {} > budget {budget}",
+            door * min_row
+        );
+        servers.push((server, min_row));
+    }
+    let row_of = |name: &str| {
+        servers
+            .iter()
+            .find(|(s, _)| s == name)
+            .unwrap_or_else(|| panic!("served_tasks must list {name}"))
+            .1
+    };
+    assert_eq!(
+        row_of("aprender-mcp-decide-antisemite"),
+        constant_u64(TOOL_CONTRACT, "served_task_min_row_tokens"),
+        "the antisemite row is the task served_task_min_row_tokens names"
+    );
+    row_of("aprender-mcp-decide-motivation");
+    let mut unique: Vec<&str> = servers.iter().map(|(s, _)| s.as_str()).collect();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(
+        unique.len(),
+        servers.len(),
+        "one served_tasks row per server"
+    );
+}
+
 /// FALSIFY-DECIDE-TOOL-008 (sizing): admission is sized from the contract.
 #[test]
 fn admission_limits_match_contract() {

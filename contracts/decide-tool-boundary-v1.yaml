@@ -323,6 +323,11 @@ constants:
   # classify_max_texts x this <= classify_max_total_tokens, and the maximal-request builder
   # refuses to emit a DISTRIBUTED request the budget would refuse. The superseded stance task
   # (laya-stance-64.apr) measured 57.
+  # THIS KEY IS THE ANTISEMITISM TASK'S (aprender-mcp-decide-antisemite) and nothing else's. Since
+  # Phase 12 two decide tasks are served, so every served task's shortest built row is recorded in
+  # the `served_tasks:` table below (the antisemite entry repeats 86 and is asserted equal to this
+  # key); the budget check `classify_max_texts x min_row_tokens <= classify_max_total_tokens` holds
+  # for EACH row of that table (tests::every_served_task_fits_its_door).
   served_task_min_row_tokens: 86
   # The SHORTEST caller text refusal_names_bound's no-echo clause quantifies over (v6.0.0, A4-7).
   # A one-character text such as `a` occurs in every refusal message, so a clause over ANY
@@ -353,6 +358,31 @@ constants:
   # Graviton2), rounded UP to 12 (v1.0.0 rounded it down to 11). Superseded: 3 008 MB 40
   # (extrapolated; live it ran 26 ms on Graviton2).
   tier_ms_per_token_at_512: 12
+
+# SERVED TASKS (Phase 12, plan 12-09, D-09 / D-26). One row per decide task a deployed server
+# serves: its shortest built row (the task prefix + markers with an empty state, measured by the
+# served tokenizer) and the door (texts per call) that follows from it. The door is the contracted
+# `classify_max_texts` for every task whose row fits it (8 x min_row_tokens <= classify_max_total_tokens,
+# i.e. min_row_tokens <= 100); a task past 100 would need a per-artifact door, which the owner did
+# not choose for motivation-v1 (variant a, 12-TASK-OWNER-REPLY.json `approve-a f74a3ad3cfc0`), so
+# `served_max_texts` is 8 on every row and no per-server flag or environment variable exists.
+# `record` names the file the measurement is read from. Enforced by
+# `cargo test -p aprender-mcp-decide --lib tests::every_served_task_fits_its_door`: every row's
+# served_max_texts x min_row_tokens must fit classify_max_total_tokens, served_max_texts must not
+# exceed classify_max_texts, and the antisemite row must equal served_task_min_row_tokens.
+served_tasks:
+  - server: aprender-mcp-decide-antisemite
+    artifact: laya-antisemitism-v1
+    label_count: 2
+    min_row_tokens: 86
+    served_max_texts: 8
+    record: .planning/phases/10-antisemitism-v1-decide-server-for-experiment-coach/10-TASK-EVIDENCE.json
+  - server: aprender-mcp-decide-motivation
+    artifact: 'laya-motivation-v1 (pilot)'
+    label_count: 3
+    min_row_tokens: 97
+    served_max_texts: 8
+    record: .planning/phases/12-motivation-v1-decide-server-for-experiment-coach-laya-pilot/12-TASK-EVIDENCE.json
 
 # CLASS A (provenance binding, SERVED side; plan 08-23). Every field a classify response or
 # tools/list serves, with the sha-bound source it comes from. The LOAD side (every manifest
