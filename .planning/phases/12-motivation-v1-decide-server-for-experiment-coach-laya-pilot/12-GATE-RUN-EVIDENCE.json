@@ -1,0 +1,47 @@
+{
+  "schema": "laya-gate-run-evidence-v3",
+  "phase": "12",
+  "plan": "12-11",
+  "attempt_cap": 2,
+  "attempt_triples": {
+    "1": {
+      "run_dir": "models/decide/laya-motivation-v1",
+      "train_log": "/tmp/p12-11-train.log",
+      "train_rc": "/tmp/p12-11-train.rc",
+      "artifact_path": "models/decide/laya-motivation-v1.apr",
+      "verify_log": "/tmp/p12-11-t2-verify.log",
+      "record": "12-GATE-RUN-ATTEMPT-1.json"
+    },
+    "2": {
+      "run_dir": "models/decide/laya-motivation-v1-run2",
+      "train_log": "/tmp/p12-11-train-run2.log",
+      "train_rc": "/tmp/p12-11-train-run2.rc",
+      "artifact_path": "models/decide/laya-motivation-v1-run2.apr",
+      "verify_log": "/tmp/p12-11-t2-verify-run2.log",
+      "record": "12-GATE-RUN-ATTEMPT-2.json"
+    }
+  },
+  "epochs": 12,
+  "recipe_id_declared": "f88f5b71ef925fdabb30d26a15c2eb5195a151dadfe0882c858b73ca7bf54d7e",
+  "declaration_commit": {
+    "sha": "e3bef4cb0a4d39104314944e2f64015ed93c0f8a",
+    "committed_at": 1793049333
+  },
+  "policy_revision": {
+    "laya_finetune_gate_version": "5.1.1",
+    "contract_blob_sha": "0af135e86bb35912109b3c1898e082c32aaf39fb"
+  },
+  "waiver_id": "motivation-v1-pilot-ece",
+  "slice_fraction": 0.25,
+  "inputs_sha256": {
+    "task_json": "f74a3ad3cfc00c160cc2959d95beb219aec859b394b883e87577a56dc14e7ea3",
+    "train_jsonl": "f1d84f19ec38ed85356bcbcd1eae6ef8ad07fb97e014f61a17d37adc0d68d378",
+    "eval_jsonl": "ee95d71fcb5d90d515b9fc6741e5df51087e763fa7f251ace83d9f11d5ccd575"
+  },
+  "P": 97,
+  "door": 8,
+  "attempts": [],
+  "final_attempt": null,
+  "declared_runs": 0,
+  "outcome": null
+}
