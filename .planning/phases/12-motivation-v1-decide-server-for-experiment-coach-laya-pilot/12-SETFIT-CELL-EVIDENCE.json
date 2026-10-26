@@ -29,5 +29,63 @@
     "dump_rows": 100,
     "decision": "proceed-s32"
   },
-  "outcome": null
+  "outcome": "completed",
+  "cell": "s32e1b16",
+  "seed": 13,
+  "config": {
+    "path": "scripts/laya_train/setfit_cell_e1b16_cpu.json",
+    "sha256": "19f7b10bd418f2047570c7f02ee7c7b7bcec89252b95c81938d191f1350212a9"
+  },
+  "adapter": {
+    "manifest_sha256": "a1398abededed5536d7f2981ca6039ae45d9ff1da95e45e117a60faa1b931d41",
+    "dataset": "motivation-2026-10-26",
+    "target": "motivation",
+    "task": "single-label three-class motivational-function classification (pilot)",
+    "labels": [
+      "social_affiliative",
+      "conspiratorial",
+      "other"
+    ],
+    "dataset_fingerprint": "e18595a2e1079b993708dcebfe3c0fd11bd3b561468486ef103f84d04e902428",
+    "counts": "train=[59,36,169] validation=[7,5,19] test=[23,14,63]"
+  },
+  "selection": {
+    "path": "data/decide/motivation-v1-setfit/selection-s32-seed13/selection-manifest.json",
+    "manifest_sha256": "d49c2c1a63c8ab37a5548af6dc6c0109bb61797139b372d4b8b0906d81a4f783",
+    "semantic_hash": "9f951447e6f7cd74d649f993fbe0000437ccf34dc70b610e4bb887405bdd1adb",
+    "shots": 32,
+    "selected_rows": 96,
+    "root_seed": 13
+  },
+  "deviation": "D-25: s64 is infeasible (pools after the 0.1 validation carve: conspiratorial 36, social_affiliative 59, below 64); s32 is the largest legal cell; subsampled train (96 of 295 rows)",
+  "artifact_sha256": "52227695fdb9f47c96dff1f5e32da364699ff8b12cc997f0470ccea4312abbe9",
+  "metric": {
+    "tag": "accuracy",
+    "value": 0.66
+  },
+  "dump": {
+    "path": "models/setfit/motivation-v1-s32e1b16-seed13/test-probabilities.json",
+    "sha256": "4dc0f3764c71d692ae256fbe8523056928203a5b951d9fe054215c01664c0bb6",
+    "n_rows": 100,
+    "ordered_labels": [
+      "social_affiliative",
+      "conspiratorial",
+      "other"
+    ],
+    "dataset_fingerprint": "e18595a2e1079b993708dcebfe3c0fd11bd3b561468486ef103f84d04e902428",
+    "row_identity": "row_ids test:0..test:99 and text_sha256 equal to data.exact_sha256 of the eval texts in order (checked)"
+  },
+  "accuracy_from_dump": 0.66,
+  "same_pass_control": true,
+  "provenance_control": "dump dataset_fingerprint and artifact_sha256 equal eval-test.json's; row ids and per-row text sha256 match data/decide/motivation-v1/eval.jsonl row by row; predicted is the argmax of every probability row",
+  "train_seconds": 748,
+  "max_rss_bytes": 12519899136,
+  "cell_watchdog": {
+    "peak_rss_bytes": 8114634752,
+    "stopped": false
+  },
+  "device": "cpu (the SetFit trainer is CPU-only by design)",
+  "measured_on": "2026-10-26",
+  "commit": "8be3707cf (binary apr 0.69.3 built at this commit)",
+  "scope_note": "SetFit is a reference arm only (D-06). macro-F1, false-assignment and length bands are computed by bakeoff.py (plan 12-16), not here."
 }
