@@ -63,6 +63,10 @@ SAMPLE_EVERY_S = 15
 THRESHOLD_S_PER_STEP = 3.0
 EPOCHS_RULE = "4 unless s_per_step <= 1.0, then 6 (RESEARCH Q4)"
 FAST_S_PER_STEP = 1.0
+MOTIVATION_MAX_HOURS = 6.0
+MOTIVATION_RULE = ("12 under early stopping, the contract's epochs_above_16_max (spike 027 es12; at about 220 fit rows "
+                   "time is not the constraint), unless the projected three-seed training hours at E = 12 exceed 6, "
+                   "then the largest E in [4, 12] projected at most 6")
 TAIL_BUDGET_H, PACK_VERIFY_BUDGET_H = 1.0, 0.7
 DOWNSTREAM_VERIFY_RUNS, DOWNSTREAM_VERIFY_MIN_EACH = 5, 18
 SEEDS_IN_PRODUCTION = 3
@@ -71,6 +75,27 @@ ROW_MAX = 512
 # match, so `clang-format` is not `clang`.
 COMPETING = ("cargo", "rustc", "rustdoc", "clippy-driver", "cargo-clippy", "cargo-nextest", "cargo-zigbuild",
              "zig", "clang", "cc1", "ld")
+
+
+def _declared_antisemitism(s_per_step, hours):
+    """Phase 10 (RESEARCH Q4): 4, or 6 when a step is fast."""
+    return 6 if s_per_step <= FAST_S_PER_STEP else 4
+
+
+def _declared_motivation(s_per_step, hours):
+    """Phase 12 (D-17): 12 under early stopping unless the three-seed hours at E = 12 exceed the budget, then the
+    largest E in [4, 12] within it (4 when none is: the contract's lower bound)."""
+    if hours["12"] <= MOTIVATION_MAX_HOURS:
+        return 12
+    return max([e for e in range(4, 13) if hours[str(e)] <= MOTIVATION_MAX_HOURS] or [4])
+
+
+# id -> (rule text, function (s_per_step, hours-by-E) -> epochs, the declared run dir the probe refuses to follow)
+EPOCHS_RULES = {
+    "antisemitism-v1": (EPOCHS_RULE, _declared_antisemitism, "models/decide/laya-antisemitism-v1"),
+    "motivation-v1": (MOTIVATION_RULE, _declared_motivation, "models/decide/laya-motivation-v1"),
+}
+RULE_DEFAULT = "antisemitism-v1"
 
 
 def log(msg):
@@ -198,6 +223,7 @@ def git_head():
 def common_record(args, v, requested, torch_version, host_load):
     return {
         "schema": "laya-probe-evidence-v1",
+        "rule": args.rule,
         "measured_on": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "commit": git_head(),
         "host": {"machine": platform.machine(), "macos": platform.mac_ver()[0] or None,
@@ -279,20 +305,23 @@ def measure(args, v):
     rec = common_record(args, v, requested, torch.__version__, sampler_block)
     rec.update(post_measure_record(info, s_per_step, monitor_s, len(calib_rows), pct(built), pct(raw), pct(retained),
                                    {"count": len(truncated), "share": round(len(truncated) / len(fit_rows), 6),
-                                    "max_lost_tokens": max([r - room for r in truncated], default=0)}, p_len))
+                                    "max_lost_tokens": max([r - room for r in truncated], default=0)}, p_len,
+                                   args.rule))
     write_evidence(args.out, rec)
     log("PROBE OK device_used=%s s_per_step=%.4f steps=%d P=%d" % (info["device_used"], s_per_step, info["steps"], p_len))
     return rec
 
 
-def post_measure_record(info, s_per_step, monitor_s, n_calib, row_tokens, post_raw, post_retained, rows_truncated, p_len):
+def post_measure_record(info, s_per_step, monitor_s, n_calib, row_tokens, post_raw, post_retained, rows_truncated, p_len,
+                        rule=RULE_DEFAULT):
     """The `measured` outcome's fields; pure arithmetic over the measurement (also the place the rule lives)."""
     steps_pl = info["steps_planned"]
     hours = {str(e): round((s_per_step * steps_pl * e + monitor_s * e) * 3 / 3600, 2) for e in range(4, 13)}
     h4, h6 = hours["4"], hours["6"]
     es = contract.early_stopping_decl()
     earliest = es["first_candidate_epoch"] + es["patience_epochs"]
-    declared = 6 if s_per_step <= FAST_S_PER_STEP else 4
+    rule_text, rule_fn, _ = EPOCHS_RULES[rule]
+    declared = rule_fn(s_per_step, hours)
     can_end = declared > earliest
     exceeds = s_per_step > THRESHOLD_S_PER_STEP
     used = str(info["device_used"])
@@ -306,27 +335,41 @@ def post_measure_record(info, s_per_step, monitor_s, n_calib, row_tokens, post_r
     downstream_h = round(DOWNSTREAM_VERIFY_RUNS * DOWNSTREAM_VERIFY_MIN_EACH / 60, 2)
     to_artifact = round(hours[str(declared)] + TAIL_BUDGET_H + PACK_VERIFY_BUDGET_H, 2)
     to_live = round(to_artifact + downstream_h, 2)
-    if declared == 4:
-        es_note = ("Early stopping (D-08) cannot fire at E = 4: its earliest stop is first_candidate_epoch %d + "
-                   "patience_epochs %d = epoch %d = E, so every seed runs all 4 epochs and the rule acts only as "
-                   "best-epoch restore (restore: best). E = 6 is not taken because s_per_step exceeds %s s."
-                   % (es["first_candidate_epoch"], es["patience_epochs"], earliest, FAST_S_PER_STEP))
+    if rule == "motivation-v1":
+        es_note = ("Early stopping (D-08) is active at E = %d: its earliest stop is epoch %d (first_candidate_epoch %d + "
+                   "patience_epochs %d), so a seed can end before E; the training hours above are the upper bound "
+                   "(every seed runs all %d epochs)." % (declared, earliest, es["first_candidate_epoch"],
+                                                          es["patience_epochs"], declared))
+        date_note = ""
+        reasoning = ("Rule: %s. Measured s_per_step %s s, monitor_s_per_epoch %s s. Three-seed training hours "
+                     "including the per-epoch calibration monitor: %s h at E = 12, %s h at E = %d declared (budget %s h). "
+                     "Plus the scoring tail %s h and the pack/verify budget %s h: %s h to the artifact, %s h to live "
+                     "with the %d downstream verify runs of %d min each (%s h). %s"
+                     % (rule_text, s_per_step, round(monitor_s, 3), str(hours["12"]), str(hours[str(declared)]),
+                        declared, MOTIVATION_MAX_HOURS, TAIL_BUDGET_H, PACK_VERIFY_BUDGET_H, to_artifact, to_live,
+                        DOWNSTREAM_VERIFY_RUNS, DOWNSTREAM_VERIFY_MIN_EACH, downstream_h, es_note))
     else:
-        es_note = ("s_per_step is at most %s s, which admits E = 6 (RESEARCH Q4): at E = 6 early stopping, whose "
-                   "earliest stop is epoch %d, can end a seed at epoch %d or %d instead of running all 6."
-                   % (FAST_S_PER_STEP, earliest, earliest, earliest + 1))
-    now = datetime.datetime.now()
-    live = {e: round(hours[str(e)] + TAIL_BUDGET_H + PACK_VERIFY_BUDGET_H + downstream_h, 2) for e in (4, 6)}
-    on = {e: (now + datetime.timedelta(hours=live[e])).strftime("%Y-%m-%d") for e in (4, 6)}
-    date_note = ("Starting now, live in %s h (%s) at E = 4 against %s h (%s) at E = 6, versus the 2026-10-29 date."
-                 % (live[4], on[4], live[6], on[6]))
-    reasoning = ("Rule: %s. Measured s_per_step %s s (threshold %s s), monitor_s_per_epoch %s s. Three-seed training "
-                 "hours including the per-epoch calibration monitor: %s h at E = 4 and %s h at E = 6 (E = %d declared). "
-                 "Plus the scoring tail %s h and the pack/verify budget %s h: %s h to the artifact, %s h to live with the "
-                 "%d downstream verify runs of %d min each (%s h). %s %s"
-                 % (EPOCHS_RULE, s_per_step, THRESHOLD_S_PER_STEP, round(monitor_s, 3), str(h4), str(h6), declared,
-                    TAIL_BUDGET_H, PACK_VERIFY_BUDGET_H, to_artifact, to_live, DOWNSTREAM_VERIFY_RUNS,
-                    DOWNSTREAM_VERIFY_MIN_EACH, downstream_h, date_note, es_note))
+        if declared == 4:
+            es_note = ("Early stopping (D-08) cannot fire at E = 4: its earliest stop is first_candidate_epoch %d + "
+                       "patience_epochs %d = epoch %d = E, so every seed runs all 4 epochs and the rule acts only as "
+                       "best-epoch restore (restore: best). E = 6 is not taken because s_per_step exceeds %s s."
+                       % (es["first_candidate_epoch"], es["patience_epochs"], earliest, FAST_S_PER_STEP))
+        else:
+            es_note = ("s_per_step is at most %s s, which admits E = 6 (RESEARCH Q4): at E = 6 early stopping, whose "
+                       "earliest stop is epoch %d, can end a seed at epoch %d or %d instead of running all 6."
+                       % (FAST_S_PER_STEP, earliest, earliest, earliest + 1))
+        now = datetime.datetime.now()
+        live = {e: round(hours[str(e)] + TAIL_BUDGET_H + PACK_VERIFY_BUDGET_H + downstream_h, 2) for e in (4, 6)}
+        on = {e: (now + datetime.timedelta(hours=live[e])).strftime("%Y-%m-%d") for e in (4, 6)}
+        date_note = ("Starting now, live in %s h (%s) at E = 4 against %s h (%s) at E = 6, versus the 2026-10-29 date."
+                     % (live[4], on[4], live[6], on[6]))
+        reasoning = ("Rule: %s. Measured s_per_step %s s (threshold %s s), monitor_s_per_epoch %s s. Three-seed training "
+                     "hours including the per-epoch calibration monitor: %s h at E = 4 and %s h at E = 6 (E = %d declared). "
+                     "Plus the scoring tail %s h and the pack/verify budget %s h: %s h to the artifact, %s h to live with the "
+                     "%d downstream verify runs of %d min each (%s h). %s %s"
+                     % (rule_text, s_per_step, THRESHOLD_S_PER_STEP, round(monitor_s, 3), str(h4), str(h6), declared,
+                        TAIL_BUDGET_H, PACK_VERIFY_BUDGET_H, to_artifact, to_live, DOWNSTREAM_VERIFY_RUNS,
+                        DOWNSTREAM_VERIFY_MIN_EACH, downstream_h, date_note, es_note))
     repriced = None
     if exceeds or cpu:
         # one gate run to live plus the one budgeted re-run (to the artifact), from today
@@ -346,7 +389,7 @@ def post_measure_record(info, s_per_step, monitor_s, n_calib, row_tokens, post_r
         "hours_at_E4": h4, "hours_at_E6": h6,
         "tail_budget_hours": TAIL_BUDGET_H, "pack_verify_budget_hours": PACK_VERIFY_BUDGET_H,
         "downstream_verify_runs": DOWNSTREAM_VERIFY_RUNS, "downstream_verify_budget_hours": downstream_h,
-        "epochs_rule": EPOCHS_RULE, "epochs_declared": declared,
+        "epochs_rule": rule_text, "epochs_declared": declared,
         "earliest_stop_epoch": earliest, "early_stopping_can_end_early": can_end,
         "epochs_reasoning": reasoning,
         "expected_hours_to_artifact": to_artifact, "expected_hours_to_live": to_live,
@@ -361,7 +404,10 @@ def parse_args(argv=None):
     ap.add_argument("--data", help="a Laya data dir (task.json + train.jsonl + eval.jsonl)")
     ap.add_argument("--out", help="the evidence JSON to write (required unless --dry-run / --host-load)")
     ap.add_argument("--dry-run", action="store_true", help="validate and print the planned steps; load no model, write nothing")
-    ap.add_argument("--guard", default=GUARD_DEFAULT, help="refuse when this run dir exists (default %(default)s)")
+    ap.add_argument("--rule", choices=sorted(EPOCHS_RULES), default=RULE_DEFAULT,
+                    help="the epochs rule table entry (default %(default)s: Phase 10's rule, unchanged)")
+    ap.add_argument("--guard", default=None,
+                    help="refuse when this run dir exists (default: the rule's declared run dir)")
     ap.add_argument("--host-load", action="store_true", help="print one host snapshot JSON line and exit")
     ap.add_argument("--ps-file", help="with --host-load: read ps output from this file instead of running ps")
     return ap.parse_args(argv)
@@ -369,6 +415,8 @@ def parse_args(argv=None):
 
 def main(argv=None):
     args = parse_args(argv)
+    if args.guard is None:
+        args.guard = EPOCHS_RULES[args.rule][2]
     if args.host_load:
         text = Path(args.ps_file).read_text() if args.ps_file else None
         print(json.dumps(host_snapshot(text)), flush=True)
