@@ -1,0 +1,193 @@
+{
+  "attempt": 1,
+  "run_dir": "models/decide/laya-motivation-v1",
+  "train_log": "/tmp/p12-11-train.log",
+  "train_rc": "/tmp/p12-11-train.rc",
+  "artifact_path": "models/decide/laya-motivation-v1.apr",
+  "outcome": "gate_pass",
+  "failure_kind": null,
+  "started_at": 1793049437,
+  "wall_seconds": 752,
+  "recipe_id_written": "f88f5b71ef925fdabb30d26a15c2eb5195a151dadfe0882c858b73ca7bf54d7e",
+  "device_used": "mps:0",
+  "torch_version": "2.14.0",
+  "seeds": {
+    "policy": "median_ece",
+    "shipped": 13,
+    "per_seed": [
+      {
+        "seed": 13,
+        "macro_f1": 0.7475947000934631,
+        "ece_post": 0.09355141013860704,
+        "margin": 0.3780294827021587,
+        "t_applied": 4.6479084158721236,
+        "clamp_hit": false,
+        "pass": true,
+        "epochs_run": 5,
+        "best_epoch": 2,
+        "eval_probs_sha256": "95955f3da1f91071504fd720831d2572c54f6db52a28ef6edb208acfe47b288d"
+      },
+      {
+        "seed": 17,
+        "macro_f1": 0.7197408326440584,
+        "ece_post": 0.11968235582113264,
+        "margin": 0.35017561525275404,
+        "t_applied": 3.7295581258026953,
+        "clamp_hit": false,
+        "pass": false,
+        "epochs_run": 5,
+        "best_epoch": 2,
+        "eval_probs_sha256": "5d4c0ddb2cd20529c9cb13225633cb52c7fdcae9fe070ab95d9bf0d90f1a4d74"
+      },
+      {
+        "seed": 23,
+        "macro_f1": 0.7404761904761905,
+        "ece_post": 0.09142689019441604,
+        "margin": 0.37091097308488613,
+        "t_applied": 5.0,
+        "clamp_hit": true,
+        "pass": true,
+        "epochs_run": 5,
+        "best_epoch": 2,
+        "eval_probs_sha256": "d448687d094c5a797bc4972dd2aa757c2c3318c0074a1acfba9217848040b218"
+      }
+    ]
+  },
+  "gate": {
+    "pass": true,
+    "zero_shot_macro_f1": 0.3695652173913044,
+    "ft_macro_f1": 0.7475947000934631,
+    "margin": 0.3780294827021587,
+    "ece_post": 0.09355141013860704,
+    "t_applied": 4.6479084158721236,
+    "clamp_hit": false,
+    "thresholds": {
+      "min_macro_f1_margin": 0.05,
+      "max_ece": 0.1,
+      "ece_bins": 15
+    }
+  },
+  "pilot_waiver": null,
+  "pilot_waiver_log_line": null,
+  "noise": {
+    "fine_tuned": {
+      "max_abs": 1.820794e-05,
+      "bound": 7.283177e-05,
+      "argmax": "100/100",
+      "t_applied": 4.647908
+    },
+    "zero_shot": {
+      "max_abs": 1.25246e-05,
+      "bound": 5.009839e-05,
+      "argmax": "100/100",
+      "t_applied": 1.760152
+    }
+  },
+  "pack": {
+    "rc": 0,
+    "line": "PACKED models/decide/laya-motivation-v1.apr sha256=d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd rescore_max_abs=0.000009149312973022461 zs_rescore_max_abs=0.000003337860107421875 rescore_bound=0.00007283176657191248 zs_rescore_bound=0.000050098394043907035 noise=0.00001820794164297812 zs_noise=0.000012524598510976759 shipped_seed=13 argmax=100/100 waived=none"
+  },
+  "verify_line": {
+    "argmax": "100/100",
+    "artifact_sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+    "deploy_eligible": true,
+    "noise": 1.820794164297812e-05,
+    "recomputed": {
+      "ece_post": 0.09355141013860704,
+      "ft_macro_f1": 0.7475947000934631,
+      "margin": 0.3780294827021587,
+      "zs_macro_f1": 0.3695652173913044
+    },
+    "rescore_bound": 7.283176657191248e-05,
+    "rescore_max_abs": 9.149312973022461e-06,
+    "shipped_seed": 13,
+    "waived": null,
+    "zs_noise": 1.2524598510976759e-05,
+    "zs_rescore_bound": 5.0098394043907035e-05,
+    "zs_rescore_max_abs": 3.337860107421875e-06
+  },
+  "waived": null,
+  "inspect": {
+    "labels": [
+      "social_affiliative",
+      "conspiratorial",
+      "other"
+    ],
+    "recipe_id": "f88f5b71ef925fdabb30d26a15c2eb5195a151dadfe0882c858b73ca7bf54d7e",
+    "variant": "production",
+    "waiver": "none"
+  },
+  "plan_only": {
+    "distributed": {
+      "probe": "plan",
+      "shape": "distributed",
+      "texts": 8,
+      "max_text_bytes": 12,
+      "tokens_planned": 800,
+      "min_row_tokens": 97,
+      "max_texts": 8,
+      "max_total_tokens": 800,
+      "artifact_sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+      "labels": [
+        "social_affiliative",
+        "conspiratorial",
+        "other"
+      ]
+    },
+    "concentrated": {
+      "probe": "plan",
+      "shape": "concentrated",
+      "texts": 2,
+      "max_text_bytes": 16384,
+      "tokens_planned": 800,
+      "min_row_tokens": 97,
+      "max_texts": 8,
+      "max_total_tokens": 800,
+      "artifact_sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+      "labels": [
+        "social_affiliative",
+        "conspiratorial",
+        "other"
+      ]
+    },
+    "p_rust": 97,
+    "p_python": 97,
+    "door": 8,
+    "door_check": {
+      "ok": true,
+      "reasons": []
+    }
+  },
+  "slice_counts": [
+    17,
+    11,
+    47
+  ],
+  "artifact": {
+    "path": "models/decide/laya-motivation-v1.apr",
+    "sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+    "bytes": 846196612,
+    "eligible": true
+  },
+  "deploy_eligible": true,
+  "inputs_sha256": {
+    "task_json": "f74a3ad3cfc00c160cc2959d95beb219aec859b394b883e87577a56dc14e7ea3",
+    "train_jsonl": "f1d84f19ec38ed85356bcbcd1eae6ef8ad07fb97e014f61a17d37adc0d68d378",
+    "eval_jsonl": "ee95d71fcb5d90d515b9fc6741e5df51087e763fa7f251ace83d9f11d5ccd575"
+  },
+  "report_inputs_sha256_extra": {
+    "base_model": "891102d372688fc2a094dac56a384bc537b87c63f21f9f3dac0be2b7cbc8d86c",
+    "tokenizer_json": "6c8aaa9a542084f2457eab775d4eeb51f92a70c0fd9de28d5edb0ddec3c08d30"
+  },
+  "checkpoints_found": [
+    "models/decide/laya-motivation-v1/checkpoint/model.safetensors"
+  ],
+  "pilot_label": "pilot",
+  "class_reweighting": "none (D-21)",
+  "train_rc_value": 0,
+  "variance": {
+    "zero_shot_ece": 0.1393175259232521,
+    "ece_pre": 0.17864792527777235,
+    "nll": 0.5842854688381253
+  }
+}
