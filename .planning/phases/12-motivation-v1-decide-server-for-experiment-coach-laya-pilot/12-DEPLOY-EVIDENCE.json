@@ -98,18 +98,125 @@
    "reserved_concurrency": null
   }
  },
- "live_attempts": [],
- "live_function_after": null,
+ "live_attempts": [
+  {
+   "attempt": 1,
+   "run_by": "executor",
+   "token_recheck_line": "pmcp.run token expires_at 2026-10-26T23:08:32.571574+00:00 (58 min left)",
+   "started": "2026-10-26T22:10:00Z",
+   "ended": "2026-10-26T22:14:36Z",
+   "rc": 0,
+   "refusal": null,
+   "endpoint": "https://aprender-mcp-decide-motivation.us-east.true-mcp.com/mcp",
+   "command": "lockf -k -t 300 /tmp/aprender-laya-real-weights.lock just laya-deploy models/decide/laya-motivation-v1.apr models/decide/laya-motivation-v1 data/decide/motivation-v1 $BASE aprender-mcp-decide-motivation dev ze-kasher-dev",
+   "recipe_lines": [
+    "DEPLOYING aprender-mcp-decide-motivation (auth enabled=false)",
+    "grant ok: checked 2 inline and 1 attached policies of the role; pmcp-declared (stack-declared) allows s3:GetObject on arn:aws:s3:::<weights-bucket>/decide/aprender-mcp-decide-motivation/* and no other S3 grant is in them (permission boundary, SCPs and bucket policy not inspected)",
+    "  edge /health not routed yet (HTTP 404), attempt 1/40 after 1 s; retrying in 15 s",
+    "edge-health-get ok: HTTP 200 after 2 attempt(s) in 16 s",
+    "edge-health ok: serverId aprender-mcp-decide-motivation",
+    "  edge health: https://aprender-mcp-decide-motivation.us-east.true-mcp.com/health names serverId aprender-mcp-decide-motivation",
+    "DEPLOYED aprender-mcp-decide-motivation at https://aprender-mcp-decide-motivation.us-east.true-mcp.com/mcp: compile log, edge health serverId and live identity (sha256 d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd) name the decide server"
+   ],
+   "health_get_line": "edge-health-get ok: HTTP 200 after 2 attempt(s) in 16 s",
+   "health_404_retries": 1,
+   "identity_probe": {
+    "probe": "identity",
+    "one_tool_named_classify": true,
+    "description_has_labels_in_order": true,
+    "response_labels_match": true,
+    "identity_matches": true,
+    "artifact_sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+    "elapsed_ms": [
+     342,
+     186,
+     1069
+    ],
+    "tokens_total": 105,
+    "shape": "identity",
+    "load_header": "warm"
+   },
+   "identity_probe_retries": 0,
+   "negative_control": {
+    "identity_matches": false,
+    "description_has_labels_in_order": false,
+    "response_labels_match": false,
+    "artifact_sha256_served": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+    "probe_exit_nonzero": true,
+    "apr_used": "models/decide/laya-antisemitism-v1.apr"
+   },
+   "aws_write_count": "one cargo pmcp deploy creating the new server; laya-grant read-only"
+  }
+ ],
+ "live_function_after": {
+  "server": "aprender-mcp-decide-motivation",
+  "artifact_sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+  "auth": "off",
+  "tier_mb": 10240,
+  "contained": false,
+  "readback": {
+   "function_name": "aprender-mcp-decide-motivation",
+   "memory_mb": 10240,
+   "architecture": "arm64",
+   "state": "Active",
+   "last_update_status": "Successful",
+   "region": "us-east-1",
+   "env_APRENDER_DECIDE_SHA256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+   "s3_uri_ends_with_prefix_key": true
+  }
+ },
  "findings": [
   {
    "id": "F-12-12-1",
    "title": "laya-upload's aws s3 cp lost its connection mid-multipart twice (parts 19 and 1) on this host",
    "evidence": "tries 1 and 2 exited 1 with 'Connection was closed before we received a valid response'; try 3 with AWS_MAX_ATTEMPTS=10 AWS_RETRY_MODE=standard succeeded; laya-verify passed each time and the upload is content-addressed and idempotent",
    "status": "worked around by environment only; the recipe is unchanged"
+  },
+  {
+   "id": "F-12-12-2",
+   "title": "brand-new id's edge /health 404'd once and was routed on the second attempt",
+   "evidence": "edge-health-get ok: HTTP 200 after 2 attempt(s) in 16 s (Phase 10's F-10-12-1 took about 8 minutes); no sticky 503; identity probe passed on the first try, warm",
+   "status": "recorded; the 404 retry in laya-deploy (plan 12-04) engaged as designed"
   }
  ],
  "measured_on": "2026-10-26",
  "commit": null,
  "token_gate_line": "pmcp.run token expires_at 2026-10-26T23:08:32.571574+00:00 (59 min left)",
- "owner_login_reply": "logged-in"
+ "owner_login_reply": "logged-in",
+ "antisemite_after": {
+  "identity_probe": {
+   "probe": "identity",
+   "one_tool_named_classify": true,
+   "description_has_labels_in_order": true,
+   "response_labels_match": true,
+   "identity_matches": true,
+   "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+   "elapsed_ms": [
+    16421,
+    222,
+    949
+   ],
+   "tokens_total": 94,
+   "shape": "identity",
+   "load_header": "cold;load_ms=15598"
+  },
+  "read_only_ops": [
+   "probe --url https://aprender-mcp-decide-antisemite.us-east.true-mcp.com/mcp --apr models/decide/laya-antisemitism-v1.apr --expect-sha256 2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+   "aws lambda get-function-configuration --profile ze-kasher-dev --function-name aprender-mcp-decide-antisemite",
+   "aws lambda get-function-concurrency --profile ze-kasher-dev --function-name aprender-mcp-decide-antisemite"
+  ],
+  "lambda": {
+   "LastModified": "2026-10-23T01:13:24.000+0000",
+   "CodeSha256": "lhqq6c5ZcCaJh7k8Y68pFIQbJdI70HxeKQE62JteEr0=",
+   "MemorySize": 10240,
+   "State": "Active",
+   "Architectures": [
+    "arm64"
+   ],
+   "env_APRENDER_DECIDE_SHA256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+   "reserved_concurrency": null
+  },
+  "unchanged": true
+ },
+ "served_path": "classify only; softmax(z / T); no prior correction (D-03, D-12)"
 }
