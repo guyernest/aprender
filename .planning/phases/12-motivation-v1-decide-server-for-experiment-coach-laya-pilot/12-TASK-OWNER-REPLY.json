@@ -1,0 +1,20 @@
+{
+  "schema": "laya-task-owner-reply-v1",
+  "reply": "approve-a f74a3ad3cfc0",
+  "option": "approve-a",
+  "variant": "a",
+  "sha256_prefix": "f74a3ad3cfc0",
+  "replied_on": "2026-10-26",
+  "shown": {
+    "a": {
+      "P": 97,
+      "door": 8,
+      "sha256": "f74a3ad3cfc00c160cc2959d95beb219aec859b394b883e87577a56dc14e7ea3"
+    },
+    "b": {
+      "P": 190,
+      "door": 4,
+      "sha256": "58ad1d0188c25dfe8d85b7f91b883221651a7395eea7a513f6cc0e4d58ecad14"
+    }
+  }
+}

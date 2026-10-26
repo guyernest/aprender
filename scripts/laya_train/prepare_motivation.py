@@ -1,7 +1,7 @@
 """The motivation CSV (the partner file) -> a Laya data dir, and the measured prefix of the condensed task (plan 12-01).
 
-    uv run --project scripts/laya_train --frozen python -I scripts/laya_train/prepare_motivation.py --draft a|b [--csv PATH] [--out DIR] [--no-pin]
-    uv run --project scripts/laya_train --frozen python -I scripts/laya_train/prepare_motivation.py --measure (--draft a|b | --task PATH) [--csv PATH] [--max-texts N]
+    uv run --project scripts/laya_train --frozen python -I scripts/laya_train/prepare_motivation.py [--csv PATH] [--out DIR] [--no-pin]
+    uv run --project scripts/laya_train --frozen python -I scripts/laya_train/prepare_motivation.py --measure [--task PATH] [--csv PATH] [--max-texts N]
     uv run --project scripts/laya_train --frozen python -I scripts/laya_train/prepare_motivation.py --selftest | --selftest-tokenizer
     (or: just laya-prepare-motivation <the same arguments>)
 
@@ -9,6 +9,11 @@ PILOT (D-01): motivation-v1 is trained on Dr. Iris Yuster's classification guide
 0e1d5a35ac3ccd455c5556fecbc5c1d1edec0e0a1100e2feac8bd16a42f29167). The guide is not frozen; the model is expected to be
 retrained after the freeze. Nothing here is an accuracy claim: whether a fuller instruction helps is a HYPOTHESIS that only
 the gate run measures.
+
+APPROVED 2026-10-26 by the owner (plan 12-01 Task 2): variant a; door 8; measured P 97; task.json sha256
+f74a3ad3cfc00c160cc2959d95beb219aec859b394b883e87577a56dc14e7ea3. The owner quoted the first 12 hex of that sha256 (D-10),
+so the approval is bound to the exact bytes INSTRUCTIONS and DESCRIPTIONS render to; the script refuses to write any other
+bytes (PREPARE FAILED) and a change to either constant is a new owner approval, never an edit.
 
 Source: `datasets/motivation/Motivation Dataset - Sheet1.csv` of the partner repo motivation-experiment (default
 `~/projects/mcp/motivation-experiment/datasets/motivation/`, override with --csv). It is READ IN PLACE and never copied into
@@ -53,9 +58,8 @@ head and of each option (exactly 48 tokens is kept; only more than 48 is a cut),
 when N x P exceeds the contract's classify_max_total_tokens). It always refuses a real cut (REFUSED prefix-cut) and a
 door below experiment-coach's batch of 4 (REFUSED prefix-door, D-26).
 
-The condensed guide (D-09): two drafts of Sections 4-6 of the guide, (a) short enough to keep the served door at 8 texts
-(P at most 100) and (b) the fullest instruction the 192-token head keeps, with a per-artifact door of min(8, floor(800 / P)),
-never below 4 (D-26). The owner chooses between them, and approves the exact task.json bytes, before anything trains.
+The condensed guide (D-09): INSTRUCTIONS and DESCRIPTIONS condense Sections 4-6 of the guide into the short variant the
+owner approved, short enough to keep the served door at 8 texts (P at most 100); the contract door is unchanged.
 """
 import argparse
 import contextlib
@@ -101,35 +105,18 @@ PINNED = {"rows_in": 395, "distinct_texts": 395, "duplicates_collapsed": 0,
           "mixed_label_groups_dropped": 0, "mixed_label_rows_dropped": 0,
           "csv_sha256": "bc61c76bd29bcdd4c6466266b4e1161841f2107a4f02f5ff4fd96f1b7a3a4ae7"}
 
-# The two condensed drafts of guide Sections 4-6 (D-09), held side by side until the owner chooses (plan 12-01 Task 2).
-GUIDES = {
-    "a": {
-        "instructions": (
-            "Which function does this post serve? Social affiliative: signals belonging to a group (we, our people, calls "
-            "to join, mocking critics). Conspiratorial: explains events by hidden control or secret orchestration by a "
-            "group. Other: neither clear, weak or both. If unsure, choose other."),
-        "descriptions": {
-            "social_affiliative": "group belonging or loyalty",
-            "conspiratorial": "hidden control by a group",
-            "other": "neither clear, weak or mixed",
-        },
-    },
-    "b": {
-        "instructions": (
-            "Classify the motivational function this post expresses. Social affiliative: the post signals membership in, "
-            "alignment with or loyalty to a group. Cues: we, us, our people; a stated group identity; they or these people "
-            "as antagonist; everyone knows; community slogans; calls to share, join or act; mocking outsiders or critics. "
-            "Conspiratorial: the post explains events or institutions by hidden control, ownership or secret orchestration "
-            "by a group. Cues: own, control, puppet, takes orders from; behind, staged, caused. Open criticism of public "
-            "actions is not conspiratorial. Other: neither function is clearly expressed, evidence is weak, or both are "
-            "clear. Judge only the written words. When unsure choose other."),
-        "descriptions": {
-            "social_affiliative": "group membership, loyalty or alignment",
-            "conspiratorial": "hidden control or secret orchestration",
-            "other": "neither clear, weak or mixed evidence",
-        },
-    },
+# The condensed guide Sections 4-6 (D-09) as the owner approved them (plan 12-01 Task 2, variant a): the exact task.json
+# bytes these render to are bound to APPROVED_TASK_SHA256.
+INSTRUCTIONS = (
+    "Which function does this post serve? Social affiliative: signals belonging to a group (we, our people, calls "
+    "to join, mocking critics). Conspiratorial: explains events by hidden control or secret orchestration by a "
+    "group. Other: neither clear, weak or both. If unsure, choose other.")
+DESCRIPTIONS = {
+    "social_affiliative": "group belonging or loyalty",
+    "conspiratorial": "hidden control by a group",
+    "other": "neither clear, weak or mixed",
 }
+APPROVED_TASK_SHA256 = "f74a3ad3cfc00c160cc2959d95beb219aec859b394b883e87577a56dc14e7ea3"
 
 
 # ------------------------------------------------------------------------------------------------ the CSV
@@ -176,8 +163,8 @@ def eval_count(n_groups):
     return (n_groups + EVAL_DIVISOR - 1) // EVAL_DIVISOR
 
 
-def build(csv_path, task):
-    """({file name: bytes}, counts-only summary) for the CSV and the task dict {instructions, descriptions}."""
+def build(csv_path):
+    """({file name: bytes}, counts-only summary) for the CSV and the approved INSTRUCTIONS / DESCRIPTIONS."""
     csv_path = Path(csv_path)
     rows = read_rows(csv_path)
     groups = {}                                         # normalized hash -> [first exact text, [labels]]
@@ -205,7 +192,7 @@ def build(csv_path, task):
         raise PrepareFailed("train.jsonl would hold no row of some criterion: %s" % train_counts)
     calibration_split(train_rows, contract.constant("calibration_slice_fraction", "float"),
                       contract.constant("calibration_slice_min_per_class", "int"), SPLIT_SEED, len(LABELS))
-    task_doc = {"type": "choice", "instructions": task["instructions"], "criteria": dict(task["descriptions"])}
+    task_doc = {"type": "choice", "instructions": INSTRUCTIONS, "criteria": dict(DESCRIPTIONS)}
     if list(task_doc["criteria"]) != LABELS:
         raise PrepareFailed("the task's criteria %s are not %s in that order" % (list(task_doc["criteria"]), LABELS))
     named = lambda rs: [(t, LABELS[y]) for t, y in rs]  # noqa: E731
@@ -227,10 +214,11 @@ def check_pin(summary):
                             "update of PINNED" % ", ".join(bad))
 
 
-def draft_task(draft):
-    if draft not in GUIDES:
-        raise DataError("draft-missing", "--draft a or --draft b is required (the owner has not chosen yet)")
-    return GUIDES[draft]
+def check_approved(files):
+    """The task.json bytes about to be written must be the bytes the owner approved (T-12-02)."""
+    got = sha256_bytes(files["task.json"])
+    if got != APPROVED_TASK_SHA256:
+        raise PrepareFailed("task.json would hash to %s, not the approved %s" % (got[:12], APPROVED_TASK_SHA256[:12]))
 
 
 # ------------------------------------------------------------------------------------------------ the served prefix
@@ -341,13 +329,12 @@ def selftest():
         except Exception as e:                           # a traceback-class escape is a FAIL, never a crash
             case(name, False, "raised %s, not a DataError %s" % (type(e).__name__, rule))
 
-    guide = GUIDES["a"]
     with tempfile.TemporaryDirectory(prefix="motivation-selftest-") as tmp:
         tmp = Path(tmp)
         good = tmp / "good.csv"
         want = _synthetic_csv(good)
         print("the declared rule:")
-        files, s = build(good, guide)
+        files, s = build(good)
         case("rows_in, distinct_texts, duplicates_collapsed", (s["rows_in"], s["distinct_texts"], s["duplicates_collapsed"])
              == (want["rows_in"], want["distinct_texts"], want["duplicates_collapsed"]),
              json.dumps({k: s[k] for k in ("rows_in", "distinct_texts", "duplicates_collapsed")}))
@@ -372,7 +359,7 @@ def selftest():
         case("train.py's calibration split succeeds on the written rows", len(slice_fit[1]) > 0 and sum(class_counts(tr, 3)) == len(tr))
         case("split seed is the contract's declared seed", SPLIT_SEED == contract.declared_seed() == 13)
         case("EVAL_DIVISOR is 4", EVAL_DIVISOR == 4)
-        files2, s2 = build(good, guide)
+        files2, s2 = build(good)
         case("two builds are byte-identical (determinism)", files == files2 and s == s2)
         case("no shift.jsonl is built", "shift.jsonl" not in files)
 
@@ -415,13 +402,20 @@ def selftest():
             case("the pin refuses a CSV that is not the partner file", False, "accepted")
         except PrepareFailed:
             case("the pin refuses a CSV that is not the partner file", True)
-        refuses("an absent draft is refused", "draft-missing", lambda: draft_task(None))
+        tampered = dict(files, **{"task.json": files["task.json"] + b" "})
+        try:
+            check_approved(tampered)
+            case("task.json bytes other than the approved ones are refused", False, "accepted")
+        except PrepareFailed:
+            case("task.json bytes other than the approved ones are refused", True)
+        check_approved(files)
+        case("the written task.json hashes to the owner-approved sha256", sha256_bytes(files["task.json"]) == APPROVED_TASK_SHA256)
 
         print("no text on stdout or stderr (sentinel %s):" % SENTINEL)
-        base = ["--draft", "a", "--no-pin"]
+        base = ["--no-pin"]
         rc, o, e = _capture(["--csv", str(good), "--out", str(tmp / "out-a")] + base)
         case("success path: exit 0, PREPARE OK, no sentinel", rc == 0 and "PREPARE OK" in o and SENTINEL not in o + e, "exit %s" % rc)
-        rc, o, e = _capture(["--csv", str(good), "--out", str(tmp / "out-pin"), "--draft", "a"])
+        rc, o, e = _capture(["--csv", str(good), "--out", str(tmp / "out-pin")])
         case("a CSV that is not the pinned file: exit 1, no sentinel, nothing written",
              rc == 1 and "PREPARE FAILED" in e and SENTINEL not in o + e and not (tmp / "out-pin").exists(), "exit %s" % rc)
         sentinel_header = tmp / "sentinel-header.csv"
@@ -506,8 +500,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--csv", default=None, help="the partner CSV (prepare mode default: the partner repo path; --measure reads a CSV only when given)")
     ap.add_argument("--out", default=None, help="data dir (default data/decide/motivation-v1)")
-    ap.add_argument("--draft", choices=sorted(GUIDES), default=None, help="the condensed guide to build or measure (a or b)")
-    ap.add_argument("--task", default=None, help="--measure: a task.json file instead of a draft")
+    ap.add_argument("--task", default=None, help="--measure: a task.json file instead of the approved task")
     ap.add_argument("--measure", action="store_true", help="measure the task's prefix with the served tokenizer and print ONE JSON line")
     ap.add_argument("--max-texts", type=int, default=None, help="--measure: ENFORCE this served door (REFUSED prefix-budget when N x P exceeds the total)")
     ap.add_argument("--no-pin", action="store_true", help="accept a CSV that is not the pinned partner file")
@@ -523,9 +516,10 @@ def main(argv=None):
             return measure_main(ap, args)
         csv_path = Path(args.csv) if args.csv else DEFAULT_CSV
         out = Path(args.out) if args.out else DEFAULT_OUT
-        files, summary = build(csv_path, draft_task(args.draft))
+        files, summary = build(csv_path)
         if not args.no_pin:
             check_pin(summary)
+        check_approved(files)
         status = write_once(out, files)
     except DataError as e:                              # every input refusal: one REFUSED <rule> line, exit 2, no traceback
         print(str(e), file=sys.stderr)
@@ -549,8 +543,7 @@ def measure_main(ap, args):
         task = data.load_task(args.task)
         instructions, criteria = task["instructions"], task["criteria"]
     else:
-        guide = draft_task(args.draft)
-        instructions, criteria = guide["instructions"], guide["descriptions"]
+        instructions, criteria = INSTRUCTIONS, DESCRIPTIONS
     if args.max_texts is not None and args.max_texts < 1:
         ap.error("--max-texts must be at least 1")
     tok = load_tokenizer()

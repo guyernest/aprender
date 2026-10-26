@@ -1,0 +1,156 @@
+{
+  "schema": "laya-task-evidence-v3",
+  "phase": "12",
+  "plan": "12-01",
+  "variant": "a",
+  "owner_reply": "approve-a f74a3ad3cfc0",
+  "owner_approved_on": "2026-10-26",
+  "approved_bytes_sha256": "f74a3ad3cfc00c160cc2959d95beb219aec859b394b883e87577a56dc14e7ea3",
+  "task_json_sha256": "f74a3ad3cfc00c160cc2959d95beb219aec859b394b883e87577a56dc14e7ea3",
+  "chosen_max_texts": 8,
+  "door_mechanism": "contract classify_max_texts 8, unchanged",
+  "measured": {
+    "P": 97,
+    "markers": 3,
+    "options": [
+      {
+        "name": "social_affiliative",
+        "raw_tokens": 10,
+        "kept_tokens": 10,
+        "cut": false
+      },
+      {
+        "name": "conspiratorial",
+        "raw_tokens": 8,
+        "kept_tokens": 8,
+        "cut": false
+      },
+      {
+        "name": "other",
+        "raw_tokens": 8,
+        "kept_tokens": 8,
+        "cut": false
+      }
+    ],
+    "head_raw_tokens": 64,
+    "head_kept_tokens": 64,
+    "head_cut": false,
+    "instructions_tokens": 61,
+    "instruction_room_tokens": 160,
+    "p_cap": 196,
+    "state_room_tokens": 415,
+    "door_max_texts": 8,
+    "door_enforced": true,
+    "door_total": 776,
+    "fits_door": true,
+    "max_texts_that_fit": 8,
+    "door_b": 8,
+    "door_b_at_least_4": true
+  },
+  "texts_per_call": {
+    "p50": 5,
+    "p95": 4
+  },
+  "batch_of_4": {
+    "p50": true,
+    "p95": true,
+    "max": false
+  },
+  "posts_truncated": {
+    "count": 0,
+    "share": 0.0
+  },
+  "post_tokens": {
+    "p50": 45,
+    "p75": 61,
+    "p90": 69,
+    "p95": 77,
+    "p99": 108,
+    "max": 147,
+    "mean": 44.7,
+    "n": 395
+  },
+  "control": {
+    "stance_task_P": 57,
+    "stance_markers": 3
+  },
+  "data": {
+    "dir": "data/decide/motivation-v1",
+    "files": {
+      "task.json": {
+        "lines": 9,
+        "sha256": "f74a3ad3cfc00c160cc2959d95beb219aec859b394b883e87577a56dc14e7ea3"
+      },
+      "train.jsonl": {
+        "lines": 295,
+        "sha256": "f1d84f19ec38ed85356bcbcd1eae6ef8ad07fb97e014f61a17d37adc0d68d378"
+      },
+      "eval.jsonl": {
+        "lines": 100,
+        "sha256": "ee95d71fcb5d90d515b9fc6741e5df51087e763fa7f251ace83d9f11d5ccd575"
+      }
+    },
+    "counts": {
+      "rows_in": 395,
+      "distinct_texts": 395,
+      "duplicates_collapsed": 0,
+      "mixed_label_groups_dropped": 0,
+      "mixed_label_rows_dropped": 0,
+      "train": {
+        "social_affiliative": 66,
+        "conspiratorial": 41,
+        "other": 188
+      },
+      "eval": {
+        "social_affiliative": 23,
+        "conspiratorial": 14,
+        "other": 63
+      }
+    },
+    "split_seed": 13,
+    "eval_divisor": 4,
+    "rule": "nfc-trim-ws-v1 grouping, conflicting-label groups dropped, seed-13 stratified text-disjoint split with ceil(0.25 x class groups) per class to eval.jsonl, the rest to train.jsonl; no shift.jsonl",
+    "csv_sha256": "bc61c76bd29bcdd4c6466266b4e1161841f2107a4f02f5ff4fd96f1b7a3a4ae7"
+  },
+  "eval_fraction_note": "0.25 by EVAL_DIVISOR = 4 in prepare_motivation.py's docstring; laya-finetune-gate-v1 has no eval-fraction key, so D-13's contract-amendment branch does not fire",
+  "pi_train": {
+    "social_affiliative": {
+      "count": 66,
+      "of": 295,
+      "fraction": 0.2237
+    },
+    "conspiratorial": {
+      "count": 41,
+      "of": 295,
+      "fraction": 0.139
+    },
+    "other": {
+      "count": 188,
+      "of": 295,
+      "fraction": 0.6373
+    }
+  },
+  "guide_source": {
+    "file": "Classification_Guide_Motivational_Function_Iris_Yuster_25Oct2026.docx",
+    "author": "Dr. Iris Yuster",
+    "designation": "25 October 2026 draft",
+    "docx_sha256": "0e1d5a35ac3ccd455c5556fecbc5c1d1edec0e0a1100e2feac8bd16a42f29167",
+    "sections": "4-6",
+    "condensation_note": "about 9,478 guide tokens (Sections 4-6) condensed into 61 measured instruction tokens (prefix P 97)",
+    "routing_to_author": "not required for the pilot (D-10)"
+  },
+  "variant_b_not_chosen": {
+    "P": 190,
+    "door": 4,
+    "sha256": "58ad1d0188c25dfe8d85b7f91b883221651a7395eea7a513f6cc0e4d58ecad14",
+    "note": "shown to the owner at the checkpoint and not chosen; no decide-tool-boundary-v1 door change follows from this plan"
+  },
+  "partner_repo_head": "0c46b68887c4b0791693462ac845df2a2da8511d",
+  "pilot": {
+    "status": "pilot",
+    "reason": "25 October draft, not frozen; retrain after the freeze (D-01)"
+  },
+  "accuracy_claim": "hypothesis: no accuracy number exists before the gate run",
+  "measured_on": "2026-10-26",
+  "commit": "f83c55e4aa462c7dce4e9fd6969db472612b0086"
+}
