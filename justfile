@@ -1354,16 +1354,20 @@ laya-train data out *args:
     uv run --project scripts/laya_train --frozen python scripts/laya_train/train.py \
         --data "{{data}}" --out "{{out}}" {{args}}
 
-# The D-11 SetFit comparison cell (plan 10-05): s64e1b16 at seed 13 on the Laya splits as adapted by
+# The D-11 SetFit comparison cell (plan 10-05): s<shots>e1b16 at seed 13 on the Laya splits as adapted by
 # crates/aprender-contrastive-data/examples/laya_dir_to_canonical.rs (test == the Laya eval set). select (only when
 # no selection manifest exists; written to a temporary sibling and moved) -> train with the tracked explicit config
-# (CPU, about 30 min) -> eval validation (--lock-out) -> eval test (--selection-lock). `apr eval` reports ACCURACY.
-# Exit 0 = SETFIT CELL OK, 2 = SETFIT CELL REFUSED <step>: <detail>. The args are <data> <out> <config> <sel>; an
-# empty <sel> means <data>/selection-s64-seed13.
-laya-setfit-cell data="data/decide/goldstandard-2024-setfit" out="models/setfit/goldstandard-2024-s64e1b16-seed13" config="scripts/laya_train/setfit_cell_e1b16_cpu.json" sel="":
+# (CPU, about 30 min) -> eval validation (--lock-out) -> eval test (--selection-lock). `apr eval` reports ACCURACY and,
+# from the same pass, writes <out>/test-probabilities.json (--dump-probabilities: nine keys with row ids, per-row
+# text sha256 and the dataset fingerprint; plan 12-06). Exit 0 = SETFIT CELL OK, 2 = SETFIT CELL REFUSED <step>:
+# <detail>. The args are <data> <out> <config> <sel> <shots>; an empty <sel> means <data>/selection-s<shots>-seed13,
+# and <shots> is one of 8 16 32 64 (default 64: Phase 10's cell). Phase 12 runs s32 (D-25): its train pools after the
+# validation carve are below 64.
+laya-setfit-cell data="data/decide/goldstandard-2024-setfit" out="models/setfit/goldstandard-2024-s64e1b16-seed13" config="scripts/laya_train/setfit_cell_e1b16_cpu.json" sel="" shots="64":
     #!/usr/bin/env bash
     set -euo pipefail
     refuse() { echo "SETFIT CELL REFUSED $1: $2"; exit 2; }
+    case "{{shots}}" in 8|16|32|64) ;; *) refuse select "shots {{shots}} is not one of 8 16 32 64" ;; esac
     test -f "{{data}}/benchmark-manifest.json" || refuse select "no benchmark-manifest.json under {{data}} (run the laya_dir_to_canonical adapter, plan 10-05)"
     test -f "{{config}}" || refuse config "no config file {{config}} (apr setfit train requires --config)"
     MINILM="{{minilm_dir}}"
@@ -1372,14 +1376,14 @@ laya-setfit-cell data="data/decide/goldstandard-2024-setfit" out="models/setfit/
     test ! -e "$OUT/cell.apr" || refuse train "$OUT/cell.apr already exists; move it aside, apr setfit train will not replace it"
     . scripts/apr_bin.sh || exit 1
     export CARGO_INCREMENTAL=0
-    SELDIR="{{sel}}"; [ -n "$SELDIR" ] || SELDIR="{{data}}/selection-s64-seed13"
+    SELDIR="{{sel}}"; [ -n "$SELDIR" ] || SELDIR="{{data}}/selection-s{{shots}}-seed13"
     SEL="$SELDIR/selection-manifest.json"
     mkdir -p "$OUT"
     if [ ! -f "$SEL" ]; then
         test ! -e "$SELDIR" || refuse select "$SELDIR exists but holds no selection-manifest.json"
         TMPSEL="$SELDIR.tmp.$$"
         rc=0
-        "$APR" data select --data "{{data}}" --shots 64 --seed 13 --output "$TMPSEL" > "$OUT/select.log" 2>&1 || rc=$?
+        "$APR" data select --data "{{data}}" --shots {{shots}} --seed 13 --output "$TMPSEL" > "$OUT/select.log" 2>&1 || rc=$?
         if [ "$rc" -ne 0 ]; then rm -rf "$TMPSEL"; refuse select "$(grep -m 1 -E 'rror|REFUSED|efus' "$OUT/select.log" || echo "exit $rc")"; fi
         mv "$TMPSEL" "$SELDIR"
     fi
@@ -1395,9 +1399,10 @@ laya-setfit-cell data="data/decide/goldstandard-2024-setfit" out="models/setfit/
     if [ "$rc" -ne 0 ]; then refuse eval-validation "$(grep -m 1 -E 'rror|REFUSED|efus' "$OUT/eval-validation.log" || echo "exit $rc")"; fi
     rc=0
     "$APR" eval "$OUT/cell.apr" --task classify --data "{{data}}" --selection "$SEL" --split test \
-        --selection-lock "$OUT/selection.lock" --json > "$OUT/eval-test.json" 2> "$OUT/eval-test.log" || rc=$?
+        --selection-lock "$OUT/selection.lock" --dump-probabilities "$OUT/test-probabilities.json" \
+        --json > "$OUT/eval-test.json" 2> "$OUT/eval-test.log" || rc=$?
     if [ "$rc" -ne 0 ]; then refuse eval-test "$(grep -m 1 -E 'rror|REFUSED|efus' "$OUT/eval-test.log" || echo "exit $rc")"; fi
-    python3 -I -c 'import json, sys; r = json.load(open(sys.argv[1])); print("SETFIT CELL OK cell=s64e1b16 seed=13 artifact_sha256=%s metric_tag=%s value=%s n_rows=%s train_seconds=%s" % (r["artifact_sha256"], r["metric"], r["value"], r["n_rows"], sys.argv[2]))' "$OUT/eval-test.json" "$TRAIN_SECONDS"
+    python3 -I -c 'import json, sys; r = json.load(open(sys.argv[1])); print("SETFIT CELL OK cell=s%se1b16 seed=13 artifact_sha256=%s metric_tag=%s value=%s n_rows=%s train_seconds=%s" % (sys.argv[3], r["artifact_sha256"], r["metric"], r["value"], r["n_rows"], sys.argv[2]))' "$OUT/eval-test.json" "$TRAIN_SECONDS" "{{shots}}"
 
 # The D-10 one-epoch probe: a MEASUREMENT, not a gate run. One epoch of seed 13 through train.train_seed on the
 # real fit rows, the device read back, the per-step time, the per-epoch monitor cost, the row-length record and
