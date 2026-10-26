@@ -18,6 +18,17 @@ No torch import (at module level or anywhere): the self-test must run without th
                             verifier is the authority (one Rust ECE, OPS-03).
     nll(P, y)               mean -log(clip(p_true, 1e-12, 1)), spike 024's definition.
 
+Phase 12 bake-off functions (bakeoff.py reports through these and computes nothing itself):
+
+    precision_recall_per_class(P, y)         per label: support, predicted, tp, precision, recall.
+    false_assignment_rate(P, y, other, thr)  eval `other` rows whose largest non-`other` probability is
+                                             strictly > thr (D-05), over all eval `other` rows;
+                                             strict=False is the client-equivalent `>=`, reported only.
+    recall_at_threshold(P, y, k, thr)        true-k rows whose p_k is strictly > thr, over the true-k rows.
+    ece_bootstrap_ci(P, y, ...)              class-stratified percentile bootstrap around ece_top_label.
+    check_distribution(P, k)                 every row: K entries, each finite in [0, 1], sum 1 +- 1e-5.
+    length_tertile_cuts / length_band        the D-14 length bands.
+
 `P` is an [N, K] array of probabilities (rows sum to 1), `y` an [N] array of true label indices.
 
     python metrics.py --selftest    hand-computed cases + a replay of every frozen house case in
@@ -26,6 +37,7 @@ No torch import (at module level or anywhere): the self-test must run without th
 """
 import json
 import math
+import numbers
 import struct
 import sys
 from pathlib import Path
@@ -105,6 +117,130 @@ def rank_key(ece_post, rank_scale):
 def nll(P, y):
     P, y = _as_arrays(P, y)
     return float(-np.log(np.clip(P[np.arange(len(y)), y], 1e-12, 1.0)).mean())
+
+
+# ------------------------------------------------------------------------- Phase 12 bake-off functions
+#
+# Counts and rates only, over the same float64 widening of the stored f32 probabilities that the gate
+# scores. Every rate carries its numerator and denominator: a rate on ~14 conspiratorial rows is noise
+# unless the reader can see the 14.
+
+BOOTSTRAP_NOTE = ("not required to contain the point: resampled ECE sums absolute bin gaps, so it is "
+                  "biased upward and a correct point (0.0, say) can sit below lo")
+
+
+def precision_recall_per_class(P, y):
+    """Per label index: {label, support, predicted, tp, precision, recall}. Predictions are the argmax with
+    the same tie rule as `_f1` (numpy argmax: the lowest index). precision is None when nothing was
+    predicted as the label, recall None when the label has no support."""
+    P, y = _as_arrays(P, y)
+    pred = P.argmax(1)
+    out = []
+    for c in range(P.shape[1]):
+        tp = int(((pred == c) & (y == c)).sum())
+        predicted = int((pred == c).sum())
+        support = int((y == c).sum())
+        out.append({"label": c, "support": support, "predicted": predicted, "tp": tp,
+                    "precision": None if predicted == 0 else tp / predicted,
+                    "recall": None if support == 0 else tp / support})
+    return out
+
+
+def false_assignment_rate(P, y, other_index, threshold, strict=True):
+    """D-05: of the rows whose true label is `other_index`, the share whose largest NON-`other` probability
+    exceeds `threshold`. STRICT `>` is the declared rule; strict=False counts `>=` (what the client,
+    experiment-coach crates/core/src/treatment.rs, assigns at) and is only ever reported beside it.
+    The comparison is float64 on the stored f32 values widened, so a probability exactly equal to the
+    threshold is not counted under `>`. rate is None when no row is `other`."""
+    P, y = _as_arrays(P, y)
+    if not 0 <= int(other_index) < P.shape[1]:
+        raise ValueError("other_index %r is not a column of P (K = %d)" % (other_index, P.shape[1]))
+    other = y == int(other_index)
+    top = np.delete(P, int(other_index), axis=1).max(1)
+    hit = (top > threshold) if strict else (top >= threshold)
+    num, den = int((hit & other).sum()), int(other.sum())
+    return {"threshold": threshold, "numerator": num, "denominator": den,
+            "rate": None if den == 0 else num / den, "comparison": ">" if strict else ">="}
+
+
+def recall_at_threshold(P, y, k, threshold):
+    """Of the rows whose true label is k, the share assigned to k at `threshold`: p_k strictly > threshold.
+    For any threshold >= 0.5 that already means k is the top label, so no separate argmax condition."""
+    P, y = _as_arrays(P, y)
+    if not 0 <= int(k) < P.shape[1]:
+        raise ValueError("k %r is not a column of P (K = %d)" % (k, P.shape[1]))
+    own = y == int(k)
+    support = int(own.sum())
+    assigned = int(((P[:, int(k)] > threshold) & own).sum())
+    return {"label": int(k), "threshold": threshold, "assigned": assigned, "support": support,
+            "recall": None if support == 0 else assigned / support}
+
+
+def _stratified_indices(y, rng):
+    """One class-stratified resample: for each class, that class's row count drawn with replacement from that
+    class's rows (classes in index order, so the draw order is fixed by the seed alone)."""
+    parts = []
+    for c in sorted(set(int(v) for v in y)):
+        rows = np.flatnonzero(y == c)
+        parts.append(rows[rng.randint(0, len(rows), size=len(rows))])
+    return np.concatenate(parts)
+
+
+def ece_bootstrap_ci(P, y, bins=15, n_resamples=10000, seed=13):
+    """D-13: the house ECE (ece_top_label, never a second ECE) with a class-stratified percentile bootstrap
+    95 % interval (2.5 / 97.5), numpy RandomState(seed). Deterministic for a seed. The interval is NOT
+    required to contain the point (see BOOTSTRAP_NOTE); callers check 0 <= lo <= hi <= 1 only."""
+    P, y = _as_arrays(P, y)
+    if int(n_resamples) < 1:
+        raise ValueError("n_resamples must be >= 1")
+    rng = np.random.RandomState(seed)
+    vals = np.empty(int(n_resamples), dtype=np.float64)
+    for b in range(int(n_resamples)):
+        idx = _stratified_indices(y, rng)
+        vals[b] = ece_top_label(P[idx], y[idx], bins)
+    lo, hi = np.percentile(vals, 2.5), np.percentile(vals, 97.5)
+    return {"point": ece_top_label(P, y, bins), "lo": float(lo), "hi": float(hi),
+            "n_resamples": int(n_resamples), "seed": int(seed),
+            "method": "class-stratified percentile bootstrap, 2.5/97.5", "note": BOOTSTRAP_NOTE}
+
+
+def check_distribution(P, k, tol=1e-5):
+    """Refuse a malformed probability set before any metric is computed (`_as_arrays` checks finiteness
+    only): every row must hold exactly k numbers, each finite and in [0, 1], summing to 1 within tol.
+    Raises ValueError naming the ROW INDEX and the rule, never a value."""
+    rows = list(P)
+    if not rows:
+        raise ValueError("no probability rows")
+    for i, row in enumerate(rows):
+        try:
+            vals = list(row)
+        except TypeError:
+            raise ValueError("row %d: not a list of probabilities" % i) from None
+        if len(vals) != k:
+            raise ValueError("row %d: %d probabilities, expected %d" % (i, len(vals), k))
+        for v in vals:
+            if isinstance(v, bool) or not isinstance(v, numbers.Real):
+                raise ValueError("row %d: a probability is not a number" % i)
+            if not math.isfinite(float(v)):
+                raise ValueError("row %d: a probability is not finite" % i)
+            if float(v) < 0.0 or float(v) > 1.0:
+                raise ValueError("row %d: a probability is outside [0, 1]" % i)
+        if abs(math.fsum(float(v) for v in vals) - 1.0) > tol:
+            raise ValueError("row %d: the probabilities sum to 1 +- more than %g" % (i, tol))
+
+
+def length_tertile_cuts(lengths):
+    """D-14: the cut points (c1, c2) of the length tertiles, numpy.percentile at 100/3 and 200/3."""
+    a = np.asarray(lengths, dtype=np.float64)
+    if a.ndim != 1 or a.size == 0 or not np.isfinite(a).all():
+        raise ValueError("lengths must be a non-empty finite 1-D list")
+    return float(np.percentile(a, 100 / 3)), float(np.percentile(a, 200 / 3))
+
+
+def length_band(n, cuts):
+    """0 if n <= c1, 1 if n <= c2, else 2 (the declared band rule)."""
+    c1, c2 = cuts
+    return 0 if n <= c1 else (1 if n <= c2 else 2)
 
 
 # ------------------------------------------------------------------------------ numeric agreement
@@ -385,6 +521,100 @@ def _check(name, got, want, tol, failures):
         failures.append(name)
 
 
+def _behaviour(name, ok, failures, detail=""):
+    print("  %-4s %-72s %s" % ("ok" if ok else "FAIL", name, detail))
+    if not ok:
+        failures.append(name)
+    return 1
+
+
+def _selftest_bakeoff_functions(failures):
+    """Hand-computed cases for the Phase 12 functions; returns the number of cases run."""
+    n = 0
+    P = np.array([[.9, .05, .05], [.1, .8, .1], [.2, .2, .6], [.6, .3, .1]])
+    y = np.array([0, 1, 2, 2])
+
+    pr = precision_recall_per_class(P, y)
+    n += _behaviour("precision/recall: label 0 (2 predicted, 1 right, support 1)",
+                    (pr[0]["precision"], pr[0]["recall"], pr[0]["predicted"], pr[0]["support"]) == (0.5, 1.0, 2, 1),
+                    failures, str(pr[0]))
+    n += _behaviour("precision/recall: label 1 perfect", (pr[1]["precision"], pr[1]["recall"]) == (1.0, 1.0), failures)
+    n += _behaviour("precision/recall: label 2 (one right of two)", (pr[2]["precision"], pr[2]["recall"]) == (1.0, 0.5), failures)
+    pr2 = precision_recall_per_class(np.array([[.9, .1, 0.0], [.8, .2, 0.0]]), np.array([0, 1]))
+    n += _behaviour("precision is None for a label never predicted, recall None without support",
+                    pr2[2]["precision"] is None and pr2[2]["recall"] is None and pr2[1]["precision"] is None
+                    and pr2[1]["recall"] == 0.0, failures, str(pr2[1:]))
+
+    f6 = false_assignment_rate(P, y, 2, 0.6)
+    f5 = false_assignment_rate(P, y, 2, 0.5)
+    g6 = false_assignment_rate(P, y, 2, 0.6, strict=False)
+    n += _behaviour("false assignment at 0.6: a probability equal to the threshold is not counted (strict >)",
+                    (f6["numerator"], f6["denominator"], f6["rate"], f6["comparison"]) == (0, 2, 0.0, ">"), failures, str(f6))
+    n += _behaviour("false assignment at 0.5: one of two other rows", (f5["numerator"], f5["rate"]) == (1, 0.5), failures, str(f5))
+    n += _behaviour("client-equivalent >= at 0.6 counts the equal probability",
+                    (g6["numerator"], g6["denominator"], g6["comparison"]) == (1, 2, ">="), failures, str(g6))
+    none_other = false_assignment_rate(P[:2], y[:2], 2, 0.6)
+    n += _behaviour("false assignment: rate None when no row is other", none_other["rate"] is None and none_other["denominator"] == 0, failures)
+
+    r = recall_at_threshold(P, y, 0, 0.85)
+    n += _behaviour("recall at 0.85 for label 0: 0.9 > 0.85, support 1",
+                    (r["assigned"], r["support"], r["recall"]) == (1, 1, 1.0), failures, str(r))
+    r2 = recall_at_threshold(P, y, 1, 0.8)
+    n += _behaviour("recall: 0.8 is not > 0.8", (r2["assigned"], r2["recall"]) == (0, 0.0), failures, str(r2))
+
+    rng = np.random.RandomState(7)
+    Q = rng.dirichlet([1, 1, 1], 60)
+    z = rng.randint(0, 3, 60)
+    a = ece_bootstrap_ci(Q, z, n_resamples=500)
+    b = ece_bootstrap_ci(Q, z, n_resamples=500)
+    n += _behaviour("ece_bootstrap_ci: point is exactly ece_top_label(P, y, 15)", a["point"] == ece_top_label(Q, z, 15), failures)
+    n += _behaviour("ece_bootstrap_ci: 0 <= lo <= hi <= 1", 0.0 <= a["lo"] <= a["hi"] <= 1.0, failures, "lo %.4f hi %.4f" % (a["lo"], a["hi"]))
+    n += _behaviour("ece_bootstrap_ci: same seed, identical result", a == b, failures)
+    c = ece_bootstrap_ci(Q, z, n_resamples=500, seed=14)
+    n += _behaviour("ece_bootstrap_ci: another seed moves the interval", (c["lo"], c["hi"]) != (a["lo"], a["hi"]), failures)
+    rs = np.random.RandomState(5)
+    counts_kept = all(np.array_equal(np.bincount(z[_stratified_indices(z, rs)], minlength=3), np.bincount(z, minlength=3))
+                      for _ in range(50))
+    n += _behaviour("every stratified resample keeps each class's count", counts_kept, failures)
+    # A calibrated-looking set whose point is 0.0: accepted whatever its interval (no containment rule).
+    cal = ece_bootstrap_ci(np.array([[1.0, 0.0]] * 3 + [[0.0, 1.0]] * 3), np.array([0] * 3 + [1] * 3), n_resamples=100)
+    n += _behaviour("point 0.0 is accepted: bounds only, never containment",
+                    cal["point"] == 0.0 and 0.0 <= cal["lo"] <= cal["hi"] <= 1.0, failures, "lo %.4f hi %.4f" % (cal["lo"], cal["hi"]))
+
+    refused = []
+    for label, bad, k in (("wrong length", np.array([[0.5, 0.5]]), 3), ("outside [0, 1]", np.array([[0.7, 0.4, -0.1]]), 3),
+                          ("sum off 1", np.array([[0.5, 0.3, 0.3]]), 3), ("non-finite", np.array([[np.nan, 0.5, 0.5]]), 3),
+                          ("above 1", np.array([[1.2, 0.0, -0.2]]), 3), ("not a number", [["a", "b", "c"]], 3)):
+        try:
+            check_distribution(bad, k)
+        except ValueError as e:
+            refused.append(label if str(e).startswith("row 0:") else label + "?")
+    n += _behaviour("check_distribution refuses six bad inputs, naming the row index",
+                    len(refused) == 6 and not any(x.endswith("?") for x in refused), failures, str(refused))
+    try:
+        check_distribution(np.vstack([Q, [[0.2, 0.2, 0.2]]]), 3)
+        later = False
+    except ValueError as e:
+        later = str(e).startswith("row 60:")
+    n += _behaviour("check_distribution names the offending row (row 60)", later, failures)
+    ok_dist = True
+    try:
+        check_distribution(Q, 3)
+        check_distribution(np.array([[1.0, 0.0, 0.0]]), 3)
+    except ValueError:
+        ok_dist = False
+    n += _behaviour("check_distribution accepts a valid set, including 0 and 1", ok_dist, failures)
+
+    c1, c2 = length_tertile_cuts(list(range(1, 10)))
+    n += _behaviour("length_tertile_cuts equals numpy.percentile at 100/3 and 200/3",
+                    (c1, c2) == (float(np.percentile(np.arange(1, 10), 100 / 3)), float(np.percentile(np.arange(1, 10), 200 / 3))),
+                    failures, "%r %r" % (c1, c2))
+    n += _behaviour("length_band boundaries: c1 -> 0, just above c1 -> 1, c2 -> 1, just above c2 -> 2",
+                    (length_band(c1, (c1, c2)), length_band(c1 + 1e-9, (c1, c2)), length_band(c2, (c1, c2)),
+                     length_band(c2 + 1e-9, (c1, c2))) == (0, 1, 1, 2), failures)
+    return n
+
+
 def selftest():
     failures = []
     print("hand-computed cases:")
@@ -442,6 +672,10 @@ def selftest():
                                 "" if ok else "got %s want %s" % (got, want)))
         if not ok:
             failures.append("numeric " + c["name"])
+
+    print("bake-off functions (Phase 12, plan 12-05):")
+    n_behaviour = _selftest_bakeoff_functions(failures)
+    print("  %d bake-off function cases run" % n_behaviour)
 
     if failures:
         print("METRICS SELFTEST FAILED: %s" % ", ".join(failures))

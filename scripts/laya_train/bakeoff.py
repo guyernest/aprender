@@ -1,0 +1,708 @@
+"""The motivation bake-off: one counts-only report over the three arms' eval probabilities (Phase 12, plan 12-05).
+
+    uv run --project scripts/laya_train --frozen python -I scripts/laya_train/bakeoff.py \\
+        --data DIR --laya RUN_DIR --setfit PATH|blocked:<failure_class>:<evidence path> \\
+        --kev PATH|blocked:<failure_class>:<evidence path> --out PATH
+    uv run --project scripts/laya_train --frozen python -I scripts/laya_train/bakeoff.py --render-tables EVIDENCE
+    uv run --project scripts/laya_train --frozen python -I scripts/laya_train/bakeoff.py --selftest
+
+OPS-03: every number comes from scripts/laya_train/metrics.py (macro_f1, ece_top_label, precision_recall_per_class,
+false_assignment_rate, recall_at_threshold, ece_bootstrap_ci, length_tertile_cuts, length_band, check_distribution),
+the one Python home of the gate metrics. This script computes no metric of its own: it aligns rows, calls metrics.*,
+and lays the results out. REPORTED, NOT A GATE: nothing here decides a pass, a deploy or a switch (`not_a_gate`).
+
+DECLARED RULES (written before any arm's number exists; the run only applies them):
+
+    arms          laya (eval-probs.json of the Laya run dir: the shipped median-ECE seed, calibrated), setfit and kev
+                  (reference arms, D-06). laya_zero_shot (zero-shot-probs.json, the declared base on the same rows) is
+                  reported beside them as a baseline and is not ranked. A blocked arm is reported with its
+                  failure_class and evidence path and is absent from the ranking.
+    ranking       by metrics.macro_f1 on the shared eval split, descending (D-05).
+    tiebreak      two arms are TIED when their macro-F1 is equal rounded to 4 decimals; the tie is broken by the LOWER
+                  false-assignment rate at 0.6 (experiment-coach's motivation_min_prob), then by the unrounded macro-F1.
+                  The false-assignment rate is never used any other way: there is no false-assignment ceiling.
+    clearly beats a reference arm whose macro-F1 exceeds Laya's by at least 0.05 (the gate's own margin threshold,
+                  laya-finetune-gate-v1 gate_min_macro_f1_margin, checked against the contract by --selftest) is
+                  written as the finding `reference_arm_clearly_beats_laya`. It is a finding, never a switch: Laya
+                  stays the served arm (D-06).
+    thresholds    0.5, 0.6, 0.7 and 0.85. The false-assignment rate of an arm is the share of its eval `other` rows
+                  whose largest non-`other` probability is STRICTLY greater than the threshold (D-05, "exceeds"),
+                  over all its eval `other` rows. Beside it, `client_ge` is the same count with `>=`
+                  (experiment-coach assigns at p >= min_prob, crates/core/src/treatment.rs:59): reported only, never
+                  ranked, so the hand-off can disclose the difference at exact threshold equality. Probabilities
+                  are compared as float64; Laya's and Kev's are stored f32 values widened, so a value that prints
+                  as 0.6 is the f32 0.60000002 and lies above 0.6.
+    length        len(text) in code points of the eval.jsonl text. Bands are the tertiles of the eval lengths: cut
+                  points c1, c2 = numpy.percentile at 100/3 and 200/3 (recorded), band 0 if len <= c1, 1 if len <= c2,
+                  else 2 (D-14). Per-class precision and recall, per-class counts and the false-assignment rates are
+                  reported inside each band for every arm, the counts beside every rate (about 4 conspiratorial rows
+                  per band: say so).
+    ECE           the house top-label ECE (metrics.ece_top_label, 15 bins from the contract) with a class-stratified
+                  percentile bootstrap 95 % interval, 10,000 resamples, numpy RandomState(13) (D-13). Reported, not a
+                  gate. The interval is checked only for 0 <= lo <= hi <= 1 and for determinism, NEVER for containing
+                  the point (the bootstrap is biased upward). Inside a length band the interval is reported only for
+                  a band of at least 30 rows; a smaller band carries its point and the string `not_reported`.
+    source batch  UNMEASURED: the mapping is not available (D-04, D-15). Nothing is computed by source.
+    counts only   no post text is read into the report, printed or written; row identity is by index and sha256.
+
+ALIGNMENT is by ROW IDENTITY, never by truth labels (two swapped same-label rows leave every label-based check green):
+Laya and Kev by index and text_sha256 (data.exact_sha256 of the eval text); the SetFit dump by its row_ids
+(`test:<i>`, the adapter's ids) and its per-row text_sha256, with truth equal to the eval labels only as a secondary
+check. Every probability row of every arm passes metrics.check_distribution before any metric. Laya's numbers must
+reproduce its gate report bit for bit (fine_tuned.macro_f1, fine_tuned.ece_post, zero_shot.macro_f1) or the run is
+refused. Refusals print one `REFUSED bakeoff-...` line and exit 2.
+"""
+import argparse
+import contextlib
+import io
+import json
+import math
+import re
+import sys
+import tempfile
+from pathlib import Path
+
+import numpy as np
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import common  # noqa: E402
+import contract  # noqa: E402
+import data  # noqa: E402
+import metrics  # noqa: E402
+
+SCHEMA = "motivation-bakeoff-v1"
+THRESHOLDS = (0.5, 0.6, 0.7, 0.85)
+LEAD_THRESHOLDS = (0.6, 0.85)
+TIEBREAK_THRESHOLD = 0.6
+CLEARLY_BEATS_MARGIN = 0.05
+BAND_MIN_ROWS = 30
+N_RESAMPLES = 10000
+BOOTSTRAP_SEED = 13
+OTHER_LABEL = "other"
+ARM_ORDER = ("laya", "laya_zero_shot", "setfit", "kev")
+RANKED_ARMS = ("laya", "setfit", "kev")
+SOURCE_BATCH = "unmeasured (the mapping is not available; D-04, D-15)"
+THRESHOLD_NOTE = ("the declared false-assignment rate counts a largest non-other probability STRICTLY greater than the "
+                  "threshold (D-05); experiment-coach assigns at p >= min_prob, so client_ge holds the "
+                  "client-equivalent counts (>=), reported only and never ranked; the two differ only at exact "
+                  "threshold equality; Laya and Kev probabilities are stored f32 values widened to float64")
+BAND_RULES = ("len <= c1", "c1 < len <= c2", "len > c2")
+
+
+class BakeoffRefused(Exception):
+    """A refused input: the message is the one `REFUSED bakeoff-...` line."""
+
+
+def refuse(rule, detail):
+    raise BakeoffRefused("REFUSED %s: %s" % (rule, detail))
+
+
+def rules_block():
+    return {
+        "ranking": "metrics.macro_f1 on the shared eval split, descending (D-05)",
+        "tiebreak": "macro-F1 equal rounded to 4 decimals -> lower false-assignment rate at %s ranks first; "
+                    "no false-assignment ceiling" % TIEBREAK_THRESHOLD,
+        "clearly_beats": "reference macro-F1 - Laya macro-F1 >= %s -> finding reference_arm_clearly_beats_laya; "
+                         "a finding, never a switch (D-06)" % CLEARLY_BEATS_MARGIN,
+        "clearly_beats_margin": CLEARLY_BEATS_MARGIN,
+        "thresholds": list(THRESHOLDS),
+        "false_assignment": "eval other rows whose largest non-other probability is strictly > threshold, over all "
+                            "eval other rows (D-05); client_ge is the same with >=, reported only",
+        "length": "len(text) in code points; tertile cuts numpy.percentile at 100/3 and 200/3; band 0 if len <= c1, "
+                  "1 if len <= c2, else 2 (D-14)",
+        "ece": "metrics.ece_top_label, class-stratified percentile bootstrap 95 %% interval, %d resamples, "
+               "RandomState(%d); reported, not a gate; the interval is not required to contain the point (D-13)"
+               % (N_RESAMPLES, BOOTSTRAP_SEED),
+        "band_interval_min_rows": BAND_MIN_ROWS,
+        "source_batch": "unmeasured (D-04, D-15)",
+        "alignment": "row identity (index + text_sha256; SetFit row_ids), never truth labels",
+        "counts_only": True,
+    }
+
+
+# ------------------------------------------------------------------------------------------------- inputs
+
+def _read_json(path, arm, what):
+    try:
+        return json.loads(Path(path).read_bytes().decode("utf-8"))
+    except FileNotFoundError:
+        refuse("bakeoff-alignment", "%s %s is missing" % (arm, what))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        refuse("bakeoff-alignment", "%s %s is not UTF-8 JSON" % (arm, what))
+
+
+def load_data_dir(data_dir):
+    d = Path(data_dir)
+    task = data.load_task(d / "task.json")
+    train = data.load_rows(d / "train.jsonl", task, "train")
+    ev = data.load_rows(d / "eval.jsonl", task, "eval")
+    if OTHER_LABEL not in task["labels"]:
+        refuse("bakeoff-alignment", "task.json has no criterion named %r" % OTHER_LABEL)
+    return task, train, ev
+
+
+def distribution_or_refuse(arm, rows, k):
+    try:
+        metrics.check_distribution(rows, k)
+    except ValueError as e:
+        refuse("bakeoff-alignment", "%s distribution %s" % (arm, e))
+    return np.array(rows, dtype=np.float64)
+
+
+def read_eval_probs(path, arm, labels, ev_rows):
+    """eval_probs_schema `{labels, rows: [{row, text_sha256, probabilities}]}` -> the [N, K] float64 array."""
+    doc = _read_json(path, arm, "probability file")
+    if not isinstance(doc, dict) or not isinstance(doc.get("rows"), list):
+        refuse("bakeoff-alignment", "%s probability file is not {labels, rows}" % arm)
+    if doc.get("labels") != labels:
+        refuse("bakeoff-alignment", "%s labels differ from task.json" % arm)
+    rows = doc["rows"]
+    if len(rows) != len(ev_rows):
+        refuse("bakeoff-alignment", "%s has %d rows, eval.jsonl has %d" % (arm, len(rows), len(ev_rows)))
+    probs = []
+    for i, r in enumerate(rows):
+        if not isinstance(r, dict) or "probabilities" not in r:
+            refuse("bakeoff-alignment", "%s row %d has no probabilities" % (arm, i))
+        probs.append(r["probabilities"])
+    return distribution_or_refuse(arm, probs, len(labels))
+
+
+def read_setfit(path, labels, ev_rows):
+    doc = _read_json(path, "setfit", "probability dump")
+    if not isinstance(doc, dict) or not isinstance(doc.get("probabilities"), list):
+        refuse("bakeoff-alignment", "setfit probability dump has no probabilities")
+    if doc.get("ordered_labels") != labels:
+        refuse("bakeoff-alignment", "setfit ordered_labels differ from task.json")
+    if len(doc["probabilities"]) != len(ev_rows):
+        refuse("bakeoff-alignment", "setfit has %d rows, eval.jsonl has %d" % (len(doc["probabilities"]), len(ev_rows)))
+    return distribution_or_refuse("setfit", doc["probabilities"], len(labels)), doc
+
+
+def read_laya_run(run_dir, labels, ev_rows):
+    run = Path(run_dir)
+    ft = read_eval_probs(run / "eval-probs.json", "laya", labels, ev_rows)
+    zs = read_eval_probs(run / "zero-shot-probs.json", "laya_zero_shot", labels, ev_rows)
+    seeds = []
+    for p in sorted((run / "seeds").glob("seed-*/eval-probs.json"),
+                    key=lambda q: int(q.parent.name.split("-", 1)[1])):
+        seed = int(p.parent.name.split("-", 1)[1])
+        seeds.append((seed, read_eval_probs(p, "laya seed %d" % seed, labels, ev_rows)))
+    gate = _read_json(run / "gate-report.json", "laya", "gate-report.json")
+    return ft, zs, seeds, gate
+
+
+# ----------------------------------------------------------------------------------------------- the report
+
+class Ctx:
+    """What every arm is measured against: the labels, the eval truth, the bands."""
+
+    def __init__(self, task, ev_rows, bins, n_resamples):
+        self.labels = task["labels"]
+        self.k = len(self.labels)
+        self.other = self.labels.index(OTHER_LABEL)
+        self.y = np.array([lab for _, lab in ev_rows], dtype=np.int64)
+        self.lengths = [len(t) for t, _ in ev_rows]
+        self.cuts = metrics.length_tertile_cuts(self.lengths)
+        self.band = np.array([metrics.length_band(n, self.cuts) for n in self.lengths], dtype=np.int64)
+        self.bins = bins
+        self.n_resamples = n_resamples
+
+
+def _fa_record(P, y, ctx, thr):
+    d = metrics.false_assignment_rate(P, y, ctx.other, thr)
+    g = metrics.false_assignment_rate(P, y, ctx.other, thr, strict=False)
+    d["client_ge"] = {k: g[k] for k in ("numerator", "denominator", "rate", "comparison")}
+    return d
+
+
+def _scope(P, y, ctx):
+    per_class = []
+    for r in metrics.precision_recall_per_class(P, y):
+        per_class.append(dict(r, label=ctx.labels[r["label"]]))
+    recall_at = {}
+    for thr in LEAD_THRESHOLDS:
+        recall_at[str(thr)] = {}
+        for k in range(ctx.k):
+            if k != ctx.other:
+                r = metrics.recall_at_threshold(P, y, k, thr)
+                recall_at[str(thr)][ctx.labels[k]] = {"assigned": r["assigned"], "support": r["support"],
+                                                      "recall": r["recall"]}
+    return {"per_class": per_class,
+            "false_assignment": {str(t): _fa_record(P, y, ctx, t) for t in THRESHOLDS},
+            "recall_at": recall_at}
+
+
+def _band_ece(Pb, yb, ctx):
+    point = metrics.ece_top_label(Pb, yb, ctx.bins)
+    if len(yb) < BAND_MIN_ROWS:
+        return {"point": point, "interval": "not_reported"}
+    ci = metrics.ece_bootstrap_ci(Pb, yb, ctx.bins, ctx.n_resamples, BOOTSTRAP_SEED)
+    return {"point": point, "interval": {"lo": ci["lo"], "hi": ci["hi"], "n_resamples": ci["n_resamples"],
+                                         "seed": ci["seed"]}}
+
+
+def arm_record(P, ctx):
+    y = ctx.y
+    rec = {"status": "completed", "n": int(len(y)), "macro_f1": metrics.macro_f1(P, y)}
+    rec.update(_scope(P, y, ctx))
+    rec["ece"] = metrics.ece_bootstrap_ci(P, y, ctx.bins, ctx.n_resamples, BOOTSTRAP_SEED)
+    bands = []
+    for b in range(3):
+        sel = ctx.band == b
+        if not sel.any():
+            bands.append({"band": b, "rule": BAND_RULES[b], "n": 0, "empty": True})
+            continue
+        Pb, yb = P[sel], y[sel]
+        band = {"band": b, "rule": BAND_RULES[b], "n": int(sel.sum())}
+        band.update(_scope(Pb, yb, ctx))
+        band["ece"] = _band_ece(Pb, yb, ctx)
+        bands.append(band)
+    rec["bands"] = bands
+    return rec
+
+
+def rank_arms(arms):
+    """Ranking by macro-F1; stage 1 has no tiebreak yet."""
+    ranked = [(n, a) for n, a in arms.items() if n in RANKED_ARMS and a["status"] == "completed"]
+    ranked.sort(key=lambda na: (-na[1]["macro_f1"], na[0]))
+    return [{"rank": i + 1, "arm": n, "macro_f1": a["macro_f1"],
+             "false_assignment_0_6": {k: a["false_assignment"][str(TIEBREAK_THRESHOLD)][k]
+                                      for k in ("numerator", "denominator", "rate")},
+             "tiebreak_applied": False} for i, (n, a) in enumerate(ranked)]
+
+
+def findings_for(arms):
+    return []
+
+
+def _class_table(rows, labels):
+    counts = [0] * len(labels)
+    for _, y in rows:
+        counts[y] += 1
+    n = len(rows)
+    return {"n": n, "counts": {lab: c for lab, c in zip(labels, counts)},
+            "fractions": {lab: c / n for lab, c in zip(labels, counts)}}
+
+
+def build_report(task, train, ev, laya_run, setfit_path, kev_path, input_files, n_resamples=N_RESAMPLES):
+    labels = task["labels"]
+    bins = int(contract.thresholds()["ece_bins"])
+    ctx = Ctx(task, ev, bins, n_resamples)
+    ft, zs, seeds, gate = read_laya_run(laya_run, labels, ev)
+    arms = {"laya": arm_record(ft, ctx), "laya_zero_shot": arm_record(zs, ctx)}
+    setfit_P, setfit_doc = read_setfit(setfit_path, labels, ev)
+    arms["setfit"] = arm_record(setfit_P, ctx)
+    arms["kev"] = arm_record(read_eval_probs(kev_path, "kev", labels, ev), ctx)
+    laya_seeds = [{"seed": s, "macro_f1": metrics.macro_f1(P, ctx.y), "ece_post": metrics.ece_top_label(P, ctx.y, bins)}
+                  for s, P in seeds]
+    band_counts = [int((ctx.band == b).sum()) for b in range(3)]
+    inputs = [{"label": lab, "path": str(p), "sha256": common.sha256_file(p)} for lab, p in input_files]
+    return {
+        "schema": SCHEMA,
+        "not_a_gate": True,
+        "rules": rules_block(),
+        "eval": {"n": int(len(ctx.y)), "per_class_counts": _class_table(ev, labels)["counts"],
+                 "labels": list(labels), "other_index": ctx.other,
+                 "length": {"unit": "code points", "cuts": [ctx.cuts[0], ctx.cuts[1]], "band_counts": band_counts}},
+        "prior": {"pi_train": _class_table(train, labels)},
+        "arms": {n: arms[n] for n in ARM_ORDER},
+        "laya_seeds": laya_seeds,
+        "ranking": rank_arms(arms),
+        "findings": findings_for(arms),
+        "source_batch": SOURCE_BATCH,
+        "threshold_note": THRESHOLD_NOTE,
+        "inputs": inputs,
+        "setfit_provenance": {"artifact_sha256": setfit_doc.get("artifact_sha256"),
+                              "dataset_fingerprint": setfit_doc.get("dataset_fingerprint")},
+    }
+
+
+# ------------------------------------------------------------------------------------------ rendering
+
+def _f4(x):
+    return "n/a" if x is None else "%.4f" % x
+
+
+def _frac(num, den):
+    return "%d/%d" % (num, den)
+
+
+def _blocked_label(arm):
+    return "blocked (%s)" % arm.get("failure_class", "unknown")
+
+
+def _scopes(arm):
+    """(scope label, record) for the whole eval set and each non-empty band, in a fixed order."""
+    out = [("all", arm)]
+    for b in arm.get("bands", []):
+        out.append(("band %d (%s)" % (b["band"], b["rule"]), b))
+    return out
+
+
+def render_tables(ev):
+    if ev.get("schema") != SCHEMA:
+        refuse("bakeoff-render", "not a %s evidence file" % SCHEMA)
+    arms = ev["arms"]
+    cuts = ev["eval"]["length"]["cuts"]
+    lines = []
+    emit = lines.append
+    emit("Eval rows: %d; length cuts c1 = %.4f, c2 = %.4f (code points); band counts %s."
+         % (ev["eval"]["n"], cuts[0], cuts[1], ev["eval"]["length"]["band_counts"]))
+    emit("")
+    emit("### LEAD: false assignment (eval `other` rows whose largest non-other probability is > threshold)")
+    emit("")
+    emit("| arm | scope | other rows | >0.6 num/den | rate | client_ge num | >0.85 num/den | rate | client_ge num |")
+    emit("|---|---|---|---|---|---|---|---|---|")
+    for name in ARM_ORDER:
+        arm = arms[name]
+        if arm["status"] != "completed":
+            emit("| %s | %s | - | - | - | - | - | - | - |" % (name, _blocked_label(arm)))
+            continue
+        for scope, rec in _scopes(arm):
+            if rec.get("empty"):
+                emit("| %s | %s | 0 | - | - | - | - | - | - |" % (name, scope))
+                continue
+            f6 = rec["false_assignment"]["0.6"]
+            f85 = rec["false_assignment"]["0.85"]
+            emit("| %s | %s | %d | %s | %s | %d | %s | %s | %d |" % (
+                name, scope, f6["denominator"], _frac(f6["numerator"], f6["denominator"]), _f4(f6["rate"]),
+                f6["client_ge"]["numerator"], _frac(f85["numerator"], f85["denominator"]), _f4(f85["rate"]),
+                f85["client_ge"]["numerator"]))
+    emit("")
+    emit("### RECALL: true rows assigned to their class at the threshold (p > threshold)")
+    emit("")
+    emit("| arm | scope | class | @0.6 assigned/support | recall | @0.85 assigned/support | recall |")
+    emit("|---|---|---|---|---|---|---|")
+    for name in ARM_ORDER:
+        arm = arms[name]
+        if arm["status"] != "completed":
+            emit("| %s | %s | - | - | - | - | - |" % (name, _blocked_label(arm)))
+            continue
+        for scope, rec in _scopes(arm):
+            if rec.get("empty"):
+                continue
+            for lab in rec["recall_at"]["0.6"]:
+                r6, r85 = rec["recall_at"]["0.6"][lab], rec["recall_at"]["0.85"][lab]
+                emit("| %s | %s | %s | %s | %s | %s | %s |" % (
+                    name, scope, lab, _frac(r6["assigned"], r6["support"]), _f4(r6["recall"]),
+                    _frac(r85["assigned"], r85["support"]), _f4(r85["recall"])))
+    emit("")
+    emit("### RANKING: macro-F1 on the shared eval split (laya_zero_shot is a baseline, not ranked)")
+    emit("")
+    emit("| rank | arm | macro-F1 | false assignment >0.6 | tiebreak applied |")
+    emit("|---|---|---|---|---|")
+    for r in ev["ranking"]:
+        fa = r["false_assignment_0_6"]
+        emit("| %d | %s | %s | %s (%s) | %s |" % (r["rank"], r["arm"], _f4(r["macro_f1"]),
+                                                  _frac(fa["numerator"], fa["denominator"]), _f4(fa["rate"]),
+                                                  "yes" if r["tiebreak_applied"] else "no"))
+    for name in ARM_ORDER:
+        arm = arms[name]
+        if name in RANKED_ARMS and arm["status"] != "completed":
+            emit("| - | %s | %s | - | - |" % (name, _blocked_label(arm)))
+    base = arms["laya_zero_shot"]
+    if base["status"] == "completed":
+        emit("| baseline | laya_zero_shot | %s | - | - |" % _f4(base["macro_f1"]))
+    emit("")
+    for f in ev["findings"]:
+        emit("Finding: %s (%s macro-F1 %s vs laya %s)" % (f["id"], f["arm"], _f4(f["macro_f1"]), _f4(f["laya_macro_f1"])))
+    if not ev["findings"]:
+        emit("Findings: none")
+    emit("")
+    emit("### PER-CLASS: precision / recall (support = true rows, predicted = argmax rows)")
+    emit("")
+    emit("| arm | scope | class | support | predicted | precision | recall |")
+    emit("|---|---|---|---|---|---|---|")
+    for name in ARM_ORDER:
+        arm = arms[name]
+        if arm["status"] != "completed":
+            emit("| %s | %s | - | - | - | - | - |" % (name, _blocked_label(arm)))
+            continue
+        for scope, rec in _scopes(arm):
+            if rec.get("empty"):
+                continue
+            for pc in rec["per_class"]:
+                emit("| %s | %s | %s | %d | %d | %s | %s |" % (name, scope, pc["label"], pc["support"], pc["predicted"],
+                                                              _f4(pc["precision"]), _f4(pc["recall"])))
+    emit("")
+    emit("### ECE: house top-label ECE (15 bins) with the class-stratified bootstrap 95 % interval")
+    emit("")
+    emit("| arm | scope | rows | ECE | 95 % interval |")
+    emit("|---|---|---|---|---|")
+    for name in ARM_ORDER:
+        arm = arms[name]
+        if arm["status"] != "completed":
+            emit("| %s | %s | - | - | - |" % (name, _blocked_label(arm)))
+            continue
+        emit("| %s | all | %d | %s | [%s, %s] |" % (name, arm["n"], _f4(arm["ece"]["point"]), _f4(arm["ece"]["lo"]),
+                                                   _f4(arm["ece"]["hi"])))
+        for b in arm["bands"]:
+            if b.get("empty"):
+                continue
+            iv = b["ece"]["interval"]
+            shown = iv if isinstance(iv, str) else "[%s, %s]" % (_f4(iv["lo"]), _f4(iv["hi"]))
+            emit("| %s | band %d (%s) | %d | %s | %s |" % (name, b["band"], b["rule"], b["n"], _f4(b["ece"]["point"]), shown))
+    return "\n".join(lines) + "\n"
+
+
+# ----------------------------------------------------------------------------------------------- the CLI
+
+def run(args):
+    task, train, ev = load_data_dir(args.data)
+    run_dir = Path(args.laya)
+    d = Path(args.data)
+    input_files = [("data/task.json", d / "task.json"), ("data/train.jsonl", d / "train.jsonl"),
+                   ("data/eval.jsonl", d / "eval.jsonl"),
+                   ("laya/eval-probs.json", run_dir / "eval-probs.json"),
+                   ("laya/zero-shot-probs.json", run_dir / "zero-shot-probs.json"),
+                   ("laya/gate-report.json", run_dir / "gate-report.json")]
+    for p in sorted((run_dir / "seeds").glob("seed-*/eval-probs.json")):
+        input_files.append(("laya/seeds/%s/eval-probs.json" % p.parent.name, p))
+    input_files += [("setfit/probability-dump.json", Path(args.setfit)), ("kev/eval-probs.json", Path(args.kev))]
+    report = build_report(task, train, ev, run_dir, args.setfit, args.kev, input_files,
+                          getattr(args, "n_resamples", N_RESAMPLES))
+    json.dumps(report, allow_nan=False)
+    common.write_json(args.out, report)
+    print("BAKEOFF OK %s arms=%d" % (args.out, sum(1 for a in report["arms"].values() if a["status"] == "completed")))
+    for name, a in report["arms"].items():
+        if a["status"] == "completed":
+            f6 = a["false_assignment"]["0.6"]
+            print("ARM %s macro_f1=%s ece=%s fa@0.6=%s" % (name, _f4(a["macro_f1"]), _f4(a["ece"]["point"]),
+                                                          _frac(f6["numerator"], f6["denominator"])))
+    return 0
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="bakeoff.py", description=__doc__.split("\n")[0])
+    ap.add_argument("--data")
+    ap.add_argument("--laya")
+    ap.add_argument("--setfit")
+    ap.add_argument("--kev")
+    ap.add_argument("--out")
+    ap.add_argument("--render-tables", metavar="EVIDENCE")
+    ap.add_argument("--selftest", action="store_true")
+    args = ap.parse_args(argv)
+    try:
+        if args.selftest:
+            return selftest()
+        if args.render_tables:
+            ev = _read_json(args.render_tables, "evidence", "file")
+            sys.stdout.write(render_tables(ev))
+            return 0
+        missing = [f for f in ("data", "laya", "setfit", "kev", "out") if getattr(args, f) is None]
+        if missing:
+            ap.error("missing --%s" % ", --".join(missing))
+        return run(args)
+    except BakeoffRefused as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    except data.DataError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+
+
+# --------------------------------------------------------------------------------------------- self-test
+
+SENTINEL = "ZQXJ-sentinel-bakeoff-7mw"
+FIX_LABELS = ["social_affiliative", "conspiratorial", "other"]
+FIX_PATTERN = [0, 2, 2, 1, 2, 0, 2, 2, 2]          # 99 rows: 22 social_affiliative, 11 conspiratorial, 66 other
+FIX_RESAMPLES = 500
+
+
+def _fix_rows(n, tag):
+    rows = []
+    for i in range(n):
+        rows.append(("%s row %03d %s %s" % (tag, i, SENTINEL, "x" * i), FIX_PATTERN[i % len(FIX_PATTERN)]))
+    return rows
+
+
+def _fix_probs(rng, ys, strength):
+    out = []
+    for y in ys:
+        z = rng.randn(3)
+        z[y] += strength
+        e = np.exp(z - z.max())
+        out.append(e / e.sum())
+    return np.array(out)
+
+
+def _eval_probs_doc(labels, rows, P):
+    return {"labels": list(labels), "rows": [
+        {"row": i, "text_sha256": data.exact_sha256(t), "probabilities": common.f32_list(P[i])}
+        for i, (t, _) in enumerate(rows)]}
+
+
+def make_fixture(root, n=99):
+    """A synthetic data dir, a Laya run dir, a SetFit dump and a Kev file under `root`; returns the paths and the
+    arrays the independent checks use. Every text carries SENTINEL."""
+    root = Path(root)
+    d = root / "data"
+    d.mkdir(parents=True)
+    common.write_json(d / "task.json", {"type": "choice", "instructions": "synthetic instructions %s" % SENTINEL,
+                                        "criteria": {lab: "synthetic criterion %s" % lab for lab in FIX_LABELS}})
+    ev_rows = _fix_rows(n, "eval")
+    train_rows = _fix_rows(30, "train")
+    for name, rows in (("eval.jsonl", ev_rows), ("train.jsonl", train_rows)):
+        (d / name).write_bytes(common.jsonl_bytes([(t, FIX_LABELS[y]) for t, y in rows]))
+    ys = [y for _, y in ev_rows]
+    y = np.array(ys)
+    out = {"data": d, "ev_rows": ev_rows, "y": y}
+
+    run = root / "laya-run"
+    (run / "seeds").mkdir(parents=True)
+    doc_ft = _eval_probs_doc(FIX_LABELS, ev_rows, _fix_probs(np.random.RandomState(101), ys, 1.6))
+    doc_zs = _eval_probs_doc(FIX_LABELS, ev_rows, _fix_probs(np.random.RandomState(102), ys, 0.4))
+    common.write_json(run / "eval-probs.json", doc_ft)
+    common.write_json(run / "zero-shot-probs.json", doc_zs)
+    as64 = lambda doc: np.array([r["probabilities"] for r in doc["rows"]], dtype=np.float64)  # noqa: E731
+    bins = int(contract.thresholds()["ece_bins"])
+    per_seed = []
+    for s, strength in ((13, 1.3), (17, None), (23, 1.9)):
+        doc = doc_ft if strength is None else _eval_probs_doc(FIX_LABELS, ev_rows,
+                                                              _fix_probs(np.random.RandomState(200 + s), ys, strength))
+        (run / "seeds" / ("seed-%d" % s)).mkdir()
+        common.write_json(run / "seeds" / ("seed-%d" % s) / "eval-probs.json", doc)
+        Ps = as64(doc)
+        per_seed.append({"seed": s, "macro_f1": metrics.macro_f1(Ps, y), "ece_post": metrics.ece_top_label(Ps, y, bins)})
+    P_ft, P_zs = as64(doc_ft), as64(doc_zs)
+    common.write_json(run / "gate-report.json", {
+        "schema": "laya-gate-report-v1", "thresholds": contract.thresholds(),
+        "zero_shot": {"macro_f1": metrics.macro_f1(P_zs, y), "ece": metrics.ece_top_label(P_zs, y, bins)},
+        "fine_tuned": {"macro_f1": metrics.macro_f1(P_ft, y), "ece_post": metrics.ece_top_label(P_ft, y, bins)},
+        "seeds": {"shipped": 17, "per_seed": per_seed}})
+    out.update(run=run, P_ft=P_ft, P_zs=P_zs)
+
+    P_sf = _fix_probs(np.random.RandomState(103), ys, 1.2)
+    common.write_json(root / "setfit.json", {
+        "ordered_labels": list(FIX_LABELS), "row_ids": ["test:%d" % i for i in range(n)],
+        "text_sha256": [data.exact_sha256(t) for t, _ in ev_rows], "truth": ys,
+        "predicted": [int(v) for v in P_sf.argmax(1)], "probabilities": P_sf.tolist(),
+        "artifact_sha256": "a" * 64, "dataset_fingerprint": "b" * 64, "n_rows": n})
+    doc_kev = _eval_probs_doc(FIX_LABELS, ev_rows, _fix_probs(np.random.RandomState(104), ys, 1.0))
+    common.write_json(root / "kev.json", doc_kev)
+    out.update(setfit=root / "setfit.json", kev=root / "kev.json", P_sf=P_sf, P_kev=as64(doc_kev))
+    return out
+
+
+def _capture(argv):
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            rc = main(argv)
+        except SystemExit as e:
+            rc = e.code
+    return rc, out.getvalue(), err.getvalue()
+
+
+def _argv(fx, out, setfit=None, kev=None, laya=None):
+    return ["--data", str(fx["data"]), "--laya", str(laya or fx["run"]), "--setfit", str(setfit or fx["setfit"]),
+            "--kev", str(kev or fx["kev"]), "--out", str(out)]
+
+
+def _py_fa(P, y, other, thr, strict):
+    """The false-assignment count by a plain loop, independent of metrics.py."""
+    num = den = 0
+    for row, t in zip(np.asarray(P).tolist(), np.asarray(y).tolist()):
+        if t != other:
+            continue
+        den += 1
+        top = max(v for j, v in enumerate(row) if j != other)
+        if (top > thr) if strict else (top >= thr):
+            num += 1
+    return num, den
+
+
+def selftest():
+    failures = []
+    n_cases = [0]
+
+    def case(name, ok, detail=""):
+        n_cases[0] += 1
+        print("  %-4s %-86s %s" % ("ok" if ok else "FAIL", name, detail))
+        if not ok:
+            failures.append(name)
+
+    with tempfile.TemporaryDirectory(prefix="bakeoff-selftest-") as tmp:
+        tmp = Path(tmp)
+        fx = make_fixture(tmp / "fx")
+        old_resamples = globals()["N_RESAMPLES"]
+        globals()["N_RESAMPLES"] = FIX_RESAMPLES
+        try:
+            print("the full report from a synthetic data dir and synthetic arm files:")
+            out = tmp / "report.json"
+            rc, o, e = _capture(_argv(fx, out))
+            case("end to end: exit 0, BAKEOFF OK, four completed arms", rc == 0 and "BAKEOFF OK" in o and "arms=4" in o,
+                 "exit %s %s" % (rc, e.strip()[:120]))
+            rep = json.loads(out.read_text(encoding="utf-8")) if out.is_file() else {}
+            case("schema, not_a_gate, unmeasured source batch, threshold note, rules",
+                 rep.get("schema") == SCHEMA and rep.get("not_a_gate") is True and "unmeasured" in rep.get("source_batch", "")
+                 and "client_ge" in rep.get("threshold_note", "") and rep.get("rules", {}).get("counts_only") is True)
+            case("three laya seeds with macro_f1 and ece_post", [s["seed"] for s in rep.get("laya_seeds", [])] == [13, 17, 23])
+            y, other = fx["y"], 2
+            arrays = {"laya": fx["P_ft"], "laya_zero_shot": fx["P_zs"], "setfit": fx["P_sf"], "kev": fx["P_kev"]}
+            bad = []
+            for name, P in arrays.items():
+                a = rep["arms"][name]
+                if a["macro_f1"] != metrics.macro_f1(P, y) or a["ece"]["point"] != metrics.ece_top_label(P, y, 15):
+                    bad.append(name + " point")
+                for thr in THRESHOLDS:
+                    rec = a["false_assignment"][str(thr)]
+                    want = _py_fa(P, y, other, thr, True)
+                    want_ge = _py_fa(P, y, other, thr, False)
+                    if (rec["numerator"], rec["denominator"]) != want or \
+                            (rec["client_ge"]["numerator"], rec["client_ge"]["denominator"]) != want_ge:
+                        bad.append("%s fa@%s" % (name, thr))
+                    if rec["client_ge"]["numerator"] < rec["numerator"]:
+                        bad.append("%s client_ge<strict@%s" % (name, thr))
+            case("every arm: macro-F1, ECE point and the false-assignment counts (strict and client_ge) match an "
+                 "independent plain-Python count", not bad, str(bad))
+            band_ok = True
+            for name in arrays:
+                a = rep["arms"][name]
+                band_ok &= sum(b["n"] for b in a["bands"]) == a["n"] == len(y)
+                for ci, lab in enumerate(FIX_LABELS):
+                    band_ok &= sum(b["per_class"][ci]["support"] for b in a["bands"]) == a["per_class"][ci]["support"]
+            case("the three bands partition the eval rows and each class's support", band_ok,
+                 "band_counts %s cuts %s" % (rep["eval"]["length"]["band_counts"], rep["eval"]["length"]["cuts"]))
+            ece_ok = True
+            for name in arrays:
+                a = rep["arms"][name]
+                ece_ok &= 0.0 <= a["ece"]["lo"] <= a["ece"]["hi"] <= 1.0 and a["ece"]["n_resamples"] == FIX_RESAMPLES
+                for b in a["bands"]:
+                    iv = b["ece"]["interval"]
+                    ece_ok &= (b["n"] >= BAND_MIN_ROWS) == isinstance(iv, dict) and (
+                        isinstance(iv, str) and iv == "not_reported" or 0.0 <= iv["lo"] <= iv["hi"] <= 1.0)
+            case("ECE intervals: 0 <= lo <= hi <= 1 (no containment check); bands of 30+ rows carry an interval", ece_ok)
+            out2 = tmp / "report2.json"
+            rc2, _, _ = _capture(_argv(fx, out2))
+            case("determinism: a second run writes the same bytes", rc2 == 0 and out.read_bytes() == out2.read_bytes())
+            fx60 = make_fixture(tmp / "fx60", n=60)
+            out60 = tmp / "report60.json"
+            rc60, _, e60 = _capture(_argv(fx60, out60))
+            rep60 = json.loads(out60.read_text(encoding="utf-8")) if out60.is_file() else {"arms": {}}
+            small = [b for a in rep60["arms"].values() if a.get("status") == "completed" for b in a["bands"]]
+            case("a band of fewer than 30 rows reports its ECE point and the string not_reported",
+                 rc60 == 0 and len(small) == 12 and all(b["n"] == 20 and b["ece"]["interval"] == "not_reported"
+                                                        and isinstance(b["ece"]["point"], float) for b in small),
+                 "exit %s %s" % (rc60, e60.strip()[:100]))
+            print("the hand-off tables:")
+            rt1 = _capture(["--render-tables", str(out)])
+            rt2 = _capture(["--render-tables", str(out)])
+            case("--render-tables: exit 0 and the same bytes twice", rt1[0] == 0 and rt1 == rt2 and rt1[1] != "")
+            lead = [ln for ln in rt1[1].splitlines() if ln.startswith("| ") and ("laya" in ln or "setfit" in ln or "kev" in ln)]
+            case("the lead table carries the 0.6 and 0.85 columns and rows for every completed arm and band",
+                 ">0.6 num/den" in rt1[1] and ">0.85 num/den" in rt1[1]
+                 and all(any(ln.startswith("| %s | all |" % n_) for ln in lead) for n_ in ARM_ORDER), "%d lead rows" % len(lead))
+        finally:
+            globals()["N_RESAMPLES"] = old_resamples
+
+    if failures:
+        print("BAKEOFF SELFTEST FAILED: %s" % ", ".join(failures))
+        return 1
+    print("BAKEOFF SELFTEST OK (%d cases)" % n_cases[0])
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
