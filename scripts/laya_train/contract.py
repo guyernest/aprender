@@ -185,17 +185,21 @@ def run_dir_files(seeds=(13,), has_shift=False):
 # trainer (the contract's own "OPTIONAL ... REQUIRED when / present exactly when" wording). A key the
 # contract marks OPTIONAL that is not listed here is refused by expected_keys (fail-closed).
 _OPTIONAL_KEY_RULES = {
-    "early_stopping": lambda stopping, n, shift: stopping == "early_stopping",
-    "seed_selection": lambda stopping, n, shift: n > 1,
-    "rescore_noise_sha256": lambda stopping, n, shift: True,      # every 1.4.0 run writes the record
-    "shift_probe": lambda stopping, n, shift: bool(shift),
+    "early_stopping": lambda stopping, n, shift, waived: stopping == "early_stopping",
+    "seed_selection": lambda stopping, n, shift, waived: n > 1,
+    "rescore_noise_sha256": lambda stopping, n, shift, waived: True,      # every 1.4.0 run writes the record
+    "shift_probe": lambda stopping, n, shift, waived: bool(shift),
+    # Phase 12 (D-19): written exactly when a pilot_waivers declaration applies to the run and the
+    # gate failed on ece_post alone (the trainer decides, plan 12-03; the Rust verifier re-decides).
+    "pilot_waiver": lambda stopping, n, shift, waived: bool(waived),
 }
 
 
-def expected_keys(schema, stopping, n_seeds, has_shift):
+def expected_keys(schema, stopping, n_seeds, has_shift, has_waiver=False):
     """The exact top-level key set of recipe.json (`recipe_json_schema`) or gate-report.json
     (`gate_report_schema`) for a run: every schema key, minus rule notes (`*_rule`), minus each key
-    marked OPTIONAL whose rule does not hold for this run."""
+    marked OPTIONAL whose rule does not hold for this run. `has_waiver` is True exactly when the
+    run's gate report carries a `pilot_waiver` claim."""
     out = []
     for key, desc in gate_contract()[schema].items():
         if key.endswith("_rule"):
@@ -203,7 +207,7 @@ def expected_keys(schema, stopping, n_seeds, has_shift):
         if str(desc).startswith("OPTIONAL"):
             if key not in _OPTIONAL_KEY_RULES:
                 raise KeyError("%s.%s is OPTIONAL but contract.expected_keys has no rule for it" % (schema, key))
-            if not _OPTIONAL_KEY_RULES[key](stopping, int(n_seeds), has_shift):
+            if not _OPTIONAL_KEY_RULES[key](stopping, int(n_seeds), has_shift, has_waiver):
                 continue
         out.append(key)
     return sorted(out)

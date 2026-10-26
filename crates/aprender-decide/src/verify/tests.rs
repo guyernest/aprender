@@ -2578,6 +2578,51 @@ fn every_run_field_is_bound_or_report_only() {
         };
         failures.extend(failure);
     }
+    // The waived base: the leaves the unwaived base lacks (the /pilot_waiver patterns), each
+    // mutated alone on a fresh waived copy. The waived base's other leaves are the unwaived
+    // base's and are swept above: on the waived base a recipe.json mutation reseals recipe_id and
+    // so also unbinds the declaration, which is FALSIFY-LAYA-GATE-017's applies_to-mismatch case.
+    let unwaived: std::collections::BTreeSet<(String, String)> = run_leaves(&base)
+        .into_iter()
+        .map(|(f, _, pat)| (f.to_string(), pat))
+        .collect();
+    let (waived_base, waived_policy) = fullest_waived_copy();
+    let waived_control = waived_base
+        .verify(&waived_policy)
+        .expect("the fullest waived copy verifies");
+    assert_eq!(waived_control.waived.as_deref(), Some(WAIVER_ID));
+    let mut waived_leaves = 0usize;
+    for (file, ptr, pat) in run_leaves(&waived_base) {
+        if unwaived.contains(&(file.to_string(), pat.clone())) {
+            continue;
+        }
+        waived_leaves += 1;
+        let Some(row) = find(file, &pat) else {
+            failures.push(format!("{file}{pat}: no run_field_bindings row"));
+            continue;
+        };
+        let names = row_str(row, "names");
+        let (run, policy) = fullest_waived_copy();
+        let old = read_json(&run.path(file))
+            .pointer(&ptr)
+            .expect("leaf")
+            .clone();
+        set_leaf(&run, file, &ptr, mutate_leaf(&old));
+        let got = run.verify(&policy);
+        match (&got, names, row_str(row, "report_only")) {
+            (Err(e), Some(n), None) if e.to_string().contains(n) || verdict(&got).contains(n) => {}
+            (Ok(r), _, Some(_)) if r.recomputed == waived_control.recomputed => {}
+            _ => failures.push(format!(
+                "{file}{ptr}: expected a refusal naming {names:?}, got {}",
+                verdict(&got)
+            )),
+        }
+    }
+    assert_eq!(
+        waived_leaves, 2,
+        "the waived base adds exactly the two /pilot_waiver leaves"
+    );
+    checked += waived_leaves;
     let count = |f: &dyn Fn(&serde_yaml::Value) -> bool| rows.iter().filter(|r| f(r)).count();
     let expected_open = count(&later_plan);
     let report_only = count(&|r| row_str(r, "report_only").is_some());
@@ -2598,9 +2643,13 @@ fn every_run_field_is_bound_or_report_only() {
 /// run copy's, each row is either bound (with `names`) or report_only, and no pattern repeats.
 #[test]
 fn run_field_bindings_table_matches_fixture_leaves() {
+    // The UNION of the unwaived base (fullest_copy, the sweep's positive control) and the waived
+    // base (fullest_waived_copy, the only one that can carry a /pilot_waiver claim).
     let run = fullest_copy(&permissive_policy());
+    let (waived, _) = fullest_waived_copy();
     let observed: std::collections::BTreeSet<(String, String)> = run_leaves(&run)
         .into_iter()
+        .chain(run_leaves(&waived))
         .map(|(f, _, pat)| (f.to_string(), pat))
         .collect();
     let rows = binding_rows();
@@ -3131,6 +3180,29 @@ fn waiver_policy(run: &Run) -> VerifyPolicy {
     policy_declaring(ece_only_policy(), &[decl])
 }
 
+/// The fullest ACCEPTED-WAIVED run copy: the ECE-only failed copy carrying every optional field
+/// `fullest_copy` carries (noise record, shift probe, the `mps:0` device record) plus the report's
+/// `pilot_waiver` claim, returned with the policy that declares it (`applies_to` read from the
+/// built copy). A SEPARATE base: `fullest_copy` stays a passing run, because a claim on a passing
+/// run is `WaiverWithoutFailure`.
+fn fullest_waived_copy() -> (Run, VerifyPolicy) {
+    let policy = ece_only_policy();
+    let run = ece_only_failed_copy(&policy);
+    let (ft, zs) = (
+        f64_rows(&run, "eval-probs.json"),
+        f64_rows(&run, "zero-shot-probs.json"),
+    );
+    write_noise_record(&run, &policy, &ft, &zs);
+    add_shift_probe(&run, &policy);
+    run.edit_json("gate-report.json", |r| {
+        r["device_used"] = "mps:0".into();
+        r["device_is_cpu"] = false.into();
+    });
+    claim_waiver(&run, WAIVER_ID, &["ece_post"]);
+    let waiver = waiver_policy(&run);
+    (run, waiver)
+}
+
 /// FALSIFY-LAYA-GATE-020 (the accept half): a declared, run-bound ECE-only failure is accepted,
 /// reported as waived, and still deploy-eligible; the same run without the declaration is not.
 #[test]
@@ -3194,4 +3266,466 @@ fn waiver_undeclared_ece_failure_is_still_gate_failed() {
         0,
         "nothing may be written"
     );
+}
+
+/// `value` with its first hex digit moved by one (`0` <-> `1`): one digit off, still 64 hex.
+fn one_digit_off(value: &str) -> String {
+    let flipped = if value.starts_with('0') { "1" } else { "0" };
+    format!("{flipped}{}", &value[1..])
+}
+
+/// `id` with one `applies_to` field moved by one hex digit.
+fn identity_with(base: &RunIdentity, field: &str) -> RunIdentity {
+    let mut id = base.clone();
+    match field {
+        "task_json_sha256" => id.task_json_sha256 = one_digit_off(&id.task_json_sha256),
+        "train_jsonl_sha256" => id.train_jsonl_sha256 = one_digit_off(&id.train_jsonl_sha256),
+        "eval_jsonl_sha256" => id.eval_jsonl_sha256 = one_digit_off(&id.eval_jsonl_sha256),
+        "recipe_id" => id.recipe_id = one_digit_off(&id.recipe_id),
+        other => panic!("not an applies_to field: {other}"),
+    }
+    id
+}
+
+/// FALSIFY-LAYA-GATE-017: a declaration for another run (any one of the four identity values one
+/// hex digit off) does not excuse this run's ECE failure.
+#[test]
+fn waiver_applies_to_mismatch_is_gate_failed() {
+    let base = ece_only_policy();
+    let run = ece_only_failed_copy(&base);
+    claim_waiver(&run, WAIVER_ID, &["ece_post"]);
+    let identity = run_identity(&run);
+    // The control: the unmoved identity is accepted, so only the moved digit can refuse below.
+    let control = policy_declaring(
+        base.clone(),
+        &[waiver_decl_json(WAIVER_ID, &["ece_post"], &identity)],
+    );
+    run.verify(&control)
+        .expect("the matching declaration is accepted");
+    for field in [
+        "task_json_sha256",
+        "train_jsonl_sha256",
+        "eval_jsonl_sha256",
+        "recipe_id",
+    ] {
+        let other = identity_with(&identity, field);
+        assert_ne!(other, identity, "{field}");
+        let policy = policy_declaring(
+            base.clone(),
+            &[waiver_decl_json(WAIVER_ID, &["ece_post"], &other)],
+        );
+        let e = expect_err(run.verify(&policy));
+        assert_eq!(e.exit_code(), 3, "{field}: {e:?}");
+        assert!(
+            matches!(&e, VerifyError::GateFailed(g) if g.clauses == vec![GateClause::EcePost]),
+            "{field}: {e:?}"
+        );
+    }
+}
+
+/// FALSIFY-LAYA-GATE-018 (run half): `margin` is never waivable, alone or with `ece_post`, under
+/// a matching declaration and a matching claim.
+#[test]
+fn waiver_never_covers_margin() {
+    // Margin alone: the contract thresholds fail the tiny copy on the margin only.
+    let margin_only = contract_policy_tiny_base();
+    // Margin and ece_post together: a margin floor the copy misses and an ECE bar it misses.
+    let both = VerifyPolicy {
+        max_ece: 0.001,
+        ..contract_policy_tiny_base()
+    };
+    for (name, policy, expected) in [
+        ("margin alone", margin_only, vec![GateClause::Margin]),
+        (
+            "margin and ece_post",
+            both,
+            vec![GateClause::Margin, GateClause::EcePost],
+        ),
+    ] {
+        let run = production_copy(&policy, false);
+        claim_waiver(&run, WAIVER_ID, &["ece_post"]);
+        let declared = policy_declaring(
+            policy.clone(),
+            &[waiver_decl_json(
+                WAIVER_ID,
+                &["ece_post"],
+                &run_identity(&run),
+            )],
+        );
+        let e = expect_err(run.verify(&declared));
+        assert_eq!(e.exit_code(), 3, "{name}: {e:?}");
+        let VerifyError::GateFailed(g) = &e else {
+            panic!("{name}: expected GateFailed, got {e:?}");
+        };
+        assert_eq!(g.clauses, expected, "{name}");
+        assert!(e.to_string().contains("margin"), "{name}: {e}");
+    }
+}
+
+/// FALSIFY-LAYA-GATE-018 (load half): a declaration listing `margin` in `waives` does not load,
+/// before any run is read; the same declaration naming `ece_post` does.
+#[test]
+fn waiver_contract_naming_margin_fails_to_load() {
+    let run = ece_only_failed_copy(&ece_only_policy());
+    let identity = run_identity(&run);
+    gate_view_with(&[waiver_decl_json(WAIVER_ID, &["ece_post"], &identity)])
+        .expect("an ece_post declaration loads");
+    for waives in [&["margin"][..], &["ece_post", "margin"][..]] {
+        let e = gate_view_with(&[waiver_decl_json(WAIVER_ID, waives, &identity)])
+            .expect_err("a declaration naming margin must not load");
+        assert!(e.to_string().contains("margin"), "{waives:?}: {e}");
+    }
+}
+
+/// FALSIFY-LAYA-GATE-019 (undeclared half): the report is a claim and the contract the
+/// authority: an id nobody declared is `WaiverUndeclared` (exit 2), and a declared id whose
+/// claimed `waives` is not exactly `["ece_post"]` is `GateFailed`.
+#[test]
+fn waiver_claimed_by_report_but_undeclared_is_refused() {
+    let base = ece_only_policy();
+    let run = ece_only_failed_copy(&base);
+    let declared = waiver_policy(&run);
+    claim_waiver(&run, "someone-elses-waiver", &["ece_post"]);
+    let e = expect_err(run.verify(&declared));
+    assert_eq!(e.exit_code(), 2);
+    assert_eq!(e.variant_name(), "WaiverUndeclared");
+    assert!(
+        matches!(&e, VerifyError::WaiverUndeclared { id } if id == "someone-elses-waiver"),
+        "{e:?}"
+    );
+    for waives in [
+        &["margin"][..],
+        &[][..],
+        &["ece_post", "margin"][..],
+        &["ece_post", "ece_post"][..],
+    ] {
+        claim_waiver(&run, WAIVER_ID, waives);
+        let e = expect_err(run.verify(&declared));
+        assert!(
+            matches!(&e, VerifyError::GateFailed(g) if g.clauses == vec![GateClause::EcePost]),
+            "claimed waives {waives:?}: {e:?}"
+        );
+    }
+}
+
+/// FALSIFY-LAYA-GATE-019 (passing half): a claim on a run whose recomputed gate passed is
+/// refused `WaiverWithoutFailure` (exit 2), even under a matching declaration.
+#[test]
+fn waiver_on_a_passing_run_is_refused() {
+    let policy = permissive_policy();
+    let run = production_copy(&policy, true);
+    claim_waiver(&run, WAIVER_ID, &["ece_post"]);
+    let declared = policy_declaring(
+        policy,
+        &[waiver_decl_json(
+            WAIVER_ID,
+            &["ece_post"],
+            &run_identity(&run),
+        )],
+    );
+    let e = expect_err(run.verify(&declared));
+    assert_eq!(e.exit_code(), 2);
+    assert_eq!(e.variant_name(), "WaiverWithoutFailure");
+    assert!(
+        matches!(&e, VerifyError::WaiverWithoutFailure { id } if id == WAIVER_ID),
+        "{e:?}"
+    );
+}
+
+/// FALSIFY-LAYA-GATE-020 (passing half): a passing run is never waived, whatever the contract
+/// declares for it.
+#[test]
+fn waiver_passing_run_with_a_declaration_is_not_waived() {
+    let policy = permissive_policy();
+    let run = production_copy(&policy, true);
+    let declared = policy_declaring(
+        policy,
+        &[waiver_decl_json(
+            WAIVER_ID,
+            &["ece_post"],
+            &run_identity(&run),
+        )],
+    );
+    let report = run.verify(&declared).expect("a passing run verifies");
+    assert!(report.deploy_eligible);
+    assert_eq!(report.waived, None);
+}
+
+/// The committed contract declares no waiver yet: the first declaration is plan 12-11's, made
+/// BEFORE the motivation-v1 gate run. That plan updates this test in the commit that adds it.
+#[test]
+fn waiver_real_contract_declares_nothing_yet() {
+    let gate = view::<GateContractView>("laya-finetune-gate-v1.yaml");
+    assert!(gate.pilot_waivers.declarations.is_empty());
+    assert!(contract_policy().pilot_waivers.is_empty());
+    let doc = contract_yaml("laya-finetune-gate-v1.yaml");
+    assert_eq!(
+        doc["pilot_waivers"]["waivable_clauses"],
+        serde_yaml::to_value(vec!["ece_post"]).expect("yaml")
+    );
+}
+
+/// FALSIFY-LAYA-GATE-018 (load half): a repeated declaration id does not load, and the error
+/// names the id, so the Rust and Python readers cannot disagree about which one a claim matches.
+#[test]
+fn waiver_contract_with_duplicate_ids_fails_to_load() {
+    let run = ece_only_failed_copy(&ece_only_policy());
+    let identity = run_identity(&run);
+    let other = identity_with(&identity, "recipe_id");
+    let e = gate_view_with(&[
+        waiver_decl_json("twice-declared", &["ece_post"], &identity),
+        waiver_decl_json("twice-declared", &["ece_post"], &other),
+    ])
+    .expect_err("a repeated id must not load");
+    assert!(e.to_string().contains("twice-declared"), "{e}");
+    gate_view_with(&[
+        waiver_decl_json("first", &["ece_post"], &identity),
+        waiver_decl_json("second", &["ece_post"], &other),
+    ])
+    .expect("distinct ids load");
+}
+
+/// FALSIFY-LAYA-GATE-018 (load half): an `applies_to` value that is not 64 lowercase hex
+/// characters does not load, and the error names the field.
+#[test]
+fn waiver_contract_with_malformed_hash_fails_to_load() {
+    let run = ece_only_failed_copy(&ece_only_policy());
+    let identity = run_identity(&run);
+    let malformed = [
+        ("train_jsonl_sha256", {
+            let mut v = identity.clone();
+            v.train_jsonl_sha256.pop();
+            v
+        }),
+        ("eval_jsonl_sha256", {
+            let mut v = identity.clone();
+            v.eval_jsonl_sha256 = v.eval_jsonl_sha256.to_uppercase();
+            v
+        }),
+        ("task_json_sha256", {
+            let mut v = identity.clone();
+            v.task_json_sha256 = format!("{}g", &v.task_json_sha256[1..]);
+            v
+        }),
+        ("recipe_id", {
+            let mut v = identity.clone();
+            v.recipe_id = String::new();
+            v
+        }),
+    ];
+    for (field, id) in malformed {
+        assert_ne!(id, identity, "{field}");
+        let e = gate_view_with(&[waiver_decl_json(WAIVER_ID, &["ece_post"], &id)])
+            .expect_err("a malformed hash must not load");
+        let msg = e.to_string();
+        assert!(
+            msg.contains(field) && msg.contains(WAIVER_ID),
+            "{field}: {msg}"
+        );
+    }
+}
+
+/// FALSIFY-LAYA-GATE-019: the two new refusals exit 2 (only `GateFailed` exits 3), carry their
+/// variant name, and say which id they refused.
+#[test]
+fn waiver_new_refusals_exit_2_and_name_their_variant() {
+    for (e, name) in [
+        (
+            VerifyError::WaiverUndeclared {
+                id: "w-undeclared".into(),
+            },
+            "WaiverUndeclared",
+        ),
+        (
+            VerifyError::WaiverWithoutFailure {
+                id: "w-passing".into(),
+            },
+            "WaiverWithoutFailure",
+        ),
+    ] {
+        assert_eq!(e.exit_code(), 2, "{name}");
+        assert_eq!(e.variant_name(), name);
+        let shown = e.to_string();
+        let id = match &e {
+            VerifyError::WaiverUndeclared { id } | VerifyError::WaiverWithoutFailure { id } => id,
+            other => panic!("{other:?}"),
+        };
+        assert!(shown.contains(id.as_str()), "{name}: {shown}");
+    }
+}
+
+/// FALSIFY-LAYA-GATE-016..020: [`decide_pilot_waiver`] over every combination of the rules, in
+/// one table (clauses x claim x declaration), pure and without a run dir.
+#[test]
+fn decide_pilot_waiver_case_table() {
+    let run = RunIdentity {
+        task_json_sha256: "a".repeat(64),
+        train_jsonl_sha256: "b".repeat(64),
+        eval_jsonl_sha256: "c".repeat(64),
+        recipe_id: "d".repeat(64),
+    };
+    let decl = |id: &str, waives: Vec<WaivableClause>, applies: &RunIdentity| PilotWaiverDecl {
+        id: id.into(),
+        declared_on: "2026-10-26".into(),
+        reason: "a table row".into(),
+        waives,
+        applies_to: WaiverAppliesTo {
+            task_json_sha256: applies.task_json_sha256.clone(),
+            train_jsonl_sha256: applies.train_jsonl_sha256.clone(),
+            eval_jsonl_sha256: applies.eval_jsonl_sha256.clone(),
+            recipe_id: applies.recipe_id.clone(),
+        },
+    };
+    let claim = |id: &str, waives: &[&str]| PilotWaiverClaim {
+        id: id.into(),
+        waives: waives.iter().map(|w| (*w).to_string()).collect(),
+    };
+    let ece = vec![WaivableClause::EcePost];
+    let elsewhere = identity_with(&run, "eval_jsonl_sha256");
+    let declared = |d: PilotWaiverDecl| VerifyPolicy {
+        pilot_waivers: vec![d],
+        ..permissive_policy()
+    };
+    let none = permissive_policy();
+    let good = declared(decl("w", ece.clone(), &run));
+    let moved = declared(decl("w", ece.clone(), &elsewhere));
+    let empty_waives = declared(decl("w", Vec::new(), &run));
+    let doubled = declared(decl(
+        "w",
+        vec![WaivableClause::EcePost, WaivableClause::EcePost],
+        &run,
+    ));
+    use GateClause::{EcePost, Margin};
+    use WaiverDecision::{GateFailed, NotNeeded, Undeclared, Waived, WithoutFailure};
+    let ok = claim("w", &["ece_post"]);
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(
+        &str,
+        &[GateClause],
+        Option<PilotWaiverClaim>,
+        &VerifyPolicy,
+        WaiverDecision,
+    )> = vec![
+        ("passed, no claim", &[], None, &none, NotNeeded),
+        (
+            "passed, no claim, declaration present",
+            &[],
+            None,
+            &good,
+            NotNeeded,
+        ),
+        (
+            "passed, claim",
+            &[],
+            Some(ok.clone()),
+            &good,
+            WithoutFailure("w".into()),
+        ),
+        (
+            "passed, claim, no declaration",
+            &[],
+            Some(ok.clone()),
+            &none,
+            WithoutFailure("w".into()),
+        ),
+        ("margin, no claim", &[Margin], None, &good, GateFailed),
+        (
+            "margin, matching claim",
+            &[Margin],
+            Some(ok.clone()),
+            &good,
+            GateFailed,
+        ),
+        (
+            "margin and ece, matching claim",
+            &[Margin, EcePost],
+            Some(ok.clone()),
+            &good,
+            GateFailed,
+        ),
+        (
+            "ece, no claim, declaration present",
+            &[EcePost],
+            None,
+            &good,
+            GateFailed,
+        ),
+        (
+            "ece, no claim, no declaration",
+            &[EcePost],
+            None,
+            &none,
+            GateFailed,
+        ),
+        (
+            "ece, claim, no declaration",
+            &[EcePost],
+            Some(ok.clone()),
+            &none,
+            Undeclared("w".into()),
+        ),
+        (
+            "ece, claim of another id",
+            &[EcePost],
+            Some(claim("x", &["ece_post"])),
+            &good,
+            Undeclared("x".into()),
+        ),
+        (
+            "ece, matching claim and declaration",
+            &[EcePost],
+            Some(ok.clone()),
+            &good,
+            Waived("w".into()),
+        ),
+        (
+            "ece, declaration for another run",
+            &[EcePost],
+            Some(ok.clone()),
+            &moved,
+            GateFailed,
+        ),
+        (
+            "ece, claim waives margin",
+            &[EcePost],
+            Some(claim("w", &["margin"])),
+            &good,
+            GateFailed,
+        ),
+        (
+            "ece, claim waives nothing",
+            &[EcePost],
+            Some(claim("w", &[])),
+            &good,
+            GateFailed,
+        ),
+        (
+            "ece, claim waives ece twice",
+            &[EcePost],
+            Some(claim("w", &["ece_post", "ece_post"])),
+            &good,
+            GateFailed,
+        ),
+        (
+            "ece, declaration waives nothing",
+            &[EcePost],
+            Some(ok.clone()),
+            &empty_waives,
+            GateFailed,
+        ),
+        (
+            "ece, declaration waives ece twice",
+            &[EcePost],
+            Some(ok.clone()),
+            &doubled,
+            GateFailed,
+        ),
+    ];
+    for (name, clauses, claim, policy, expected) in rows {
+        assert_eq!(
+            decide_pilot_waiver(clauses, claim.as_ref(), &run, policy),
+            expected,
+            "{name}"
+        );
+    }
 }
