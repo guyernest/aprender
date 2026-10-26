@@ -355,6 +355,22 @@ pub struct GateReport {
     /// The shift probe (1.4.0, A2); present exactly when the data dir carries `shift.jsonl`.
     #[serde(default)]
     pub shift_probe: Option<ShiftProbe>,
+    /// The pilot-waiver claim (Phase 12, D-19), written by the trainer exactly when a
+    /// `pilot_waivers` declaration applies to this run and the gate failed on `ece_post` alone.
+    /// A CLAIM only: the verifier decides it against the contract ([`crate::verify::decide_pilot_waiver`]).
+    /// ABSENT = no claim, so every earlier report parses unchanged.
+    #[serde(default)]
+    pub pilot_waiver: Option<PilotWaiverClaim>,
+}
+
+/// `gate-report.json` `pilot_waiver` (laya-finetune-gate-v1 `gate_report_schema.pilot_waiver`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PilotWaiverClaim {
+    /// The `pilot_waivers.declarations` id the trainer matched.
+    pub id: String,
+    /// The clauses it claims to waive; the verifier accepts exactly `["ece_post"]`.
+    pub waives: Vec<String>,
 }
 
 /// The gate report `schema` value this packer reads.

@@ -91,6 +91,15 @@ metadata:
     bit (the trainer used to write int(k)). `pv diff` classifies the formula and invariant edit
     MAJOR, so this is published as 5.0.0; the 1.4.0 naming above is unchanged.
 
+    PILOT WAIVER (Phase 12, D-19 and D-20, 2026-10-26; declared BEFORE any motivation-v1 gate run).
+    Additive only: a top-level `pilot_waivers` block (no declaration yet), the OPTIONAL gate-report
+    key `pilot_waiver`, two `run_field_bindings` rows, the equation `pilot_waiver_honoured` and
+    FALSIFY-LAYA-GATE-016..021. A pilot waiver lets pack and verify accept a run whose ONLY failed
+    recomputed clause is `ece_post`, and only under a declaration committed here BEFORE the run it
+    applies to; `margin` is never waivable. NO threshold, constant, seed, recipe value, data rule or
+    existing schema field moved, and every existing run verifies unchanged: the same
+    recomputed-metric gate still decides, a waiver only changes what an ECE-only failure means.
+
     THE GATE IS DECIDED ON RECOMPUTED METRICS, NOT REPORTED ONES. A gate report is a file a
     training run wrote; an edited report must not pass. So the metrics that DECIDE pass are
     recomputed in Rust (plan 08-09) from `eval-probs.json` and `zero-shot-probs.json`, after every
@@ -193,6 +202,18 @@ eval_set:
   demo_rule: 'the demo_s64 eval set, as a rule: TweetEval stance_abortion `validation` rows followed by `train` rows (file order), keeping every row whose id is NOT a shot of the s64-seed13 manifest (payload.ordered_examples), NOT in payload.exclusions.excluded_train_ids, and NOT a member of any payload.exclusions.groups[*].members (each member a [split, id] pair, e.g. [validation, validation:3]); text overlap with the shots under nfc-trim-ws-v1 is REFUSED; duplicates by nfc-trim-ws-v1 are dropped keeping the first occurrence in that order. Expected: 459 rows with class counts [111, 291, 57] in criteria order [none, against, favor], as spikes 027 (diagnose_indist.py) and 028 (build_heldout.py) both measured'
   shift_probe_rule: 'an OPTIONAL data-dir file `shift.jsonl` with the train_row schema, scored with the shipped checkpoint and the declared base AFTER the gate is decided; reported in gate-report `shift_probe` with `gate_clause: false`; RECOMPUTED in Rust from its hash-bound probability files but never re-scored and never a gate clause; text overlap with train.jsonl is refused'
   demo_shift_probe: 'the TweetEval stance_abortion test split (SemEval-2016 test), 280 rows — the 1.x gate eval set, kept visible as the shift probe'
+
+pilot_waivers:
+  # ---- Phase 12 (D-19, D-20): the ONLY place a pilot waiver can come from. Read by
+  # aprender_decide::verify::VerifyPolicy::from_contract_views (the one contract-to-policy mapping)
+  # and by scripts/laya_train/gate.py matching_pilot_waiver (plan 12-03); no argument, environment
+  # variable or run-dir file can add a declaration.
+  rule: 'a pilot waiver lets pack and verify accept a run whose ONLY failed recomputed clause is ece_post, and only when a declaration below names it, waives exactly [ece_post] and applies_to the run''s task_json / train_jsonl / eval_jsonl sha256s and recipe_id, and the run''s gate report carries pilot_waiver {id, waives} equal to it; margin is never waivable (a declaration naming margin fails to load); a declaration is committed BEFORE the run it applies to; the waived artifact names the waiver in manifest gate.waiver (decide-apr-v1, plan 12-03). A malformed block (margin in waives, a repeated id, an applies_to value that is not 64 lowercase hex) refuses EVERY artifact at load, the deployed ones included: that symptom is a contract defect, never artifact drift.'
+  waivable_clauses: [ece_post]
+  # Each entry: {id, declared_on, reason, waives: [ece_post], applies_to: {task_json_sha256,
+  # train_jsonl_sha256, eval_jsonl_sha256, recipe_id}} (64 lowercase hex each). Plan 12-11 adds the
+  # first, before the one motivation-v1 gate run.
+  declarations: []
 
 recipe:
   # D-04: fixed to the spike-024 values. Any change is a new recipe_id.
@@ -802,6 +823,20 @@ equations:
     invariants:
       - 'Pitfall 5: training leaves fp32 weights while D-17 serves F16; scoring the fp32 weights would describe a model that is never served'
       - 'the zero-shot baseline is the declared base loaded the same way'
+
+  pilot_waiver_honoured:
+    formula: 'accept_waived(run) iff recomputed_failed_clauses(run) == [ece_post] AND run.gate_report.pilot_waiver == {id, waives: [ece_post]} AND exists d in pilot_waivers.declarations: d.id == id AND d.waives == [ece_post] AND d.applies_to == (task_json_sha256, train_jsonl_sha256, eval_jsonl_sha256, recipe_id) of the run as VERIFIED; otherwise the failure keeps its refusal (GateFailed, WaiverUndeclared or WaiverWithoutFailure)'
+    domain: 'a run dir that passed every cheap check, both re-scores and check_gate (the recomputed failed clauses are known)'
+    codomain: 'NotNeeded (gate passed, no claim), Waived(id), GateFailed, WaiverUndeclared(id) or WaiverWithoutFailure(id), decided by aprender_decide::verify::decide_pilot_waiver'
+    invariants:
+      - 'margin is never waivable: a recomputed failure containing margin is GateFailed whatever the report claims (D-20), and a declaration naming margin fails to deserialize, so the contract fails to load before any run is read'
+      - 'a declaration applies to exactly one run: the four applies_to values are compared with the values the verifier has already verified (inputs re-hashed against the data dir, recipe_id against recipe.json), and one hex digit off is GateFailed'
+      - 'a claim on a run whose recomputed gate passed is refused WaiverWithoutFailure, and a claim whose id no declaration has is refused WaiverUndeclared: the report is a claim and the contract is the authority'
+      - 'declaration ids are unique and every applies_to value is 64 lowercase hex, validated where the contract deserializes, so the Rust and Python readers cannot disagree about which declaration a claim matches'
+      - 'a waived run is deploy-eligible and is reported as waived (VerifyReport.waived, the `waived` key of pack_laya); a passing run is never waived'
+      - 'bound to the Rust verifier tests waiver_* and decide_pilot_waiver_case_table (FALSIFY-LAYA-GATE-016..020), the trainer half to FALSIFY-LAYA-GATE-021 (plan 12-03)'
+    preconditions:
+      - 'check_gate returned Ok: thresholds equal the contract''s, every reported metric is within gate_metric_recompute_abs of its recomputation, and the reported pass equals the recomputed one'
 
   early_stopping_train_side:
     # plan 08-29 (V13-c): the formula used to state a RUNNING-MINIMUM rule (m_e < min_{j < e} m_j -

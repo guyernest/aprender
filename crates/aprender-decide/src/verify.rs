@@ -64,7 +64,9 @@
 use crate::artifact::{self, within, ArtifactError};
 use crate::digest::sha256_hex;
 use crate::laya::argmax;
-use crate::pack::{self, GateCalibration, GateReport, PackError, PackInputs, Recipe};
+use crate::pack::{
+    self, GateCalibration, GateReport, PackError, PackInputs, PilotWaiverClaim, Recipe,
+};
 use crate::{DecideError, Decider, Decision, DecisionMethod, Task};
 use aprender::calibration::expected_calibration_error_top_label_f64;
 use aprender::metrics::classification::{macro_f1_f64, mean_f1_over_labels_f64};
@@ -137,6 +139,10 @@ pub struct VerifyPolicy {
     /// is the stance task, whose report carries `f_avg` over [`F_AVG_STANCE_LABELS`]; every
     /// other task's `f_avg` is null ([`f_avg_labels`], the rule `train.py` applies).
     pub stance_criteria_order: Vec<String>,
+    /// laya-finetune-gate-v1 `pilot_waivers.declarations` (Phase 12, D-19): the ONLY place a
+    /// pilot waiver can come from. Filled by [`VerifyPolicy::from_contract_views`] alone; no
+    /// argument, environment variable or run-dir file can add one.
+    pub pilot_waivers: Vec<PilotWaiverDecl>,
 }
 
 /// laya-finetune-gate-v1 `base`: what a production run must declare as its base, and what the
@@ -221,6 +227,121 @@ pub struct GateContractView {
     pub early_stopping: EarlyStoppingBlockView,
     /// `demo`.
     pub demo: DemoBlockView,
+    /// `pilot_waivers` (Phase 12, D-19). Absent = no declaration, so every contract that
+    /// predates it still maps to a policy that waives nothing.
+    #[serde(default)]
+    pub pilot_waivers: PilotWaiversView,
+}
+
+/// laya-finetune-gate-v1 `pilot_waivers` (the part the verifier reads: the prose keys `rule` and
+/// `waivable_clauses` are ignored). Validated WHERE IT DESERIALIZES, so every caller of the one
+/// contract-to-policy mapping fails alike on a malformed block: a repeated declaration id, or an
+/// `applies_to` value that is not 64 lowercase hex characters, is a deserialization error naming
+/// the id and the field (D-19). A malformed block therefore refuses EVERY artifact at load, the
+/// deployed ones included: that symptom is a contract defect, not artifact drift.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(try_from = "PilotWaiversRaw")]
+pub struct PilotWaiversView {
+    /// `declarations`: committed BEFORE the run each applies to.
+    pub declarations: Vec<PilotWaiverDecl>,
+}
+
+/// The unvalidated shape [`PilotWaiversView`] deserializes through.
+#[derive(Deserialize)]
+struct PilotWaiversRaw {
+    #[serde(default)]
+    declarations: Vec<PilotWaiverDecl>,
+}
+
+/// `value` is exactly 64 lowercase hex characters.
+fn is_lower_hex64(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+impl TryFrom<PilotWaiversRaw> for PilotWaiversView {
+    type Error = String;
+
+    fn try_from(raw: PilotWaiversRaw) -> Result<Self, Self::Error> {
+        let mut seen: Vec<&str> = Vec::new();
+        for d in &raw.declarations {
+            if seen.contains(&d.id.as_str()) {
+                return Err(format!(
+                    "pilot_waivers.declarations: the id {:?} is declared more than once",
+                    d.id
+                ));
+            }
+            seen.push(&d.id);
+            let a = &d.applies_to;
+            for (field, value) in [
+                ("task_json_sha256", &a.task_json_sha256),
+                ("train_jsonl_sha256", &a.train_jsonl_sha256),
+                ("eval_jsonl_sha256", &a.eval_jsonl_sha256),
+                ("recipe_id", &a.recipe_id),
+            ] {
+                if !is_lower_hex64(value) {
+                    return Err(format!(
+                        "pilot_waivers.declarations[{:?}].applies_to.{field} is not 64 lowercase hex characters",
+                        d.id
+                    ));
+                }
+            }
+        }
+        Ok(Self {
+            declarations: raw.declarations,
+        })
+    }
+}
+
+/// One `pilot_waivers.declarations` entry (Phase 12, D-19).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PilotWaiverDecl {
+    /// The declaration id a gate report's `pilot_waiver.id` must equal.
+    pub id: String,
+    /// The date the declaration was committed (prose; it precedes the run).
+    pub declared_on: String,
+    /// Why the owner accepted the waiver (prose).
+    pub reason: String,
+    /// The clauses it waives: only [`WaivableClause::EcePost`] can be named at all.
+    pub waives: Vec<WaivableClause>,
+    /// The exact run it applies to.
+    pub applies_to: WaiverAppliesTo,
+}
+
+/// The run a declaration is bound to: four values the verifier has ALREADY verified for the run.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WaiverAppliesTo {
+    /// sha256 of `task.json`.
+    pub task_json_sha256: String,
+    /// sha256 of `train.jsonl`.
+    pub train_jsonl_sha256: String,
+    /// sha256 of `eval.jsonl`.
+    pub eval_jsonl_sha256: String,
+    /// sha256 of `recipe.json`.
+    pub recipe_id: String,
+}
+
+/// A gate clause a pilot waiver may excuse. There is NO margin variant: a declaration naming
+/// `margin` does not deserialize, so the contract fails to load before any run is read (D-20).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub enum WaivableClause {
+    /// `ft.ece_post <= gate_max_ece`.
+    #[serde(rename = "ece_post")]
+    EcePost,
+}
+
+impl WaivableClause {
+    /// The clause as the contract and the gate report spell it.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::EcePost => "ece_post",
+        }
+    }
 }
 
 /// laya-finetune-gate-v1 `demo` (the part the verifier reads).
@@ -434,6 +555,7 @@ impl VerifyPolicy {
             seed_rank_scale: s.rank_scale,
             seed_tie_break: s.tie_break.clone(),
             stance_criteria_order: gate.demo.criteria_order.clone(),
+            pilot_waivers: gate.pilot_waivers.declarations.clone(),
         }
     }
 }
@@ -600,6 +722,9 @@ pub struct VerifyReport {
     pub recomputed: Recomputed,
     /// Always `true`: a report exists only for an accepted run.
     pub deploy_eligible: bool,
+    /// The pilot-waiver id this run was accepted under (Phase 12, D-19); `None` for a run whose
+    /// gate passed outright.
+    pub waived: Option<String>,
 }
 
 /// The evidence a gate refusal carries (boxed in [`VerifyError::GateFailed`]).
@@ -825,6 +950,18 @@ pub enum VerifyError {
     },
     /// The recomputed gate FAILED (the only variant with exit code 3).
     GateFailed(Box<GateFailure>),
+    /// The gate report claims a pilot waiver whose id no `pilot_waivers.declarations` entry has
+    /// (D-19). Only an ECE-only failure reaches this decision.
+    WaiverUndeclared {
+        /// The id the report claimed.
+        id: String,
+    },
+    /// The gate report claims a pilot waiver on a run whose recomputed gate PASSED (D-19): a
+    /// waiver excuses a failure, so a claim with nothing to excuse is a forged or stale report.
+    WaiverWithoutFailure {
+        /// The id the report claimed.
+        id: String,
+    },
     /// The report's seed selection is not the one the files support (A3): a non-median
     /// `shipped`, a per_seed row that does not bind the shipped checkpoint or eval file, a rank
     /// key or pass that differs from its recomputation, or a malformed seeds block.
@@ -916,6 +1053,8 @@ impl VerifyError {
             Self::ThresholdMismatch { .. } => "ThresholdMismatch",
             Self::PassDisagrees { .. } => "PassDisagrees",
             Self::GateFailed(_) => "GateFailed",
+            Self::WaiverUndeclared { .. } => "WaiverUndeclared",
+            Self::WaiverWithoutFailure { .. } => "WaiverWithoutFailure",
             Self::SeedPolicyViolated { .. } => "SeedPolicyViolated",
             Self::SeedPolicyMismatch { .. } => "SeedPolicyMismatch",
             Self::SeedPolicyMissing => "SeedPolicyMissing",
@@ -1096,6 +1235,16 @@ impl fmt::Display for VerifyError {
                 recomputed,
             } => write!(f, "reported pass={reported} recomputed pass={recomputed}"),
             Self::GateFailed(g) => write!(f, "{g}"),
+            Self::WaiverUndeclared { id } => write!(
+                f,
+                "the gate report claims pilot waiver {id:?}, which no \
+                 laya-finetune-gate-v1 pilot_waivers.declarations entry has"
+            ),
+            Self::WaiverWithoutFailure { id } => write!(
+                f,
+                "the gate report claims pilot waiver {id:?}, but the recomputed gate passed: \
+                 a waiver excuses a failed ece_post clause and nothing else"
+            ),
             Self::SeedPolicyViolated { field, why }
             | Self::ShiftProbeMismatch { field, why }
             | Self::RecordMismatch { field, why } => {
@@ -2487,6 +2636,100 @@ pub fn check_gate(
     Ok(failed)
 }
 
+/// The run a pilot waiver is matched against: the four values the verifier has ALREADY verified
+/// for this run. The report's `inputs_sha256` task/train/eval hashes are re-hashed against the
+/// data dir by [`check_inputs`] and its `recipe_id` against the recipe.json bytes by
+/// `PackInputs::from_run_dir`, so reading them here re-reads no file and trusts no claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunIdentity {
+    /// sha256 of `task.json`.
+    pub task_json_sha256: String,
+    /// sha256 of `train.jsonl`.
+    pub train_jsonl_sha256: String,
+    /// sha256 of `eval.jsonl`.
+    pub eval_jsonl_sha256: String,
+    /// sha256 of `recipe.json`.
+    pub recipe_id: String,
+}
+
+impl RunIdentity {
+    /// The identity of the run whose (already cross-checked) gate report this is.
+    #[must_use]
+    pub fn of(report: &GateReport) -> Self {
+        Self {
+            task_json_sha256: report.inputs_sha256.task_json.clone(),
+            train_jsonl_sha256: report.inputs_sha256.train_jsonl.clone(),
+            eval_jsonl_sha256: report.inputs_sha256.eval_jsonl.clone(),
+            recipe_id: report.recipe_id.clone(),
+        }
+    }
+
+    fn matches(&self, a: &WaiverAppliesTo) -> bool {
+        self.task_json_sha256 == a.task_json_sha256
+            && self.train_jsonl_sha256 == a.train_jsonl_sha256
+            && self.eval_jsonl_sha256 == a.eval_jsonl_sha256
+            && self.recipe_id == a.recipe_id
+    }
+}
+
+/// What [`decide_pilot_waiver`] decided about a recomputed gate outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WaiverDecision {
+    /// The gate passed and no waiver was claimed: accept, `waived` is `None`.
+    NotNeeded,
+    /// A declared waiver excuses the one failed clause: accept, `waived` is the id.
+    Waived(String),
+    /// The failure stands: refuse [`VerifyError::GateFailed`] with the failed clauses.
+    GateFailed,
+    /// The claimed id is not declared: refuse [`VerifyError::WaiverUndeclared`].
+    Undeclared(String),
+    /// A waiver was claimed on a passing gate: refuse [`VerifyError::WaiverWithoutFailure`].
+    WithoutFailure(String),
+}
+
+/// laya-finetune-gate-v1 `pilot_waivers` (Phase 12, D-19, D-20): decide what the failed clauses
+/// `clauses` (from [`check_gate`], on RECOMPUTED metrics) mean for a run carrying `claim` in its
+/// gate report. Pure: no IO, no clock, nothing read from the run beyond its [`RunIdentity`].
+///
+/// In order: no failed clause and no claim is [`WaiverDecision::NotNeeded`]; no failed clause with
+/// a claim is [`WaiverDecision::WithoutFailure`]; a `margin` failure is
+/// [`WaiverDecision::GateFailed`] whatever the claim (D-20); an ECE-only failure with no claim is
+/// `GateFailed`; with a claim whose id no declaration has it is [`WaiverDecision::Undeclared`];
+/// with a declaration whose `waives` and the claim's `waives` are both exactly `["ece_post"]` and
+/// whose `applies_to` equals `run` field for field it is [`WaiverDecision::Waived`]; any other
+/// mismatch is `GateFailed`.
+#[provable_contracts_macros::contract("laya-finetune-gate-v1", equation = "pilot_waiver_honoured")]
+#[must_use]
+pub fn decide_pilot_waiver(
+    clauses: &[GateClause],
+    claim: Option<&PilotWaiverClaim>,
+    run: &RunIdentity,
+    policy: &VerifyPolicy,
+) -> WaiverDecision {
+    if clauses.is_empty() {
+        return claim.map_or(WaiverDecision::NotNeeded, |c| {
+            WaiverDecision::WithoutFailure(c.id.clone())
+        });
+    }
+    if clauses.contains(&GateClause::Margin) || clauses != [GateClause::EcePost] {
+        return WaiverDecision::GateFailed;
+    }
+    let Some(claim) = claim else {
+        return WaiverDecision::GateFailed;
+    };
+    let Some(decl) = policy.pilot_waivers.iter().find(|d| d.id == claim.id) else {
+        return WaiverDecision::Undeclared(claim.id.clone());
+    };
+    let exactly_ece = |w: &[&str]| w == [WaivableClause::EcePost.as_str()];
+    let declared: Vec<&str> = decl.waives.iter().map(|w| w.as_str()).collect();
+    let claimed: Vec<&str> = claim.waives.iter().map(String::as_str).collect();
+    if exactly_ece(&declared) && exactly_ece(&claimed) && run.matches(&decl.applies_to) {
+        WaiverDecision::Waived(decl.id.clone())
+    } else {
+        WaiverDecision::GateFailed
+    }
+}
+
 // ===========================================================================
 // The seed selection (A3) and the shift probe (A2), laya-finetune-gate-v1 1.4.0
 // ===========================================================================
@@ -3264,8 +3507,10 @@ fn verify_loaded(
     );
     let n = checked.labels.len();
     let clauses = check_gate(&inputs.gate_report, &recomputed, n, policy)?;
-    if !clauses.is_empty() {
-        return Err(VerifyError::GateFailed(Box::new(GateFailure {
+    // D-19 / D-20: a declared, run-bound pilot waiver can excuse an ECE-only failure and nothing
+    // else. Every other outcome keeps its existing refusal (the one shared failure builder).
+    let gate_failure = |clauses: Vec<GateClause>| {
+        VerifyError::GateFailed(Box::new(GateFailure {
             clauses,
             recomputed,
             rescore_max_abs: ft.max_abs,
@@ -3277,9 +3522,21 @@ fn verify_loaded(
             shipped_seed: checked.shipped_seed,
             argmax_agree: ft.argmax_agree,
             n,
-            artifact_sha256,
-        })));
-    }
+            artifact_sha256: artifact_sha256.clone(),
+        }))
+    };
+    let waived = match decide_pilot_waiver(
+        &clauses,
+        inputs.gate_report.pilot_waiver.as_ref(),
+        &RunIdentity::of(&inputs.gate_report),
+        policy,
+    ) {
+        WaiverDecision::NotNeeded => None,
+        WaiverDecision::Waived(id) => Some(id),
+        WaiverDecision::GateFailed => return Err(gate_failure(clauses)),
+        WaiverDecision::Undeclared(id) => return Err(VerifyError::WaiverUndeclared { id }),
+        WaiverDecision::WithoutFailure(id) => return Err(VerifyError::WaiverWithoutFailure { id }),
+    };
     // seed_policy.legacy_rule: AFTER the re-scores and the gate, so a legacy run whose gate
     // fails still reports GateFailed (the 1.x fail-closed vectors keep their refusals).
     if inputs.recipe.seed_selection.is_none() {
@@ -3298,6 +3555,7 @@ fn verify_loaded(
         n,
         recomputed,
         deploy_eligible: true,
+        waived,
     })
 }
 

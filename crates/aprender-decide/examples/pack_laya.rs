@@ -141,7 +141,7 @@ fn cmd_pack(a: &Args) -> Result<ExitCode, String> {
             Ok(r) => {
                 println!(
                     "PACKED {} sha256={} rescore_max_abs={} zs_rescore_max_abs={} rescore_bound={} \
-                     zs_rescore_bound={} noise={} zs_noise={} shipped_seed={} argmax={}/{}",
+                     zs_rescore_bound={} noise={} zs_noise={} shipped_seed={} argmax={}/{} waived={}",
                     out.display(),
                     r.artifact_sha256,
                     r.rescore_max_abs,
@@ -152,7 +152,8 @@ fn cmd_pack(a: &Args) -> Result<ExitCode, String> {
                     verify::opt_f64(r.zs_noise),
                     verify::opt_i64(r.shipped_seed),
                     r.argmax_agree,
-                    r.n
+                    r.n,
+                    r.waived.as_deref().unwrap_or("none")
                 );
                 ExitCode::SUCCESS
             }
@@ -176,6 +177,7 @@ fn cmd_verify(a: &Args) -> Result<ExitCode, String> {
                 let line = obj(vec![
                     ("artifact_sha256", r.artifact_sha256.into()),
                     ("deploy_eligible", r.deploy_eligible.into()),
+                    ("waived", r.waived.clone().into()),
                     (
                         "recomputed",
                         obj(vec![

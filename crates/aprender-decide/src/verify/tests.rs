@@ -3039,3 +3039,159 @@ fn ece_bin_confidence_sums_are_exact_in_f64() {
         "{sets} sets, {bin_sums} bin sums"
     );
 }
+
+// ===========================================================================
+// Phase 12 plan 02: the pilot waiver (D-19, D-20) — FALSIFY-LAYA-GATE-016..020
+// ===========================================================================
+
+/// The declaration id every waiver test uses.
+const WAIVER_ID: &str = "test-pilot";
+
+/// TEST-ONLY policy under which the tiny fixture fails the gate on `ece_post` ALONE: margin 0 is
+/// within the permissive 0.0 floor, while the fixture's ece_post (0.008) exceeds 0.001. The
+/// failure is induced in the policy's threshold, never by weakening a check.
+fn ece_only_policy() -> VerifyPolicy {
+    VerifyPolicy {
+        max_ece: 0.001,
+        ..permissive_policy()
+    }
+}
+
+/// A production copy whose reported pass is false and whose recomputed failed clauses are exactly
+/// `[EcePost]` under `policy` (the way `gate_failed_margin_only` induces a margin-only failure).
+fn ece_only_failed_copy(policy: &VerifyPolicy) -> Run {
+    production_copy(policy, false)
+}
+
+/// Write the gate report's `pilot_waiver` claim (the trainer's job; plan 12-03).
+fn claim_waiver(run: &Run, id: &str, waives: &[&str]) {
+    run.edit_json("gate-report.json", |r| {
+        r["pilot_waiver"] = obj(vec![
+            ("id", id.into()),
+            ("waives", Value::from(waives.to_vec())),
+        ]);
+    });
+}
+
+/// The run's identity as the verifier reads it (task / train / eval sha256 and recipe_id).
+fn run_identity(run: &Run) -> RunIdentity {
+    RunIdentity::of(&run.inputs().gate_report)
+}
+
+/// One `pilot_waivers.declarations` entry, as YAML-shaped JSON.
+fn waiver_decl_json(id: &str, waives: &[&str], applies: &RunIdentity) -> Value {
+    obj(vec![
+        ("id", id.into()),
+        ("declared_on", "2026-10-26".into()),
+        ("reason", "a test declaration".into()),
+        ("waives", Value::from(waives.to_vec())),
+        (
+            "applies_to",
+            obj(vec![
+                ("task_json_sha256", applies.task_json_sha256.clone().into()),
+                (
+                    "train_jsonl_sha256",
+                    applies.train_jsonl_sha256.clone().into(),
+                ),
+                (
+                    "eval_jsonl_sha256",
+                    applies.eval_jsonl_sha256.clone().into(),
+                ),
+                ("recipe_id", applies.recipe_id.clone().into()),
+            ]),
+        ),
+    ])
+}
+
+/// The REAL contract text with `pilot_waivers.declarations` replaced by `decls`, parsed into the
+/// view every caller parses it into (so the load-time validation is the production one).
+fn gate_view_with(decls: &[Value]) -> Result<GateContractView, serde_yaml::Error> {
+    let mut doc = contract_yaml("laya-finetune-gate-v1.yaml");
+    doc["pilot_waivers"]["declarations"] = serde_yaml::to_value(decls)?;
+    serde_yaml::from_value(doc)
+}
+
+/// `base` with its waivers taken from the real contract text carrying `decls`, through the one
+/// contract-to-policy mapping.
+fn policy_declaring(base: VerifyPolicy, decls: &[Value]) -> VerifyPolicy {
+    let gate = gate_view_with(decls).unwrap_or_else(|e| panic!("the declarations load: {e}"));
+    let mapped = VerifyPolicy::from_contract_views(
+        &gate,
+        &view::<ParityContractView>("laya-parity-v1.yaml"),
+    );
+    VerifyPolicy {
+        pilot_waivers: mapped.pilot_waivers,
+        ..base
+    }
+}
+
+/// The ECE-only policy plus ONE declaration whose `applies_to` is read from `run` (already built).
+fn waiver_policy(run: &Run) -> VerifyPolicy {
+    let decl = waiver_decl_json(WAIVER_ID, &["ece_post"], &run_identity(run));
+    policy_declaring(ece_only_policy(), &[decl])
+}
+
+/// FALSIFY-LAYA-GATE-020 (the accept half): a declared, run-bound ECE-only failure is accepted,
+/// reported as waived, and still deploy-eligible; the same run without the declaration is not.
+#[test]
+fn waiver_declared_ece_only_failure_is_accepted_and_reported() {
+    let base = ece_only_policy();
+    let run = ece_only_failed_copy(&base);
+    claim_waiver(&run, WAIVER_ID, &["ece_post"]);
+    let policy = waiver_policy(&run);
+    assert_eq!(policy.pilot_waivers.len(), 1, "the declaration is mapped");
+    let report = run
+        .verify(&policy)
+        .expect("the declared waiver is accepted");
+    assert_eq!(report.waived.as_deref(), Some(WAIVER_ID));
+    assert!(report.deploy_eligible);
+    assert!(
+        report.recomputed.ece_post > policy.max_ece,
+        "the failure being waived is real: {:?}",
+        report.recomputed
+    );
+    // The control: without the declaration the same claim is refused, so the declaration is
+    // what changed the verdict.
+    let e = expect_err(run.verify(&base));
+    assert!(
+        matches!(&e, VerifyError::WaiverUndeclared { id } if id == WAIVER_ID),
+        "{e:?}"
+    );
+}
+
+/// FALSIFY-LAYA-GATE-016: an ECE failure with no claim is still GateFailed naming ece_post
+/// (exit 3, nothing written), even when a matching declaration exists in the contract.
+#[test]
+fn waiver_undeclared_ece_failure_is_still_gate_failed() {
+    let base = ece_only_policy();
+    let run = ece_only_failed_copy(&base);
+    let e = expect_err(run.verify(&base));
+    assert_eq!(e.exit_code(), 3);
+    assert!(
+        matches!(&e, VerifyError::GateFailed(g) if g.clauses == vec![GateClause::EcePost]),
+        "{e:?}"
+    );
+    // A matching declaration without the report's claim waives nothing.
+    let declared = waiver_policy(&run);
+    let e = expect_err(run.verify(&declared));
+    assert!(
+        matches!(&e, VerifyError::GateFailed(g) if g.clauses == vec![GateClause::EcePost]),
+        "{e:?}"
+    );
+    // And pack_for_serving writes nothing on the refusal.
+    let out_dir = TempDir::new().expect("out dir");
+    let out = out_dir.path().join("v.apr");
+    let e = expect_err(pack_for_serving(
+        &run.dir,
+        &run.data(),
+        &run.base(),
+        &out,
+        &base,
+    ));
+    assert!(matches!(e, VerifyError::GateFailed(_)), "{e:?}");
+    assert_eq!(
+        std::fs::read_dir(out_dir.path()).expect("read out").count(),
+        0,
+        "nothing may be written"
+    );
+}
