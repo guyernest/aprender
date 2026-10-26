@@ -1,0 +1,72 @@
+{
+  "schema": "laya-kev-arm-evidence-v1",
+  "phase": "12",
+  "plan": "12-14",
+  "branch": "spike/016-upstream-sync",
+  "commit": "32103ba83ce4165598ae31ddde89b5c9856b43f3",
+  "worktree_dirty": [
+    "Cargo.lock"
+  ],
+  "kev_vendor_commit": "7405b72e73e2d24787f3720d162a21c974ff2ad2",
+  "llama_cpp_commit": "d2e54583c7452353eb35d40431281f6ee984332f",
+  "disk": {
+    "before_clean_bytes": 30699687936,
+    "after_clean_bytes": 51534573568,
+    "cleaned": "cargo clean on the main checkout only (D-24 owner authorisation)"
+  },
+  "model": {
+    "gguf_sha256": "549e40ca10ec1ba17b32b40cacace3c9e4dcef960234812f36984279f0ab0c22",
+    "gguf_bytes": 16833972608,
+    "head_sha256": "00cd03e1899f07b83effccc159fac5f2260b52b1585e3615d4e82416898d8ed8",
+    "parity_fixture_sha256": "6bb4eeab8a668cb51bf018bcb40ee98f352bc2dc658edb04e7e9d16e3419b7c7",
+    "merged_tensor_keys_equal_base": true,
+    "base_key_accounting": {
+      "total": 738,
+      "text": 426,
+      "dropped_visual": 297,
+      "dropped_mtp": 15,
+      "tie_word_embeddings": true
+    },
+    "base_key_note": "the base checkpoint is multimodal (model.language_model.* / model.visual.* / mtp.*): the written text backbone equals the image model.language_model.X -> model.X of the base's 426 text keys; the 297 visual and 15 mtp keys are not part of the Kev backbone (Kev loads AutoModelForCausalLM(...).model); tie_word_embeddings is true so no lm_head",
+    "merged_shards": 4,
+    "merged_bytes": 16823005184,
+    "export_peak_rss_bytes": 21190377472,
+    "export_peak_rss_note": "one resident merged 4B model; spike 017's two-model exporter held about two copies",
+    "projected_peak_rss_bytes": 40401534259,
+    "projected_peak_rss_note": "2.4 x the GGUF bytes (the 0.8B ratio: 7.2 GB RSS for a 3.0 GB file)",
+    "measured_parity_peak_rss_bytes": 24029200384,
+    "measured_parity_peak_footprint_bytes": 21928685312,
+    "host_memory_bytes": 51539607552,
+    "dtype": "f32",
+    "converter": "llama.cpp d2e5458 convert_hf_to_gguf.py --outtype f32 (UV_OFFLINE=1, spike-017 command)"
+  },
+  "cleanup": {
+    "free_before_bytes": 12085620736,
+    "removed": "models/kev/kev-4b/merged (the merged fp32 HF directory, 16843112448 bytes), after the GGUF sha256 was recorded; free disk was below 20 GiB",
+    "free_after_bytes": 28929683456
+  },
+  "parity": {
+    "tolerance": 0.0001,
+    "max_abs_dprob": 2.8014183044433594e-06,
+    "argmax_agree": 9,
+    "n_rows": 9,
+    "peak_rss_bytes": 24029200384,
+    "threads": 14,
+    "rows": "six public stance rows (cardiffnlp/tweet_eval stance_abortion, spike 015) and the 3-question ticket (3 rows)"
+  },
+  "parity_long": {
+    "status": "measured",
+    "n_tokens": 6808,
+    "max_abs_dprob": 8.940696716308594e-07,
+    "argmax_agree": true,
+    "reason": null,
+    "prefill_ms": 166186,
+    "row": "seeded synthetic filler (seed 13, fixed word list), no motivation data, no guide text",
+    "tolerance": 0.0001
+  },
+  "driver": {
+    "binary": ".planning/spikes/033-motivation-kev-4b-arm/target/release/motivation-kev-4b-arm",
+    "build": "cargo build --release --offline --locked",
+    "lock": "spike 020's Cargo.lock regenerated offline for the rename (cargo update --workspace --offline); only the workspace member's entry changed"
+  }
+}
