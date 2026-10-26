@@ -119,6 +119,34 @@ spike branch; serving SetFit or Kev; any change inside motivation-experiment.
   field reference (with their caveat that weak and mixed evidence count as `other`), and a statement that no server
   change was made.
 
+### Amendments after research (owner, 2026-10-26, at plan-phase)
+- **D-23 (deploy target):** deploy `aprender-mcp-decide-motivation` with profile `ze-kasher-dev`, region us-east-1,
+  the same account, weights bucket and endpoint host pattern as `aprender-mcp-decide-antisemite`. "augury-dev" in
+  the roadmap title is not an AWS target for this phase. No region work is needed. The uncommitted `region`
+  parameter in the justfile is not this phase's work, so plans must not depend on it or commit it.
+- **D-24 (Kev arm, amends D-07/D-11):** Kev-4B goes ahead. Disk is freed by `cargo clean` on the local
+  checkout(s); the main `target/` is about 19 GB, giving about 44 GB free against the about 34 GB needed for the
+  merge and GGUF conversion. The plan still times one row on the 4B model, and stops at a checkpoint with the
+  projected total before the full arm runs. The Kev prompt is guide Sections 4–6 WITHOUT §4.5 (6,811 Qwen tokens,
+  under Kev's 8,192 row limit), and the evidence records the omission. If the 4B Rust path cannot be made to
+  run, the arm is recorded as blocked with a failure class, as SetFit was in Phase 10, and nothing is faked.
+- **D-25 (SetFit arm, amends D-08):** use the s32 cell (the largest legal one; the conspiratorial pool is about
+  36, and the allowed shots are {8,16,32,64}), recorded as a declared recipe deviation. Extend
+  `laya_dir_to_canonical` to K labels, keeping Phase 10's binary output byte-identical. Pull in the deferred plan
+  10-06 (`apr eval --dump-probabilities`) so SetFit's macro-F1, false-assignment rate and tertiles come from the
+  same metrics code as the other arms (OPS-03).
+- **D-26 (variant (b) door, amends D-09):** if the owner picks a task variant with P > 100, the door becomes
+  per-artifact, `min(8, floor(800 / P))`, never below 4, through a `decide-tool-boundary-v1` change.
+  antisemitism-v1 keeps 8. experiment-coach (commit 52f31d7) splits a batch only on a token refusal and sends
+  batches of 4, so a door below 4 would break the partner. This contract work happens only if variant (b) is
+  chosen at the D-09 checkpoint.
+- **Research corrections recorded:** the eval fraction is a constant in the prepare script (EVAL_DIVISOR), not a
+  contract value, so the D-13 contract-amendment branch never fires. `calibration_temp_max` lives in
+  `laya-finetune-gate-v1.yaml` and `laya/temperature.rs`, not in `laya-parity-v1` (D-18 applies to those files).
+  The calibration-slice fraction is a global contract minimum enforced by the Rust verifier, so changing it
+  globally would fail re-verification of the live antisemitism-v1 artifact; any change must be per-run. The
+  folded spike must not read `eval.jsonl` labels and runs on a hold-out carved from train.
+
 ### Carried forward from Phase 10 (unchanged)
 - Recipe and gate thresholds: margin ≥ 0.05 over zero-shot, top-label ECE ≤ 0.10, early stopping, epochs declared
   from a timed one-epoch probe by a rule written before the probe, and the device read back from a trace line.
