@@ -1,0 +1,49 @@
+{
+  "schema": "laya-waiver-evidence-v1",
+  "phase": "12",
+  "plan": "12-03",
+  "measured_on": "2026-10-26",
+  "commit": "eacea60a3e0ae846cf23a8edc40c607f911a84f1",
+  "contracts": {
+    "laya_finetune_gate_version": "5.1.0",
+    "decide_apr_version": "3.1.0",
+    "pv_diff_suggestions": [
+      {
+        "contract": "decide-apr-v1",
+        "from": "3.0.0",
+        "suggested_bump": "minor",
+        "chosen": "3.1.0",
+        "additions": [
+          "falsification_tests: FALSIFY-DECIDE-APR-014"
+        ],
+        "note": "pv diff compares the start commit's file with the working file; it does not see manifest.fields / bindings edits"
+      }
+    ]
+  },
+  "laya_antisemitism_v1_verify": {
+    "command": "just laya-verify models/decide/laya-antisemitism-v1.apr models/decide/laya-antisemitism-v1 data/decide/goldstandard-2024 $BASE",
+    "rc": 0,
+    "line": {
+      "argmax": "2129/2129",
+      "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+      "deploy_eligible": true,
+      "noise": 3.592973853439041e-06,
+      "recomputed": {
+        "ece_post": 0.04236402879471284,
+        "ft_macro_f1": 0.7956129081807202,
+        "margin": 0.23603720989749355,
+        "zs_macro_f1": 0.5595756982832266
+      },
+      "rescore_bound": 1.4371895413756164e-05,
+      "rescore_max_abs": 7.554888725280762e-06,
+      "shipped_seed": 23,
+      "waived": null,
+      "zs_noise": 1.5070898052527149e-05,
+      "zs_rescore_bound": 6.0283592210108594e-05,
+      "zs_rescore_max_abs": 1.195073127746582e-05
+    }
+  },
+  "inspect_waiver": "none",
+  "file_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+  "wall_seconds": 1300
+}
