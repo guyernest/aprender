@@ -68,5 +68,82 @@
     "binary": ".planning/spikes/033-motivation-kev-4b-arm/target/release/motivation-kev-4b-arm",
     "build": "cargo build --release --offline --locked",
     "lock": "spike 020's Cargo.lock regenerated offline for the rename (cargo update --workspace --offline); only the workspace member's entry changed"
-  }
+  },
+  "prompt": {
+    "guide_sha256": "837d915af312d65a706070ed5dd1a506e5e1d83f27e9eb52a9a18d663227174b",
+    "guide_words": 4586,
+    "qwen_tokens": 6812,
+    "instruction_branch_tokens": 6813,
+    "max_row_tokens": 7011,
+    "min_row_tokens": 6852,
+    "sections_kept": [
+      "4.1",
+      "4.2",
+      "4.3",
+      "4.4",
+      "5",
+      "6"
+    ],
+    "section_4_lead_in_included": true,
+    "omitted": "4.5 (the derivation narrative): with it Sections 4-6 are 9,648 Qwen tokens, above Kev's 8,192-token row limit (D-24)",
+    "regime_note": "about 6.6x Kev's 1,024-token training branch, outside its training distribution",
+    "options": [
+      "social_affiliative",
+      "conspiratorial",
+      "other"
+    ],
+    "rows": {
+      "train": 295,
+      "eval": 100
+    }
+  },
+  "leakage": {
+    "method": "nfc-trim-ws-v1 (scripts/laya_train/data.normalize): substring match of each normalized eval post in the normalized guide text; sha256 intersection of the normalized train and eval texts",
+    "eval_posts_in_guide": 0,
+    "fit_rows_in_eval": 0,
+    "eval_post_prefix50_in_guide": 0,
+    "train_posts_in_guide": 0
+  },
+  "timing": {
+    "row": {
+      "split": "train",
+      "row": 190,
+      "selection": "median post length (characters) of the 295 train rows"
+    },
+    "first_touch_s": 166.32837125,
+    "warm_s": 155.882335083,
+    "n_tokens": 6892,
+    "threads": 14,
+    "peak_rss_bytes": 12974178304,
+    "peak_footprint_bytes": 21941563160,
+    "process_real_s": 327.57,
+    "command": "RAYON_NUM_THREADS=14 /usr/bin/time -l <033 binary> dump <gguf> <head> probe-row.json <out> --identity <identity> --repeat 2",
+    "note": "the second pass is the warm figure; the projections use it x 1.1"
+  },
+  "projections": {
+    "full": {
+      "rows": 395,
+      "hours": 18.81413183154542,
+      "description": "100 eval + all 295 train rows (bias and temperature fitted on train)"
+    },
+    "subset": {
+      "rows": 160,
+      "hours": 7.620914159613333,
+      "description": "100 eval + a stratified 60-row train subset (20 per class, seed 13)"
+    },
+    "zero_shot": {
+      "rows": 100,
+      "hours": 4.7630713497583335,
+      "description": "100 eval rows, no fitting"
+    }
+  },
+  "resources_at_checkpoint": {
+    "free_disk_bytes": 29969752064,
+    "host_memory_bytes": 51539607552,
+    "projected_peak_rss_bytes": 40401534259,
+    "measured_peak_rss_bytes_timed_row": 12974178304,
+    "measured_peak_rss_bytes_parity_run": 24029200384
+  },
+  "outcome": "prepared",
+  "outcome_note": "preparation and probe complete; the full arm has NOT run (D-24: awaiting the owner's budget choice at the plan-14 checkpoint)"
 }
