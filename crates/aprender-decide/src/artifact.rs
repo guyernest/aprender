@@ -212,6 +212,11 @@ pub struct GateSummary {
     pub ece_post: f64,
     /// sha256 of the gate-report blob.
     pub report_sha256: String,
+    /// The pilot waiver id that let this artifact pass with an ECE-only gate failure
+    /// (decide-apr-v1 `/gate/waiver`, Phase 12 D-19); absent on every unwaived artifact,
+    /// so their manifest bytes are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiver: Option<String>,
 }
 
 /// Input hashes (`manifest.inputs_sha256`, gate report `inputs_sha256`).
@@ -1215,6 +1220,7 @@ fn build_manifest(inputs: &PackInputs, agent: &AgentConfig, labels: Vec<String>)
             margin: report.margin,
             ece_post: report.fine_tuned.ece_post,
             report_sha256: sha256_hex(&inputs.gate_report_json),
+            waiver: report.pilot_waiver.as_ref().map(|w| w.id.clone()),
         },
         inputs_sha256: inputs.inputs_sha256.clone(),
         device_used: report.device_used.clone(),
@@ -1619,7 +1625,7 @@ fn check_manifest_bindings(m: &Manifest, src: &BoundSources<'_>) -> Result<(), A
     let applied = applied_temperature_f64(src.agent, QType::Choice, k);
     // One entry per comparison, so each can be disabled on its own (plan 08-19 mutation
     // proof); the first disagreement in this order is the refusal.
-    let checks: [(&'static str, bool); 23] = [
+    let checks: [(&'static str, bool); 24] = [
         ("variant", m.variant == recipe.variant),
         ("base", m.base == recipe.base),
         (
@@ -1658,6 +1664,10 @@ fn check_manifest_bindings(m: &Manifest, src: &BoundSources<'_>) -> Result<(), A
         (
             "gate.ece_post",
             same_f64(m.gate.ece_post, report.fine_tuned.ece_post),
+        ),
+        (
+            "gate.waiver",
+            m.gate.waiver == report.pilot_waiver.as_ref().map(|w| w.id.clone()),
         ),
         ("calibration.bucket", cal.bucket == r_cal.bucket),
         (

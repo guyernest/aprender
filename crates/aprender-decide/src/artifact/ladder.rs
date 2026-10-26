@@ -26,6 +26,26 @@ fn packed() -> Vec<u8> {
     PACKED.get_or_init(pack_tiny).clone()
 }
 
+/// The tiny fixture packed from a gate report that carries a `pilot_waiver` claim
+/// (decide-apr-v1 `/gate/waiver`, Phase 12 D-19), through the SAME write path the shipped
+/// packer uses: the manifest's `gate.waiver` is filled from the report, not forged.
+fn packed_waived() -> Vec<u8> {
+    static PACKED: OnceLock<Vec<u8>> = OnceLock::new();
+    PACKED.get_or_init(pack_tiny_waived).clone()
+}
+
+fn pack_tiny_waived() -> Vec<u8> {
+    let mut i = inputs();
+    let mut report: Value = serde_json::from_slice(&i.gate_report_json).expect("report JSON");
+    report["pilot_waiver"] = Value::Object(serde_json::Map::from_iter([
+        ("id".to_string(), Value::from("test-pilot")),
+        ("waives".to_string(), Value::from(vec!["ece_post"])),
+    ]));
+    i.gate_report_json = serde_json::to_vec(&report).expect("report re-serializes");
+    i.gate_report = serde_json::from_slice(&i.gate_report_json).expect("the waived report parses");
+    super::write_decide_apr(&i).expect("the waived fixture packs")
+}
+
 fn inputs() -> PackInputs {
     let dir = fixture_dir();
     PackInputs::from_run_dir(&dir, &dir.join("data")).expect("the tiny run dir reads")
@@ -1129,6 +1149,113 @@ fn manifest_gate_summary_disagrees_with_report() {
     }
 }
 
+/// `gate.waiver` must equal the embedded report's `pilot_waiver.id`: a strip from a waived
+/// pack, an add to an unwaived pack and a change are each refused at rung 4 naming it
+/// (T-12-10).
+#[test]
+fn manifest_gate_waiver_disagrees_with_report() {
+    // Strip: the report still claims the waiver, the manifest hides it.
+    let w = packed_waived();
+    let m = manifest_json(&w);
+    assert_eq!(
+        m["gate"]["waiver"], "test-pilot",
+        "control: the waived pack names it"
+    );
+    let stripped = edit_manifest(&w, |v| {
+        v["gate"]
+            .as_object_mut()
+            .expect("gate object")
+            .remove("waiver");
+    });
+    assert_field(&stripped, "gate.waiver");
+    // Change: the manifest names another id than the report.
+    let changed = forge(
+        &w,
+        &[],
+        &[],
+        &edits(&[("/gate/waiver", Value::from("another-pilot"))]),
+    );
+    assert_field(&changed, "gate.waiver");
+    // Add: the unwaived pack's manifest claims a waiver its report does not hold.
+    let b = packed();
+    let added = edit_manifest(&b, |v| {
+        v["gate"]["waiver"] = Value::from("test-pilot");
+    });
+    assert_field(&added, "gate.waiver");
+    // Control: both unforged packs load.
+    load_verified(&w).expect("control: the waived pack loads");
+    load_verified(&b).expect("control: the unwaived pack loads");
+}
+
+/// A waived run packs with `gate.waiver` filled from the report and loads through every
+/// door (`load_bytes`, `load_hashed` the Lambda door, `load_path` the stdio door); the
+/// manifest the loaded `Decider` carries names the waiver.
+#[test]
+fn waived_run_packs_with_gate_waiver_and_loads_at_every_door() {
+    let w = packed_waived();
+    let by_bytes = crate::Decider::load_bytes(&w).expect("load_bytes");
+    assert_eq!(
+        by_bytes.manifest().gate.waiver.as_deref(),
+        Some("test-pilot")
+    );
+    let by_hash =
+        crate::Decider::load_hashed(&super::HashedArtifact::new(&w)).expect("load_hashed");
+    assert_eq!(
+        by_hash.manifest().gate.waiver.as_deref(),
+        Some("test-pilot")
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("waived.apr");
+    std::fs::write(&path, &w).expect("write the waived artifact");
+    let by_path = crate::Decider::load_path(&path).expect("load_path");
+    assert_eq!(
+        by_path.manifest().gate.waiver.as_deref(),
+        Some("test-pilot")
+    );
+    assert_eq!(by_bytes.identity(), by_hash.identity());
+    assert_eq!(by_bytes.identity(), by_path.identity());
+    // inspect_manifest (the `inspect` line's source) reads it too.
+    let m = super::inspect_manifest(&w).expect("inspect");
+    assert_eq!(m.gate.waiver.as_deref(), Some("test-pilot"));
+    // A waived pack is a different artifact from the unwaived one (the pinned sha shows it).
+    assert_ne!(
+        by_bytes.identity().artifact_sha256,
+        crate::Decider::load_bytes(&packed())
+            .expect("unwaived control")
+            .identity()
+            .artifact_sha256
+    );
+}
+
+/// Byte stability (T-12-11): an unwaived pack's manifest holds NO `waiver` key at all (a
+/// `null` would have changed every shipped artifact's bytes), and the key appears only on
+/// the waived pack.
+#[test]
+fn unwaived_manifest_serializes_no_waiver_key() {
+    let b = packed();
+    let text = {
+        let r = AprV2ReaderRef::from_bytes(&b).expect("open the packed artifact");
+        r.metadata().custom[CUSTOM_METADATA_KEY]
+            .as_str()
+            .expect("manifest string")
+            .to_string()
+    };
+    assert!(
+        !text.contains("\"waiver\""),
+        "the unwaived manifest serialized a waiver key: {text}"
+    );
+    assert!(manifest_json(&b)["gate"].get("waiver").is_none());
+    let waived_bytes = packed_waived();
+    let w = {
+        let r = AprV2ReaderRef::from_bytes(&waived_bytes).expect("open the waived artifact");
+        r.metadata().custom[CUSTOM_METADATA_KEY]
+            .as_str()
+            .expect("manifest string")
+            .to_string()
+    };
+    assert!(w.contains("\"waiver\":\"test-pilot\""), "{w}");
+}
+
 /// Every calibration field must equal the embedded report's calibration block.
 #[test]
 fn manifest_calibration_disagrees_with_report() {
@@ -1224,14 +1351,26 @@ fn manifest_device_used_disagrees_with_report() {
     assert_field(&f, "device_used");
 }
 
-/// FALSIFY-DECIDE-APR-013: EVERY leaf of the packed manifest, for EVERY binding the
-/// contract table names for it, is forged so that exactly that one binding breaks — and
-/// the ladder must refuse it at the table's rung. A binding whose check is disabled lets
-/// its forgery load, which this test names.
-#[test]
-fn every_manifest_leaf_is_bound() {
-    let b = packed();
-    let m = manifest_json(&b);
+/// The leaf patterns of `bytes`' manifest.
+fn leaf_patterns(bytes: &[u8]) -> BTreeSet<String> {
+    let mut ptrs = Vec::new();
+    leaves(&manifest_json(bytes), "", "", &mut ptrs);
+    ptrs.into_iter().map(|(_, p)| p).collect()
+}
+
+/// What one binding sweep over `b` found: the failures, the leaf patterns it forged and the
+/// number of edges and leaves.
+struct Sweep {
+    failures: Vec<String>,
+    forged: BTreeSet<String>,
+    edges: usize,
+    leaves: usize,
+}
+
+/// Forge, on `b`, exactly the one binding of every edge whose leaf pattern passes `wanted`,
+/// and require the ladder to refuse it at the table's rung naming that leaf.
+fn sweep_bindings(b: &[u8], wanted: impl Fn(&str) -> bool) -> Sweep {
+    let m = manifest_json(b);
     let mut ptrs = Vec::new();
     leaves(&m, "", "", &mut ptrs);
     let table = bindings_table();
@@ -1241,13 +1380,18 @@ fn every_manifest_leaf_is_bound() {
         .map(|(p, pat)| (p.as_str(), pat.as_str()))
         .collect();
     let mut failures = Vec::new();
+    let mut forged = BTreeSet::new();
     for (i, (leaf, source)) in edges.iter().enumerate() {
         let ptr = leaf.trim_start_matches("manifest:");
         let pattern = pattern_of[ptr];
+        if !wanted(pattern) {
+            continue;
+        }
+        forged.insert(pattern.to_string());
         let row = &table[pattern];
         let old = m.pointer(ptr).expect("leaf value");
-        let forged = break_only(&b, &edges, i, pattern, old);
-        match load_verified(&forged) {
+        let broken = break_only(b, &edges, i, pattern, old);
+        match load_verified(&broken) {
             Ok(_) => failures.push(format!(
                 "{ptr} <-> {source}: LOADED after the binding was broken"
             )),
@@ -1266,14 +1410,45 @@ fn every_manifest_leaf_is_bound() {
                             "{ptr} <-> {source}: refused naming another field: {e}"
                         ));
                     }
+                } else if ptr == "/gate/waiver" {
+                    failures.push(format!(
+                        "{ptr} <-> {source}: refused, but not as a manifest disagreement: {e}"
+                    ));
                 }
             }
         }
     }
+    Sweep {
+        failures,
+        forged,
+        edges: edges.len(),
+        leaves: ptrs.len(),
+    }
+}
+
+/// FALSIFY-DECIDE-APR-013: EVERY leaf of the packed manifest, for EVERY binding the
+/// contract table names for it, is forged so that exactly that one binding breaks — and
+/// the ladder must refuse it at the table's rung. A binding whose check is disabled lets
+/// its forgery load, which this test names. The optional `/gate/waiver` leaf exists only on
+/// a waived pack, so a second sweep forges every leaf `packed_waived()` adds to `packed()`.
+#[test]
+fn every_manifest_leaf_is_bound() {
+    let b = packed();
+    let base = sweep_bindings(&b, |_| true);
+    let mut failures = base.failures;
+    // The optional leaf: forged on the waived pack, which is where it exists.
+    let w = packed_waived();
+    let base_patterns = leaf_patterns(&b);
+    let waived = sweep_bindings(&w, |pattern| !base_patterns.contains(pattern));
+    assert_eq!(
+        waived.forged,
+        BTreeSet::from(["/gate/waiver".to_string()]),
+        "the waived pack must add exactly the /gate/waiver leaf"
+    );
+    failures.extend(waived.failures);
     println!(
-        "every_manifest_leaf_is_bound: {} bindings over {} leaves",
-        edges.len(),
-        ptrs.len()
+        "every_manifest_leaf_is_bound: {} bindings over {} leaves (+{} on the waived pack)",
+        base.edges, base.leaves, waived.edges
     );
     assert!(
         failures.is_empty(),
@@ -1288,9 +1463,12 @@ fn every_manifest_leaf_is_bound() {
 #[test]
 fn manifest_bindings_table_matches_manifest_leaves() {
     let b = packed();
-    let mut ptrs = Vec::new();
-    leaves(&manifest_json(&b), "", "", &mut ptrs);
-    let observed: BTreeSet<String> = ptrs.into_iter().map(|(_, p)| p).collect();
+    let w = packed_waived();
+    // The optional /gate/waiver leaf exists only on a waived pack, so the manifest's leaf
+    // set is the union of the two fixtures.
+    let base_leaves = leaf_patterns(&b);
+    let waived_leaves = leaf_patterns(&w);
+    let observed: BTreeSet<String> = base_leaves.union(&waived_leaves).cloned().collect();
     let table = bindings_table();
     let listed: BTreeSet<String> = table.keys().cloned().collect();
     let unbound: Vec<_> = observed.difference(&listed).collect();
@@ -1304,14 +1482,28 @@ fn manifest_bindings_table_matches_manifest_leaves() {
         "manifest.bindings rows for no manifest leaf: {stale:?}"
     );
 
-    let r = AprV2ReaderRef::from_bytes(&b).expect("open the packed artifact");
-    let json = |name: &str| -> Value {
-        serde_json::from_slice(r.get_tensor_data(name).expect("blob")).expect("blob JSON")
+    // Each row's recipe: / report: pointers resolve against the fixture whose manifest has
+    // that leaf: packed() when it does, packed_waived() for a leaf only a waived pack
+    // carries (the unwaived report has no /pilot_waiver/id).
+    let blobs = |bytes: &[u8]| -> (Value, Value) {
+        (
+            blob_json(bytes, super::RECIPE_BLOB),
+            blob_json(bytes, super::GATE_REPORT_BLOB),
+        )
     };
-    let (recipe, report) = (json(super::RECIPE_BLOB), json(super::GATE_REPORT_BLOB));
+    let (base_blobs, waived_blobs) = (blobs(&b), blobs(&w));
     for (leaf, row) in &table {
         assert!([3, 4, 7].contains(&row.rung), "{leaf}: rung {}", row.rung);
         assert!(!row.sources.is_empty(), "{leaf}: no source");
+        let (recipe, report) = if base_leaves.contains(leaf) {
+            &base_blobs
+        } else {
+            assert!(
+                waived_leaves.contains(leaf),
+                "{leaf}: a row whose leaf occurs in neither fixture"
+            );
+            &waived_blobs
+        };
         for s in &row.sources {
             let (kind, rest) = s
                 .split_once(':')

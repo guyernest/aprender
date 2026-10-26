@@ -31,6 +31,16 @@ metadata:
     with an order-preserving map visitor, and the manifest stores labels as an ARRAY, so the order
     holds in every build shape.
 
+    AMENDMENT (Phase 12 D-19, additive). `manifest.gate` gains the OPTIONAL `waiver`: the id of the
+    laya-finetune-gate-v1 `pilot_waivers` declaration that let this artifact be deployed with an
+    ECE-only gate failure, copied from the embedded gate report's `pilot_waiver.id` so the pinned
+    sha256 of a waived artifact shows the waiver. It is bound at rung 4 (`/gate/waiver` in
+    `manifest.bindings`): stripping it from a waived artifact, adding it to an unwaived one or
+    changing it is refused at load on every door. It is serialized ONLY when present (no `null`),
+    so every artifact packed before this amendment is byte-identical and verifies unchanged: one
+    real `laya-verify` of the deployed antisemitism-v1 artifact after the change records
+    `deploy_eligible: true, waived: null` (12-WAIVER-EVIDENCE.json).
+
     PROBES DO NOT DEPEND ON THE USER'S TASK OR ON THE PACKING MACHINE. Probes run through a
     contract-resident SYNTHETIC PROBE TASK (K = 2), so their cost is bounded by construction
     (`probe_max_row_tokens`, which prices decide-tool-boundary-v1 `probe_budget_ms`); a stance task's
@@ -138,7 +148,7 @@ manifest:
     blobs: 'array of {name, sha256} in blob_tensors order — an ARRAY, not a map keyed by blob name, so the manifest bytes do not depend on the serde_json map backing'
     recipe_id: 'string: sha256 hex of the decide.recipe_json blob bytes'
     calibration: 'object {bucket, t_fitted, t_applied, clamp_hit, slice_ids_sha256}'
-    gate: 'object {pass, margin, ece_post, report_sha256}'
+    gate: 'object {pass, margin, ece_post, report_sha256, waiver?} — waiver present only on a pilot-waived artifact (laya-finetune-gate-v1 pilot_waivers, Phase 12 D-19), absent otherwise'
     inputs_sha256: 'object {task_json, train_jsonl, eval_jsonl, base_model, tokenizer_json}'
     device_used: string
     probes: 'array of {input_index, tokens, label, probabilities_f32_hex[]} — copied from probes.json (Python values)'
@@ -252,6 +262,10 @@ manifest:
       rung: 4
       sources: ['sha256:decide.gate_report_json']
       source: 'sha256 of the decide.gate_report_json blob'
+    '/gate/waiver':
+      rung: 4
+      sources: ['report:/pilot_waiver/id']
+      source: 'decide.gate_report_json pilot_waiver.id, present only on a waived artifact'
     '/inputs_sha256/task_json':
       rung: 4
       sources: ['sha256:decide.task_json', 'report:/inputs_sha256/task_json']

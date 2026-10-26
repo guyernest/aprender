@@ -240,6 +240,15 @@ fn cmd_inspect(a: &Args) -> Result<ExitCode, String> {
                         ("ece_post", m.gate.ece_post.into()),
                     ]),
                 ),
+                // The pilot waiver the pinned sha names (decide-apr-v1 /gate/waiver), or "none".
+                (
+                    "waiver",
+                    m.gate
+                        .waiver
+                        .clone()
+                        .unwrap_or_else(|| "none".to_string())
+                        .into(),
+                ),
                 ("schema_version", m.schema_version.into()),
             ]);
             println!("{line}");
