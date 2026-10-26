@@ -1,0 +1,16 @@
+{
+  "schema": "laya-slice-override-evidence-v1",
+  "phase": "12",
+  "plan": "12-08",
+  "slice_fraction_selected": 0.25,
+  "outcome": "not_needed",
+  "reason": "the spike's declared SLICE RULE kept the contract constant 0.25; plan 12-11 declares it",
+  "spike_evidence_sha256": "b77978461da2ddd35a0092b114dee5a6f9c94ae211464de17dc634a8d826dcc7",
+  "spike_owner_reply": "skip record (skipped true, no trigger: clamp_not_binding)",
+  "policy_revision": {
+    "laya_finetune_gate_version": "5.1.0",
+    "contract_blob_sha": "d05933ea76be3ad4112f399e038f570438e969fc"
+  },
+  "measured_on": "2026-10-26T21:07:56Z",
+  "commit": "dc4247401e22d700903952bdc9436facaaacbb01"
+}
