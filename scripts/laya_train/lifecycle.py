@@ -60,6 +60,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import contract  # noqa: E402
+import gate  # noqa: E402  (torch-free)
 from common import sha256_bytes, sha256_file, tree_sha256  # noqa: E402
 from data import jsonl_lines  # noqa: E402  (rows split as Rust's str::lines)
 
@@ -94,8 +95,10 @@ def main():
 
     tmp = Path(tempfile.mkdtemp(prefix="laya-lifecycle-"))
     try:
+        reports = {}
         for stopping, epochs in (("early_stopping", 3), ("fixed_epochs", 1)):
-            run_one(tmp / stopping, tiny_sha, stopping, epochs, Agent)
+            reports[stopping] = run_one(tmp / stopping, tiny_sha, stopping, epochs, Agent)
+        check_waived_report_assembly(reports["fixed_epochs"], "fixed_epochs")
         check_seed_refusals(tmp, tiny_sha)
         check_train_cli_refusals(tmp, tiny_sha)
         check_data_changed_refusal(tmp)
@@ -109,6 +112,66 @@ def main():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print("LIFECYCLE OK")
+
+
+def check_waived_report_assembly(real, stopping):
+    """FALSIFY-LAYA-GATE-021 integration: a WAIVED gate report is actually produced and checked. The real tiny
+    run's report is turned into an ECE-only failure (the only edits: ece_post over the bound, `pass` false),
+    a synthetic declaration matching its inputs and recipe_id is run through train.attach_pilot_waiver -- the
+    helper train.main calls -- and the result must (a) carry pilot_waiver, (b) have exactly the key set
+    expected_keys(..., has_waiver=True) names, (c) still decide pass=False on failed ["ece_post"] through
+    gate.verify_report. The declaration lives only in this check; the committed contract holds none."""
+    import copy
+    import train                                  # imports torch (already loaded by main)
+    th = contract.thresholds()
+    n_seeds = real["seeds"]["n"]
+    has_shift = "shift_probe" in real
+    rep = copy.deepcopy(real)
+    rep["fine_tuned"]["ece_post"] = float(th["max_ece"]) + 0.1
+    rep["fine_tuned"]["macro_f1"] = rep["zero_shot"]["macro_f1"] + float(th["min_macro_f1_margin"]) + 0.1
+    rep["margin"] = rep["fine_tuned"]["macro_f1"] - rep["zero_shot"]["macro_f1"]
+    rep["pass"] = False
+    if gate.report_failed_clauses(rep) != ["ece_post"]:
+        fail("waived-report case: the synthetic report does not fail on ece_post alone")
+    ins = rep["inputs_sha256"]
+    decl = {"id": "synthetic-pilot", "declared_on": "2026-10-26", "reason": "lifecycle integration case",
+            "waives": ["ece_post"],
+            "applies_to": {"task_json_sha256": ins["task_json"], "train_jsonl_sha256": ins["train_jsonl"],
+                           "eval_jsonl_sha256": ins["eval_jsonl"], "recipe_id": rep["recipe_id"]}}
+    contract.validate_pilot_waivers({"waivable_clauses": ["ece_post"], "declarations": [decl]})
+    if "pilot_waiver" in real:
+        fail("the real tiny report already carries a pilot_waiver")
+    # No declaration, or another recipe: no claim and no key.
+    for name, decls, rid in (("no declaration", [], rep["recipe_id"]),
+                             ("another recipe_id", [decl], "0" * 64)):
+        probe = copy.deepcopy(rep)
+        if train.attach_pilot_waiver(probe, decls, rid) is not None or "pilot_waiver" in probe:
+            fail("waived-report case: %s still produced a claim" % name)
+    claim = train.attach_pilot_waiver(rep, [decl], rep["recipe_id"])
+    if claim != {"id": "synthetic-pilot", "waives": ["ece_post"]} or rep.get("pilot_waiver") != claim:
+        fail("waived-report case: attach_pilot_waiver produced %r / %r" % (claim, rep.get("pilot_waiver")))
+    if rep["pass"] is not False:
+        fail("waived-report case: attach_pilot_waiver changed pass")
+    want = contract.expected_keys("gate_report_schema", stopping, n_seeds, has_shift, has_waiver=True)
+    if sorted(rep) != want:
+        fail("waived-report case: keys %s differ from expected_keys(has_waiver=True): %s" % (sorted(rep), want))
+    if "pilot_waiver" in contract.expected_keys("gate_report_schema", stopping, n_seeds, has_shift):
+        fail("waived-report case: the default expected_keys includes pilot_waiver")
+    out = gate.verify_report(rep)
+    if out["pass"] is not False or out["failed"] != ["ece_post"]:
+        fail("waived-report case: verify_report decided %r" % (out,))
+    # A margin failure alone, or with ece_post, gets no claim even under a matching declaration (D-20).
+    zs_f1 = real["zero_shot"]["macro_f1"]
+    for name, ece in (("margin alone", 0.0), ("margin and ece_post", float(th["max_ece"]) + 0.1)):
+        probe = copy.deepcopy(real)
+        probe["fine_tuned"].update(macro_f1=zs_f1, ece_post=ece)
+        want_failed = ["margin"] if ece == 0.0 else ["margin", "ece_post"]
+        if gate.report_failed_clauses(probe) != want_failed:
+            fail("waived-report case: the %s probe fails %s" % (name, gate.report_failed_clauses(probe)))
+        if train.attach_pilot_waiver(probe, [decl], probe["recipe_id"]) is not None or "pilot_waiver" in probe:
+            fail("waived-report case: a %s failure produced a claim" % name)
+    print("WAIVED REPORT ASSEMBLY OK (claim %s; keys == expected_keys(has_waiver=True); verify_report: pass False, "
+          "failed %s)" % (claim["id"], out["failed"]))
 
 
 def _refused(proc, rule, what):
@@ -496,7 +559,13 @@ def run_one(out, tiny_sha, stopping, epochs, Agent, seeds=1, data_dir=None):
     if not (t_recipe <= t_ck <= t_eval):
         fail("mtime order recipe.json <= model.safetensors <= eval-probs.json violated")
     report = json.loads((out / "gate-report.json").read_text())
-    want_report = contract.expected_keys("gate_report_schema", stopping, seeds, has_shift)
+    # The OPTIONAL pilot_waiver key is expected exactly when a contract declaration applies to this run and its
+    # metrics fail on ece_post alone -- recomputed here from the contract, the report's inputs and metrics, never
+    # from whether the report already holds the key (that would accept whatever the report holds).
+    expect_waiver = gate.matching_pilot_waiver(
+        contract.pilot_waiver_declarations(), report["inputs_sha256"], report["recipe_id"],
+        gate.report_failed_clauses(report)) is not None
+    want_report = contract.expected_keys("gate_report_schema", stopping, seeds, has_shift, has_waiver=expect_waiver)
     if sorted(report) != want_report:
         fail("gate-report.json keys %s differ from gate_report_schema for this run: %s" % (sorted(report), want_report))
     if ("shift_jsonl" in report["inputs_sha256"]) is not has_shift:

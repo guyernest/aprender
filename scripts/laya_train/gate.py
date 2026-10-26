@@ -162,6 +162,40 @@ class GateError(ValueError):
     """A refused gate report; the message starts `REFUSED <field>:`."""
 
 
+def failed_clauses(margin, ece_post, thresholds):
+    """THE one list of failed gate clauses, in gate_pass order: `margin`, then `ece_post`. A non-finite
+    value is failed, never passed. verify_report, the trainer (train.attach_pilot_waiver) and the lifecycle
+    check all read it, so none re-derives the list differently (Phase 12, D-20)."""
+    return [clause for clause, ok in (
+        ("margin", _finite(margin) and margin >= float(thresholds["min_macro_f1_margin"])),
+        ("ece_post", _finite(ece_post) and ece_post <= float(thresholds["max_ece"]))) if not ok]
+
+
+def report_failed_clauses(report):
+    """`failed_clauses` of a gate report's own metrics and thresholds: margin is the ONE f64 subtraction of
+    the macro-F1s (as evaluate_gate and the Rust verifier compute it), never the report's `margin` key."""
+    margin = float(report["fine_tuned"]["macro_f1"]) - float(report["zero_shot"]["macro_f1"])
+    return failed_clauses(margin, float(report["fine_tuned"]["ece_post"]), report["thresholds"])
+
+
+def matching_pilot_waiver(declarations, inputs_sha256, recipe_id, failed):
+    """The pilot-waiver claim `{id, waives}` this run may write, or None (Phase 12, D-19/D-20).
+
+    `failed` is `failed_clauses` output. A claim exists ONLY when the run failed on `ece_post` alone
+    (`failed == ["ece_post"]`: never a pass, never margin, alone or with ece_post) AND one declaration
+    waives exactly `["ece_post"]` and its applies_to equals this run's task_json / train_jsonl / eval_jsonl
+    sha256 (`inputs_sha256`, keys task_json / train_jsonl / eval_jsonl) and `recipe_id`. Pure; the Rust
+    verifier re-decides the claim against the contract regardless (decide_pilot_waiver)."""
+    if list(failed) != ["ece_post"]:
+        return None
+    want = {"task_json_sha256": inputs_sha256["task_json"], "train_jsonl_sha256": inputs_sha256["train_jsonl"],
+            "eval_jsonl_sha256": inputs_sha256["eval_jsonl"], "recipe_id": recipe_id}
+    for d in declarations:
+        if list(d["waives"]) == ["ece_post"] and d["applies_to"] == want:
+            return {"id": d["id"], "waives": ["ece_post"]}
+    return None
+
+
 def verify_report(report):
     """Re-decide gate_pass from a report's reported metrics (see the module docstring for the limits)."""
     th = contract.thresholds()
@@ -172,9 +206,7 @@ def verify_report(report):
                         "are read from the contract, never from a report)" % (got, th))
     margin = float(report["fine_tuned"]["macro_f1"]) - float(report["zero_shot"]["macro_f1"])
     ece = float(report["fine_tuned"]["ece_post"])
-    failed = [clause for clause, ok in (
-        ("margin", _finite(margin) and margin >= float(th["min_macro_f1_margin"])),
-        ("ece_post", _finite(ece) and ece <= float(th["max_ece"]))) if not ok]
+    failed = failed_clauses(margin, ece, th)
     passed = not failed
     if "pass" in report and report["pass"] is not passed:
         raise GateError("REFUSED pass: the report says pass=%r but its metrics decide %r (failed: %s)"
@@ -235,8 +267,7 @@ def evaluate_gate(zs_probs, ft_probs, ft_probs_pre, y, f_avg_labels=None):
           "ece_pre": metrics.ece_top_label(pre_P, y, bins), "ece_post": metrics.ece_top_label(ft_P, y, bins),
           "nll": metrics.nll(ft_P, y), "n": int(len(y))}
     margin = ft["macro_f1"] - zs["macro_f1"]
-    passed = bool(_finite(margin) and _finite(ft["ece_post"])
-                  and margin >= float(th["min_macro_f1_margin"]) and ft["ece_post"] <= float(th["max_ece"]))
+    passed = not failed_clauses(margin, ft["ece_post"], th)
     return {"pass": passed, "thresholds": th, "zero_shot": zs, "fine_tuned": ft, "margin": margin}
 
 
@@ -394,6 +425,77 @@ def _best_anchored_cases(case, decl):
          and (stp["best_epoch"], stp["epochs_run"], stp["reason"]) == (rec["best_epoch"], rec["epochs_run"], rec["reason"]))
 
 
+def _waiver_cases(case):
+    """FALSIFY-LAYA-GATE-021 (Phase 12, D-19/D-20): failed_clauses is the ONE clause list and
+    matching_pilot_waiver claims a pilot waiver only for an ECE-only failure of a declared run."""
+    th = contract.thresholds()
+    print("failed_clauses: the one clause list (gate_pass order; non-finite = failed):")
+    nan = float("nan")
+    for name, margin, ece, want in (
+            ("both hold -> []", 0.10, 0.05, []),
+            ("margin short -> [margin]", 0.01, 0.05, ["margin"]),
+            ("ece over -> [ece_post]", 0.10, 0.20, ["ece_post"]),
+            ("both fail -> [margin, ece_post] in gate_pass order", 0.01, 0.20, ["margin", "ece_post"]),
+            ("margin exactly at the bound passes (inclusive)", float(th["min_macro_f1_margin"]), 0.05, []),
+            ("ece exactly at the bound passes (inclusive)", 0.10, float(th["max_ece"]), []),
+            ("margin NaN is failed", nan, 0.05, ["margin"]),
+            ("ece NaN is failed", 0.10, nan, ["ece_post"]),
+            ("ece +inf is failed", 0.10, float("inf"), ["ece_post"])):
+        got = failed_clauses(margin, ece, th)
+        case("failed_clauses: " + name, got == want, "got %s" % got)
+    out = verify_report(_fabricated(0.5, 0.9, 0.5))
+    case("verify_report names the clauses failed_clauses names", out["failed"] == failed_clauses(out["margin"], 0.5, th))
+
+    print("matching_pilot_waiver (D-20: ece_post alone, a declared run, exact applies_to):")
+    h = lambda c: c * 64  # noqa: E731
+    decl = {"id": "pilot-x", "declared_on": "2026-10-26", "reason": "selftest", "waives": ["ece_post"],
+            "applies_to": {"task_json_sha256": h("a"), "train_jsonl_sha256": h("b"), "eval_jsonl_sha256": h("c"),
+                           "recipe_id": h("d")}}
+    ins = {"task_json": h("a"), "train_jsonl": h("b"), "eval_jsonl": h("c")}
+    claim = matching_pilot_waiver([decl], ins, h("d"), ["ece_post"])
+    case("matching_pilot_waiver: an ECE-only failure of the declared run claims {id, waives}",
+         claim == {"id": "pilot-x", "waives": ["ece_post"]}, "got %s" % (claim,))
+    for name, failed in (("a passing run (no failed clause)", []), ("a margin failure alone", ["margin"]),
+                         ("margin and ece_post together", ["margin", "ece_post"]),
+                         ("ece_post listed twice is not the ECE-only list", ["ece_post", "ece_post"])):
+        case("matching_pilot_waiver: none for " + name, matching_pilot_waiver([decl], ins, h("d"), failed) is None)
+    for field in ("task_json", "train_jsonl", "eval_jsonl"):
+        moved = dict(ins, **{field: h("e")})
+        case("matching_pilot_waiver: none when the run's %s differs" % field,
+             matching_pilot_waiver([decl], moved, h("d"), ["ece_post"]) is None)
+    case("matching_pilot_waiver: none when the recipe_id differs",
+         matching_pilot_waiver([decl], ins, h("e"), ["ece_post"]) is None)
+    case("matching_pilot_waiver: none when the declaration waives something else",
+         matching_pilot_waiver([dict(decl, waives=["margin"])], ins, h("d"), ["ece_post"]) is None)
+    case("matching_pilot_waiver: none when the declaration waives ece_post and margin",
+         matching_pilot_waiver([dict(decl, waives=["ece_post", "margin"])], ins, h("d"), ["ece_post"]) is None)
+    case("matching_pilot_waiver: none with no declaration", matching_pilot_waiver([], ins, h("d"), ["ece_post"]) is None)
+    other = dict(decl, id="pilot-y", applies_to=dict(decl["applies_to"], recipe_id=h("9")))
+    case("matching_pilot_waiver: picks the declaration that applies among several",
+         matching_pilot_waiver([other, decl], ins, h("d"), ["ece_post"]) == {"id": "pilot-x", "waives": ["ece_post"]})
+
+    print("pilot_waiver_declarations: the Rust load rules, mirrored (repeated id / malformed hash / margin refused):")
+    blk = lambda *ds: {"waivable_clauses": ["ece_post"], "declarations": list(ds)}  # noqa: E731
+    case("declarations: the committed contract's block parses",
+         isinstance(contract.pilot_waiver_declarations(), list))
+    case("declarations: a well-formed one is returned unchanged",
+         contract.validate_pilot_waivers(blk(decl)) == [decl])
+    bad = (("a repeated id", blk(decl, dict(decl))),
+           ("an applies_to value that is not hex", blk(dict(decl, applies_to=dict(decl["applies_to"], recipe_id="z" * 64)))),
+           ("an uppercase hash", blk(dict(decl, applies_to=dict(decl["applies_to"], task_json_sha256="A" * 64)))),
+           ("a 63-character hash", blk(dict(decl, applies_to=dict(decl["applies_to"], eval_jsonl_sha256="a" * 63)))),
+           ("an applies_to key missing", blk(dict(decl, applies_to={k: v for k, v in decl["applies_to"].items()
+                                                                    if k != "train_jsonl_sha256"}))),
+           ("margin in waives", blk(dict(decl, waives=["margin"]))),
+           ("a missing id", blk({k: v for k, v in decl.items() if k != "id"})))
+    for name, block in bad:
+        try:
+            contract.validate_pilot_waivers(block)
+            case("declarations: refused " + name, False, "accepted")
+        except ValueError as e:
+            case("declarations: refused " + name, "pilot_waivers.declarations" in str(e), str(e)[:90])
+
+
 def selftest():
     failures = []
 
@@ -453,6 +555,8 @@ def selftest():
         except GateError as e:
             case(tag + "the same report with pass flipped to true is refused", True, str(e)[:70])
         _recompute_run_dir(v, case)
+
+    _waiver_cases(case)
 
     print("median-ECE seed selection (seed_policy A3, FALSIFY-LAYA-GATE-011; rank_scale from the contract):")
     scale = contract.seed_selection_decl()["rank_scale"]

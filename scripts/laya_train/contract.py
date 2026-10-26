@@ -7,7 +7,10 @@ time. A threshold chosen after seeing a result is not a gate (D-07), so the valu
 
 No torch import: gate.py and data.py self-tests run with numpy + pyyaml only.
 """
+import hashlib
+import json
 import math
+import re
 from pathlib import Path
 
 import yaml
@@ -305,6 +308,65 @@ def recipe_json(variant, shots_per_class, epochs, seed, base_block, stopping="fi
     return out
 
 
+def recipe_id_for(variant, shots_per_class, epochs, seed, base_block, stopping="fixed_epochs", seed_selection=None):
+    """THE one builder of recipe.json bytes and recipe_id (OPS-03): `(recipe_obj, recipe_bytes, recipe_id)`.
+
+    recipe_bytes is `json.dumps(recipe_json(...), sort_keys=True, separators=(",", ":"))` in UTF-8 -- the
+    bytes train.py writes to recipe.json -- and recipe_id is their sha256 hex. train.main calls this, and
+    so does the plan that DECLARES a pilot waiver (applies_to.recipe_id) before the run it applies to, so a
+    declaration and the run it names can never disagree about how the recipe is serialised."""
+    obj = recipe_json(variant, shots_per_class, epochs, seed, base_block, stopping, seed_selection)
+    data = json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return obj, data, hashlib.sha256(data).hexdigest()
+
+
+# The applies_to keys of a pilot_waivers declaration and the declaration's own keys: exactly the Rust
+# view's (verify.rs PilotWaiverDecl / WaiverAppliesTo, both deny_unknown_fields).
+_WAIVER_DECL_KEYS = ("id", "declared_on", "reason", "waives", "applies_to")
+_WAIVER_APPLIES_TO_KEYS = ("task_json_sha256", "train_jsonl_sha256", "eval_jsonl_sha256", "recipe_id")
+_LOWER_HEX64 = re.compile(r"[0-9a-f]{64}\Z")
+
+
+def validate_pilot_waivers(block):
+    """The `declarations` of a laya-finetune-gate-v1 `pilot_waivers` block, validated by the SAME rules the
+    Rust verifier applies where the block deserializes (PilotWaiversView, plan 12-02), so the two readers
+    see the same declarations or both refuse: a declaration is exactly {id, declared_on, reason, waives,
+    applies_to}; `waives` names only clauses in `waivable_clauses` (margin is never one); `applies_to` is
+    exactly the four values, each 64 lowercase hex characters; an id is declared once. Raises
+    ContractValueError (a ValueError) naming `pilot_waivers.declarations[<id>].<field>`."""
+    block = {} if block is None else block
+    waivable = [str(c) for c in block.get("waivable_clauses", [])]
+    decls = block.get("declarations") or []
+    if not isinstance(decls, list):
+        raise ContractValueError("pilot_waivers.declarations", decls, "a list of declarations is expected")
+    seen = set()
+    for i, d in enumerate(decls):
+        where = "pilot_waivers.declarations[%s]" % (d.get("id", i) if isinstance(d, dict) else i)
+        if not isinstance(d, dict) or sorted(d) != sorted(_WAIVER_DECL_KEYS):
+            raise ContractValueError(where, d, "a declaration is exactly %s" % (list(_WAIVER_DECL_KEYS),))
+        if not isinstance(d["id"], str) or not d["id"]:
+            raise ContractValueError(where + ".id", d["id"], "a non-empty string is expected")
+        if d["id"] in seen:
+            raise ContractValueError("pilot_waivers.declarations", d["id"], "the id is declared more than once")
+        seen.add(d["id"])
+        w = d["waives"]
+        if not isinstance(w, list) or not w or any(c not in waivable for c in w):
+            raise ContractValueError(where + ".waives", w, "only %s can be waived (margin never)" % (waivable,))
+        a = d["applies_to"]
+        if not isinstance(a, dict) or sorted(a) != sorted(_WAIVER_APPLIES_TO_KEYS):
+            raise ContractValueError(where + ".applies_to", a, "exactly %s" % (list(_WAIVER_APPLIES_TO_KEYS),))
+        for key in _WAIVER_APPLIES_TO_KEYS:
+            if not isinstance(a[key], str) or not _LOWER_HEX64.match(a[key]):
+                raise ContractValueError(where + ".applies_to." + key, a[key], "not 64 lowercase hex characters")
+    return list(decls)
+
+
+def pilot_waiver_declarations():
+    """The contract's `pilot_waivers.declarations` (each {id, declared_on, reason, waives, applies_to}),
+    validated by `validate_pilot_waivers`. The ONLY place a pilot waiver can come from."""
+    return validate_pilot_waivers(gate_contract().get("pilot_waivers"))
+
+
 def production_base_block():
     b = base()
     return {"family": b["family"], "repo": b["repo"], "revision": b["revision"], "checkpoint": b["checkpoint"],
@@ -388,6 +450,7 @@ def check_numbers():
     thresholds()
     early_stopping_decl()
     seed_selection_decl()
+    pilot_waiver_declarations()
     resolve_seeds(None, "production")
     for key in ("gate_metric_recompute_abs", "calibration_temp_min", "calibration_temp_max",
                 "calibration_slice_fraction"):

@@ -705,6 +705,18 @@ def variance_report(declared, seeds, rows, recipe_id, zero_shot, shipped):
 
 # ------------------------------------------------------------------------------------------ main
 
+def attach_pilot_waiver(report, declarations, recipe_id):
+    """Add `report["pilot_waiver"] = {id, waives}` exactly when `gate.matching_pilot_waiver` finds a
+    declaration that applies to this run (its task_json / train_jsonl / eval_jsonl sha256s and `recipe_id`)
+    and the report's own metrics fail on `ece_post` alone (`gate.failed_clauses`, the one clause list).
+    Pure: returns the claim (or None) and never touches `pass`, so the exit status is the gate's."""
+    failed = gate.report_failed_clauses(report)
+    claim = gate.matching_pilot_waiver(declarations, report["inputs_sha256"], recipe_id, failed)
+    if claim is not None:
+        report["pilot_waiver"] = claim
+    return claim
+
+
 def parse_args(argv):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--data", required=True, help="data dir: task.json, train.jsonl, eval.jsonl")
@@ -770,10 +782,11 @@ def main(argv=None):
     # 2. recipe first (seed_selection whenever three seeds run -- every production run, A3)
     selection = contract.seed_selection_decl() if len(seeds) > 1 else None
     out.mkdir(parents=True, exist_ok=True)
-    recipe = contract.recipe_json(args.variant, shots_per_class, epochs, seed, base.block, stopping, selection)
-    recipe_bytes = json.dumps(recipe, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    # contract.recipe_id_for is the ONE builder of these bytes (OPS-03): a pilot waiver's applies_to.recipe_id
+    # is declared through the same function before the run, so the declaration and this run cannot disagree.
+    recipe, recipe_bytes, recipe_id = contract.recipe_id_for(args.variant, shots_per_class, epochs, seed,
+                                                             base.block, stopping, selection)
     (out / "recipe.json").write_bytes(recipe_bytes)
-    recipe_id = sha256_bytes(recipe_bytes)
     log("RECIPE WRITTEN %s stopping=%s epochs%s=%d" % (recipe_id, stopping, "_max" if stopping == "early_stopping"
                                                         else "", epochs))
 
@@ -910,7 +923,12 @@ def main(argv=None):
     # The data dir must still hold exactly what was trained on: a file edited (or a shift.jsonl added / removed)
     # during the run is refused with no report, never bound to this model.
     refuse_if_data_changed(data_dir, input_sha)
+    # D-19: the pilot-waiver CLAIM, written exactly when a declaration in the contract applies to this run and
+    # the gate failed on ece_post alone. It never changes `pass` or the exit status; pack and verify decide.
+    claim = attach_pilot_waiver(report, contract.pilot_waiver_declarations(), recipe_id)
     write_json(out / "gate-report.json", report)
+    if claim is not None:
+        log("PILOT WAIVER %s: declared for this run; ece_post failed alone; pack and verify decide" % claim["id"])
 
     zs, ft = g["zero_shot"], g["fine_tuned"]
     fmt = lambda v: "null" if v is None else "%.4f" % v  # noqa: E731
