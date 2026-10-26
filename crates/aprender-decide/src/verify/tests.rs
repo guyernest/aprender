@@ -3451,13 +3451,39 @@ fn waiver_passing_run_with_a_declaration_is_not_waived() {
     assert_eq!(report.waived, None);
 }
 
-/// The committed contract declares no waiver yet: the first declaration is plan 12-11's, made
-/// BEFORE the motivation-v1 gate run. That plan updates this test in the commit that adds it.
+/// The committed contract's first declaration is plan 12-11's `motivation-v1-pilot-ece`, made
+/// BEFORE the motivation-v1 gate run: it parses, waives exactly `ece_post`, and binds the run by
+/// four 64-hex `applies_to` values (this replaced 12-02's "declares nothing yet" test in the same
+/// commit that added the declaration).
 #[test]
-fn waiver_real_contract_declares_nothing_yet() {
+fn waiver_real_contract_declarations_parse() {
     let gate = view::<GateContractView>("laya-finetune-gate-v1.yaml");
-    assert!(gate.pilot_waivers.declarations.is_empty());
-    assert!(contract_policy().pilot_waivers.is_empty());
+    let decls: Vec<_> = gate
+        .pilot_waivers
+        .declarations
+        .iter()
+        .filter(|d| d.id == "motivation-v1-pilot-ece")
+        .collect();
+    assert_eq!(decls.len(), 1, "exactly one motivation declaration");
+    let d = decls[0];
+    assert_eq!(d.waives, vec![WaivableClause::EcePost]);
+    for v in [
+        &d.applies_to.task_json_sha256,
+        &d.applies_to.train_jsonl_sha256,
+        &d.applies_to.eval_jsonl_sha256,
+        &d.applies_to.recipe_id,
+    ] {
+        assert!(
+            v.len() == 64
+                && v.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "applies_to value is not 64 lowercase hex: {v}"
+        );
+    }
+    assert!(contract_policy()
+        .pilot_waivers
+        .iter()
+        .any(|w| w.id == "motivation-v1-pilot-ece"));
     let doc = contract_yaml("laya-finetune-gate-v1.yaml");
     assert_eq!(
         doc["pilot_waivers"]["waivable_clauses"],

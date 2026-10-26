@@ -1,6 +1,6 @@
 contract: laya-finetune-gate
 metadata:
-  version: 5.1.0
+  version: 5.1.1
   created: '2026-09-25'
   author: PAIML Engineering
   kind: kernel
@@ -100,6 +100,13 @@ metadata:
     existing schema field moved, and every existing run verifies unchanged (`pv diff` classifies the
     additions MINOR: published as 5.1.0): the same
     recomputed-metric gate still decides, a waiver only changes what an ECE-only failure means.
+
+    MOTIVATION-V1 RUN DECLARATION (Phase 12 plan 12-11, 2026-10-26, published as 5.1.1; committed BEFORE the one declared
+    gate run). Additive only: the first `pilot_waivers` declaration (`motivation-v1-pilot-ece`, bound
+    by sha256 to the approved task.json, train.jsonl, eval.jsonl and the recipe_id of the declared
+    recipe) and a top-level `motivation_v1` block recording the run's declared inputs (epochs, seeds,
+    calibration slice, eval fraction). NO threshold, constant, seed, recipe value, data rule or
+    existing schema field moved; `margin` stays unwaivable (D-20).
 
     THE GATE IS DECIDED ON RECOMPUTED METRICS, NOT REPORTED ONES. A gate report is a file a
     training run wrote; an edited report must not pass. So the metrics that DECIDE pass are
@@ -214,7 +221,49 @@ pilot_waivers:
   # Each entry: {id, declared_on, reason, waives: [ece_post], applies_to: {task_json_sha256,
   # train_jsonl_sha256, eval_jsonl_sha256, recipe_id}} (64 lowercase hex each). Plan 12-11 adds the
   # first, before the one motivation-v1 gate run.
-  declarations: []
+  declarations:
+    - id: motivation-v1-pilot-ece
+      declared_on: '2026-10-26'
+      reason: 'Phase 12 D-19: the motivation-v1 PILOT (D-01) ships, labelled gate-failed, if margin passes and only ece_post fails; declared before the one gate run; margin is never waived (D-20)'
+      waives: [ece_post]
+      applies_to:
+        task_json_sha256: f74a3ad3cfc00c160cc2959d95beb219aec859b394b883e87577a56dc14e7ea3
+        train_jsonl_sha256: f1d84f19ec38ed85356bcbcd1eae6ef8ad07fb97e014f61a17d37adc0d68d378
+        eval_jsonl_sha256: ee95d71fcb5d90d515b9fc6741e5df51087e763fa7f251ace83d9f11d5ccd575
+        recipe_id: f88f5b71ef925fdabb30d26a15c2eb5195a151dadfe0882c858b73ca7bf54d7e
+
+motivation_v1:
+  # ---- Phase 12 plan 12-11 (D-01, D-13, D-17, D-19, D-21): THE motivation-v1 run declaration,
+  # committed BEFORE `just laya-train data/decide/motivation-v1 ...` starts. A record, not a knob:
+  # nothing here is read by the trainer or the verifier except through `pilot_waivers` above.
+  status: pilot
+  dataset: 'motivation-2026-10-26 (partner commit 0c46b68)'
+  guide:
+    docx_sha256: 0e1d5a35ac3ccd455c5556fecbc5c1d1edec0e0a1100e2feac8bd16a42f29167
+    designation: '25 October 2026 draft'
+  data_dir: data/decide/motivation-v1
+  task_json_sha256: f74a3ad3cfc00c160cc2959d95beb219aec859b394b883e87577a56dc14e7ea3
+  train_jsonl_sha256: f1d84f19ec38ed85356bcbcd1eae6ef8ad07fb97e014f61a17d37adc0d68d378
+  eval_jsonl_sha256: ee95d71fcb5d90d515b9fc6741e5df51087e763fa7f251ace83d9f11d5ccd575
+  eval_fraction: '0.25 (prepare_motivation.py EVAL_DIVISOR = 4)'
+  recipe:
+    variant: production
+    stopping: early_stopping
+    epochs: 12
+    seeds: [13, 17, 23]
+    selection: median_ece
+    shots_per_class: 188
+    recipe_id: f88f5b71ef925fdabb30d26a15c2eb5195a151dadfe0882c858b73ca7bf54d7e
+    class_reweighting: 'none (D-21)'
+  calibration_slice:
+    fraction: 0.25
+    mechanism: 'the contract constant calibration_slice_fraction (12-08 outcome not_needed: no override)'
+    evidence_sha256:
+      spike_evidence: b77978461da2ddd35a0092b114dee5a6f9c94ae211464de17dc634a8d826dcc7
+      slice_override_evidence: af589521ba4c8ba2e4285bd9db467c8dd8942287b54a092f0092ba356c310272
+  waiver_id: motivation-v1-pilot-ece
+  stop_rule: 'ONE declared run under this declaration. A margin failure halts for the owner and ships nothing; a second attempt exists only under the owner''s written rerun authorization (cap two); no retuning'
+  claim: 'In-distribution margin and calibration on a held-out 25 % of the same file (the eval_set.claim scope); it does NOT certify robustness to a shifted input population, and the source batch of the file is unmeasured'
 
 recipe:
   # D-04: fixed to the spike-024 values. Any change is a new recipe_id.
@@ -1062,7 +1111,7 @@ falsification_tests:
     rule: 'A declared, run-bound, ECE-only pilot waiver is accepted and reported as waived; a passing run is never waived'
     prediction: 'A run whose only failed clause is ece_post, whose report carries pilot_waiver {id, waives: [ece_post]} and whose policy declares that id for exactly its task, train, eval and recipe hashes verifies with waived = Some(id) and deploy_eligible true, and is refused without the declaration; a passing run under a matching declaration verifies with waived = None; the committed contract declares nothing yet; the run-field sweep covers both the unwaived and the waived base (the two /pilot_waiver leaves are bound, fullest_copy unchanged).'
     implemented_by: 'plan 12-02 (aprender_decide::verify lib tests: the accepted waived copy and its undeclared control, the passing copy with a declaration, the real contract, the case table, and the run_field_bindings sweep over fullest_copy and fullest_waived_copy)'
-    test: 'cargo test -p aprender-decide --lib verify::tests::waiver_declared_ece_only_failure_is_accepted_and_reported && cargo test -p aprender-decide --lib verify::tests::waiver_passing_run_with_a_declaration_is_not_waived && cargo test -p aprender-decide --lib verify::tests::waiver_real_contract_declares_nothing_yet && cargo test -p aprender-decide --lib verify::tests::decide_pilot_waiver_case_table && cargo test -p aprender-decide --lib verify::tests::every_run_field_is_bound_or_report_only && cargo test -p aprender-decide --lib verify::tests::run_field_bindings_table_matches_fixture_leaves'
+    test: 'cargo test -p aprender-decide --lib verify::tests::waiver_declared_ece_only_failure_is_accepted_and_reported && cargo test -p aprender-decide --lib verify::tests::waiver_passing_run_with_a_declaration_is_not_waived && cargo test -p aprender-decide --lib verify::tests::waiver_real_contract_declarations_parse && cargo test -p aprender-decide --lib verify::tests::decide_pilot_waiver_case_table && cargo test -p aprender-decide --lib verify::tests::every_run_field_is_bound_or_report_only && cargo test -p aprender-decide --lib verify::tests::run_field_bindings_table_matches_fixture_leaves'
     if_fails: 'The waiver cannot be used for the one run it was declared for, or a passing run is mislabelled as waived, or a new gate-report leaf is unbound.'
 
   - id: FALSIFY-LAYA-GATE-021
