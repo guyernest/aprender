@@ -319,6 +319,7 @@ fn test_no_unauthorized_binaries() {
         "aprender-mcp-chronos-lambda",  // Chronos-Bolt AWS Lambda custom runtime (bootstrap)
         "aprender-mcp-decide",          // Laya decision server (Phase 8 D-15)
         "aprender-mcp-decide-antisemite-lambda", // server id `aprender-mcp-decide-antisemite`: the decide runtime's Lambda bootstrap (Phase 10 D-19)
+        "aprender-mcp-decide-motivation-lambda", // server id `aprender-mcp-decide-motivation`: the decide runtime's Lambda bootstrap for the motivation-v1 pilot (Phase 12 D-02)
     ]
     .into();
 
@@ -442,7 +443,9 @@ fn test_no_unauthorized_binaries() {
     // model-agnostic runtime library now) and the thin `aprender-mcp-decide-antisemite-lambda`
     // replaced it as the deployment unit. The NEXT model's thin crate is growth (9 -> 10) and
     // needs a recorded CONTEXT decision with a blocking-human checkpoint.
-    const DEPLOYMENT_UNIT_BASELINE: usize = 9;
+    // 9 -> 10: GROWN (Phase 12 D-02, the owner's 2026-10-26 decision recorded in 12-CONTEXT.md):
+    // aprender-mcp-decide-motivation-lambda, the second served decide model's thin crate.
+    const DEPLOYMENT_UNIT_BASELINE: usize = 10;
     assert!(
         deployment_unit_bins.len() <= DEPLOYMENT_UNIT_BASELINE,
         "FALSIFY-MONO-011: the thin-MCP deployment-unit register grew to {} \

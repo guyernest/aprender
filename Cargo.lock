@@ -964,6 +964,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "aprender-mcp-decide-motivation-lambda"
+version = "0.69.3"
+dependencies = [
+ "aprender-mcp-decide-lambda",
+]
+
+[[package]]
 name = "aprender-mcp-forecast"
 version = "0.69.3"
 dependencies = [

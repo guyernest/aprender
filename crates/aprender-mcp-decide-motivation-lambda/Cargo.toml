@@ -1,0 +1,28 @@
+[package]
+name = "aprender-mcp-decide-motivation-lambda"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Lambda bootstrap of the aprender-mcp-decide-motivation server (a thin shim over the shared decide runtime)"
+readme = "README.md"
+# A deployment unit (Phase 12 D-02, on the Phase 10 D-19 shape), never a library: registered in
+# FALSIFY-MONO-011's deployment_unit_bins, which requires publish = false.
+publish = false
+
+# AWS Lambda's Custom Runtime API requires the binary to be named `bootstrap`
+# exactly — a platform constant, not a choice. `cargo pmcp deploy` finds the
+# deployable by this name.
+[[bin]]
+name = "bootstrap"
+path = "src/main.rs"
+
+[dependencies]
+# The ONLY dependency: the shared, model-agnostic runtime. `tests::thin_server_crates_are_shims`
+# in that crate fails if a thin crate grows another one.
+aprender-mcp-decide-lambda = { path = "../aprender-mcp-decide-lambda" }
+
+[lints]
+workspace = true

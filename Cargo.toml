@@ -73,6 +73,8 @@ members = [
     "crates/aprender-mcp-decide-lambda",
     # D-19 (plan 10-12): one thin crate per served decide server id; the bootstrap bin lives here, not in the shared crate above
     "crates/aprender-mcp-decide-antisemite-lambda",
+    # Phase 12 D-02: the second served decide model's thin crate (motivation-v1 pilot)
+    "crates/aprender-mcp-decide-motivation-lambda",
     # --- APR-MONO Phase 2f: satellite repos (main crates) ---
     "crates/aprender-profile",
     "crates/aprender-profile-core",
