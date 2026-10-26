@@ -1,0 +1,113 @@
+{
+ "schema": "laya-deploy-evidence-v2",
+ "phase": "12",
+ "plan": "12-12",
+ "server": "aprender-mcp-decide-motivation",
+ "profile": "ze-kasher-dev",
+ "region": "us-east-1",
+ "env": "dev",
+ "auth": "off",
+ "tier_mb": 10240,
+ "artifact_path": "models/decide/laya-motivation-v1.apr",
+ "run_dir": "models/decide/laya-motivation-v1",
+ "gate_final_attempt": 1,
+ "artifact_sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+ "waived": null,
+ "pilot_label": "pilot",
+ "pilot_label_note": "D-01: a pilot; the gate passed on the first declared run (no waiver)",
+ "d23": {
+  "justfile_source": "working tree (carries the owner's uncommitted region diff; not depended on)",
+  "recipes_identical_to_head": {
+   "rule": "every recipe except laya-deploy-config and laya-weights-bucket",
+   "excluded": [
+    "laya-deploy-config",
+    "laya-weights-bucket"
+   ],
+   "count": 79
+  },
+  "deploy_config_equal_to_head": true,
+  "region_argument_passed": false,
+  "region_from_profile": "us-east-1",
+  "note": "laya-weights-bucket is called by no deploy-path recipe (grep of the justfile: only its own definition)"
+ },
+ "config": {
+  "rc": 0,
+  "sha_pin": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+  "key": "decide/aprender-mcp-decide-motivation/d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd.apr"
+ },
+ "selftest": {
+  "aws_calls": 0,
+  "last_line": "DEPLOY SELFTEST OK (positive dry run SKIPPED: disarmed by LAYA_DEPLOY_SELFTEST_POSITIVE=0)"
+ },
+ "upload": {
+  "run_by": "executor",
+  "rc": 0,
+  "uploaded_line": "UPLOADED s3://<weights-bucket>/decide/aprender-mcp-decide-motivation/d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd.apr (846196612 bytes, sha256 d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd)",
+  "started": "2026-10-26T21:59:58Z",
+  "ended": "2026-10-26T22:05:08Z",
+  "tries": [
+   {
+    "try": 1,
+    "rc": 1,
+    "failure": "aws s3 cp: Connection was closed before we received a valid response from endpoint URL (multipart partNumber=19)"
+   },
+   {
+    "try": 2,
+    "rc": 1,
+    "failure": "aws s3 cp: Connection was closed before we received a valid response from endpoint URL (multipart partNumber=1)"
+   },
+   {
+    "try": 3,
+    "rc": 0,
+    "env": "AWS_MAX_ATTEMPTS=10 AWS_RETRY_MODE=standard (environment only; the recipe is unchanged)",
+    "wall_s": 310
+   }
+  ]
+ },
+ "antisemite_before": {
+  "identity_probe": {
+   "probe": "identity",
+   "one_tool_named_classify": true,
+   "description_has_labels_in_order": true,
+   "response_labels_match": true,
+   "identity_matches": true,
+   "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+   "elapsed_ms": [
+    18705,
+    203,
+    1048
+   ],
+   "tokens_total": 94,
+   "shape": "identity",
+   "load_header": "cold;load_ms=15684"
+  },
+  "read_only_ops": [
+   "probe --url https://aprender-mcp-decide-antisemite.us-east.true-mcp.com/mcp --apr models/decide/laya-antisemitism-v1.apr --expect-sha256 2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+   "aws lambda get-function-configuration --profile ze-kasher-dev --function-name aprender-mcp-decide-antisemite",
+   "aws lambda get-function-concurrency --profile ze-kasher-dev --function-name aprender-mcp-decide-antisemite"
+  ],
+  "lambda": {
+   "LastModified": "2026-10-23T01:13:24.000+0000",
+   "CodeSha256": "lhqq6c5ZcCaJh7k8Y68pFIQbJdI70HxeKQE62JteEr0=",
+   "MemorySize": 10240,
+   "State": "Active",
+   "Architectures": [
+    "arm64"
+   ],
+   "env_APRENDER_DECIDE_SHA256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+   "reserved_concurrency": null
+  }
+ },
+ "live_attempts": [],
+ "live_function_after": null,
+ "findings": [
+  {
+   "id": "F-12-12-1",
+   "title": "laya-upload's aws s3 cp lost its connection mid-multipart twice (parts 19 and 1) on this host",
+   "evidence": "tries 1 and 2 exited 1 with 'Connection was closed before we received a valid response'; try 3 with AWS_MAX_ATTEMPTS=10 AWS_RETRY_MODE=standard succeeded; laya-verify passed each time and the upload is content-addressed and idempotent",
+   "status": "worked around by environment only; the recipe is unchanged"
+  }
+ ],
+ "measured_on": "2026-10-26",
+ "commit": null
+}
