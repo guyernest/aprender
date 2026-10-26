@@ -1,0 +1,103 @@
+{
+  "P": 97,
+  "calibration_rows": 75,
+  "ce_first": 0.9725,
+  "ce_last": 1.0143,
+  "commit": "772af7ab9a28cf1edbc2c8da8f47dd5d6a0908c7",
+  "data_dir": "data/decide/motivation-v1",
+  "data_sha256": {
+    "eval.jsonl": "ee95d71fcb5d90d515b9fc6741e5df51087e763fa7f251ace83d9f11d5ccd575",
+    "task.json": "f74a3ad3cfc00c160cc2959d95beb219aec859b394b883e87577a56dc14e7ea3",
+    "train.jsonl": "f1d84f19ec38ed85356bcbcd1eae6ef8ad07fb97e014f61a17d37adc0d68d378"
+  },
+  "device_flag": "MPS as expected",
+  "device_requested": "mps",
+  "device_used": "mps:0",
+  "downstream_verify_budget_hours": 1.5,
+  "downstream_verify_runs": 5,
+  "earliest_stop_epoch": 4,
+  "early_stopping_can_end_early": true,
+  "epochs": 1,
+  "epochs_declared": 12,
+  "epochs_reasoning": "Rule: 12 under early stopping, the contract's epochs_above_16_max (spike 027 es12; at about 220 fit rows time is not the constraint), unless the projected three-seed training hours at E = 12 exceed 6, then the largest E in [4, 12] projected at most 6. Measured s_per_step 1.467857142857143 s, monitor_s_per_epoch 2.154 s. Three-seed training hours including the per-epoch calibration monitor: 0.43 h at E = 12, 0.43 h at E = 12 declared (budget 6.0 h). Plus the scoring tail 1.0 h and the pack/verify budget 0.7 h: 2.13 h to the artifact, 3.63 h to live with the 5 downstream verify runs of 18 min each (1.5 h). Early stopping (D-08) is active at E = 12: its earliest stop is epoch 4 (first_candidate_epoch 1 + patience_epochs 3), so a seed can end before E; the training hours above are the upper bound (every seed runs all 12 epochs).",
+  "epochs_rule": "12 under early stopping, the contract's epochs_above_16_max (spike 027 es12; at about 220 fit rows time is not the constraint), unless the projected three-seed training hours at E = 12 exceed 6, then the largest E in [4, 12] projected at most 6",
+  "exceeds_threshold": false,
+  "expected_hours_to_artifact": 2.13,
+  "expected_hours_to_live": 3.63,
+  "fit_rows": 220,
+  "host": {
+    "machine": "arm64",
+    "macos": "26.6.2",
+    "python": "3.13.7"
+  },
+  "host_load": {
+    "competing_names": [],
+    "competing_samples": 0,
+    "contended": false,
+    "load1_end": 1.58984375,
+    "load1_start": 1.14794921875,
+    "ncpu": 14,
+    "sampled_every_s": 15,
+    "samples": 5
+  },
+  "hours_at_E4": 0.14,
+  "hours_at_E6": 0.22,
+  "measured_on": "2026-10-26T20:05:26Z",
+  "monitor_s_per_epoch": 2.1537528038024902,
+  "outcome": "measured",
+  "pack_verify_budget_hours": 0.7,
+  "phase": "12",
+  "plan": "12-07",
+  "post_tokens_raw": {
+    "max": 147,
+    "mean": 45.8,
+    "p50": 47.0,
+    "p95": 80.0,
+    "p99": 122.3
+  },
+  "post_tokens_retained": {
+    "max": 147,
+    "mean": 45.8,
+    "p50": 47.0,
+    "p95": 80.0,
+    "p99": 122.3
+  },
+  "probe_rc": 0,
+  "projected_training_hours": {
+    "10": 0.36,
+    "11": 0.4,
+    "12": 0.43,
+    "4": 0.14,
+    "5": 0.18,
+    "6": 0.22,
+    "7": 0.25,
+    "8": 0.29,
+    "9": 0.32
+  },
+  "projected_training_hours_basis": "(s_per_step x steps_planned x E + monitor_s_per_epoch x E) x 3 seeds / 3600",
+  "repriced_ready_by": null,
+  "row_tokens": {
+    "max": 244,
+    "mean": 142.8,
+    "p50": 144.0,
+    "p95": 177.0,
+    "p99": 219.3
+  },
+  "rows_truncated": {
+    "count": 0,
+    "max_lost_tokens": 0,
+    "share": 0.0
+  },
+  "rule": "motivation-v1",
+  "s_per_step": 1.467857142857143,
+  "schema": "laya-probe-evidence-v1",
+  "seed": 13,
+  "steps": 28,
+  "steps_planned": 28,
+  "stopping": "fixed_epochs",
+  "tail_budget_hours": 1.0,
+  "task_json_sha256": "f74a3ad3cfc00c160cc2959d95beb219aec859b394b883e87577a56dc14e7ea3",
+  "threshold_s_per_step": 3.0,
+  "torch_version": "2.14.0",
+  "train_seconds": 41.1
+}
