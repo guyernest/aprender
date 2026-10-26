@@ -1,0 +1,5 @@
+{
+ "schema": "laya-deploy-owner-reply-v1",
+ "skipped": true,
+ "reason": "Task 1 ended verified with final true (DEPLOY VERIFY OK, 4 proven-cold samples under the 30 s cap); no owner decision needed"
+}
