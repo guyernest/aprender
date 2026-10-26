@@ -613,6 +613,150 @@ def _py_fa(P, y, other, thr, strict):
     return num, den
 
 
+def _mutate(path, fn):
+    doc = json.loads(Path(path).read_text(encoding="utf-8"))
+    fn(doc)
+    Path(path).write_text(json.dumps(doc), encoding="utf-8")
+
+
+def _stub_arm(f1, rate06):
+    return {"status": "completed", "macro_f1": f1,
+            "false_assignment": {"0.6": {"numerator": int(round(rate06 * 10)), "denominator": 10, "rate": rate06}}}
+
+
+def _selftest_rules(case, tmp):
+    """Refusals, blocked arms, the tie and clearly-beats rules, strict thresholds and the no-text sentinel."""
+    seen = []                                   # every stdout/stderr/output byte the cases below produced
+
+    def refused(name, argv, needle):
+        rc, o, e = _capture(argv)
+        seen.extend([o, e])
+        case(name, rc == 2 and e.startswith("REFUSED bakeoff-") and needle in e and "Traceback" not in e
+             and e.count("\n") == 1, "exit %s %s" % (rc, e.strip()[:150]))
+
+    def fresh(name):
+        return make_fixture(tmp / name)
+
+    print("alignment by row identity:")
+    fx = fresh("sf-swap")
+
+    def swap_rows(doc):                         # rows 1 and 2 are both `other`: truth and every label count unchanged
+        for key in ("row_ids", "text_sha256", "probabilities"):
+            doc[key][1], doc[key][2] = doc[key][2], doc[key][1]
+    _mutate(fx["setfit"], swap_rows)
+    refused("setfit: two swapped same-label rows (ids, hashes, probabilities) are refused",
+            _argv(fx, tmp / "o1.json"), "REFUSED bakeoff-alignment: setfit row identity")
+    fx = fresh("sf-ids")
+    _mutate(fx["setfit"], lambda d: d["row_ids"].__setitem__(5, "train:5"))
+    refused("setfit: row_ids that are not test:0 .. test:<n-1>", _argv(fx, tmp / "o2.json"),
+            "REFUSED bakeoff-alignment: setfit row identity")
+    fx = fresh("sf-hash")
+    _mutate(fx["setfit"], lambda d: d["text_sha256"].__setitem__(7, "0" * 64))
+    refused("setfit: a text_sha256 that is not the eval text's", _argv(fx, tmp / "o3.json"),
+            "REFUSED bakeoff-alignment: setfit row identity")
+    fx = fresh("sf-six")
+
+    def six_keys(doc):
+        for key in ("row_ids", "text_sha256", "dataset_fingerprint"):
+            del doc[key]
+    _mutate(fx["setfit"], six_keys)
+    refused("setfit: the six-key dump (no row_ids)", _argv(fx, tmp / "o4.json"),
+            "REFUSED bakeoff-alignment: setfit dump lacks row identity")
+    fx = fresh("sf-truth")
+    _mutate(fx["setfit"], lambda d: d["truth"].__setitem__(9, (d["truth"][9] + 1) % 3))
+    refused("setfit: truth differs from the eval labels at one row (identity intact)", _argv(fx, tmp / "o5.json"),
+            "REFUSED bakeoff-alignment: setfit truth")
+    fx = fresh("kev-hash")
+    _mutate(fx["kev"], lambda d: d["rows"][3].__setitem__("text_sha256", "f" * 64))
+    refused("kev: a row whose text_sha256 differs", _argv(fx, tmp / "o6.json"), "REFUSED bakeoff-alignment: kev")
+    fx = fresh("kev-rows")
+    _mutate(fx["kev"], lambda d: d["rows"][4].__setitem__("row", 40))
+    refused("kev: rows that are not 0..n-1", _argv(fx, tmp / "o7.json"), "REFUSED bakeoff-alignment: kev")
+    print("distributions:")
+    fx = fresh("kev-range")
+    _mutate(fx["kev"], lambda d: d["rows"][4].__setitem__("probabilities", [1.2, -0.1, -0.1]))
+    refused("kev: a probability outside [0, 1]", _argv(fx, tmp / "o8.json"),
+            "REFUSED bakeoff-alignment: kev distribution row 4")
+    fx = fresh("sf-sum")
+    _mutate(fx["setfit"], lambda d: d["probabilities"].__setitem__(6, [0.5, 0.3, 0.3]))
+    refused("setfit: a row summing to 1.1", _argv(fx, tmp / "o9.json"),
+            "REFUSED bakeoff-alignment: setfit distribution row 6")
+    print("Laya reproduces its gate report bit for bit:")
+    for field, mut in (("fine_tuned.macro_f1", lambda g: g["fine_tuned"].__setitem__("macro_f1", g["fine_tuned"]["macro_f1"] + 1e-12)),
+                       ("fine_tuned.ece_post", lambda g: g["fine_tuned"].__setitem__("ece_post", g["fine_tuned"]["ece_post"] + 1e-12)),
+                       ("zero_shot.macro_f1", lambda g: g["zero_shot"].__setitem__("macro_f1", g["zero_shot"]["macro_f1"] - 1e-12)),
+                       ("seeds.per_seed", lambda g: g["seeds"]["per_seed"][0].__setitem__("ece_post", 0.5))):
+        fx = fresh("rc-" + field)
+        _mutate(fx["run"] / "gate-report.json", mut)
+        refused("laya recompute: %s off by a hair is refused" % field, _argv(fx, tmp / "o10.json"),
+                "REFUSED bakeoff-laya-recompute: " + field)
+
+    print("blocked arms:")
+    fx = fresh("blocked")
+    evidence = tmp / "kev-blocked-evidence.txt"
+    evidence.write_text("kev arm blocked: no compute window\n", encoding="utf-8")
+    outb = tmp / "blocked.json"
+    rc, o, e = _capture(_argv(fx, outb, kev="blocked:compute:%s" % evidence))
+    seen.extend([o, e])
+    repb = json.loads(outb.read_text(encoding="utf-8")) if outb.is_file() else {}
+    kev = repb.get("arms", {}).get("kev", {})
+    case("--kev blocked:compute:<path>: the arm is blocked with its failure_class and evidence",
+         rc == 0 and kev.get("status") == "blocked" and kev.get("failure_class") == "compute"
+         and kev.get("evidence") == str(evidence) and "arms=3" in o, "exit %s %s" % (rc, e.strip()[:100]))
+    case("a blocked arm is absent from the ranking", [r["arm"] for r in repb.get("ranking", [])].count("kev") == 0
+         and len(repb.get("ranking", [])) == 2)
+    rt = _capture(["--render-tables", str(outb)]) if outb.is_file() else (1, "", "")
+    seen.extend([rt[1], rt[2]])
+    case("--render-tables prints blocked (compute) for the blocked arm", rt[0] == 0 and "blocked (compute)" in rt[1])
+    refused("a malformed blocked form is refused", _argv(fx, tmp / "o11.json", setfit="blocked:Bad Class:x"),
+            "REFUSED bakeoff-alignment: setfit blocked form")
+
+    print("the declared rules:")
+    stub = {"laya": _stub_arm(0.71234, 0.20), "setfit": _stub_arm(0.71231, 0.10), "kev": _stub_arm(0.80, 0.30)}
+    ranked = rank_arms(stub)
+    case("macro-F1 equal to 4 decimals ranks by the lower false-assignment rate at 0.6",
+         [r["arm"] for r in ranked] == ["kev", "setfit", "laya"] and [r["tiebreak_applied"] for r in ranked] == [False, True, True],
+         str([(r["arm"], r["tiebreak_applied"]) for r in ranked]))
+    ranked2 = rank_arms({"laya": _stub_arm(0.7124, 0.50), "setfit": _stub_arm(0.7120, 0.01)})
+    case("a macro-F1 difference of 0.0004 is not a tie: the higher macro-F1 ranks first whatever the rate",
+         [r["arm"] for r in ranked2] == ["laya", "setfit"] and not any(r["tiebreak_applied"] for r in ranked2))
+    case("the clearly-beats margin is the gate's own 0.05", CLEARLY_BEATS_MARGIN == float(contract.thresholds()["min_macro_f1_margin"]) == 0.05)
+    f_at = findings_for({"laya": _stub_arm(0.50, 0.1), "setfit": _stub_arm(0.55, 0.1), "kev": _stub_arm(0.549, 0.1)})
+    case("a reference arm at Laya + 0.05 yields the finding; at Laya + 0.049 it does not",
+         [f["arm"] for f in f_at] == ["setfit"] and f_at[0]["id"] == "reference_arm_clearly_beats_laya"
+         and "switch" not in json.dumps(f_at[0]).replace("never a switch", ""), str(f_at))
+    case("no finding when Laya leads; a blocked reference arm is skipped",
+         findings_for({"laya": _stub_arm(0.7, 0.1), "setfit": _stub_arm(0.6, 0.1), "kev": {"status": "blocked"}}) == [])
+
+    fx = fresh("equal")
+
+    def exact_half(doc):                        # an `other` row whose top non-other probability is exactly 0.5
+        doc["probabilities"][1] = [0.5, 0.25, 0.25]
+    _mutate(fx["setfit"], exact_half)
+    oute = tmp / "equal.json"
+    rc, o, e = _capture(_argv(fx, oute))
+    seen.extend([o, e])
+    P_sf = np.array(json.loads(fx["setfit"].read_text(encoding="utf-8"))["probabilities"])
+    sf = json.loads(oute.read_text(encoding="utf-8"))["arms"]["setfit"]["false_assignment"]["0.5"] if oute.is_file() else {}
+    want, want_ge = _py_fa(P_sf, fx["y"], 2, 0.5, True), _py_fa(P_sf, fx["y"], 2, 0.5, False)
+    case("a probability exactly equal to the threshold is not counted (strict >) but is in client_ge",
+         rc == 0 and (sf["numerator"], sf["client_ge"]["numerator"]) == (want[0], want_ge[0]) and want_ge[0] > want[0],
+         "strict %s client_ge %s" % (want, want_ge))
+
+    print("no text on stdout, stderr or the output (sentinel %s):" % SENTINEL)
+    out_ok = tmp / "sentinel-ok.json"
+    rc, o, e = _capture(_argv(fresh("sent-ok"), out_ok))
+    seen.extend([o, e, out_ok.read_text(encoding="utf-8"), _capture(["--render-tables", str(out_ok)])[1]])
+    probe_out, probe_err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(probe_out), contextlib.redirect_stderr(probe_err):
+        print(SENTINEL)
+        print(SENTINEL, file=sys.stderr)
+    case("control: the capture sees a sentinel on stdout and on stderr",
+         SENTINEL in probe_out.getvalue() and SENTINEL in probe_err.getvalue())
+    case("the sentinel is in every synthetic text yet in no stdout, stderr, output JSON or table of %d captures (success and "
+         "every refusal above)" % len(seen), rc == 0 and len(seen) > 20 and not any(SENTINEL in s for s in seen))
+
+
 def selftest():
     failures = []
     n_cases = [0]
@@ -694,6 +838,7 @@ def selftest():
             case("the lead table carries the 0.6 and 0.85 columns and rows for every completed arm and band",
                  ">0.6 num/den" in rt1[1] and ">0.85 num/den" in rt1[1]
                  and all(any(ln.startswith("| %s | all |" % n_) for ln in lead) for n_ in ARM_ORDER), "%d lead rows" % len(lead))
+            _selftest_rules(case, tmp)
         finally:
             globals()["N_RESAMPLES"] = old_resamples
 
