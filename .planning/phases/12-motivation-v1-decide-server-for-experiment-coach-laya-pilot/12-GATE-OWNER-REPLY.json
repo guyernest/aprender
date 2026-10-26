@@ -1,0 +1,9 @@
+{
+  "schema": "laya-gate-owner-reply-v2",
+  "skipped": true,
+  "final_attempt": 1,
+  "outcome": "gate_pass",
+  "failure_kind": null,
+  "option": null,
+  "rerun_authorization_sha256": null
+}
