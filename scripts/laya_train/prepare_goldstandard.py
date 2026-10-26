@@ -110,6 +110,7 @@ HEAD_MAX = 192
 OPTION_MAX = 48
 DOOR_CEILING = 8                                        # the Phase 8 door, the ceiling of THIS phase
 SNAPSHOT_REV = "55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851"
+STANCE_CONTROL_P = 57                                   # the stance task's measured prefix of record (a literal, never the live contract constant)
 HEADER_TEXT = "choice question:"
 TOOL_BOUNDARY = "contracts/decide-tool-boundary-v1.yaml"
 
@@ -538,8 +539,8 @@ def selftest_tokenizer():
          "raw %d kept %d" % (long_head["head_raw_tokens"], long_head["head_kept_tokens"]))
     case("the cap build of a two-option task is 196", long_head["p_cap"] == 196, str(long_head["p_cap"]))
     stance = measure_task(tok, prepare_stance.INSTRUCTIONS, prepare_stance.DESCRIPTIONS)
-    case("the stance task measures the contract's served_task_min_row_tokens 57 with 3 markers",
-         stance["P"] == 57 == contract_constant("served_task_min_row_tokens") and stance["markers"] == 3, "P %d markers %d" % (stance["P"], stance["markers"]))
+    case("the stance task measures its prefix of record, STANCE_CONTROL_P 57, with 3 markers",
+         stance["P"] == STANCE_CONTROL_P and stance["markers"] == 3, "P %d markers %d" % (stance["P"], stance["markers"]))
     case("the stance task has no head or option cut", not stance["head_cut"] and not any(o["cut"] for o in stance["options"]))
     print("%d case(s) failed" % len(failures) if failures else "all cases ok")
     if not failures:

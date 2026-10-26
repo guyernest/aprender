@@ -1327,6 +1327,18 @@ laya-prepare-goldstandard *args:
     set -euo pipefail
     uv run --project scripts/laya_train --frozen python -I scripts/laya_train/prepare_goldstandard.py {{args}}
 
+# The motivation CSV (motivation-v1, phase 12, a PILOT on the 25 October 2026 guide draft): the partner CSV is read IN
+# PLACE (never copied) and written as a Laya data dir by the rule prepare_motivation.py declares (nfc-trim-ws-v1
+# grouping, conflicting-label texts dropped, a seed-13 stratified text-disjoint 25 % eval draw) -> data/decide/motivation-v1.
+# The same script measures a task's prefix with the SERVED tokenizer: `just laya-prepare-motivation --measure
+# (--draft a|b | --task <task.json>) [--csv <csv>] [--max-texts N]`, and runs its own `--selftest` /
+# `--selftest-tokenizer`. A thin wrapper: the script owns the default CSV path and every refusal. Output is under the
+# root-anchored, gitignored /data/.
+laya-prepare-motivation *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    uv run --project scripts/laya_train --frozen python -I scripts/laya_train/prepare_motivation.py {{args}}
+
 # Fine-tune Laya on <data> (task.json + train.jsonl + a REQUIRED eval.jsonl + an OPTIONAL shift.jsonl),
 # calibrate and gate into the run dir <out>. Exit 0 = GATE PASS, 3 = GATE FAIL, 2 = input refused.
 # Production (laya-finetune-gate-v1 1.4.0) trains the three gate seeds 13/17/23 and ships the MEDIAN-ECE
