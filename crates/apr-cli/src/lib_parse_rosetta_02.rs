@@ -281,6 +281,7 @@
             lock_out: None,
             selection_lock: None,
             candidate: Vec::new(),
+            dump_probabilities: None,
             force: false,
         });
         let paths = extract_model_paths(&cmd);

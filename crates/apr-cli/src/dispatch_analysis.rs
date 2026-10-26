@@ -1015,6 +1015,7 @@ pub(crate) fn dispatch_classify_eval(
     selection_lock: Option<&std::path::Path>,
     candidate: &[std::path::PathBuf],
     force: bool,
+    dump_probabilities: Option<&std::path::Path>,
 ) -> std::result::Result<(), CliError> {
     let tagged = crate::setfit_tag::read_setfit_tag(resolved)?.is_some();
 
@@ -1031,6 +1032,7 @@ pub(crate) fn dispatch_classify_eval(
                 selection_lock,
                 candidates: candidate,
                 force,
+                dump_probabilities,
                 json,
             });
         }
@@ -1660,6 +1662,7 @@ fn dispatch_profiling_commands(cli: &Cli) -> Option<Result<(), CliError>> {
             lock_out,
             selection_lock,
             candidate,
+            dump_probabilities,
             force,
         } => crate::error::resolve_model_path(file).and_then(|r| match task.as_deref() {
             #[cfg(feature = "training")]
@@ -1677,6 +1680,7 @@ fn dispatch_profiling_commands(cli: &Cli) -> Option<Result<(), CliError>> {
                 selection_lock.as_deref(),
                 candidate,
                 *force,
+                dump_probabilities.as_deref(),
             ),
             Some("code") => {
                 eval::run_code_eval(&r, data.as_deref(), *max_tokens, *threshold, cli.json)

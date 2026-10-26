@@ -44,6 +44,7 @@ fn args<'a>(artifact: &'a Path, data: &'a Path, selection: &'a Path) -> SetFitEv
         selection_lock: None,
         candidates: &[],
         force: false,
+        dump_probabilities: None,
         json: true,
     }
 }
@@ -494,6 +495,266 @@ fn write_lock_still_refuses_a_destination_that_appeared_mid_run() {
         std::fs::read(&destination).expect("the destination is readable"),
         b"{}",
         "the forced write must actually have replaced the file"
+    );
+}
+
+// ===========================================================================
+// --dump-probabilities (plan 10-06 Task 1, pulled into Phase 12 by D-25)
+// ===========================================================================
+
+const ARTIFACT_SHA: &str = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+const DATASET_FP: &str = "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
+
+fn three_labels() -> Vec<String> {
+    vec!["zeta".to_string(), "alpha".to_string(), "mu".to_string()]
+}
+
+fn example(
+    index: usize,
+    label: usize,
+    input: &str,
+) -> aprender_contrastive_data::schema::LabeledExample {
+    aprender_contrastive_data::schema::LabeledExample {
+        id: format!("test:{index}"),
+        input: input.to_string(),
+        label,
+        label_text: three_labels()[label].clone(),
+        source_split: "test".to_string(),
+    }
+}
+
+/// Three made-up rows through the SAME per-row function `evaluate_test` calls.
+fn synthetic_dump_rows() -> Vec<RowProbabilities> {
+    let labels = three_labels();
+    let inputs = [
+        (
+            "made-up sentence about harbours",
+            0_usize,
+            "zeta",
+            [0.7, 0.2, 0.1],
+        ),
+        (
+            "another made-up sentence about orchards",
+            1,
+            "alpha",
+            [0.1, 0.8, 0.1],
+        ),
+        (
+            "a third made-up sentence about glaciers",
+            2,
+            "alpha",
+            [0.2, 0.5, 0.3],
+        ),
+    ];
+    inputs
+        .iter()
+        .enumerate()
+        .map(|(index, (text, truth, predicted, probs))| {
+            row_probabilities(&example(index, *truth, text), &labels, predicted, probs)
+                .expect("a well-formed row builds")
+        })
+        .collect()
+}
+
+#[test]
+fn eval_setfit_refuses_dump_probabilities_on_a_validation_run() {
+    let temp = TempDir::new().expect("tempdir");
+    let artifact = temp.path().join("model.apr");
+    let data = temp.path().join("data");
+    let selection = temp.path().join("sel.json");
+    let dump = temp.path().join("probs.json");
+    let mut a = args(&artifact, &data, &selection);
+    a.dump_probabilities = Some(&dump);
+
+    let error = run(&a).expect_err("a validation run has no probabilities to dump");
+    assert!(
+        matches!(error, CliError::ValidationFailed(_)),
+        "a contradictory flag set is a request error; got: {error}"
+    );
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("--dump-probabilities") && rendered.contains("--split test"),
+        "the refusal must name the flag and the split it belongs to; got: {rendered}"
+    );
+    assert!(
+        !rendered.contains(&data.display().to_string()),
+        "the flag refusal must come BEFORE any input is opened; got: {rendered}"
+    );
+}
+
+#[test]
+fn dump_probabilities_refuses_an_existing_destination_before_the_dataset_is_read() {
+    let temp = TempDir::new().expect("tempdir");
+    let artifact = temp.path().join("model.apr");
+    // ABSENT on purpose, as in the --lock-out ordering witness above.
+    let data = temp.path().join("no-such-corpus");
+    let selection = temp.path().join("no-such-selection.json");
+    let lock = temp.path().join("selection.lock");
+    let dump = temp.path().join("probs.json");
+    std::fs::write(&dump, b"{\"a prior dump\":true}")
+        .expect("the occupied destination is writable");
+    let mut a = args(&artifact, &data, &selection);
+    a.split = Split::Test;
+    a.selection_lock = Some(&lock);
+    a.dump_probabilities = Some(&dump);
+    assert!(!a.force && !data.exists() && dump.exists());
+
+    let error = run(&a).expect_err("an occupied --dump-probabilities destination is refused");
+    assert!(
+        matches!(error, CliError::ValidationFailed(_)),
+        "refusing to clobber is a request error; got: {error}"
+    );
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains(&dump.display().to_string()),
+        "the refusal must name the destination; got: {rendered}"
+    );
+    assert!(
+        !rendered.contains(&data.display().to_string()),
+        "and it must come BEFORE the dataset is read, so the corpus is not named; got: {rendered}"
+    );
+}
+
+#[test]
+fn probability_dump_has_exactly_its_keys_and_no_text() {
+    let labels = three_labels();
+    let rows = synthetic_dump_rows();
+    let dump = probability_dump(&labels, &rows, ARTIFACT_SHA, DATASET_FP).expect("builds");
+    let text = serde_json::to_string(&dump).expect("serializes");
+    let keys = [
+        "ordered_labels",
+        "row_ids",
+        "text_sha256",
+        "truth",
+        "predicted",
+        "probabilities",
+        "artifact_sha256",
+        "dataset_fingerprint",
+        "n_rows",
+    ];
+    let positions: Vec<usize> = keys
+        .iter()
+        .map(|key| {
+            text.find(&format!("\"{key}\":"))
+                .unwrap_or_else(|| panic!("key {key} missing from {text}"))
+        })
+        .collect();
+    assert!(
+        positions.windows(2).all(|w| w[0] < w[1]),
+        "the keys must appear in document order; got: {text}"
+    );
+    let value: serde_json::Value = serde_json::from_str(&text).expect("parses");
+    let object = value.as_object().expect("a JSON object");
+    assert_eq!(object.len(), keys.len(), "no tenth key: {text}");
+    // Every string anywhere in the document is a label, a row id, a 64-hex sha or the
+    // fingerprint. An input text would be none of those.
+    let mut allowed: Vec<String> = labels.clone();
+    allowed.extend(rows.iter().map(|r| r.id.clone()));
+    allowed.push(ARTIFACT_SHA.to_string());
+    allowed.push(DATASET_FP.to_string());
+    let is_hex64 = |s: &str| {
+        s.len() == 64
+            && s.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    };
+    fn strings<'v>(value: &'v serde_json::Value, out: &mut Vec<&'v str>) {
+        match value {
+            serde_json::Value::String(s) => out.push(s),
+            serde_json::Value::Array(items) => items.iter().for_each(|v| strings(v, out)),
+            serde_json::Value::Object(map) => map.values().for_each(|v| strings(v, out)),
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    strings(&value, &mut found);
+    assert!(!found.is_empty());
+    for s in found {
+        assert!(
+            allowed.iter().any(|a| a == s) || is_hex64(s),
+            "string value {s:?} is not a label, a row id, a sha or the fingerprint"
+        );
+    }
+    assert!(
+        !text.contains("harbours") && !text.contains("orchards"),
+        "no input text: {text}"
+    );
+    assert_eq!(object["n_rows"], serde_json::json!(3));
+}
+
+#[test]
+fn probability_dump_row_identity_is_the_test_split() {
+    let labels = three_labels();
+    let inputs = ["made-up one", "made-up two", "made-up three"];
+    let rows: Vec<RowProbabilities> = inputs
+        .iter()
+        .enumerate()
+        .map(|(index, text)| {
+            row_probabilities(&example(index, 0, text), &labels, "zeta", &[0.6, 0.3, 0.1])
+                .expect("builds")
+        })
+        .collect();
+    let dump = probability_dump(&labels, &rows, ARTIFACT_SHA, DATASET_FP).expect("builds");
+    assert_eq!(dump.row_ids, vec!["test:0", "test:1", "test:2"]);
+    for (index, text) in inputs.iter().enumerate() {
+        let expected =
+            aprender_contrastive_data::hash::hex(&Sha256::digest(text.as_bytes()).into());
+        assert_eq!(
+            dump.text_sha256[index], expected,
+            "row {index}: sha256 of the input bytes"
+        );
+    }
+    assert_eq!(dump.dataset_fingerprint, DATASET_FP);
+    assert_eq!(dump.n_rows, 3);
+    dump.validate().expect("a built dump validates");
+
+    // A column of the wrong length is refused, whichever column it is.
+    let mut short_ids = probability_dump(&labels, &rows, ARTIFACT_SHA, DATASET_FP).expect("builds");
+    short_ids.row_ids.pop();
+    assert!(short_ids.validate().is_err(), "row_ids shorter than n_rows");
+    let mut short_sha = probability_dump(&labels, &rows, ARTIFACT_SHA, DATASET_FP).expect("builds");
+    short_sha.text_sha256.pop();
+    assert!(
+        short_sha.validate().is_err(),
+        "text_sha256 shorter than n_rows"
+    );
+    // And no rows is not a dump.
+    assert!(probability_dump(&labels, &[], ARTIFACT_SHA, DATASET_FP).is_err());
+}
+
+#[test]
+fn probability_dump_predicted_is_the_argmax_of_probabilities() {
+    let labels = three_labels();
+    let rows = synthetic_dump_rows();
+    let dump = probability_dump(&labels, &rows, ARTIFACT_SHA, DATASET_FP).expect("builds");
+    assert_eq!(dump.predicted, vec![0, 1, 1]);
+    assert_eq!(dump.truth, vec![0, 1, 2]);
+    for (row, predicted) in dump.probabilities.iter().zip(&dump.predicted) {
+        let max = row.iter().copied().fold(f64::MIN, f64::max);
+        assert!((row[*predicted] - max).abs() < f64::EPSILON);
+    }
+
+    // A predicted index that is not the argmax is refused.
+    let mut wrong = rows.clone();
+    wrong[0].predicted = 2;
+    assert!(probability_dump(&labels, &wrong, ARTIFACT_SHA, DATASET_FP).is_err());
+    // A row of the wrong length is refused.
+    let mut short = rows.clone();
+    short[1].probabilities = vec![0.5, 0.5];
+    assert!(probability_dump(&labels, &short, ARTIFACT_SHA, DATASET_FP).is_err());
+    // A NaN is refused.
+    let mut nan = rows.clone();
+    nan[2].probabilities[0] = f64::NAN;
+    assert!(probability_dump(&labels, &nan, ARTIFACT_SHA, DATASET_FP).is_err());
+    // A predicted label the head does not index is refused at the row.
+    let outside = row_probabilities(
+        &example(0, 0, "made-up"),
+        &labels,
+        "no-such-label",
+        &[0.5, 0.3, 0.2],
+    );
+    assert!(
+        outside.is_err(),
+        "a prediction outside the labels cannot be represented"
     );
 }
 

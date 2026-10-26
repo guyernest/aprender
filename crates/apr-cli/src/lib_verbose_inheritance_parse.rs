@@ -298,6 +298,7 @@
             lock_out: None,
             selection_lock: None,
             candidate: Vec::new(),
+            dump_probabilities: None,
             force: false,
         }));
         let result = execute_command(&cli);

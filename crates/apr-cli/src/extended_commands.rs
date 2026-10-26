@@ -192,7 +192,17 @@ pub enum ExtendedCommands {
         /// silently compared against ones that were not.
         #[arg(long, value_name = "APR")]
         candidate: Vec<PathBuf>,
-        /// SetFit only: replace an existing --lock-out
+        /// SetFit only, `--split test`: write the per-row probabilities of this run's own pass
+        ///
+        /// One JSON document built from the SAME classify pass that produced the reported
+        /// accuracy, behind the same selection replay and lock -> token -> grant chain:
+        /// ordered_labels, row_ids, text_sha256, truth, predicted, probabilities,
+        /// artifact_sha256, dataset_fingerprint and n_rows. It carries row identity (the
+        /// canonical `test:<i>` ids and a sha256 of each input) and no text. Refused on
+        /// `--split validation`; an existing destination is refused unless --force.
+        #[arg(long = "dump-probabilities", value_name = "FILE")]
+        dump_probabilities: Option<PathBuf>,
+        /// SetFit only: replace an existing --lock-out or --dump-probabilities destination
         #[arg(long)]
         force: bool,
     },

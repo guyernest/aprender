@@ -361,6 +361,7 @@ fn four_consumers_agree_about_one_over_cap_file() {
         None,
         &[],
         false,
+        None,
     )
     .expect_err("the classify router cannot route a block it could not read");
     let eval_msg = eval.to_string();
@@ -481,4 +482,45 @@ fn the_local_tag_literal_equals_cores_model_type_tag() {
         aprender::setfit::artifact::MODEL_TYPE_TAG,
         "apr-cli's ungated tag literal must track the value core's writer stamps"
     );
+}
+
+/// `--dump-probabilities` is SetFit-only, like `--lock-out`: a non-SetFit artifact refuses it
+/// rather than ignoring it, because an operator who passes it and sees a green report would
+/// believe a probability document was written.
+#[cfg(feature = "training")]
+#[test]
+fn eval_dump_probabilities_on_a_non_setfit_artifact_is_refused() {
+    let temp = TempDir::new().expect("tempdir");
+    // A plain APR: the same container shape, but `model_type` is empty, so it is not tagged.
+    let path = write_setfit_shaped_apr(temp.path(), "plain.apr", "", None);
+    let dump = temp.path().join("probs.json");
+
+    let error = crate::dispatch_classify_eval(
+        &path,
+        "sst2",
+        None,
+        None,
+        2,
+        false,
+        true,
+        None,
+        "validation",
+        None,
+        None,
+        &[],
+        false,
+        Some(&dump),
+    )
+    .expect_err("a non-SetFit artifact must refuse --dump-probabilities");
+    assert!(
+        matches!(error, crate::error::CliError::ValidationFailed(_)),
+        "a flag that cannot apply is a request error; got: {error}"
+    );
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("--dump-probabilities")
+            && rendered.contains("applies only to a setfit-apr-v1"),
+        "the refusal must name the flag and say why; got: {rendered}"
+    );
+    assert!(!dump.exists(), "nothing was written");
 }

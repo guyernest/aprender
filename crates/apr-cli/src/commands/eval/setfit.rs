@@ -101,8 +101,10 @@ pub(crate) struct SetFitEvalArgs<'a> {
     pub(crate) selection_lock: Option<&'a Path>,
     /// Additional artifacts to consider (`--candidate`, validation only).
     pub(crate) candidates: &'a [PathBuf],
-    /// Replace an existing `--lock-out`.
+    /// Replace an existing `--lock-out` or `--dump-probabilities` destination.
     pub(crate) force: bool,
+    /// Where to write the per-row probabilities of the test pass (`--dump-probabilities`).
+    pub(crate) dump_probabilities: Option<&'a Path>,
     /// The global `--json`.
     pub(crate) json: bool,
 }
@@ -153,6 +155,68 @@ struct CandidateRow {
     value: f64,
     /// Its measured value's bits.
     value_bits: u64,
+}
+
+/// One test row as the dump keeps it: identity, truth, the prediction and its probabilities.
+#[derive(Debug, Clone, PartialEq)]
+struct RowProbabilities {
+    /// The row's canonical id (`test:<index>`).
+    id: String,
+    /// Lowercase hex sha256 of the row's `input` bytes.
+    text_sha256: String,
+    /// The dataset's label index of the row.
+    truth: usize,
+    /// The artifact's predicted label index.
+    predicted: usize,
+    /// The probability the head assigned to each label, in label order.
+    probabilities: Vec<f64>,
+}
+
+/// The document `--dump-probabilities` writes. Field order IS the document order.
+#[derive(Debug, Serialize)]
+struct ProbabilityDump {
+    ordered_labels: Vec<String>,
+    row_ids: Vec<String>,
+    text_sha256: Vec<String>,
+    truth: Vec<usize>,
+    predicted: Vec<usize>,
+    probabilities: Vec<Vec<f64>>,
+    artifact_sha256: String,
+    dataset_fingerprint: String,
+    n_rows: usize,
+}
+
+impl ProbabilityDump {
+    /// Refuse a document whose columns do not all have `n_rows` entries.
+    fn validate(&self) -> Result<()> {
+        Err(CliError::ValidationFailed(
+            "ProbabilityDump::validate is not implemented".to_string(),
+        ))
+    }
+}
+
+/// One test row's dump entry, from the row and what the classifier said about it.
+fn row_probabilities(
+    _row: &aprender_contrastive_data::schema::LabeledExample,
+    _labels: &[String],
+    _predicted_label: &str,
+    _probabilities: &[f64],
+) -> Result<RowProbabilities> {
+    Err(CliError::ValidationFailed(
+        "row_probabilities is not implemented".to_string(),
+    ))
+}
+
+/// Build the dump from the rows of one classify pass.
+fn probability_dump(
+    _labels: &[String],
+    _rows: &[RowProbabilities],
+    _artifact_sha256: &str,
+    _dataset_fingerprint: &str,
+) -> Result<ProbabilityDump> {
+    Err(CliError::ValidationFailed(
+        "probability_dump is not implemented".to_string(),
+    ))
 }
 
 /// The lock, as written or consumed.
