@@ -1,0 +1,321 @@
+{
+  "schema": "laya-acceptance-replay-v1",
+  "phase": "12",
+  "plan": "12-13",
+  "date": "2026-10-26T22:24Z",
+  "commit": "8578107a4",
+  "endpoint": "https://aprender-mcp-decide-motivation.us-east.true-mcp.com/mcp",
+  "endpoint_source": "models/decide/deploy-aprender-mcp-decide-motivation.state/deployment.toml [deployment] endpoint, equal to 12-DEPLOY-EVIDENCE.json live_attempts[0].endpoint",
+  "server": "aprender-mcp-decide-motivation",
+  "auth_posture": "off (no bearer was sent; APRENDER_DECIDE_PROBE_TOKEN unset)",
+  "artifact_sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+  "pilot_label": "pilot",
+  "labels": [
+    "social_affiliative",
+    "conspiratorial",
+    "other"
+  ],
+  "chosen_max_texts": 8,
+  "P": 97,
+  "probe": "cargo build --release -p aprender-mcp-decide-lambda --example probe (the binary laya-deploy-verify built); read-only tools/call with the probe's committed synthetic REPLAY_TEXTS only; no partner text sent or recorded",
+  "identity": {
+    "probe": "identity",
+    "probe_id": "probe-18e2348bc595d078-14f3d",
+    "one_tool_named_classify": true,
+    "description_has_labels_in_order": true,
+    "response_labels_match": true,
+    "identity_matches": true,
+    "artifact_sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+    "elapsed_ms": [
+      524,
+      143,
+      1167
+    ],
+    "tokens_total": 105,
+    "shape": "identity",
+    "load_header": "warm"
+  },
+  "replays": [
+    {
+      "n": 1,
+      "from": 0,
+      "line": {
+        "probe": "replay",
+        "probe_id": "probe-18e2348cb9d92fb8-14f73",
+        "n_texts": 1,
+        "n_results": 1,
+        "one_result_per_text": true,
+        "probabilities_len_match": true,
+        "probabilities_in_unit_range": true,
+        "sums_within_tolerance": true,
+        "max_abs_sum_deviation": 1.1175870895385742e-08,
+        "label_is_argmax": true,
+        "labels_in_task_order": true,
+        "identity_matches": true,
+        "artifact_sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+        "labels": [
+          "social_affiliative",
+          "conspiratorial",
+          "other"
+        ],
+        "tokens_total": 105,
+        "truncated": 0,
+        "elapsed_ms": 1210,
+        "door_max_texts": 8,
+        "shape": "replay"
+      }
+    },
+    {
+      "n": 1,
+      "from": 1,
+      "line": {
+        "probe": "replay",
+        "probe_id": "probe-18e2348de45f8cb8-14f8a",
+        "n_texts": 1,
+        "n_results": 1,
+        "one_result_per_text": true,
+        "probabilities_len_match": true,
+        "probabilities_in_unit_range": true,
+        "sums_within_tolerance": true,
+        "max_abs_sum_deviation": 1.1175870895385742e-08,
+        "label_is_argmax": true,
+        "labels_in_task_order": true,
+        "identity_matches": true,
+        "artifact_sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+        "labels": [
+          "social_affiliative",
+          "conspiratorial",
+          "other"
+        ],
+        "tokens_total": 106,
+        "truncated": 0,
+        "elapsed_ms": 1210,
+        "door_max_texts": 8,
+        "shape": "replay"
+      }
+    },
+    {
+      "n": 1,
+      "from": 2,
+      "line": {
+        "probe": "replay",
+        "probe_id": "probe-18e2348f1974dec0-14fa4",
+        "n_texts": 1,
+        "n_results": 1,
+        "one_result_per_text": true,
+        "probabilities_len_match": true,
+        "probabilities_in_unit_range": true,
+        "sums_within_tolerance": true,
+        "max_abs_sum_deviation": 2.2351741790771484e-08,
+        "label_is_argmax": true,
+        "labels_in_task_order": true,
+        "identity_matches": true,
+        "artifact_sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+        "labels": [
+          "social_affiliative",
+          "conspiratorial",
+          "other"
+        ],
+        "tokens_total": 107,
+        "truncated": 0,
+        "elapsed_ms": 1272,
+        "door_max_texts": 8,
+        "shape": "replay"
+      }
+    },
+    {
+      "n": 7,
+      "from": 0,
+      "line": {
+        "probe": "replay",
+        "probe_id": "probe-18e234926b2531e0-1503d",
+        "n_texts": 7,
+        "n_results": 7,
+        "one_result_per_text": true,
+        "probabilities_len_match": true,
+        "probabilities_in_unit_range": true,
+        "sums_within_tolerance": true,
+        "max_abs_sum_deviation": 2.2351741790771484e-08,
+        "label_is_argmax": true,
+        "labels_in_task_order": true,
+        "identity_matches": true,
+        "artifact_sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+        "labels": [
+          "social_affiliative",
+          "conspiratorial",
+          "other"
+        ],
+        "tokens_total": 745,
+        "truncated": 0,
+        "elapsed_ms": 6630,
+        "door_max_texts": 8,
+        "shape": "replay"
+      }
+    }
+  ],
+  "largest_multi_text_n": 7,
+  "refused_token_budget": [
+    {
+      "n": 8,
+      "from": 0,
+      "line": {
+        "probe": "replay",
+        "refused": true,
+        "n_texts": 8,
+        "refusal_bound": "classify_max_total_tokens",
+        "refusal": "classify: built rows total 850 tokens (per text [105, 106, 107, 105, 108, 107, 107, 105]), over classify_max_total_tokens 800 (contracts/decide-tool-boundary-v1.yaml); send fewer or shorter texts",
+        "door_max_texts": 8
+      }
+    }
+  ],
+  "batch_of_4": {
+    "line": {
+      "probe": "replay",
+      "probe_id": "probe-18e234961696d468-150ea",
+      "n_texts": 4,
+      "n_results": 4,
+      "one_result_per_text": true,
+      "probabilities_len_match": true,
+      "probabilities_in_unit_range": true,
+      "sums_within_tolerance": true,
+      "max_abs_sum_deviation": 2.2351741790771484e-08,
+      "label_is_argmax": true,
+      "labels_in_task_order": true,
+      "identity_matches": true,
+      "artifact_sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+      "labels": [
+        "social_affiliative",
+        "conspiratorial",
+        "other"
+      ],
+      "tokens_total": 423,
+      "truncated": 0,
+      "elapsed_ms": 3908,
+      "door_max_texts": 8,
+      "shape": "replay"
+    },
+    "note": "experiment-coach's batch size; admitted whole (423 built tokens, under 800)"
+  },
+  "expected_count_refusal": {
+    "n_texts": 9,
+    "line": {
+      "probe": "replay_over_limit",
+      "probe_id": "probe-18e23497e4e2fd50-1510b",
+      "n_texts": 9,
+      "is_error": true,
+      "names_count_bound": true,
+      "names_limit_value": true,
+      "names_contract": true,
+      "elapsed_ms": 398,
+      "door_max_texts": 8,
+      "derived_from_flags": {
+        "note": "the probe prints the refusal as three booleans computed from the server's message; these two are those flags spelled out, not extra measurements",
+        "bound_named": "classify_max_texts",
+        "limit_named": "classify_max_texts 8",
+        "contract_named": "decide-tool-boundary-v1"
+      }
+    }
+  },
+  "request_form": {
+    "method": "tools/call",
+    "tool": "classify",
+    "arguments": "{texts: [...]}",
+    "transport": "plain HTTPS POST to the pmcp.run endpoint; no SigV4, no Function URL"
+  },
+  "requester_tests": {
+    "one_result_per_text": {
+      "result": "pass",
+      "proof": "one_result_per_text true on every successful replay (n = 1, 1, 1, 7, 4: n_results == n_texts)"
+    },
+    "probabilities_length_equals_labels": {
+      "result": "pass",
+      "proof": "probabilities_len_match true on every successful replay (3 labels)"
+    },
+    "probabilities_sum_to_1_within_1e-5": {
+      "result": "pass",
+      "proof": "sums_within_tolerance true, max_abs_sum_deviation 2.235e-08 over all successful replays"
+    },
+    "label_is_argmax": {
+      "result": "pass",
+      "proof": "label_is_argmax true on every successful replay"
+    },
+    "labels_in_task_order": {
+      "result": "pass",
+      "proof": "labels_in_task_order true on every successful replay; served order [social_affiliative, conspiratorial, other]"
+    },
+    "returned_sha_equals_pin": {
+      "result": "pass",
+      "proof": "identity_matches true and artifact_sha256 equal to the pin on the identity probe and on every successful replay"
+    },
+    "count_bound_refuses_above_the_door": {
+      "result": "pass",
+      "proof": "replay_over_limit with 9 texts returned an isError result naming classify_max_texts, the limit 8 and the contract"
+    }
+  },
+  "requester_tests_not_run_here": [
+    "Calibration sweep and the per-class precision/recall, false-assignment rate, source-batch and length-band results on the requester's own held-out split (needs their data; this plan sends only synthetic texts)",
+    "Cold-start and warm timing as the request quotes them for antisemitism-v1: replaced here by the live record's motivation figures, reported not gated"
+  ],
+  "timings_reported": {
+    "replay_elapsed_ms": {
+      "n1_from0": 1210,
+      "n1_from1": 1210,
+      "n1_from2": 1272,
+      "n7_from0": 6630,
+      "batch_of_4": 3908,
+      "refused_n8_token_budget": null
+    },
+    "count_refusal_elapsed_ms": 398,
+    "identity_probe_elapsed_ms_this_run": [
+      524,
+      143,
+      1167
+    ],
+    "identity_probe_load_header_this_run": "warm",
+    "tokens_total": {
+      "n1": [
+        105,
+        106,
+        107
+      ],
+      "n7": 745,
+      "batch_of_4": 423,
+      "n8_refused_rows_total": 850
+    },
+    "cold_wall_ms": {
+      "min": 22620,
+      "max": 25353,
+      "worst_sample": {
+        "index": 1,
+        "shape": "concentrated",
+        "probe_id": "38880d92-fecd-4ed0-a83e-8c581c4dccdf",
+        "elapsed_ms": 25353
+      },
+      "worst_slack_to_cap_ms": 4647,
+      "phase10_worst_slack_ms": 4500,
+      "n_measured": 4
+    },
+    "warm_ms": {
+      "values": [
+        1227,
+        1314,
+        1226,
+        1253,
+        1309
+      ],
+      "min": 1226,
+      "max": 1314,
+      "p50": 1253,
+      "n": 5
+    },
+    "source": "cold_wall_ms and warm_ms copied from 12-DEPLOY-EVIDENCE.json live (laya-deploy-verify, plan 12-13 Task 1)",
+    "policy": "reported, not gated"
+  },
+  "texts_per_call_rule": "min(B, floor(800 / built_row_tokens)) for equal-length texts with built_row_tokens = P + t (P measured = 97); mixed batches are admitted while the sum of built rows is at most 800",
+  "observed": "the replay of 8 synthetic texts was refused at the token budget (built rows total 850 > 800: rows 105-108 tokens each, P 97 plus 8-11 text tokens), so the step-down admitted 7 (745 built tokens); the 4-text call (423 tokens) and the single-text calls passed. The deployed door is 8 texts by count, but equal-length 8-text batches of rows above 100 tokens do not fit the 800-token budget: experiment-coach must split on a classify_max_total_tokens refusal, as its client already does.",
+  "partner_repo_unchanged": true,
+  "partner_repo": {
+    "head_before": "0c46b68887c4b0791693462ac845df2a2da8511d",
+    "status_before_equals_after": true
+  }
+}
