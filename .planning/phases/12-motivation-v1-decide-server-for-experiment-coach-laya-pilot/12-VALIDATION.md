@@ -56,16 +56,51 @@ Filled by the planner per task; the decision-level map is:
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
+### Per-task map (planner, 2026-10-26)
+
+Every task's `<verify>` carries an `<automated>` command with a `<fails_when>`; checkpoint tasks verify the recorded reply file.
+
+| Plan / Task | Decisions | Verify (key command or check) | Status |
+|-------------|-----------|-------------------------------|--------|
+| 12-01 T1 (tracer) | D-16, D-13, D-09 | `prepare_motivation.py --selftest` / `--selftest-tokenizer`; drafts a/b `--measure`; scratch dir through data.py validators; all-395-post leak scan; `LAYA_GATES_ONLY=prefix-budget just laya-gates-selftest` | ⬜ |
+| 12-01 T2 (decision) | D-09, D-10 | 12-TASK-OWNER-REPLY.json with the sha prefix of the bytes shown | ⬜ |
+| 12-01 T3 | D-10, D-13, D-01, D-23 | re-run byte-identical; enforced `--measure`; 12-TASK-EVIDENCE.json consistency; owner's justfile diff preserved | ⬜ |
+| 12-02 T1 (tracer) | D-19 | `cargo test -p aprender-decide --lib waiver` (accept + undeclared), clippy, wiring checks | ⬜ |
+| 12-02 T2 | D-19, D-20 | full lib suite incl. 10 waiver tests + case table + bindings sweep; armed fail_closed_vectors; laya-train-selftest; pv validate; census; `pv extract contracts --check` | ⬜ |
+| 12-03 T1 (tracer) | D-19 | `cargo test -p aprender-decide --lib artifact::` (waived pack at every door, strip/add/change refused, no waiver key when unwaived, determinism) | ⬜ |
+| 12-03 T2 | D-19, D-20 | gate.py selftest; laya-train-selftest; recipe_id_for reproduces the deployed run; training path AST unchanged | ⬜ |
+| 12-03 T3 | D-19 | one real `just laya-verify` of laya-antisemitism-v1.apr: eligible, waived null; pv + graph + census | ⬜ |
+| 12-04 T1 (tracer) | D-02 | monorepo_invariants (register N to N+1), duplicate-bin check, shim test, readme_contract, resolver proof, `BOOTSTRAP aarch64 OK` | ⬜ |
+| 12-04 T2 | F-10-12-1, D-23 | `laya-deploy-selftest` for both ids (5 EDGE HEALTH get cases, AWS CALLS: 0); edge-health-get gates row GREEN | ⬜ |
+| 12-05 T1 (tracer) | D-05, D-13, D-14 | `metrics.py --selftest`; `bakeoff.py --selftest`; direct metric checks | ⬜ |
+| 12-05 T2 | D-05, D-06 | `bakeoff.py --selftest` at least 12 cases (refusals, rules, sentinel) | ⬜ |
+| 12-06 T1 (tracer) | D-25 | adapter example tests; Phase 10 dir re-adapted byte-identically; three-label select + `setfit train --dry-run` | ⬜ |
+| 12-06 T2 | D-25 | `cargo test -p apr-cli --features setfit --lib eval` (5 dump tests), clippy, fmt | ⬜ |
+| 12-07 T1 (tracer) | D-17, D-21 | probe evidence (device from trace, E by the rule); `run_spike.py --guard-selftest`; one spike cell after the rules commit | ⬜ |
+| 12-07 T2 | D-17, D-18 | 12-SPIKE-EVIDENCE.json re-derived from the nine runs by the declared rules | ⬜ |
+| 12-07 T3 (decision) | D-18 | skip record or owner reply bound to the evidence hashes | ⬜ |
+| 12-08 T1 (tracer) / T2 | D-17 | branch record; on implemented: override tests, laya-verify of antisemitism-v1, pv/graph | ⬜ |
+| 12-09 T1 (tracer) / T2 | D-09, D-26 | decide lib + e2e_stdio + lambda lib tests; served_tasks consistency; (b) served_for tests; pv/graph/census; laya-claims-check | ⬜ |
+| 12-10 T1 (tracer) / T2 | D-08, D-25 | s8 rehearsal under `/usr/bin/time -l` against the 32 GiB rule; s32 cell same-pass control or blocked record | ⬜ |
+| 12-11 T1 (tracer) | D-17, D-19 | declaration read identically by Python and Rust; declaration commit precedes the run; refused-epochs path | ⬜ |
+| 12-11 T2 | D-13, D-19, D-20, D-21 | outcome-specific gate record; verify line with `waived`; plan-only door check | ⬜ |
+| 12-11 T3 (decision) | D-20 | skip or owner reply | ⬜ |
+| 12-12 T1 (tracer) / T2 (human-action) / T3 | D-23 | upload record; token gate at least 45 min; live identity, negative control, readback us-east-1, antisemite unchanged | ⬜ |
+| 12-13 T1 (tracer) / T2 (decision) / T3 | D-12, D-09 | live{} normalized timings; acceptance replay (7 requester tests, count refusal at B + 1) | ⬜ |
+| 12-14 T1 (tracer) / T2 / T3 (decision) | D-07, D-11, D-24 | disk around `cargo clean`; 4B parity within 1e-4; prompt and leakage; timed row and projections; owner budget | ⬜ |
+| 12-15 T1 (tracer) / T2 | D-07, D-11, D-24 | chosen rows scored once; train-only fit; eval-probs aligned to eval.jsonl | ⬜ |
+| 12-16 T1 (tracer) / T2 / T3 | D-03, D-05, D-14, D-15, D-22 | bake-off evidence (Laya bit-identical to the gate); hand-off content checks; readme_contract + laya-claims-check | ⬜ |
+
 ---
 
 ## Wave 0 Requirements
 
-- [ ] `scripts/laya_train/prepare_motivation.py` with `--selftest` / `--selftest-tokenizer`
-- [ ] waiver cases in `crates/aprender-decide/src/verify/tests.rs` (plus manifest strip/forge cases)
-- [ ] metrics functions + `bakeoff.py --selftest`
-- [ ] SetFit adapter K≥2 tests; `--dump-probabilities` tests
-- [ ] spike harness guard refusing `eval.jsonl`
-- [ ] `laya-deploy-selftest` EDGE HEALTH 404-retry rows
+- [ ] `scripts/laya_train/prepare_motivation.py` with `--selftest` / `--selftest-tokenizer` (plan 12-01 Task 1)
+- [ ] waiver cases in `crates/aprender-decide/src/verify/tests.rs` (plan 12-02) plus manifest strip/forge cases (plan 12-03 Task 1)
+- [ ] metrics functions + `bakeoff.py --selftest` (plan 12-05)
+- [ ] SetFit adapter K≥2 tests; `--dump-probabilities` tests (plan 12-06)
+- [ ] spike harness guard refusing `eval.jsonl` (plan 12-07 Task 1)
+- [ ] `laya-deploy-selftest` EDGE HEALTH 404-retry rows (plan 12-04 Task 2)
 
 ---
 
