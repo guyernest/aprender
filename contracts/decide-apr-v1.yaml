@@ -1,6 +1,6 @@
 contract: decide-apr
 metadata:
-  version: 3.0.0
+  version: 3.1.0
   created: '2026-09-25'
   author: PAIML Engineering
   kind: kernel
@@ -854,6 +854,13 @@ falsification_tests:
     implemented_by: 'plan 08-19 (aprender_decide::artifact::check_manifest_bindings, rung 4 (e); the leaf sweep driven by manifest.bindings)'
     test: 'cargo test -p aprender-decide --lib artifact::ladder::every_manifest_leaf_is_bound && cargo test -p aprender-decide --lib artifact::ladder::manifest_bindings_table_matches_manifest_leaves && cargo test -p aprender-decide --lib artifact::ladder::manifest_bound_at_every_load_door'
     if_fails: 'A crafted .apr serves a manifest field (model.base in every classify response, the gate or calibration record a reader sees) that its own embedded blobs contradict.'
+
+  - id: FALSIFY-DECIDE-APR-014
+    rule: 'A pilot-waived artifact names its waiver inside the pinned sha, and an unwaived pack is byte-identical to before'
+    prediction: 'A pack whose gate report carries pilot_waiver {id} writes manifest gate.waiver = id and loads through load_bytes, load_hashed and load_path; stripping it from a waived artifact, adding it to an unwaived one or changing it is refused at rung 4 on every load door (ManifestDisagreesWithBlob gate.waiver); an unwaived pack serializes no waiver key at all (no null), so the committed golden sha256 and every pre-Phase-12 artifact re-pack byte-identically and verify unchanged.'
+    implemented_by: 'plan 12-03 (aprender_decide::artifact GateSummary.waiver and check_manifest_bindings gate.waiver)'
+    test: 'cargo test -p aprender-decide --lib artifact::ladder::waived_run_packs_with_gate_waiver_and_loads_at_every_door && cargo test -p aprender-decide --lib artifact::ladder::manifest_gate_waiver_disagrees_with_report && cargo test -p aprender-decide --lib artifact::ladder::unwaived_manifest_serializes_no_waiver_key && cargo test -p aprender-decide --lib artifact::determinism::golden_sha && cargo test -p aprender-decide --lib artifact::determinism::same_process_twice'
+    if_fails: 'A waived artifact hides (or an unwaived one invents) its waiver in the pinned manifest, or the manifest change re-decided an artifact that was already shipped.'
 
 kani_harnesses:
 
