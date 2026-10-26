@@ -150,8 +150,13 @@ def distribution_or_refuse(arm, rows, k):
     return np.array(rows, dtype=np.float64)
 
 
+def _expected_hashes(ev_rows):
+    return [data.exact_sha256(t) for t, _ in ev_rows]
+
+
 def read_eval_probs(path, arm, labels, ev_rows):
-    """eval_probs_schema `{labels, rows: [{row, text_sha256, probabilities}]}` -> the [N, K] float64 array."""
+    """eval_probs_schema `{labels, rows: [{row, text_sha256, probabilities}]}` -> the [N, K] float64 array,
+    aligned to eval.jsonl by row index and text_sha256 (data.exact_sha256), never by truth labels."""
     doc = _read_json(path, arm, "probability file")
     if not isinstance(doc, dict) or not isinstance(doc.get("rows"), list):
         refuse("bakeoff-alignment", "%s probability file is not {labels, rows}" % arm)
@@ -160,36 +165,117 @@ def read_eval_probs(path, arm, labels, ev_rows):
     rows = doc["rows"]
     if len(rows) != len(ev_rows):
         refuse("bakeoff-alignment", "%s has %d rows, eval.jsonl has %d" % (arm, len(rows), len(ev_rows)))
+    want = _expected_hashes(ev_rows)
     probs = []
     for i, r in enumerate(rows):
         if not isinstance(r, dict) or "probabilities" not in r:
             refuse("bakeoff-alignment", "%s row %d has no probabilities" % (arm, i))
+        idx = r.get("row")
+        if isinstance(idx, bool) or not isinstance(idx, int) or idx != i:
+            refuse("bakeoff-alignment", "%s rows are not 0..n-1 (the row at position %d)" % (arm, i))
+        if r.get("text_sha256") != want[i]:
+            refuse("bakeoff-alignment", "%s text_sha256 differs from eval.jsonl at row %d" % (arm, i))
         probs.append(r["probabilities"])
     return distribution_or_refuse(arm, probs, len(labels))
 
 
 def read_setfit(path, labels, ev_rows):
+    """The plan 12-06 dump (ordered_labels, row_ids, text_sha256, truth, predicted, probabilities, artifact_sha256,
+    dataset_fingerprint, n_rows). Row identity first (row_ids `test:<i>` and the per-row text_sha256), truth only
+    as a secondary check: two swapped same-label rows leave every label-based check green."""
     doc = _read_json(path, "setfit", "probability dump")
-    if not isinstance(doc, dict) or not isinstance(doc.get("probabilities"), list):
-        refuse("bakeoff-alignment", "setfit probability dump has no probabilities")
+    if not isinstance(doc, dict):
+        refuse("bakeoff-alignment", "setfit probability dump is not a JSON object")
+    if "row_ids" not in doc or "text_sha256" not in doc:
+        refuse("bakeoff-alignment", "setfit dump lacks row identity (row_ids / text_sha256): regenerate it with "
+                                    "the revised --dump-probabilities")
     if doc.get("ordered_labels") != labels:
         refuse("bakeoff-alignment", "setfit ordered_labels differ from task.json")
-    if len(doc["probabilities"]) != len(ev_rows):
-        refuse("bakeoff-alignment", "setfit has %d rows, eval.jsonl has %d" % (len(doc["probabilities"]), len(ev_rows)))
+    n = len(ev_rows)
+    for key in ("row_ids", "text_sha256", "truth", "predicted", "probabilities"):
+        if not isinstance(doc.get(key), list) or len(doc[key]) != n:
+            refuse("bakeoff-alignment", "setfit %s does not hold one entry per eval row (%d)" % (key, n))
+    if doc["row_ids"] != ["test:%d" % i for i in range(n)]:
+        refuse("bakeoff-alignment", "setfit row identity: row_ids are not test:0 .. test:%d" % (n - 1))
+    want = _expected_hashes(ev_rows)
+    for i in range(n):
+        if doc["text_sha256"][i] != want[i]:
+            refuse("bakeoff-alignment", "setfit row identity: text_sha256 differs from eval.jsonl at row %d" % i)
+    for i, (_, lab) in enumerate(ev_rows):
+        t = doc["truth"][i]
+        if isinstance(t, bool) or not isinstance(t, int) or t != lab:
+            refuse("bakeoff-alignment", "setfit truth differs from the eval label indices at row %d" % i)
     return distribution_or_refuse("setfit", doc["probabilities"], len(labels)), doc
+
+
+def _seed_files(run):
+    found = []
+    for p in (Path(run) / "seeds").glob("seed-*/eval-probs.json"):
+        m = re.fullmatch(r"seed-(\d+)", p.parent.name)
+        if m:
+            found.append((int(m.group(1)), p))
+    return sorted(found)
 
 
 def read_laya_run(run_dir, labels, ev_rows):
     run = Path(run_dir)
     ft = read_eval_probs(run / "eval-probs.json", "laya", labels, ev_rows)
     zs = read_eval_probs(run / "zero-shot-probs.json", "laya_zero_shot", labels, ev_rows)
-    seeds = []
-    for p in sorted((run / "seeds").glob("seed-*/eval-probs.json"),
-                    key=lambda q: int(q.parent.name.split("-", 1)[1])):
-        seed = int(p.parent.name.split("-", 1)[1])
-        seeds.append((seed, read_eval_probs(p, "laya seed %d" % seed, labels, ev_rows)))
+    seeds = [(seed, read_eval_probs(p, "laya seed %d" % seed, labels, ev_rows)) for seed, p in _seed_files(run)]
     gate = _read_json(run / "gate-report.json", "laya", "gate-report.json")
     return ft, zs, seeds, gate
+
+
+def _number_at(doc, path):
+    """doc[a][b]... as a finite JSON number, else a bakeoff-laya-recompute refusal naming the field."""
+    cur = doc
+    for key in path.split("."):
+        if not isinstance(cur, dict) or key not in cur:
+            refuse("bakeoff-laya-recompute", "%s is missing from gate-report.json" % path)
+        cur = cur[key]
+    if isinstance(cur, bool) or not isinstance(cur, (int, float)) or not math.isfinite(cur):
+        refuse("bakeoff-laya-recompute", "%s is not a finite number in gate-report.json" % path)
+    return float(cur)
+
+
+def check_laya_recompute(gate, ft, zs, seeds, y, bins):
+    """Laya's numbers must reproduce the gate report bit for bit (the metrics are bit-identical by construction:
+    the trainer computed them with metrics.py on exactly these probabilities), or the run is refused."""
+    if not isinstance(gate, dict):
+        refuse("bakeoff-laya-recompute", "gate-report.json is not a JSON object")
+    for field, got in (("fine_tuned.macro_f1", metrics.macro_f1(ft, y)),
+                       ("fine_tuned.ece_post", metrics.ece_top_label(ft, y, bins)),
+                       ("zero_shot.macro_f1", metrics.macro_f1(zs, y))):
+        if _number_at(gate, field) != got:
+            refuse("bakeoff-laya-recompute", field)
+    per_seed = (gate.get("seeds") or {}).get("per_seed") if isinstance(gate.get("seeds"), dict) else None
+    if per_seed is None:
+        return
+    by_seed = dict(seeds)
+    if not isinstance(per_seed, list) or sorted(r.get("seed") for r in per_seed if isinstance(r, dict)) != sorted(by_seed):
+        refuse("bakeoff-laya-recompute", "seeds.per_seed does not list the seeds/seed-<s>/eval-probs.json files")
+    for r in per_seed:
+        P = by_seed[r["seed"]]
+        for key, got in (("macro_f1", metrics.macro_f1(P, y)), ("ece_post", metrics.ece_top_label(P, y, bins))):
+            if _number_at(r, key) != got:
+                refuse("bakeoff-laya-recompute", "seeds.per_seed[%d].%s" % (r["seed"], key))
+
+
+def parse_arm_spec(arm, value):
+    """`PATH` or `blocked:<failure_class>:<evidence path>` -> ("path", PATH) | ("blocked", class, evidence)."""
+    if not value.startswith("blocked:"):
+        return ("path", value)
+    parts = value.split(":", 2)
+    if len(parts) != 3 or not re.fullmatch(r"[a-z][a-z0-9_-]*", parts[1]) or not parts[2]:
+        refuse("bakeoff-alignment", "%s blocked form must be blocked:<failure_class>:<evidence path>" % arm)
+    return ("blocked", parts[1], parts[2])
+
+
+def blocked_record(spec):
+    _, failure_class, evidence = spec
+    p = Path(evidence)
+    return {"status": "blocked", "failure_class": failure_class, "evidence": evidence,
+            "evidence_sha256": common.sha256_file(p) if p.is_file() else None}
 
 
 # ----------------------------------------------------------------------------------------------- the report
@@ -263,37 +349,63 @@ def arm_record(P, ctx):
 
 
 def rank_arms(arms):
-    """Ranking by macro-F1; stage 1 has no tiebreak yet."""
+    """Ranking by macro-F1 (D-05). Arms whose macro-F1 is equal rounded to 4 decimals are tied and ordered by the
+    lower false-assignment rate at 0.6; a still-equal pair by the unrounded macro-F1, then the arm name."""
     ranked = [(n, a) for n, a in arms.items() if n in RANKED_ARMS and a["status"] == "completed"]
-    ranked.sort(key=lambda na: (-na[1]["macro_f1"], na[0]))
+
+    def rate(a):
+        r = a["false_assignment"][str(TIEBREAK_THRESHOLD)]["rate"]
+        return math.inf if r is None else r
+    rounded = {n: round(a["macro_f1"], 4) for n, a in ranked}
+    ranked.sort(key=lambda na: (-rounded[na[0]], rate(na[1]), -na[1]["macro_f1"], na[0]))
     return [{"rank": i + 1, "arm": n, "macro_f1": a["macro_f1"],
              "false_assignment_0_6": {k: a["false_assignment"][str(TIEBREAK_THRESHOLD)][k]
                                       for k in ("numerator", "denominator", "rate")},
-             "tiebreak_applied": False} for i, (n, a) in enumerate(ranked)]
+             "tiebreak_applied": sum(1 for v in rounded.values() if v == rounded[n]) > 1}
+            for i, (n, a) in enumerate(ranked)]
 
 
 def findings_for(arms):
-    return []
+    """D-06: a reference arm whose macro-F1 exceeds Laya's by at least the gate's own 0.05 is a FINDING, never a
+    switch. Plain float64 subtraction and `>=`, the gate's own comparison."""
+    laya = arms.get("laya")
+    if not laya or laya["status"] != "completed":
+        return []
+    out = []
+    for name in ("setfit", "kev"):
+        arm = arms.get(name)
+        if arm and arm["status"] == "completed" and arm["macro_f1"] - laya["macro_f1"] >= CLEARLY_BEATS_MARGIN:
+            out.append({"id": "reference_arm_clearly_beats_laya", "arm": name, "macro_f1": arm["macro_f1"],
+                        "laya_macro_f1": laya["macro_f1"], "difference": arm["macro_f1"] - laya["macro_f1"],
+                        "margin": CLEARLY_BEATS_MARGIN,
+                        "note": "a finding for the hand-off, never a switch: Laya stays the served arm (D-06)"})
+    return out
 
 
 def _class_table(rows, labels):
-    counts = [0] * len(labels)
-    for _, y in rows:
-        counts[y] += 1
+    counts = data.class_counts(rows, len(labels))
     n = len(rows)
     return {"n": n, "counts": {lab: c for lab, c in zip(labels, counts)},
             "fractions": {lab: c / n for lab, c in zip(labels, counts)}}
 
 
-def build_report(task, train, ev, laya_run, setfit_path, kev_path, input_files, n_resamples=N_RESAMPLES):
+def build_report(task, train, ev, laya_run, setfit_spec, kev_spec, input_files, n_resamples=N_RESAMPLES):
     labels = task["labels"]
     bins = int(contract.thresholds()["ece_bins"])
     ctx = Ctx(task, ev, bins, n_resamples)
     ft, zs, seeds, gate = read_laya_run(laya_run, labels, ev)
+    check_laya_recompute(gate, ft, zs, seeds, ctx.y, bins)
     arms = {"laya": arm_record(ft, ctx), "laya_zero_shot": arm_record(zs, ctx)}
-    setfit_P, setfit_doc = read_setfit(setfit_path, labels, ev)
-    arms["setfit"] = arm_record(setfit_P, ctx)
-    arms["kev"] = arm_record(read_eval_probs(kev_path, "kev", labels, ev), ctx)
+    setfit_doc = {}
+    if setfit_spec[0] == "blocked":
+        arms["setfit"] = blocked_record(setfit_spec)
+    else:
+        setfit_P, setfit_doc = read_setfit(setfit_spec[1], labels, ev)
+        arms["setfit"] = arm_record(setfit_P, ctx)
+    if kev_spec[0] == "blocked":
+        arms["kev"] = blocked_record(kev_spec)
+    else:
+        arms["kev"] = arm_record(read_eval_probs(kev_spec[1], "kev", labels, ev), ctx)
     laya_seeds = [{"seed": s, "macro_f1": metrics.macro_f1(P, ctx.y), "ece_post": metrics.ece_top_label(P, ctx.y, bins)}
                   for s, P in seeds]
     band_counts = [int((ctx.band == b).sum()) for b in range(3)]
@@ -450,6 +562,7 @@ def render_tables(ev):
 
 def run(args):
     task, train, ev = load_data_dir(args.data)
+    setfit_spec, kev_spec = parse_arm_spec("setfit", args.setfit), parse_arm_spec("kev", args.kev)
     run_dir = Path(args.laya)
     d = Path(args.data)
     input_files = [("data/task.json", d / "task.json"), ("data/train.jsonl", d / "train.jsonl"),
@@ -457,11 +570,13 @@ def run(args):
                    ("laya/eval-probs.json", run_dir / "eval-probs.json"),
                    ("laya/zero-shot-probs.json", run_dir / "zero-shot-probs.json"),
                    ("laya/gate-report.json", run_dir / "gate-report.json")]
-    for p in sorted((run_dir / "seeds").glob("seed-*/eval-probs.json")):
-        input_files.append(("laya/seeds/%s/eval-probs.json" % p.parent.name, p))
-    input_files += [("setfit/probability-dump.json", Path(args.setfit)), ("kev/eval-probs.json", Path(args.kev))]
-    report = build_report(task, train, ev, run_dir, args.setfit, args.kev, input_files,
-                          getattr(args, "n_resamples", N_RESAMPLES))
+    input_files += [("laya/seeds/%s/eval-probs.json" % p.parent.name, p) for _, p in _seed_files(run_dir)]
+    for label, spec in (("setfit/probability-dump.json", setfit_spec), ("kev/eval-probs.json", kev_spec)):
+        if spec[0] == "path":
+            input_files.append((label, Path(spec[1])))
+        elif Path(spec[2]).is_file():
+            input_files.append((label.split("/")[0] + "/blocked-evidence", Path(spec[2])))
+    report = build_report(task, train, ev, run_dir, setfit_spec, kev_spec, input_files, N_RESAMPLES)
     json.dumps(report, allow_nan=False)
     common.write_json(args.out, report)
     print("BAKEOFF OK %s arms=%d" % (args.out, sum(1 for a in report["arms"].values() if a["status"] == "completed")))
@@ -470,6 +585,8 @@ def run(args):
             f6 = a["false_assignment"]["0.6"]
             print("ARM %s macro_f1=%s ece=%s fa@0.6=%s" % (name, _f4(a["macro_f1"]), _f4(a["ece"]["point"]),
                                                           _frac(f6["numerator"], f6["denominator"])))
+        else:
+            print("ARM %s blocked (%s)" % (name, a["failure_class"]))
     return 0
 
 
