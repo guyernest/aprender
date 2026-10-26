@@ -1038,7 +1038,15 @@ pub(crate) fn dispatch_classify_eval(
         }
         #[cfg(not(feature = "setfit"))]
         {
-            let _ = (selection, split, lock_out, selection_lock, candidate, force);
+            let _ = (
+                selection,
+                split,
+                lock_out,
+                selection_lock,
+                candidate,
+                force,
+                dump_probabilities,
+            );
             return Err(CliError::FeatureDisabled(format!(
                 "{} is a setfit-apr-v1 classifier, but this binary was built without the \
                  `setfit` feature. Rebuild with `--features setfit` to evaluate it.",
@@ -1052,6 +1060,7 @@ pub(crate) fn dispatch_classify_eval(
         ("--lock-out", lock_out.is_some()),
         ("--selection-lock", selection_lock.is_some()),
         ("--candidate", !candidate.is_empty()),
+        ("--dump-probabilities", dump_probabilities.is_some()),
     ] {
         if given {
             return Err(CliError::ValidationFailed(format!(

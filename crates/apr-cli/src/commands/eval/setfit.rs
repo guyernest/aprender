@@ -29,6 +29,10 @@
 //! surface those refusals with the flag names the library cannot know. It defines no gating
 //! type, and there is no path here to the test split that does not pass through `grant`.
 //!
+//! `--dump-probabilities` is one more option of this same test pass, not a second path to the
+//! test rows: the dump is collected in the loop that counts correct rows, from the rows the
+//! grant admitted, and written only after the measurement succeeded.
+//!
 //! # Bounds
 //!
 //! Artifact bytes come through `setfit_io::read_setfit_apr_file_bounded` — the ONE bounded
@@ -187,36 +191,130 @@ struct ProbabilityDump {
 }
 
 impl ProbabilityDump {
-    /// Refuse a document whose columns do not all have `n_rows` entries.
+    /// Refuse a document whose columns do not all have `n_rows` entries, or that has no rows.
     fn validate(&self) -> Result<()> {
-        Err(CliError::ValidationFailed(
-            "ProbabilityDump::validate is not implemented".to_string(),
-        ))
+        let columns = [
+            ("row_ids", self.row_ids.len()),
+            ("text_sha256", self.text_sha256.len()),
+            ("truth", self.truth.len()),
+            ("predicted", self.predicted.len()),
+            ("probabilities", self.probabilities.len()),
+        ];
+        if self.n_rows == 0 {
+            return Err(CliError::ValidationFailed(
+                "the probability dump has no rows".to_string(),
+            ));
+        }
+        for (name, len) in columns {
+            if len != self.n_rows {
+                return Err(CliError::ValidationFailed(format!(
+                    "the probability dump's `{name}` has {len} entries for n_rows = {}",
+                    self.n_rows
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
+/// Lowercase hex SHA-256 of `bytes`.
+fn sha256_hex(bytes: &[u8]) -> String {
+    aprender_contrastive_data::hash::hex(&Sha256::digest(bytes).into())
+}
+
 /// One test row's dump entry, from the row and what the classifier said about it.
+///
+/// The prediction arrives as the label the classifier returned; its index in `labels` is what
+/// the dump records. A label outside `labels` cannot be represented, so it is an error here
+/// rather than a silently dropped row.
 fn row_probabilities(
-    _row: &aprender_contrastive_data::schema::LabeledExample,
-    _labels: &[String],
-    _predicted_label: &str,
-    _probabilities: &[f64],
+    row: &aprender_contrastive_data::schema::LabeledExample,
+    labels: &[String],
+    predicted_label: &str,
+    probabilities: &[f64],
 ) -> Result<RowProbabilities> {
-    Err(CliError::ValidationFailed(
-        "row_probabilities is not implemented".to_string(),
-    ))
+    let predicted = labels
+        .iter()
+        .position(|label| label == predicted_label)
+        .ok_or_else(|| {
+            CliError::InferenceFailed(format!(
+                "row {} was classified as {predicted_label:?}, which is not one of the \
+                 artifact's labels {labels:?}; the probability dump cannot represent it",
+                row.id
+            ))
+        })?;
+    Ok(RowProbabilities {
+        id: row.id.clone(),
+        text_sha256: sha256_hex(row.input.as_bytes()),
+        truth: row.label,
+        predicted,
+        probabilities: probabilities.to_vec(),
+    })
+}
+
+/// True for a 64-character lowercase hex string.
+fn is_sha256_hex(text: &str) -> bool {
+    text.len() == 64 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// Build the dump from the rows of one classify pass.
+///
+/// Pure: it refuses what the document cannot honestly represent — no rows, a probabilities
+/// row whose length is not the label count, a non-finite probability, a truth or predicted
+/// index outside the labels, a predicted index that is not an argmax of its row, an empty id
+/// or an input hash that is not a sha256.
 fn probability_dump(
-    _labels: &[String],
-    _rows: &[RowProbabilities],
-    _artifact_sha256: &str,
-    _dataset_fingerprint: &str,
+    labels: &[String],
+    rows: &[RowProbabilities],
+    artifact_sha256: &str,
+    dataset_fingerprint: &str,
 ) -> Result<ProbabilityDump> {
-    Err(CliError::ValidationFailed(
-        "probability_dump is not implemented".to_string(),
-    ))
+    let mut dump = ProbabilityDump {
+        ordered_labels: labels.to_vec(),
+        row_ids: Vec::with_capacity(rows.len()),
+        text_sha256: Vec::with_capacity(rows.len()),
+        truth: Vec::with_capacity(rows.len()),
+        predicted: Vec::with_capacity(rows.len()),
+        probabilities: Vec::with_capacity(rows.len()),
+        artifact_sha256: artifact_sha256.to_string(),
+        dataset_fingerprint: dataset_fingerprint.to_string(),
+        n_rows: rows.len(),
+    };
+    for (index, row) in rows.iter().enumerate() {
+        let refuse = |why: &str| {
+            CliError::ValidationFailed(format!("probability dump row {index} ({}): {why}", row.id))
+        };
+        if row.id.is_empty() {
+            return Err(refuse("the row id is empty"));
+        }
+        if !is_sha256_hex(&row.text_sha256) {
+            return Err(refuse("text_sha256 is not a lowercase hex sha256"));
+        }
+        if row.probabilities.len() != labels.len() {
+            return Err(refuse(&format!(
+                "{} probabilities for {} labels",
+                row.probabilities.len(),
+                labels.len()
+            )));
+        }
+        if row.probabilities.iter().any(|p| !p.is_finite()) {
+            return Err(refuse("a probability is not finite"));
+        }
+        if row.truth >= labels.len() || row.predicted >= labels.len() {
+            return Err(refuse("a label index is outside the artifact's labels"));
+        }
+        let chosen = row.probabilities[row.predicted];
+        if row.probabilities.iter().any(|p| *p > chosen) {
+            return Err(refuse("predicted is not the argmax of its probabilities"));
+        }
+        dump.row_ids.push(row.id.clone());
+        dump.text_sha256.push(row.text_sha256.clone());
+        dump.truth.push(row.truth);
+        dump.predicted.push(row.predicted);
+        dump.probabilities.push(row.probabilities.clone());
+    }
+    dump.validate()?;
+    Ok(dump)
 }
 
 /// The lock, as written or consumed.
@@ -287,6 +385,11 @@ pub(crate) fn run(args: &SetFitEvalArgs<'_>) -> Result<()> {
     if let Some(destination) = args.lock_out {
         refuse_existing_lock(destination, args.force)?;
     }
+    // The dump destination gets the same pre-flight as `--lock-out`: an occupied path costs
+    // the operator nothing but the message, instead of a whole classify pass first.
+    if let Some(destination) = args.dump_probabilities {
+        crate::commands::setfit_train::refuse_existing_output(destination, args.force)?;
+    }
 
     // (2) THE PHASE 2 INPUTS, through the doors `data_contrastive` already owns.
     let mut ledger = AccessLedger::new();
@@ -323,6 +426,14 @@ fn check_split_flags(args: &SetFitEvalArgs<'_>) -> Result<()> {
                     "--selection-lock belongs to `--split test`: a validation run COMMITS a \
                      selection, it does not consume one. Use --lock-out <FILE> to write the \
                      lock this run's decision produces."
+                        .to_string(),
+                ));
+            }
+            if args.dump_probabilities.is_some() {
+                return Err(CliError::ValidationFailed(
+                    "--dump-probabilities belongs to `--split test`: it writes the per-row \
+                     probabilities of the test pass, and a validation run has no test pass to \
+                     dump. Re-run with --split test and a --selection-lock."
                         .to_string(),
                 ));
             }
@@ -515,7 +626,37 @@ fn run_test(
         )));
     }
 
-    let evaluation = evaluate_test(credential, grant.test())?;
+    let evaluation = evaluate_test(credential, grant.test(), args.dump_probabilities.is_some())?;
+    let dataset_fingerprint = dataset.validation_witness().dataset_fingerprint_hex();
+
+    // The dump is written from the pass that was just measured, BEFORE the row is printed, so
+    // a failed write is a non-zero exit and never a printed success.
+    let mut notes = vec![
+        "canonical TEST measurement, taken under a selection lock committed by a prior \
+         invocation. This number is reportable exactly once per committed selection: \
+         measuring it again after further tuning requires a NEW validation run and a NEW \
+         lock."
+            .to_string(),
+    ];
+    if let Some(destination) = args.dump_probabilities {
+        let dump = probability_dump(
+            &artifact_labels,
+            &evaluation.rows,
+            grant.artifact_hash(),
+            &dataset_fingerprint,
+        )?;
+        let mut bytes = serde_json::to_vec(&dump).map_err(|error| {
+            CliError::Aprender(format!("the probability dump did not serialize: {error}"))
+        })?;
+        bytes.push(b'\n');
+        crate::commands::setfit_train::atomic_write(destination, &bytes, args.force)?;
+        notes.push(format!(
+            "per-row probabilities of this pass were written to {} ({} rows; identities and \
+             hashes only, no text).",
+            destination.display(),
+            dump.n_rows
+        ));
+    }
 
     let row = EvalRow {
         split: "test",
@@ -524,7 +665,7 @@ fn run_test(
         value_bits: evaluation.value.to_bits(),
         n_rows: evaluation.n_rows,
         artifact_sha256: grant.artifact_hash().to_string(),
-        dataset_fingerprint: dataset.validation_witness().dataset_fingerprint_hex(),
+        dataset_fingerprint,
         validation_split_fingerprint: dataset.validation_witness().fingerprint_hex(),
         ordered_labels: credential.model().ordered_labels().to_vec(),
         evidence_table_hash: evidence_table_hash(credential),
@@ -538,13 +679,7 @@ fn run_test(
             rule: lock.rule().to_string(),
             role: "consumed",
         }),
-        notes: vec![
-            "canonical TEST measurement, taken under a selection lock committed by a prior \
-             invocation. This number is reportable exactly once per committed selection: \
-             measuring it again after further tuning requires a NEW validation run and a NEW \
-             lock."
-                .to_string(),
-        ],
+        notes,
     };
     report(args.json, &row)
 }
@@ -568,11 +703,14 @@ fn evaluate_one(
 struct TestMeasurement {
     value: f64,
     n_rows: usize,
+    /// One entry per test row, kept ONLY when a dump was requested (no extra memory otherwise).
+    rows: Vec<RowProbabilities>,
 }
 
 fn evaluate_test(
     credential: &ReloadedSetFitCredential,
     split: &aprender_contrastive_data::split::Split<aprender_contrastive_data::split::Test>,
+    keep_rows: bool,
 ) -> Result<TestMeasurement> {
     use aprender::setfit::{ClassifyRequestDocument, MAX_BATCH_TEXTS};
 
@@ -585,6 +723,7 @@ fn evaluate_test(
     let labels = credential.model().ordered_labels().to_vec();
     let mut correct = 0_usize;
     let mut seen = 0_usize;
+    let mut kept = Vec::new();
     for chunk in rows.chunks(MAX_BATCH_TEXTS) {
         let request = ClassifyRequestDocument::new(chunk.iter().map(|row| row.input.clone()));
         let response = credential
@@ -595,6 +734,14 @@ fn evaluate_test(
             let predicted = labels.iter().position(|label| label == result.label());
             if predicted == Some(row.label) {
                 correct += 1;
+            }
+            if keep_rows {
+                kept.push(row_probabilities(
+                    row,
+                    &labels,
+                    result.label(),
+                    result.probabilities(),
+                )?);
             }
             seen += 1;
         }
@@ -610,6 +757,7 @@ fn evaluate_test(
     Ok(TestMeasurement {
         value,
         n_rows: seen,
+        rows: kept,
     })
 }
 
