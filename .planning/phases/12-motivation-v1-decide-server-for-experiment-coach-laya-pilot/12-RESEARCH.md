@@ -736,14 +736,16 @@ done
 | A10 | The waiver function/field names in the code sketch | Code Examples | None (naming) |
 | A11 | augury-dev means profile `augury-dev`, eu-west-1, a separate account | Q7 | Wrong account/region deploy; cold-start slack |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **Where does "augury-dev" deploy?** Known: profile `augury-dev` = eu-west-1; an uncommitted region parameter exists in two recipes; the request's endpoint host says `us-east`. Unclear: env (dev|prod), account, endpoint host, whether cargo-pmcp's pmcp.run target deploys into that account. Recommendation: an owner question before the deploy plan; extend `region` to every AWS-touching recipe that needs it, with selftests.
-2. **Kev arm go/no-go.** Disk (needs ≈ 15-20 GB freed), compute (multi-hour), guide-text definition (exclude §4.5?), and D-07's Rust-only rule. Recommendation: owner checkpoint after a timed probe; allow a recorded `blocked` outcome.
-3. **SetFit shots.** s64 is infeasible; s32 is the largest legal cell. Recommendation: declare s32e1b16 at the start of the SetFit plan and record the deviation.
-4. **Variant (b) mechanism.** If the owner picks (b), the door change is a `decide-tool-boundary-v1` MAJOR change; recommend deriving the served count per artifact (`min(8, floor(800/P))`, never below 4) rather than a per-server table, so the antisemite server's behaviour is unchanged (P 86 → 8).
-5. **Slice-fraction override mechanism**, only if the spike recommends ≠ 0.25 (Q3).
-6. **Epochs rule** for ≈ 220 fit rows — to be written before the probe (Pitfall 10).
+Every question below is closed; the pointer names where (owner amendments in 12-CONTEXT.md, or the plan that decides it).
+
+1. **Where does "augury-dev" deploy?** Known: profile `augury-dev` = eu-west-1; an uncommitted region parameter exists in two recipes; the request's endpoint host says `us-east`. Unclear: env (dev|prod), account, endpoint host, whether cargo-pmcp's pmcp.run target deploys into that account. Recommendation: an owner question before the deploy plan; extend `region` to every AWS-touching recipe that needs it, with selftests. **RESOLVED → D-23** (owner, 2026-10-26): deploy with profile ze-kasher-dev in us-east-1, the antisemite server's account, bucket and host pattern; the uncommitted region parameter is not this phase's work (plans 12-01, 12-04, 12-10 commit only their own justfile hunks; 12-12 proves the deploy does not depend on that diff).
+2. **Kev arm go/no-go.** Disk (needs ≈ 15-20 GB freed), compute (multi-hour), guide-text definition (exclude §4.5?), and D-07's Rust-only rule. Recommendation: owner checkpoint after a timed probe; allow a recorded `blocked` outcome. **RESOLVED → D-24**: Kev-4B goes ahead after `cargo clean`, guide §4-6 without §4.5, a timed row and a budget checkpoint, or a recorded blocked arm (plans 12-14, 12-15).
+3. **SetFit shots.** s64 is infeasible; s32 is the largest legal cell. Recommendation: declare s32e1b16 at the start of the SetFit plan and record the deviation. **RESOLVED → D-25**: the s32 cell as a declared deviation, the K-label adapter and `apr eval --dump-probabilities` (plans 12-06, 12-10).
+4. **Variant (b) mechanism.** If the owner picks (b), the door change is a `decide-tool-boundary-v1` MAJOR change; recommend deriving the served count per artifact (`min(8, floor(800/P))`, never below 4) rather than a per-server table, so the antisemite server's behaviour is unchanged (P 86 → 8). **RESOLVED → D-26**: a per-artifact door through a decide-tool-boundary-v1 change, only if the owner picks (b) at the D-09 checkpoint (plan 12-09 branch b).
+5. **Slice-fraction override mechanism**, only if the spike recommends ≠ 0.25 (Q3). **RESOLVED → plan 12-08**: a no-op at 0.25, otherwise a per-run override keyed by the motivation train sha, read by both Rust and Python, never a global edit.
+6. **Epochs rule** for ≈ 220 fit rows — to be written before the probe (Pitfall 10). **RESOLVED → plan 12-07's rule**: the `motivation-v1` entry of probe_epoch.py's rule table (E = 12 under early stopping unless the projected three-seed hours exceed 6), committed before the timed probe.
 
 ## Environment Availability
 
