@@ -1,0 +1,38 @@
+{
+  "schema": "laya-door-evidence-v1",
+  "phase": "12",
+  "plan": "12-09",
+  "variant": "a",
+  "owner_reply": "approve-a f74a3ad3cfc0",
+  "P": 97,
+  "served_max_texts": 8,
+  "mechanism": "contract classify_max_texts 8, unchanged",
+  "b_times_p": 776,
+  "budget_total_tokens": 800,
+  "contract": {
+    "file": "contracts/decide-tool-boundary-v1.yaml",
+    "version_before": "10.0.0",
+    "version_after": "10.1.0",
+    "pv_diff_classification": "identical (pv diff models neither constants: nor the added served_tasks table, so it offered no bump); raised MINOR by hand because the change only adds a record",
+    "pv_validate": "0 error(s), 0 warning(s) - Contract is valid.",
+    "additions": ["served_tasks (top-level table)", "comment on served_task_min_row_tokens naming it the antisemitism task's", "v10.1.0 amendment paragraph"],
+    "not_added": ["classify_min_served_texts", "served_max_texts equation", "FALSIFY test for a derivation"]
+  },
+  "antisemitism_door": 8,
+  "served_tasks": {
+    "aprender-mcp-decide-antisemite": {"min_row_tokens": 86, "served_max_texts": 8, "label_count": 2},
+    "aprender-mcp-decide-motivation": {"min_row_tokens": 97, "served_max_texts": 8, "label_count": 3}
+  },
+  "served_task_min_row_tokens_unchanged": 86,
+  "mirror_test": "tests::every_served_task_fits_its_door (observed RED with the motivation row at 101: 8 x 101 = 808 > 800)",
+  "door_code_changed": false,
+  "docs_edited": [],
+  "docs_note": "variant (a): both READMEs' 8-text sentences stay true for both servers; no claims row moved (laya-claims-check: LAYA CLAIMS OK 140 rows)",
+  "derived_files": {
+    "census": "fresh (pv census == contracts/census.json)",
+    "contracts_nt_shapes_ttl": "unchanged: contracts.nt/shapes.ttl do not encode this table; pv extract contracts --check passes in a clean checkout of the contract commit, and reports a diff in this dirty main tree (untracked .claude/worktrees and .planning dirs are the known 08-33 pollution; the cause was not isolated here), while a plain pv extract rewrites byte-identical files"
+  },
+  "experiment_coach_note": "batches of 4 fit the door; a count refusal is never split by the client, a token refusal is",
+  "measured_on": "2026-10-26",
+  "commit": "afe44f917"
+}
