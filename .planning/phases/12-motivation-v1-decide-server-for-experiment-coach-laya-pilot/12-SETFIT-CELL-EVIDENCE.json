@@ -1,0 +1,33 @@
+{
+  "schema": "laya-setfit-cell-evidence-v3",
+  "phase": "12",
+  "plan": "12-10",
+  "binary": {
+    "apr_version_line": "apr 0.69.3 (bc52bf3d6)",
+    "help_lists_dump_probabilities": true
+  },
+  "memory_rule": "the s32 cell runs only when the s8 rehearsal exits 0 with a maximum resident set size of at most 34359738368 bytes (32 GiB) on this 48 GB host; otherwise the arm is BLOCKED (failure_class implementation)",
+  "stop_rule": "a watchdog terminates the pinned apr processes when their summed resident size passes 38654705664 bytes (36 GiB); a watchdog stop is a non-zero rehearsal and blocks the arm",
+  "rehearsal_quality_excluded": "the s8 rehearsal measures memory only: its accuracy and dump are excluded from every recipe decision and from the bake-off",
+  "rss_control": {
+    "max_rss_bytes": 4320854016,
+    "allocated_bytes": 4294967296,
+    "propagates": true,
+    "method": "/usr/bin/time -l just --justfile /tmp/p12-10-ctl.just alloc (python3 -I allocates and touches 4 GiB); same time -> just -> shell -> process nesting as the cell"
+  },
+  "rehearsal": {
+    "rc": 0,
+    "max_rss_bytes": 12509954048,
+    "max_rss_source": "wrapped /usr/bin/time -l just (control validated)",
+    "watchdog": {
+      "peak_rss_bytes": 5290573824,
+      "stopped": false
+    },
+    "watchdog_note": "5 s sampling of the summed RSS of the pinned apr processes; its peak is a lower bound of the time -l maximum",
+    "ok_line": "SETFIT CELL OK cell=s8e1b16 seed=13 artifact_sha256=0532fe5dda9c6b13253f16cb23f5d4223526df0a6918dfa7b1795e849bdc3602 metric_tag=accuracy value=<excluded> n_rows=100 train_seconds=49",
+    "ok_line_note": "the accuracy value is redacted here on purpose: the rehearsal's quality is excluded from every decision",
+    "dump_rows": 100,
+    "decision": "proceed-s32"
+  },
+  "outcome": null
+}
