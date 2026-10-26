@@ -1931,7 +1931,9 @@ laya-build-bootstrap server:
 # this env's, aprender-decide-weights-<account>-<env>). DRY_RUN=1 stops at (6) with DRY-RUN OK. Live:
 # touch -> DEPLOYING -> cargo pmcp deploy (crates root, swapped) -> compile-log, edge-health
 # serverId and live identity-probe assertions; any identity failure runs `just laya-teardown`
-# (containment).
+# (containment). The edge /health GET retries HTTP 404 only (a brand-new server id's first
+# /health can 404 for minutes, F-10-12-1), bounded by LAYA_EDGE_HEALTH_TRIES / _SLEEP /
+# _MAX_SECONDS; any other status still contains at once.
 laya-deploy apr run data base server env="dev" profile="ze-kasher-dev":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -2072,8 +2074,13 @@ laya-deploy apr run data base server env="dev" profile="ze-kasher-dev":
     LOGGED_HEALTH="$(sed -n 's/^ *health_endpoint: "\(.*\)"$/\1/p' "$LOG" | head -n 1)"
     [ -z "$LOGGED_HEALTH" ] || [ "$LOGGED_HEALTH" = "$HEALTH_URL" ] \
         || contain "cargo pmcp reported health_endpoint $LOGGED_HEALTH, but $ENDPOINT derives $HEALTH_URL"
-    HEALTH="$(curl -fsS --max-time 30 "$HEALTH_URL")" || contain "GET $HEALTH_URL failed"
-    printf '%s\n' "$HEALTH" > "models/decide/deploy-health-$SERVER.json"
+    # F-10-12-1: a brand-new server id's first /health can answer 404 for minutes after cargo-pmcp
+    # reports success (Phase 10: about 8 minutes). The helper retries that 404 and nothing else, within
+    # LAYA_EDGE_HEALTH_TRIES / _SLEEP and the elapsed cap LAYA_EDGE_HEALTH_MAX_SECONDS; every other
+    # outcome contains at once, and a refusal leaves no body file behind.
+    just _laya-edge-health-get "$HEALTH_URL" "models/decide/deploy-health-$SERVER.json" \
+        || contain "GET $HEALTH_URL did not return 200 (404 retried at most ${LAYA_EDGE_HEALTH_TRIES:-40} times within ${LAYA_EDGE_HEALTH_MAX_SECONDS:-900} s, F-10-12-1)"
+    HEALTH="$(cat "models/decide/deploy-health-$SERVER.json")" || contain "no edge health body was kept for $HEALTH_URL"
     just _laya-edge-health-check "$HEALTH" "$SERVER" \
         || contain "the edge health body at $HEALTH_URL does not name $SERVER as serverId: $HEALTH"
     echo "  edge health: $HEALTH_URL names serverId $SERVER"
@@ -2117,6 +2124,87 @@ _laya-edge-health-url endpoint:
         sys.exit(2)
     print(m.group(1) + "/health")
     PY
+
+# GET the edge /health URL into <out>, retrying HTTP 404 and nothing else (F-10-12-1). A brand-new
+# server id's first /health can answer 404 for minutes after cargo-pmcp reports success (Phase 10's
+# first deploy: about 8 minutes), so a single GET contained a healthy function. Bounds: at most
+# LAYA_EDGE_HEALTH_TRIES attempts (default 40) LAYA_EDGE_HEALTH_SLEEP seconds apart (default 15), AND
+# a total elapsed cap LAYA_EDGE_HEALTH_MAX_SECONDS (default 900): a retry is not started when
+# elapsed + SLEEP + the 30 s curl timeout would pass the cap. The cap, not TRIES x SLEEP, is the worst
+# case, because each attempt can itself spend the 30 s curl timeout: the helper never runs past the
+# cap (15 min by default) where 40 x (30 s + 15 s) alone would allow about 29.75 min. Any other status
+# (500 and 503 included: 503 is the identity probe's retry code, never this GET's), a transport
+# failure, an invalid retry configuration (refused before any request, exit 2) or a 404 beyond either
+# bound exits 1. <out> is truncated before every attempt and removed on every refusal, so a stale
+# deploy-health file can never pass _laya-edge-health-check. Exercised by laya-deploy-selftest's
+# EDGE HEALTH get table (a scripted curl) and the edge-health-get gates row.
+[positional-arguments]
+_laya-edge-health-get url out:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    URL="$1"
+    OUT="$2"
+    refuse_config() {
+        rm -f "$OUT"
+        echo "REFUSED edge-health-get: config $1" >&2
+        exit 2
+    }
+    TRIES="${LAYA_EDGE_HEALTH_TRIES:-40}"
+    SLEEP="${LAYA_EDGE_HEALTH_SLEEP:-15}"
+    MAX="${LAYA_EDGE_HEALTH_MAX_SECONDS:-900}"
+    for name in TRIES SLEEP MAX; do
+        value="${!name}"
+        case "$value" in
+            ''|*[!0-9]*) refuse_config "LAYA_EDGE_HEALTH_$name=$value is not a whole number" ;;
+        esac
+        [ "${#value}" -le 9 ] || refuse_config "LAYA_EDGE_HEALTH_$name=$value is too large"
+    done
+    TRIES=$((10#$TRIES))
+    SLEEP=$((10#$SLEEP))
+    MAX=$((10#$MAX))
+    [ "$TRIES" -ge 1 ] || refuse_config "LAYA_EDGE_HEALTH_TRIES=$TRIES is below 1"
+    CURL_TIMEOUT=30
+    START=$SECONDS
+    k=0
+    while :; do
+        k=$((k + 1))
+        : > "$OUT"
+        set +e
+        code="$(curl -sS --max-time "$CURL_TIMEOUT" -o "$OUT" -w '%{http_code}' "$URL")"
+        crc=$?
+        set -e
+        elapsed=$((SECONDS - START))
+        if [ "$crc" -ne 0 ]; then
+            rm -f "$OUT"
+            echo "REFUSED edge-health-get: transport (curl exit $crc) after $k attempt(s)" >&2
+            exit 1
+        fi
+        case "$code" in
+            200)
+                echo "edge-health-get ok: HTTP 200 after $k attempt(s) in $elapsed s"
+                exit 0
+                ;;
+            404)
+                if [ "$k" -ge "$TRIES" ]; then
+                    rm -f "$OUT"
+                    echo "REFUSED edge-health-get: HTTP 404 after $k attempt(s) (tries $TRIES)" >&2
+                    exit 1
+                fi
+                if [ $((elapsed + SLEEP + CURL_TIMEOUT)) -gt "$MAX" ]; then
+                    rm -f "$OUT"
+                    echo "REFUSED edge-health-get: HTTP 404 after $k attempt(s) (elapsed cap $MAX s)" >&2
+                    exit 1
+                fi
+                echo "  edge /health not routed yet (HTTP 404), attempt $k/$TRIES after $elapsed s; retrying in $SLEEP s" >&2
+                sleep "$SLEEP"
+                ;;
+            *)
+                rm -f "$OUT"
+                echo "REFUSED edge-health-get: HTTP $code after $k attempt(s)" >&2
+                exit 1
+                ;;
+        esac
+    done
 
 # Accept an edge /health body only when it is a JSON object whose serverId is exactly <server>.
 # No package field is asserted: the edge body has none (D-ITEM-08-17-A); package identity is the
@@ -2347,14 +2435,118 @@ laya-deploy-selftest:
     body_case refuse not-an-object "[\"$SRV\"]"
     body_case refuse not-json '<html>503</html>'
     body_case refuse empty ''
-    # Wiring: laya-deploy calls both helpers and never GETs the /mcp endpoint itself.
+    # EDGE HEALTH get (F-10-12-1, plan 12-04): the bounded 404-only retry of the first /health GET,
+    # over a scripted curl first on PATH for this table only (restored after it). The Nth call
+    # answers line N of the script (the last line repeats); `x7` is a transport failure. The out
+    # path is pre-seeded with a STALE healthy body before every case: after any refusal it must be
+    # absent or empty, so a leftover deploy-health file can never pass _laya-edge-health-check.
+    CURLSHIM="$(pwd -P)/$ST/curlshim"
+    CURL_SCRIPT="$CASES/curl-script"
+    CURL_CALLS="$CASES/curl-calls.log"
+    mkdir -p "$CURLSHIM"
+    cat > "$CURLSHIM/curl" <<'SH'
+    #!/usr/bin/env bash
+    out=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -o) out="$2"; shift 2 ;;
+            -w|--max-time) shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    n=$(( $(wc -l < "$CURL_CALLS" | tr -d ' ') + 1 ))
+    code="$(sed -n "${n}p" "$CURL_SCRIPT")"
+    [ -n "$code" ] || code="$(tail -n 1 "$CURL_SCRIPT")"
+    echo "$code" >> "$CURL_CALLS"
+    if [ "$code" = x7 ]; then echo "curl: (7) shim: transport failure" >&2; printf '000'; exit 7; fi
+    if [ "$code" = 200 ]; then
+        printf '{"status":"healthy","serverId":"%s","via":"curl-shim"}' "$CURL_SERVER" > "$out"
+    else
+        printf '{"error":"shim answered %s"}' "$code" > "$out"
+    fi
+    printf '%s' "$code"
+    SH
+    chmod +x "$CURLSHIM/curl"
+    PATH_BEFORE_CURL="$PATH"
+    export PATH="$CURLSHIM:$PATH"
+    [ "$(command -v curl)" = "$CURLSHIM/curl" ] || { echo "ERROR: the curl shim is not first on PATH" >&2; exit 1; }
+    # hg_run <name> <comma-free script words> [VAR=value ...]: runs the helper, sets HG_RC / HG_CALLS.
+    hg_run() {
+        HG_NAME="$1"; local script="$2"
+        shift 2
+        HG_OUT="$CASES/health-get-$HG_NAME.body"; HG_LOG="$CASES/health-get-$HG_NAME.log"
+        printf '%s\n' "$script" | tr ' ' '\n' > "$CURL_SCRIPT"
+        : > "$CURL_CALLS"
+        printf '{"status":"healthy","serverId":"%s"}\n' "$SRV" > "$HG_OUT"
+        set +e
+        env CURL_SCRIPT="$CURL_SCRIPT" CURL_CALLS="$CURL_CALLS" CURL_SERVER="$SRV" LAYA_EDGE_HEALTH_SLEEP=0 "$@" \
+            just _laya-edge-health-get "https://$SRV.us-east.true-mcp.com/health" "$HG_OUT" > "$HG_LOG" 2>&1
+        HG_RC=$?
+        set -e
+        HG_CALLS="$(wc -l < "$CURL_CALLS" | tr -d ' ')"
+    }
+    # hg_check <accept|refuse> <exit> <ERE> <calls>: sets HG_OK (1/0); an accept leaves the shim's body,
+    # a refusal leaves no body file (absent or empty) although a stale healthy one was there before.
+    hg_check() {
+        local want="$1" wrc="$2" pat="$3" wcalls="$4"
+        HG_OK=1
+        [ "$HG_RC" -eq "$wrc" ] || HG_OK=0
+        grep -Eq -- "$pat" "$HG_LOG" || HG_OK=0
+        [ "$HG_CALLS" -eq "$wcalls" ] || HG_OK=0
+        if [ "$want" = accept ]; then
+            grep -q '"via":"curl-shim"' "$HG_OUT" || HG_OK=0
+        else
+            [ ! -s "$HG_OUT" ] || HG_OK=0
+        fi
+    }
+    hg_say() {
+        local want="$1"
+        if [ "$HG_OK" -eq 1 ]; then
+            echo "EDGE HEALTH get $want: $HG_NAME ($HG_CALLS calls)"
+        else
+            fail "EDGE HEALTH get $want $HG_NAME: exit $HG_RC, $HG_CALLS calls, body $( [ -s "$HG_OUT" ] && echo present || echo absent ) (log: $HG_LOG)"
+            tail -3 "$HG_LOG" >&2 || true
+        fi
+    }
+    hg_run ok-first 200
+    hg_check accept 0 '^edge-health-get ok: HTTP 200 after 1 attempt\(s\)' 1; hg_say accept
+    hg_run 404-404-200 "404 404 200"
+    hg_check accept 0 '^edge-health-get ok: HTTP 200 after 3 attempt\(s\)' 3; hg_say accept
+    hg_run 404-forever 404 LAYA_EDGE_HEALTH_TRIES=3
+    hg_check refuse 1 'REFUSED edge-health-get: HTTP 404 after 3 attempt\(s\)' 3; hg_say refuse
+    hg_run 500 500
+    hg_check refuse 1 'REFUSED edge-health-get: HTTP 500 after 1 attempt\(s\)' 1; hg_say refuse
+    hg_run 503 503
+    hg_check refuse 1 'REFUSED edge-health-get: HTTP 503 after 1 attempt\(s\)' 1; hg_say refuse
+    hg_run transport x7
+    hg_check refuse 1 'REFUSED edge-health-get: transport \(curl exit 7\) after 1 attempt\(s\)' 1; hg_say refuse
+    HG_CFG_OK=1; HG_CFG_CALLS=0; HG_CFG_N=0
+    for kv in LAYA_EDGE_HEALTH_TRIES=0 LAYA_EDGE_HEALTH_TRIES=abc LAYA_EDGE_HEALTH_SLEEP=-1 LAYA_EDGE_HEALTH_MAX_SECONDS=x; do
+        HG_CFG_N=$((HG_CFG_N + 1))
+        hg_run "config-$HG_CFG_N" 200 "$kv"
+        hg_check refuse 2 'REFUSED edge-health-get: config ' 0
+        [ "$HG_OK" -eq 1 ] || { HG_CFG_OK=0; fail "EDGE HEALTH get config $kv: exit $HG_RC, $HG_CALLS calls (log: $HG_LOG)"; }
+        HG_CFG_CALLS=$((HG_CFG_CALLS + HG_CALLS))
+    done
+    HG_NAME=config; HG_CALLS="$HG_CFG_CALLS"; HG_OK="$HG_CFG_OK"
+    [ "$HG_CFG_N" -eq 4 ] || HG_OK=0
+    hg_say refuse
+    hg_run elapsed-cap 404 LAYA_EDGE_HEALTH_TRIES=40 LAYA_EDGE_HEALTH_MAX_SECONDS=0
+    hg_check refuse 1 'REFUSED edge-health-get: HTTP 404 after 1 attempt\(s\) \(elapsed cap 0 s\)' 1; hg_say refuse
+    export PATH="$PATH_BEFORE_CURL"
+    [ "$(command -v curl)" != "$CURLSHIM/curl" ] || { echo "ERROR: the curl shim is still on PATH after the table" >&2; exit 1; }
+    # Wiring: laya-deploy calls the health-url and health-check helpers, gets /health through the retrying
+    # helper (never a bare curl), and never GETs the /mcp endpoint itself.
     DEPLOY_BODY="$(just --show laya-deploy)"
+    DEPLOY_CODE="$(printf '%s\n' "$DEPLOY_BODY" | grep -v '^ *#' || true)"
     if printf '%s' "$DEPLOY_BODY" | grep -q 'just _laya-edge-health-url "\$ENDPOINT"' \
         && printf '%s' "$DEPLOY_BODY" | grep -q 'just _laya-edge-health-check "\$HEALTH" "\$SERVER"' \
+        && printf '%s' "$DEPLOY_CODE" | grep -qF 'just _laya-edge-health-get "$HEALTH_URL"' \
+        && ! printf '%s' "$DEPLOY_CODE" | grep -qF 'curl -fsS' \
         && ! printf '%s' "$DEPLOY_BODY" | grep -q 'curl [^|]*"\$ENDPOINT"'; then
-        echo "EDGE HEALTH wiring: laya-deploy checks \$HEALTH_URL's serverId and never GETs \$ENDPOINT"
+        echo "EDGE HEALTH wiring: laya-deploy GETs \$HEALTH_URL through the retrying helper, checks its serverId and never GETs \$ENDPOINT"
     else
-        fail "EDGE HEALTH wiring: laya-deploy does not call both helpers, or still GETs \$ENDPOINT"
+        fail "EDGE HEALTH wiring: laya-deploy does not call the helpers, still runs a bare curl on \$HEALTH_URL, or still GETs \$ENDPOINT"
     fi
     # IAM (08-17 option 1): the generated config carries the scoped weights read IN THE STACK and
     # nothing broader. must-accept / must-refuse table over _laya-iam-check, then laya-deploy's own
@@ -3508,6 +3700,22 @@ laya-gates-selftest:
         # The reverse-prefix case: the retired server's healthy edge body is not the new server's.
         must_fail retired-server "REFUSED edge-health: serverId is '$RETIRED_SERVER'" just _laya-edge-health-check "{\"status\":\"healthy\",\"serverId\":\"$RETIRED_SERVER\"}" "$SRV"
         must_pass decide "^edge-health ok: serverId $SRV\$" just _laya-edge-health-check "{\"status\":\"healthy\",\"serverId\":\"$SRV\"}" "$SRV"
+    }
+    row_edge_health_get() {
+        # A scripted curl in $W (the Nth call answers line N of the script, the last line repeats):
+        # a 404 that never clears and an HTTP 500 are contained; 404, 404, 200 is retried to success.
+        local C="$W/curlshim" S="$W/curl-script" L="$W/curl-calls.log" O="$W/health-get.json"
+        mkdir -p "$C"
+        printf '#!/bin/sh\nout=""\nwhile [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift 2 ;; -w|--max-time) shift 2 ;; *) shift ;; esac; done\nn=$(( $(wc -l < "$CURL_CALLS" | tr -d " ") + 1 ))\ncode="$(sed -n "${n}p" "$CURL_SCRIPT")"\n[ -n "$code" ] || code="$(tail -n 1 "$CURL_SCRIPT")"\necho "$code" >> "$CURL_CALLS"\nprintf "{\\"serverId\\":\\"shim\\"}" > "$out"\nprintf "%%s" "$code"\n' > "$C/curl"
+        chmod +x "$C/curl"
+        printf '404\n' > "$S"; : > "$L"
+        must_fail forever 'REFUSED edge-health-get: HTTP 404 after 3 attempt' env PATH="$C:$PATH" CURL_SCRIPT="$S" CURL_CALLS="$L" LAYA_EDGE_HEALTH_TRIES=3 LAYA_EDGE_HEALTH_SLEEP=0 just _laya-edge-health-get "https://$SRV.us-east.true-mcp.com/health" "$O"
+        [ ! -s "$O" ] || red "forever: a refused GET left a body file behind"
+        printf '500\n' > "$S"; : > "$L"
+        must_fail http-500 'REFUSED edge-health-get: HTTP 500 after 1 attempt' env PATH="$C:$PATH" CURL_SCRIPT="$S" CURL_CALLS="$L" LAYA_EDGE_HEALTH_SLEEP=0 just _laya-edge-health-get "https://$SRV.us-east.true-mcp.com/health" "$O"
+        [ "$(wc -l < "$L" | tr -d ' ')" -eq 1 ] || red "http-500: the 500 was retried"
+        printf '404\n404\n200\n' > "$S"; : > "$L"
+        must_pass retried '^edge-health-get ok: HTTP 200 after 3 attempt\(s\)' env PATH="$C:$PATH" CURL_SCRIPT="$S" CURL_CALLS="$L" LAYA_EDGE_HEALTH_SLEEP=0 just _laya-edge-health-get "https://$SRV.us-east.true-mcp.com/health" "$O"
     }
     row_server_check() {
         must_fail space 'REFUSED server: .*not a server id' just _laya-server-check "bad name" named
