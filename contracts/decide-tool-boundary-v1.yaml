@@ -1,6 +1,6 @@
 contract: decide-tool-boundary
 metadata:
-  version: 10.0.0
+  version: 10.1.0
   created: '2026-09-25'
   author: PAIML Engineering
   kind: kernel
@@ -130,6 +130,23 @@ metadata:
     two files identical (it does not model `constants:` and does not compare the falsification
     harness fields), so it offered no bump; the version is raised MAJOR because a served constant
     moved, as at v7.0.0.
+
+    v10.1.0 (plan 12-09, 2026-10-26; ADDITIVE, no constant moved, no door literal touched). A second
+    decide task is served from Phase 12: motivation-v1 (pilot), a 3-label task whose shortest built
+    row is P = 97 (12-TASK-EVIDENCE.json measured.P, read twice by the Python measurement of plan
+    12-01 and, in plan 12-11, by the Rust-side plan-only `min_row_tokens` of the packed artifact).
+    The owner chose variant (a) of D-09 on 2026-10-26 (`approve-a f74a3ad3cfc0`,
+    12-TASK-OWNER-REPLY.json): 8 x 97 = 776 <= 800, so the contracted `classify_max_texts` 8 stays
+    the door for EVERY served task, and D-26's per-artifact door (variant b, P 190, door 4) was shown
+    and not chosen, so no `classify_min_served_texts`, no `served_max_texts` equation and no door
+    derivation exist. What changes is that the file no longer describes one task only: the new
+    top-level `served_tasks:` table lists each served decide model with its measured shortest built
+    row (antisemite 86, motivation 97) and its door, `served_task_min_row_tokens` (86) is kept and
+    documented as the antisemitism task's, and `tests::every_served_task_fits_its_door` asserts every
+    row fits `classify_max_total_tokens` and that the antisemite row equals that constant. `pv diff`
+    reported the two files identical (it models neither `constants:` nor the extra table), so it
+    offered no bump; the version is raised MINOR by hand because the change only adds a record and
+    breaks no consumer. 12-DOOR-EVIDENCE.json records the branch.
 
     THE 10 240 MB TIER (v7.0.0, THE CONTRACTED TIER). 10 240 MB is 6 vCPU. Every term below is a
     MEASUREMENT: the spike-026 records at this very tier (Graviton2, three forced cold starts,
