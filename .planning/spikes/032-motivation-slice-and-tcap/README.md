@@ -4,7 +4,7 @@ idea: llm-decision-classifier
 name: motivation-slice-and-tcap
 type: standard
 validates: "Given the approved motivation-v1 task (about 220 spike-train rows after a 25 % holdout is carved from train.jsonl), when Laya en-root is fully fine-tuned with early stopping at the probe-declared epochs over calibration-slice fractions {0.25, 0.35, 0.5} x training seeds {13, 17, 23}, then the holdout ECE at the slice-fitted T (unbounded, [0.5, 5], [0.5, 10]), the holdout-oracle T and the margin over zero-shot show which slice fraction to declare for the one gate run and whether the T <= 5 clamp binds"
-verdict: pending
+verdict: VALIDATED
 related: [027, 028]
 tags: [laya, calibration, temperature-scaling, ece, gate, motivation-v1, thin-data, mps]
 ---
@@ -112,3 +112,31 @@ uv run --project scripts/laya_train --frozen python -I .planning/spikes/032-moti
 ```
 
 `scripts/laya_train` is imported and not modified.
+
+## Results (2026-10-26, E = 12, all nine cells on mps:0, eval.jsonl never opened)
+
+| fraction | seed | T unbounded | T clamped 5 | T oracle | ECE at clamped T | ECE at oracle | margin | best/run epochs |
+|---|---|---|---|---|---|---|---|---|
+| 0.25 | 13 | 4.544 | 4.544 | 5.26 | 0.0798 | 0.0752 | 0.2306 | 2/5 |
+| 0.25 | 17 | 1.643 | 1.643 | 2.46 | 0.1176 | 0.0649 | 0.0730 | 1/4 |
+| 0.25 | 23 | 3.349 | 3.349 | 4.01 | 0.1169 | 0.0845 | 0.2387 | 2/5 |
+| 0.35 | 13 | 4.354 | 4.354 | 4.18 | 0.0437 | 0.0407 | 0.2513 | 2/5 |
+| 0.35 | 17 | 1.852 | 1.852 | 2.16 | 0.0802 | 0.0511 | 0.0532 | 1/4 |
+| 0.35 | 23 | 1.292 | 1.292 | 0.98 | 0.1045 | 0.0793 | 0.0988 | 1/4 |
+| 0.5 | 13 | 1.299 | 1.299 | 1.23 | 0.0984 | 0.0782 | -0.0146 | 1/4 |
+| 0.5 | 17 | 2.035 | 2.035 | 2.48 | 0.1499 | 0.1008 | 0.1694 | 2/5 |
+| 0.5 | 23 | 2.284 | 2.284 | 2.66 | 0.1137 | 0.0670 | 0.2088 | 2/5 |
+
+| fraction | median ECE (clamped T) | median margin | median T unbounded | seeds with T > 5 |
+|---|---|---|---|---|
+| 0.25 | 0.1169 | 0.2306 | 3.349 | 0 |
+| 0.35 | 0.0802 | 0.0988 | 1.852 | 0 |
+| 0.5 | 0.1137 | 0.1694 | 2.035 | 0 |
+
+* **SLICE RULE:** 0.35 lowers the median ECE by 0.0367 (at least 0.02) but costs 0.1317 of median margin (more than
+  0.02); 0.5 lowers it by 0.0032. Selected fraction: **0.25** (the contract's value, unchanged).
+* **CLAMP-BINDING RULE** at 0.25: unbounded T above 5.0 on 0 of 3 seeds (4.54, 1.64, 3.35); oracle rescue on 0 of 3.
+  The clamp does **not** bind; no owner checkpoint is triggered by it.
+* Informational, not a rule input: the 0.25 median holdout ECE at the clamped T is 0.117, above the gate's 0.10, on
+  about 11 conspiratorial holdout rows; early stopping fired at epoch 1-2 on every cell (4-5 epochs run). The
+  holdout is noisy (caveat 1), so this is a warning that an ECE-only gate failure is plausible (D-19), not a result.

@@ -1,0 +1,11 @@
+{
+  "evidence_sha256": {
+    "probe": "cb98db90f94dc0dcc665a62d8278c176dcf4cc40e4b54ec127719d31873e1af3",
+    "spike": "b77978461da2ddd35a0092b114dee5a6f9c94ae211464de17dc634a8d826dcc7"
+  },
+  "history": [],
+  "reason": "no trigger: clamp_not_binding, probe measured on a non-cpu device, not contended",
+  "schema": "laya-spike-owner-reply-v2",
+  "skipped": true,
+  "state": "completed"
+}
