@@ -1000,3 +1000,22 @@ Plans:
 
 **Wave 13** *(blocked on Wave 12; ordering only)*
 - [ ] 12-19-PLAN.md — evidence and tooling integrity (WR-03, WR-04, WR-05, IN-03, IN-04, IN-05): bake-off inputs bound to their recorded hashes and a missing blocked-evidence file refused (real run byte-identical), `apr eval --dump-probabilities` writability pre-flight, two justfile messages (own hunks only), IN-05 recorded `accepted` with a standing guard
+
+### Phase 13: motivation-v1 on augury-dev (second server) and the first enrichment hand-off
+
+**Goal:** Deploy the unchanged `motivation-v1` artifact (`laya-motivation-v1.apr`, sha256 d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd) as a SECOND decide server from the augury-dev account (profile `augury-dev`, eu-west-1), beside the ze-kasher-dev pilot, so the experiment team can run their stored posts (already classified antisemitic by stage 1) through it and send the output to the expert for annotation; and give that round what it needs to come back as training data: a per-post record schema (probabilities in served label order, artifact sha, post id, source), a selection-guidance note (stratified by predicted function and by uncertainty, not only high-probability rows), and the enrichment-file format that `prepare_motivation.py` ingests as a second source beside the partner's motivation file. No retrain, no gate run, no change to the served artifact or to the ze-kasher-dev server.
+
+Owner decisions already made (2026-10-27), to be recorded in this phase's CONTEXT:
+- The three-class model continues; the binary conspiratorial-or-not reframing is dropped. On the 100-row eval the two functions confuse each other on 1 row (0 in the other direction, 1+2 / 0+0 on the other seeds), every other error is function-vs-other, and the per-class AUC ordering flips by seed, so neither class is shown easier (analysis of 2026-10-27, from `models/decide/laya-motivation-v1/eval-probs.json` and the two seed dumps).
+- Add a second server, not a move: the ze-kasher-dev pilot stays live and untouched; the new id has its own thin crate, so the deployment-unit register grows by one. The id is fixed in CONTEXT (proposal: `aprender-mcp-decide-motivation-augury`).
+- The experiment team runs their own stored posts through the new server; the expert annotates. This phase collects no posts and writes no labels; no silver label enters the dataset.
+- The review follow-up 12-17..12-19 stays parked; this phase runs on the current verifier and tooling.
+- The uncommitted justfile `region` parameter that Phase 12 D-23 excluded is this phase's work: committed with its own check and used for eu-west-1.
+
+Known constraints: the only edge host pattern seen is `<server>.us-east.true-mcp.com`, so eu-west-1 deployability on pmcp.run is unverified (a read-only probe first; a checkpoint if the platform deploys to us-east-1 only); the pmcp.run token lives about an hour (owner login step, autonomous: false); `laya-deploy` refuses a server id without a thin crate `crates/<id>-lambda`; the partner's data is read in place and never copied into this repo, and the enrichment file lives in the partner repo too; the first edge `/health` on a new id can 404 and trigger containment (F-10-12-1).
+**Requirements**: none mapped; the plans implement CONTEXT decisions
+**Depends on:** Phase 12
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 13 to break down)
