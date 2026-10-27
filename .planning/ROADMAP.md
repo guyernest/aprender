@@ -953,41 +953,41 @@ Owner decisions already made (2026-10-26), to be recorded in this phase's CONTEX
 Known constraints: no server-side prior correction exists (serving is `softmax(z / T)`); the fine-tune gate's ECE on about 11 conspiratorial eval rows is noisy; three labels and the guide's indicators lengthen the per-call prefix, reducing texts per call; the first edge `/health` on a new id can 404 and trigger containment (F-10-12-1).
 **Requirements**: none mapped; the plans implement CONTEXT decisions D-01..D-26 (D-23: deployed with profile ze-kasher-dev in us-east-1; "augury-dev" is not an AWS target)
 **Depends on:** Phase 10
-**Plans:** 16 plans in 10 waves
+**Plans:** 16/16 plans executed in 10 waves — verified `passed` 11/11 (`12-VERIFICATION.md`, 2026-10-26). Plan 12-15 closed as a documented partial by owner decision: the Kev-4B arm was stopped after 134 of 395 rows (about 142 s per post on CPU) and is recorded `blocked`/`budget`, so the bake-off compares Laya and SetFit with Kev unranked. Advisory code review: 0 critical, 6 warning, 5 info, all open (`12-REVIEW-DISPOSITION.md`); follow-up planned for WR-06 (served door of 8 overstated for the 97-token task) and the waiver findings WR-01/WR-02.
 
 Plans:
 **Wave 1**
-- [ ] 12-01-PLAN.md — prepare_motivation.py (declared seed-13 stratified 25 % split, pins, no text), two task.json variants measured with the served tokenizer, the owner approves the exact bytes (autonomous: false)
-- [ ] 12-02-PLAN.md — the D-19 pilot waiver in the Rust verifier: declared, run-bound, ECE-only, margin never waived (D-20), with falsification tests
-- [ ] 12-05-PLAN.md — bake-off metrics in metrics.py (false-assignment, per-class P/R, ECE bootstrap CI, length tertiles) and bakeoff.py with declared ranking rules
-- [ ] 12-06-PLAN.md — SetFit code: the K-label Laya adapter (Phase 10 output byte-identical) and `apr eval --dump-probabilities` (10-06 Task 1, pulled in by D-25)
+- [x] 12-01-PLAN.md — prepare_motivation.py (declared seed-13 stratified 25 % split, pins, no text), two task.json variants measured with the served tokenizer, the owner approves the exact bytes (autonomous: false)
+- [x] 12-02-PLAN.md — the D-19 pilot waiver in the Rust verifier: declared, run-bound, ECE-only, margin never waived (D-20), with falsification tests
+- [x] 12-05-PLAN.md — bake-off metrics in metrics.py (false-assignment, per-class P/R, ECE bootstrap CI, length tertiles) and bakeoff.py with declared ranking rules
+- [x] 12-06-PLAN.md — SetFit code: the K-label Laya adapter (Phase 10 output byte-identical) and `apr eval --dump-probabilities` (10-06 Task 1, pulled in by D-25)
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 12-03-PLAN.md — the waiver in the artifact identity (gate.waiver, skip_serializing_if), the trainer's claim, recipe_id_for, and a real laya-verify proving antisemitism-v1 unchanged
-- [ ] 12-04-PLAN.md — offline deploy prep: thin crate aprender-mcp-decide-motivation-lambda under D-02, resolver proof, arm64 bootstrap, and the 404-only /health retry (F-10-12-1) with an offline selftest
-- [ ] 12-07-PLAN.md — the epochs rule and probe, the folded calibration-slice x T-cap spike on a train-only holdout, and the D-18 owner stop (autonomous: false)
+- [x] 12-03-PLAN.md — the waiver in the artifact identity (gate.waiver, skip_serializing_if), the trainer's claim, recipe_id_for, and a real laya-verify proving antisemitism-v1 unchanged
+- [x] 12-04-PLAN.md — offline deploy prep: thin crate aprender-mcp-decide-motivation-lambda under D-02, resolver proof, arm64 bootstrap, and the 404-only /health retry (F-10-12-1) with an offline selftest
+- [x] 12-07-PLAN.md — the epochs rule and probe, the folded calibration-slice x T-cap spike on a train-only holdout, and the D-18 owner stop (autonomous: false)
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 12-09-PLAN.md — decide-tool-boundary-v1 served_tasks record for two servers; the D-26 per-artifact door only if variant (b) was chosen
-- [ ] 12-10-PLAN.md — the SetFit reference arm: s8 memory rehearsal, the declared s32 cell (D-25 deviation) with the probability dump, or a blocked record
+- [x] 12-09-PLAN.md — decide-tool-boundary-v1 served_tasks record for two servers; the D-26 per-artifact door only if variant (b) was chosen
+- [x] 12-10-PLAN.md — the SetFit reference arm: s8 memory rehearsal, the declared s32 cell (D-25 deviation) with the probability dump, or a blocked record
 
 **Wave 4** *(blocked on Wave 3 completion)*
-- [ ] 12-08-PLAN.md — the calibration-slice fraction the spike selected: a recorded no-op at 0.25, else a per-run override keyed by the train sha
+- [x] 12-08-PLAN.md — the calibration-slice fraction the spike selected: a recorded no-op at 0.25, else a per-run override keyed by the train sha
 
 **Wave 5** *(blocked on Wave 4 completion)*
-- [ ] 12-11-PLAN.md — the declaration committed before the run (waiver applies_to, recipe_id, slice, epochs), the one gate run, pack/verify, and the D-20 margin halt (autonomous: false)
+- [x] 12-11-PLAN.md — the declaration committed before the run (waiver applies_to, recipe_id, slice, epochs), the one gate run, pack/verify, and the D-20 margin halt (autonomous: false)
 
 **Wave 6** *(blocked on Wave 5 completion)*
-- [ ] 12-12-PLAN.md — live deploy of aprender-mcp-decide-motivation (ze-kasher-dev, us-east-1): upload, the owner's pmcp.run login, deploy with identity and the antisemite server shown untouched (autonomous: false)
+- [x] 12-12-PLAN.md — live deploy of aprender-mcp-decide-motivation (ze-kasher-dev, us-east-1): upload, the owner's pmcp.run login, deploy with identity and the antisemite server shown untouched (autonomous: false)
 
 **Wave 7** *(blocked on Wave 6 completion)*
-- [ ] 12-13-PLAN.md — cold/warm timings (reported, not gated) and the acceptance replay at the deployed door (autonomous: false)
+- [x] 12-13-PLAN.md — cold/warm timings (reported, not gated) and the acceptance replay at the deployed door (autonomous: false)
 
 **Wave 8** *(blocked on Wave 7 completion)*
-- [ ] 12-14-PLAN.md — the Kev-4B arm: cargo clean (D-24), fp32 merge and GGUF, 4B Rust parity on the in-place branch, guide prompt without §4.5, timed row and the owner's budget checkpoint (autonomous: false)
+- [x] 12-14-PLAN.md — the Kev-4B arm: cargo clean (D-24), fp32 merge and GGUF, 4B Rust parity on the in-place branch, guide prompt without §4.5, timed row and the owner's budget checkpoint (autonomous: false)
 
 **Wave 9** *(blocked on Wave 8 completion)*
-- [ ] 12-15-PLAN.md — the Kev-4B arm run at the chosen budget, bias + temperature fitted on train only, eval probabilities in the shared schema (or blocked)
+- [x] 12-15-PLAN.md — the Kev-4B arm run at the chosen budget, bias + temperature fitted on train only, eval probabilities in the shared schema (or blocked)
 
 **Wave 10** *(blocked on Wave 9 completion)*
-- [ ] 12-16-PLAN.md — the bake-off run, 12-HANDOFF.md led by the false-assignment rate (prior correction D-22, unmeasured source batch D-15, pilot/gate status), and the project docs naming the second served model
+- [x] 12-16-PLAN.md — the bake-off run, 12-HANDOFF.md led by the false-assignment rate (prior correction D-22, unmeasured source batch D-15, pilot/gate status), and the project docs naming the second served model
