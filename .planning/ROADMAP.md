@@ -1015,7 +1015,31 @@ Owner decisions already made (2026-10-27), to be recorded in this phase's CONTEX
 Known constraints: the only edge host pattern seen is `<server>.us-east.true-mcp.com`, so eu-west-1 deployability on pmcp.run is unverified (a read-only probe first; a checkpoint if the platform deploys to us-east-1 only); the pmcp.run token lives about an hour (owner login step, autonomous: false); `laya-deploy` refuses a server id without a thin crate `crates/<id>-lambda`; the partner's data is read in place and never copied into this repo, and the enrichment file lives in the partner repo too; the first edge `/health` on a new id can 404 and trigger containment (F-10-12-1).
 **Requirements**: none mapped; the plans implement CONTEXT decisions
 **Depends on:** Phase 12
-**Plans:** 0 plans
+**Note:** CONTEXT D-06 amends the owner decision above: the augury server REUSES the id `aprender-mcp-decide-motivation` and the existing thin crate (no new crate, register unchanged); the two deployments are told apart by the triple (pmcp.run target, AWS account, region). The eu-west-1 deployability question is answered by an existing tenant (the augury antisemite Lambda in eu-west-1, RESEARCH P9), not assumed.
+**Plans:** 11 plans (7 waves)
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 13 to break down)
+**Wave 1**
+- [ ] 13-01-PLAN.md — commit the justfile region parameter with its offline check in both regions, positional args, and re-mutation (D-05, D-20)
+- [ ] 13-02-PLAN.md — declare motivation-record-v1 and motivation-enrichment-v1 as a kind:schema contract (D-13, D-14, D-15, D-16)
+- [ ] 13-11-PLAN.md — wave 1: archive the ze-kasher-dev local record with a pinned sha256 manifest and a pre-phase mtime anchor before any phase-13 command writes it (D-06, D-02)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 13-03-PLAN.md — prepare_motivation.py --enrichment: train-only merge, conflict/eval-overlap drops, v1 byte identity by check (D-09..D-12, D-15, D-16)
+- [ ] 13-04-PLAN.md — deployment triple as the key: _laya-target-check, per-profile state dir, endpoint check, wiring guard (D-06)
+- [ ] 13-05-PLAN.md — selection note and the seeded reference rule (D-17)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 13-06-PLAN.md — M2M token from a mode-600 file, laya-probe-auth, unauthenticated-refusal probe, re-exec in verify/deploy (D-07)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 13-07-PLAN.md — re-verify the wave-1 archive of the ze-kasher-dev local record, D-18 read-only probe, eu-west-1 config, upload to the augury bucket, owner login (D-18, D-19)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [ ] 13-08-PLAN.md — publish on augury-dev, owner enables OAuth and creates the M2M client, refusal and authenticated identity (D-06, D-07)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [ ] 13-09-PLAN.md — authenticated timings and acceptance replay; ze-kasher-dev shown unchanged (D-07, D-02)
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [ ] 13-10-PLAN.md — hand-off to the owner and phase closure checks (D-08, D-04)
