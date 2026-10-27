@@ -1,0 +1,228 @@
+{
+  "schema": "laya-region-evidence-v1",
+  "phase": "13",
+  "plan": "13-01",
+  "triple": {
+    "pmcp_target": "augury-dev",
+    "aws_account": "783960389328",
+    "region": "eu-west-1",
+    "endpoint": null
+  },
+  "pre_phase_justfile_commit": "bc52bf3d619845a2b3dc7f8af33ae8c13312d9d5",
+  "region_commits": [
+    "946c3f6605c2",
+    "6c9045e2ec4a"
+  ],
+  "region_commit": "6c9045e2ec4a",
+  "region_commit_note": "the final tested revision (Task 2 GREEN), not one atomic change: the implementation spans the Task 1 commit and the Task 2 commits",
+  "task2_red_commit": "0f04649c333c",
+  "eligibility_export": {
+    "producer": "laya-deploy-selftest exports before it restores",
+    "consumer": "armed_deploy_selftest reads the export only when newer than armed-start",
+    "export_path": "models/decide/selftest/cases/eligibility-export-<server>.log",
+    "restored_verify_line": "must-pass deployed: laya-verify accepted 24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a (deploy_eligible true, via the default-armed selftest)"
+  },
+  "snapshot": {
+    "recipe": "_laya-state-snapshot",
+    "unchanged_after": [
+      "_laya-region-selftest",
+      "laya-deploy-selftest"
+    ]
+  },
+  "default_render_equivalence": {
+    "equal": true,
+    "sha256_12": "eb33a11e4a01",
+    "nested_just_limitation": "nested `just` calls inside the pre-phase recipe resolve to the current justfile, so the comparison is the pre-phase outer recipe plus the current helpers",
+    "nested_helpers": {
+      "_laya-server-check": true,
+      "_laya-iam-check": true
+    },
+    "worktree_render_equal": null
+  },
+  "eu_west_render": {
+    "region": "eu-west-1",
+    "differing_lines": 1
+  },
+  "selftest": {
+    "last_line": "REGION SELFTEST OK",
+    "aws_calls": 0,
+    "cases": [
+      "CASE R1 default: rendered models/decide/deploy-config-aprender-mcp-decide-antisemite.toml, aws.region us-east-1, sha256 aec7153ba29c",
+      "CASE R2 explicit us-east-1: cmp-equal to R1, aws.region us-east-1",
+      "CASE R3 eu-west-1: aws.region eu-west-1, exactly one line differs from R1 (region = \"us-east-1\" => region = \"eu-west-1\")",
+      "CASE R4 zero-region-lines: REFUSED as expected (exit 1, expected exactly one 'region = \"us-east-1\"' line), output sha256 unchanged",
+      "CASE R5 two-region-lines: REFUSED as expected (exit 1, expected exactly one 'region = \"us-east-1\"' line), output sha256 unchanged",
+      "CASE R6 upper-case: REFUSED as expected (REFUSED region: the region argument (9 characters) is not an AWS region name), output unchanged, value not echoed",
+      "CASE R6 trailing-quote: REFUSED as expected (REFUSED region: the region argument (10 characters) is not an AWS region name), output unchanged, value not echoed",
+      "CASE R6 empty: REFUSED as expected (REFUSED region: the region argument (0 characters) is not an AWS region name), output unchanged, value not echoed",
+      "CASE R6 underscores: REFUSED as expected (REFUSED region: the region argument (9 characters) is not an AWS region name), output unchanged, value not echoed",
+      "CASE R6 path: REFUSED as expected (REFUSED region: the region argument (4 characters) is not an AWS region name), output unchanged, value not echoed",
+      "CASE R6 embedded-newline: REFUSED as expected (REFUSED region: the region argument (11 characters) is not an AWS region name), output unchanged, value not echoed",
+      "CASE R6 canary: REFUSED as expected (REFUSED region: the region argument (64 characters) is not an AWS region name), output unchanged, value not echoed",
+      "CASE R6 prefix-form: region=eu-west-1 renders aws.region eu-west-1",
+      "CASE R7 live-template: REFUSED as expected (REFUSED template: LAYA_DEPLOY_TEMPLATE is honoured only under DRY_RUN=1), 0 recorder calls, output unchanged",
+      "BUCKET us-east-1: create-bucket --region us-east-1, no --create-bucket-configuration",
+      "BUCKET eu-west-1: create-bucket --region eu-west-1 --create-bucket-configuration LocationConstraint=eu-west-1",
+      "BUCKET refuse: EU-WEST-1 REFUSED as expected (exit 2), 0 fake-aws calls"
+    ]
+  },
+  "gates_rows": [
+    "region-selftest",
+    "weights-bucket-region",
+    "prepare-motivation-args"
+  ],
+  "removed_not_a_gate": "laya-weights-bucket",
+  "deploy_selftest_last_line": "DEPLOY SELFTEST OK (positive dry run SKIPPED: disarmed by LAYA_DEPLOY_SELFTEST_POSITIVE=0)",
+  "mutations": [
+    {
+      "id": "M1",
+      "edit": "delete the renderer's `text = text.replace(region_line, ...)` line",
+      "check": "just _laya-region-selftest (R3)",
+      "red": true,
+      "exit": 1,
+      "red_line": "FAIL CASE R3 eu-west-1: exit 1, no rendered config (log: models/decide/selftest/region.KUbZLN/r3.log)",
+      "failed_line": "REGION SELFTEST FAILED (2 failed checks)",
+      "first_fail_line": "FAIL CASE R3 eu-west-1: exit 1, no rendered config (log: models/decide/selftest/region.KUbZLN/r3.log)",
+      "restored_line": "REGION SELFTEST OK",
+      "restored_from": "restored-region"
+    },
+    {
+      "id": "M2",
+      "edit": "the region count check `!= 1` -> `< 1`",
+      "check": "just _laya-region-selftest (R5)",
+      "red": true,
+      "exit": 1,
+      "red_line": "FAIL CASE R5 two-region-lines: exit 0, expected the one-line refusal and an unchanged output (log: models/decide/selftest/region.mImzVy/two.log)",
+      "failed_line": "REGION SELFTEST FAILED (1 failed checks)",
+      "first_fail_line": "FAIL CASE R5 two-region-lines: exit 0, expected the one-line refusal and an unchanged output (log: models/decide/selftest/region.mImzVy/two.log)",
+      "restored_line": "REGION SELFTEST OK",
+      "restored_from": "restored-region"
+    },
+    {
+      "id": "M3",
+      "edit": "the region count check `!= 1` -> `> 1`",
+      "check": "just _laya-region-selftest (R4)",
+      "red": true,
+      "exit": 1,
+      "red_line": "FAIL CASE R4 zero-region-lines: exit 1, expected the one-line refusal and an unchanged output (log: models/decide/selftest/region.YwJxMP/zero.log)",
+      "failed_line": "REGION SELFTEST FAILED (1 failed checks)",
+      "first_fail_line": "FAIL CASE R4 zero-region-lines: exit 1, expected the one-line refusal and an unchanged output (log: models/decide/selftest/region.YwJxMP/zero.log)",
+      "restored_line": "REGION SELFTEST OK",
+      "restored_from": "restored-region"
+    },
+    {
+      "id": "M4",
+      "edit": "laya-weights-bucket `[ \"$R\" = \"us-east-1\" ]` -> `!=`",
+      "check": "just _laya-region-selftest (BUCKET table)",
+      "red": true,
+      "exit": 1,
+      "red_line": "FAIL BUCKET us-east-1: exit 0, create-bucket argv 's3api create-bucket --profile ze-kasher-dev --region us-east-1 --bucket aprender-decide-weights-<fake-account>-dev --create-bucket-configuration LocationConstraint=us-east-1' (log: models/decide/selftest/region.fUqEuY/bucket-us.log)",
+      "failed_line": "REGION SELFTEST FAILED (2 failed checks)",
+      "first_fail_line": "FAIL BUCKET us-east-1: exit 0, create-bucket argv 's3api create-bucket --profile ze-kasher-dev --region us-east-1 --bucket aprender-decide-weights-<fake-account>-dev --create-bucket-configuration LocationConstraint=us-east-1' (log: models/decide/selftest/region.fUqEuY/bucket-us.log)",
+      "restored_line": "REGION SELFTEST OK",
+      "restored_from": "restored-region"
+    },
+    {
+      "id": "M5",
+      "edit": "laya-deploy-config default `region=\"us-east-1\"` -> `region=\"eu-west-1\"`",
+      "check": "just _laya-region-selftest (R1/R2)",
+      "red": true,
+      "exit": 1,
+      "red_line": "FAIL CASE R2 explicit us-east-1: exit 0, not cmp-equal to R1 or aws.region us-east-1 (log: models/decide/selftest/region.JT36qo/r2.log)",
+      "failed_line": "REGION SELFTEST FAILED (2 failed checks)",
+      "first_fail_line": "FAIL CASE R2 explicit us-east-1: exit 0, not cmp-equal to R1 or aws.region us-east-1 (log: models/decide/selftest/region.JT36qo/r2.log)",
+      "restored_line": "REGION SELFTEST OK",
+      "restored_from": "restored-region"
+    },
+    {
+      "id": "M6",
+      "edit": "remove laya-deploy-config's region ERE check",
+      "check": "just _laya-region-selftest (R6)",
+      "red": true,
+      "exit": 1,
+      "red_line": "FAIL CASE R6 upper-case: exit 0, expected exit 2 REFUSED region:, an unchanged output, no canary and the value absent from the log (log: models/decide/selftest/region.A33hfd/r6-upper-case.log)",
+      "failed_line": "REGION SELFTEST FAILED (7 failed checks)",
+      "first_fail_line": "FAIL CASE R6 upper-case: exit 0, expected exit 2 REFUSED region:, an unchanged output, no canary and the value absent from the log (log: models/decide/selftest/region.A33hfd/r6-upper-case.log)",
+      "restored_line": "REGION SELFTEST OK",
+      "restored_from": "restored-region"
+    },
+    {
+      "id": "M7",
+      "edit": "laya-deploy-config reads the region textually (`REGION=\"{{region}}\"` instead of `$6`)",
+      "check": "just _laya-region-selftest (R6 canary)",
+      "red": true,
+      "exit": 1,
+      "red_line": "FAIL CASE R6 canary: exit 127, expected exit 2 REFUSED region:, an unchanged output, no canary and the value absent from the log (log: models/decide/selftest/region.s3QRqc/r6-canary.log)",
+      "failed_line": "REGION SELFTEST FAILED (4 failed checks)",
+      "first_fail_line": "FAIL CASE R6 trailing-quote: exit 2, expected exit 2 REFUSED region:, an unchanged output, no canary and the value absent from the log (log: models/decide/selftest/region.s3QRqc/r6-trailing-quote.log)",
+      "restored_line": "REGION SELFTEST OK",
+      "restored_from": "restored-region"
+    },
+    {
+      "id": "M8",
+      "edit": "laya-prepare-motivation loses [positional-arguments] and forwards {{args}}",
+      "check": "LAYA_GATES_ONLY=prepare-motivation-args just laya-gates-selftest",
+      "red": true,
+      "exit": 1,
+      "red_line": "RED  prepare-motivation-args: must-fail spaced-csv: exit 2, expected non-zero with a line matching 'REFUSED csv-missing' (log /var/folders/3s/xftgktnj6qs681vbh0tg5hmc0000gn/T/tmp.lzP3utjy93/logs/prepare-motivation-args-spaced-csv.log)",
+      "failed_line": "LAYA GATES SELFTEST FAILED: 1 row(s) RED: prepare-motivation-args",
+      "first_fail_line": "RED  prepare-motivation-args: must-fail spaced-csv: exit 2, expected non-zero with a line matching 'REFUSED csv-missing' (log /var/folders/3s/xftgktnj6qs681vbh0tg5hmc0000gn/T/tmp.lzP3utjy93/logs/prepare-motivation-args-spaced-csv.log)",
+      "restored_line": "LAYA GATES ROWS OK",
+      "restored_from": "restored-pm"
+    },
+    {
+      "id": "M9",
+      "edit": "laya-deploy-selftest cleanup() loses the export copy (the restore stays)",
+      "check": "lockf -k -t 3600 /tmp/aprender-laya-real-weights.lock env LAYA_GATES_ONLY=verify just laya-gates-selftest",
+      "red": true,
+      "exit": 1,
+      "red_line": "RED  verify: must-pass deployed: no deploy_eligible true for 24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a in /var/folders/3s/xftgktnj6qs681vbh0tg5hmc0000gn/T/tmp.xLfTYFDjm7/armed-eligibility.log (no export)",
+      "failed_line": "LAYA GATES SELFTEST FAILED: 1 row(s) RED: verify",
+      "first_fail_line": "RED  verify: must-pass deployed: no deploy_eligible true for 24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a in /var/folders/3s/xftgktnj6qs681vbh0tg5hmc0000gn/T/tmp.xLfTYFDjm7/armed-eligibility.log (no export)",
+      "restored_line": "LAYA GATES ROWS OK",
+      "restored_from": "restored-verify"
+    },
+    {
+      "id": "M10",
+      "edit": "armed_deploy_selftest `SRC=\"$EXPORT\"` -> `SRC=\"models/decide/eligibility-$SRV.log\"`",
+      "check": "lockf -k -t 3600 /tmp/aprender-laya-real-weights.lock env LAYA_GATES_ONLY=verify just laya-gates-selftest",
+      "red": true,
+      "exit": 1,
+      "red_line": "RED  verify: must-pass deployed: no deploy_eligible true for 24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a in /var/folders/3s/xftgktnj6qs681vbh0tg5hmc0000gn/T/tmp.uL4hXf8EhQ/armed-eligibility.log (export not from this run)",
+      "failed_line": "LAYA GATES SELFTEST FAILED: 1 row(s) RED: verify",
+      "first_fail_line": "RED  verify: must-pass deployed: no deploy_eligible true for 24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a in /var/folders/3s/xftgktnj6qs681vbh0tg5hmc0000gn/T/tmp.uL4hXf8EhQ/armed-eligibility.log (export not from this run)",
+      "restored_line": "LAYA GATES ROWS OK",
+      "restored_from": "restored-verify"
+    },
+    {
+      "id": "M11",
+      "edit": "laya-deploy-config honours LAYA_DEPLOY_TEMPLATE without the DRY_RUN condition",
+      "check": "just _laya-region-selftest (R7)",
+      "red": true,
+      "exit": 1,
+      "red_line": "FAIL CASE R7 live-template: exit 97, recorder calls 0 -> 1; expected exit 2 REFUSED template: with no call (log: models/decide/selftest/region.Zhz9JB/r7.log)",
+      "failed_line": "REGION SELFTEST FAILED (2 failed checks)",
+      "first_fail_line": "FAIL CASE R7 live-template: exit 97, recorder calls 0 -> 1; expected exit 2 REFUSED template: with no call (log: models/decide/selftest/region.Zhz9JB/r7.log)",
+      "restored_line": "REGION SELFTEST OK",
+      "restored_from": "restored-region"
+    },
+    {
+      "id": "M12",
+      "edit": "laya-deploy-selftest cleanup() restores the historical logs BEFORE it exports",
+      "check": "Task 2's ELIG block (planted historical eligibility log, disarmed laya-deploy-selftest)",
+      "red": true,
+      "exit": 1,
+      "red_line": "the export holds the historical log, not this run's",
+      "failed_line": "the export holds the historical log, not this run's",
+      "first_fail_line": null,
+      "restored_line": "LAYA GATES ROWS OK",
+      "restored_from": "restored-verify",
+      "restored_check_line": "ELIGIBILITY EXPORT OK",
+      "restored_check_note": "the restored ELIG block printed ELIGIBILITY EXPORT OK; restored_line is the restored LAYA_GATES_ONLY=verify run, which reads the same unmutated export"
+    }
+  ],
+  "redaction": "the scripted fake aws's 12-digit fake account ids in recorded log lines are replaced by <fake-account>",
+  "interpolation_finding": "other laya recipes still interpolate parameters textually (pre-existing; out of this phase's scope, recorded for a later phase)",
+  "measured_on": "2026-10-27",
+  "commit": "6c9045e2ec4a"
+}
