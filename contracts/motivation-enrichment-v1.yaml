@@ -254,7 +254,9 @@ merge:
     the files in command-line order.
 
 manifest:
-  file: enrichment-manifest.json
+  # Key `filename`, not `file`: an output file name is not a repo file to anchor, and the ONT R-5
+  # bindable counter of scripts/check_ont_ratchet.sh reads a `file:` key as one.
+  filename: enrichment-manifest.json
   location: "the output directory, beside task.json, train.jsonl and eval.jsonl"
   schema: motivation-enrichment-manifest-v1
   content: "counts and sha256 values only, never a text"
