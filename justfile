@@ -1333,11 +1333,13 @@ laya-prepare-goldstandard *args:
 # The same script measures a task's prefix with the SERVED tokenizer: `just laya-prepare-motivation --measure
 # (--draft a|b | --task <task.json>) [--csv <csv>] [--max-texts N]`, and runs its own `--selftest` /
 # `--selftest-tokenizer`. A thin wrapper: the script owns the default CSV path and every refusal. Output is under the
-# root-anchored, gitignored /data/.
+# root-anchored, gitignored /data/. The arguments are forwarded as "$@" (plan 13-01): a path with
+# spaces reaches the script whole. Row prepare-motivation-args.
+[positional-arguments]
 laya-prepare-motivation *args:
     #!/usr/bin/env bash
     set -euo pipefail
-    uv run --project scripts/laya_train --frozen python -I scripts/laya_train/prepare_motivation.py {{args}}
+    uv run --project scripts/laya_train --frozen python -I scripts/laya_train/prepare_motivation.py "$@"
 
 # Fine-tune Laya on <data> (task.json + train.jsonl + a REQUIRED eval.jsonl + an OPTIONAL shift.jsonl),
 # calibrate and gate into the run dir <out>. Exit 0 = GATE PASS, 3 = GATE FAIL, 2 = input refused.
@@ -2552,12 +2554,24 @@ laya-deploy-selftest:
     BK="$(mktemp -d "$ST/bk.XXXXXX")"
     [ -f "$CFG" ] && cp -p "$CFG" "$BK/decide-deploy.toml"
     cp -p "$PROOF" "$BK/resolver-proof.txt" 2>/dev/null || true
+    # The id's eligibility logs (plan 13-01): the historical files are kept and the live paths REMOVED,
+    # so only this run can write them. On EXIT this run's output is EXPORTED first (laya-gates-selftest's
+    # row verify reads the export, never the restored history), then the historical files come back.
+    ELIG="models/decide/eligibility-$SRV.log"
+    ELIG_UP="models/decide/eligibility-upload-$SRV.log"
+    if [ -f "$ELIG" ]; then cp -p "$ELIG" "$BK/eligibility.log"; fi
+    if [ -f "$ELIG_UP" ]; then cp -p "$ELIG_UP" "$BK/eligibility-upload.log"; fi
     cleanup() {
+        if [ -f "$ELIG" ]; then cp "$ELIG" "$CASES/eligibility-export-$SRV.log"; fi
+        if [ -f "$ELIG_UP" ]; then cp "$ELIG_UP" "$CASES/eligibility-upload-export-$SRV.log"; fi
+        if [ -f "$BK/eligibility.log" ]; then cp -p "$BK/eligibility.log" "$ELIG"; else rm -f "$ELIG"; fi
+        if [ -f "$BK/eligibility-upload.log" ]; then cp -p "$BK/eligibility-upload.log" "$ELIG_UP"; else rm -f "$ELIG_UP"; fi
         if [ -f "$BK/decide-deploy.toml" ]; then cp -p "$BK/decide-deploy.toml" "$CFG"; else rm -f "$CFG"; fi
         [ -f "$BK/resolver-proof.txt" ] && cp -p "$BK/resolver-proof.txt" "$PROOF"
         rm -rf "$BK"
     }
     trap cleanup EXIT
+    rm -f "$ELIG" "$ELIG_UP"
     # The shared deploy root's state (setfit-train's), before anything runs.
     ROOT_TOML_BEFORE="$(sha_or_absent crates/.pmcp/deploy.toml)"
     root_digest() {
@@ -3022,20 +3036,29 @@ laya-deploy-selftest:
         exit 1
     fi
 
-# Create (if absent) the decide weights bucket aprender-decide-weights-<account>-<env> in us-east-1
-# and (re)assert its posture on every run: all public access blocked, SSE-S3 default encryption,
-# tags project=aprender component=decide-weights env=<env>. No lifecycle expiry: objects are
-# content-addressed (decide/<server>/<sha256>.apr) and immutable; a new model is a new key.
+# Create (if absent) the decide weights bucket aprender-decide-weights-<account>-<env> in <region>
+# (default us-east-1, which takes no LocationConstraint; `region=<r>` accepted) and (re)assert its
+# posture on every run: all public access blocked, SSE-S3 default encryption, tags project=aprender
+# component=decide-weights env=<env>. No lifecycle expiry: objects are content-addressed
+# (decide/<server>/<sha256>.apr) and immutable; a new model is a new key. Parameters are read
+# positionally (plan 13-01) and the region must match ^[a-z]{2}(-[a-z]+)+-[0-9]$ before the first
+# aws call (`REFUSED region:`, exit 2, the value never echoed). Row weights-bucket-region.
+[positional-arguments]
 laya-weights-bucket env="dev" profile="ze-kasher-dev" region="us-east-1":
     #!/usr/bin/env bash
     set -euo pipefail
-    ENV="{{ trim_start_match(env, "env=") }}"
+    ENV="${1#env=}"
+    P="$2"
+    R="${3#region=}"
+    REGION_ERE='^[a-z]{2}(-[a-z]+)+-[0-9]$'
+    if ! (LC_ALL=C; [[ "$R" =~ $REGION_ERE ]]); then
+        echo "REFUSED region: the region argument (${#R} characters) is not an AWS region name" >&2
+        exit 2
+    fi
     case "$ENV" in
         dev|prod) ;;
         *) echo "ERROR: '$ENV' is not a known environment (expected dev or prod)" >&2; exit 2 ;;
     esac
-    P="{{profile}}"
-    R="{{region}}"
     ACCOUNT="$(aws sts get-caller-identity --profile "$P" --query Account --output text)"
     BUCKET="aprender-decide-weights-${ACCOUNT}-${ENV}"
     if aws s3api head-bucket --profile "$P" --bucket "$BUCKET" 2>/dev/null; then
@@ -3725,6 +3748,12 @@ laya-gates-selftest:
     ARMED_RC=""
     armed_deploy_selftest() {
         [ -n "$ARMED_RC" ] && return 0
+        # The child EXPORTS its own eligibility output before it restores the historical log (plan 13-01):
+        # the export is deleted first and read only when newer than this marker, so a restored
+        # historical log can never satisfy row verify.
+        local EXPORT="models/decide/selftest/cases/eligibility-export-$SRV.log" SRC
+        rm -f "$EXPORT"
+        touch "$W/armed-start"
         echo "  (running the default-armed laya-deploy-selftest once: laya-verify of the deployed artifact, multi-GB)"
         set +e
         env -u LAYA_ELIGIBLE_APR -u LAYA_ELIGIBLE_RUN -u LAYA_ELIGIBLE_DATA -u LAYA_ELIGIBLE_BASE -u LAYA_DEPLOY_SELFTEST_POSITIVE \
@@ -3732,7 +3761,16 @@ laya-gates-selftest:
         ARMED_RC=$?
         set -e
         cp models/decide/selftest/cases/positive.log "$W/armed-positive.log" 2>/dev/null || : > "$W/armed-positive.log"
-        cp "models/decide/eligibility-$SRV.log" "$W/armed-eligibility.log" 2>/dev/null || : > "$W/armed-eligibility.log"
+        SRC="$EXPORT"
+        : > "$W/armed-eligibility.log"
+        if [ ! -f "$SRC" ]; then
+            echo "no export" > "$W/armed-eligibility.why"
+        elif [ "$SRC" -nt "$W/armed-start" ]; then
+            cp "$SRC" "$W/armed-eligibility.log"
+            echo "this run's export" > "$W/armed-eligibility.why"
+        else
+            echo "export not from this run" > "$W/armed-eligibility.why"
+        fi
     }
     set_pin() { python3 -c 'import re, sys; p, key, value = sys.argv[1:4]; t = open(p).read(); t, n = re.subn(r"^(" + key + r" = )\"[^\"]*\"$", lambda m: m.group(1) + chr(34) + value + chr(34), t, count=1, flags=re.M); assert n == 1, key; open(p, "w").write(t)' "$CFG" "$1" "$2"; }
     pinned() { python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["environment"]["APRENDER_DECIDE_SHA256"])' "$CFG"; }
@@ -3902,7 +3940,7 @@ laya-gates-selftest:
         if python3 -c 'import json, sys; v = json.loads([l for l in open(sys.argv[1]) if l.startswith("{")][-1]); sys.exit(0 if v.get("deploy_eligible") is True and v.get("artifact_sha256") == sys.argv[2] else 1)' "$W/armed-eligibility.log" "$H" 2> /dev/null; then
             echo "  must-pass deployed: laya-verify accepted $H (deploy_eligible true, via the default-armed selftest)"
         else
-            red "must-pass deployed: no deploy_eligible true for $H in $W/armed-eligibility.log"
+            red "must-pass deployed: no deploy_eligible true for $H in $W/armed-eligibility.log ($(cat "$W/armed-eligibility.why" 2> /dev/null || echo "no reason recorded"))"
         fi
     }
     row_pack() {
