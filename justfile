@@ -1715,21 +1715,48 @@ _laya-resolver-parse log server:
 # the plan 08-11 decision). The server id is REQUIRED (D-19): one config file per server, none shared.
 # LOCAL ONLY: eligibility is enforced by the recipes that write to AWS. DRY_RUN=1 uses the literal
 # bucket dry-run-bucket.
-laya-deploy-config apr auth server env="dev" profile="ze-kasher-dev":
+# <region> (plan 13-01, D-05/D-20; `region=<r>` accepted) replaces the template's single
+# `region = "us-east-1"` line, so the default render is byte-identical to the pre-region one. Every
+# parameter is read POSITIONALLY: a `{{param}}` is pasted into this script as text, so a quote
+# in a value would break the recipe's own quoting. The region must match ^[a-z]{2}(-[a-z]+)+-[0-9]$
+# before anything else runs (`REFUSED region:`, exit 2, the value is never echoed).
+# LAYA_DEPLOY_TEMPLATE overrides the template ONLY under DRY_RUN=1 (the region selftest's zero- and
+# two-line templates); set in a live run it is `REFUSED template:` (exit 2) before any AWS call.
+[positional-arguments]
+laya-deploy-config apr auth server env="dev" profile="ze-kasher-dev" region="us-east-1":
     #!/usr/bin/env bash
     set -euo pipefail
-    APR="{{apr}}"
-    SERVER="{{server}}"
+    APR="$1"
+    AUTH_WORD="$2"
+    SERVER="$3"
+    ENV="${4#env=}"
+    PROFILE="$5"
+    REGION="${6#region=}"
+    # The whole string, in the C locale: [[ =~ ]] anchors at the string's ends, so a value with an
+    # embedded newline cannot pass on its first line (as `grep -Eq` would let it).
+    REGION_ERE='^[a-z]{2}(-[a-z]+)+-[0-9]$'
+    if ! (LC_ALL=C; [[ "$REGION" =~ $REGION_ERE ]]); then
+        echo "REFUSED region: the region argument (${#REGION} characters) is not an AWS region name" >&2
+        exit 2
+    fi
+    TEMPLATE="crates/aprender-mcp-decide-lambda/.pmcp/deploy.toml.template"
+    if [ -n "${LAYA_DEPLOY_TEMPLATE:-}" ]; then
+        if [ "${DRY_RUN:-0}" = "1" ]; then
+            TEMPLATE="$LAYA_DEPLOY_TEMPLATE"
+        else
+            echo "REFUSED template: LAYA_DEPLOY_TEMPLATE is honoured only under DRY_RUN=1" >&2
+            exit 2
+        fi
+    fi
     just _laya-server-check "$SERVER" deployable
-    ENV="{{ trim_start_match(env, "env=") }}"
     case "$ENV" in
         dev|prod) ;;
         *) echo "ERROR: '$ENV' is not a known environment (expected dev or prod)" >&2; exit 2 ;;
     esac
-    case "{{auth}}" in
+    case "$AUTH_WORD" in
         on) AUTH=true ;;
         off) AUTH=false ;;
-        *) echo "ERROR: auth must be on or off, got '{{auth}}'" >&2; exit 2 ;;
+        *) echo "ERROR: auth must be on or off, got '$AUTH_WORD'" >&2; exit 2 ;;
     esac
     test -f "$APR" || { echo "ERROR: $APR does not exist" >&2; exit 2; }
     # shasum directly (plan 08-22, V11-c): the rtk hook never rewrites a command inside a recipe, so a
@@ -1739,16 +1766,15 @@ laya-deploy-config apr auth server env="dev" profile="ze-kasher-dev":
     if [ "${DRY_RUN:-0}" = "1" ]; then
         BUCKET="dry-run-bucket"
     else
-        ACCOUNT="$(aws sts get-caller-identity --profile "{{profile}}" --query Account --output text)"
+        ACCOUNT="$(aws sts get-caller-identity --profile "$PROFILE" --query Account --output text)"
         BUCKET="aprender-decide-weights-${ACCOUNT}-${ENV}"
     fi
-    TEMPLATE="crates/aprender-mcp-decide-lambda/.pmcp/deploy.toml.template"
     OUT="models/decide/deploy-config-$SERVER.toml"
     mkdir -p models/decide
     python3 - "$TEMPLATE" "$OUT" "$SERVER" \
-        "s3://$BUCKET/decide/$SERVER/$H.apr" "$H" "$AUTH" <<'PY'
+        "s3://$BUCKET/decide/$SERVER/$H.apr" "$H" "$AUTH" "$REGION" <<'PY'
     import re, sys, tomllib
-    template, out, server, uri, sha, auth = sys.argv[1:7]
+    template, out, server, uri, sha, auth, region = sys.argv[1:8]
     text = open(template).read()
     unset = '"UNSET-run-just-laya-deploy-config"'
     for key, value in (("name", server), ("APRENDER_DECIDE_S3_URI", uri), ("APRENDER_DECIDE_SHA256", sha)):
@@ -1756,6 +1782,11 @@ laya-deploy-config apr auth server env="dev" profile="ze-kasher-dev":
         if text.count(marker) != 1:
             sys.exit(f"{template}: expected exactly one placeholder for {key}; restore the template")
         text = text.replace(marker, f'{key} = "{value}"')
+    # The stack's region: the template carries one literal region line (us-east-1 by default).
+    region_line = 'region = "us-east-1"'
+    if text.count(region_line) != 1:
+        sys.exit(f"{template}: expected exactly one '{region_line}' line; restore the template")
+    text = text.replace(region_line, f'region = "{region}"')
     # The stack-declared weights read: s3:GetObject on this server's prefix in the URI's bucket.
     bucket = uri[len("s3://"):].split("/", 1)[0]
     arn = f"arn:aws:s3:::{bucket}/decide/{server}/*"
@@ -1774,8 +1805,9 @@ laya-deploy-config apr auth server env="dev" profile="ze-kasher-dev":
     assert cfg["environment"]["APRENDER_DECIDE_SHA256"] == sha
     assert cfg["auth"]["enabled"] is (auth == "true")
     assert cfg["iam"]["statements"][0]["resources"] == [arn]
+    assert cfg["aws"]["region"] == region
     open(out, "w").write(text)
-    print(f"  server   {server}\n  s3 uri   {uri}\n  sha256   {sha}\n  auth     {auth}\n  iam      Allow s3:GetObject {arn}")
+    print(f"  server   {server}\n  s3 uri   {uri}\n  sha256   {sha}\n  auth     {auth}\n  region   {region}\n  iam      Allow s3:GetObject {arn}")
     PY
     just _laya-iam-check "$OUT" || { rm -f "$OUT"; echo "ERROR: the generated config failed the iam check; removed it" >&2; exit 1; }
     echo "  wrote $OUT (gitignored) for env=$ENV"
@@ -2232,6 +2264,146 @@ _laya-edge-health-check body server:
         sys.exit(1)
     print(f"edge-health ok: serverId {server}")
     PY
+
+# The sha256 and path of every PERSISTENT models/decide file, sorted by path: every regular file directly
+# in models/decide whose name does not end in .apr, every file under models/decide/*.state/ and every file
+# under models/decide/augury-dev/ (absent directories contribute nothing). models/decide/selftest/, the
+# swap backup and the archive directory are scratch or evidence and are not listed. Taken before and after
+# an offline selftest, two listings that are not cmp-equal name the persistent file it left changed
+# (plan 13-01). Read-only; prints the listing and nothing else.
+_laya-state-snapshot:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    python3 -I - <<'PY'
+    import hashlib, os
+    root = "models/decide"
+    paths = []
+    if os.path.isdir(root):
+        for name in os.listdir(root):
+            p = os.path.join(root, name)
+            if os.path.isfile(p):
+                if not name.endswith(".apr"):
+                    paths.append(p)
+            elif os.path.isdir(p) and (name.endswith(".state") or name == "augury-dev"):
+                for d, _, files in os.walk(p):
+                    paths.extend(os.path.join(d, f) for f in files if os.path.isfile(os.path.join(d, f)))
+    for p in sorted(paths):
+        h = hashlib.sha256()
+        with open(p, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        print(h.hexdigest() + "  " + p)
+    PY
+
+# Prove the region parameter of laya-deploy-config and laya-weights-bucket OFFLINE (plan 13-01, D-20):
+# DRY_RUN=1, an aws recorder first on PATH that must stay empty (AWS CALLS: 0), a fixed fixture artifact
+# and a COPY of the base template passed as LAYA_DEPLOY_TEMPLATE (the tracked template is never edited;
+# LAYA_REGION_SELFTEST_TEMPLATE replaces the base). Cases: R1 the default render; R2 an explicit
+# us-east-1 render, cmp-equal to R1; R3 an eu-west-1 render that differs from R1 in exactly the region
+# line. Both config paths a render of the server id can reach (models/decide/deploy-config-<id>.toml and
+# models/decide/augury-dev/deploy-config-<id>.toml) are backed up and restored on EXIT. Ends with
+# `REGION SELFTEST OK`, or `REGION SELFTEST FAILED (<k> failed checks)` and exit 1. Row region-selftest.
+_laya-region-selftest:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export DRY_RUN=1
+    ST="models/decide/selftest"
+    SRV="${LAYA_SELFTEST_SERVER:-aprender-mcp-decide-antisemite}"
+    BASE_TEMPLATE="${LAYA_REGION_SELFTEST_TEMPLATE:-crates/aprender-mcp-decide-lambda/.pmcp/deploy.toml.template}"
+    CFG="models/decide/deploy-config-$SRV.toml"
+    AUG_DIR="models/decide/augury-dev"
+    AUG="$AUG_DIR/deploy-config-$SRV.toml"
+    FAILS=0
+    fail() { echo "FAIL $1" >&2; FAILS=$((FAILS + 1)); }
+    mkdir -p "$ST"
+    W="$(mktemp -d "$ST/region.XXXXXX")"
+    # Both config paths a render of this id can reach come back byte-identical (or absent) on EXIT.
+    AUG_DIR_CREATED=0
+    [ -d "$AUG_DIR" ] || AUG_DIR_CREATED=1
+    if [ -f "$CFG" ]; then cp -p "$CFG" "$W/keep-default.toml"; fi
+    if [ -f "$AUG" ]; then cp -p "$AUG" "$W/keep-augury.toml"; fi
+    cleanup() {
+        if [ -f "$W/keep-default.toml" ]; then cp -p "$W/keep-default.toml" "$CFG"; else rm -f "$CFG"; fi
+        if [ -f "$W/keep-augury.toml" ]; then cp -p "$W/keep-augury.toml" "$AUG"; else rm -f "$AUG"; fi
+        if [ "$AUG_DIR_CREATED" = "1" ] && [ -d "$AUG_DIR" ]; then rmdir "$AUG_DIR" 2> /dev/null || true; fi
+        rm -rf "$W"
+    }
+    trap cleanup EXIT
+    # The aws recorder: first on PATH, appends its argv, never reaches AWS.
+    SHIM="$(pwd -P)/$ST/region-shim"
+    REC="$SHIM/aws-calls.log"
+    mkdir -p "$SHIM"
+    : > "$REC"
+    printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s"\necho "aws recorder: the region selftest never reaches AWS" >&2\nexit 97\n' "$REC" > "$SHIM/aws"
+    chmod +x "$SHIM/aws"
+    export PATH="$SHIM:$PATH"
+    [ "$(command -v aws)" = "$SHIM/aws" ] || { echo "REGION SELFTEST FAILED: the aws recorder is not first on PATH" >&2; exit 1; }
+    set +e; aws recorder-control > /dev/null 2>&1; crc=$?; set -e
+    [ "$crc" -eq 97 ] && [ "$(wc -l < "$REC" | tr -d ' ')" -eq 1 ] || { echo "REGION SELFTEST FAILED: the aws recorder did not record its control call (exit $crc)" >&2; exit 1; }
+    : > "$REC"
+    echo "AWS RECORDER: control call recorded and cleared"
+    # A fixed fixture artifact (laya-deploy-config only hashes it under DRY_RUN) and the base template copy.
+    A="$W/fixture.apr"
+    printf 'p13-01 region selftest fixture\n' > "$A"
+    [ -f "$BASE_TEMPLATE" ] || { echo "REGION SELFTEST FAILED: the base template $BASE_TEMPLATE does not exist" >&2; exit 1; }
+    cp "$BASE_TEMPLATE" "$W/base.toml"
+    export LAYA_DEPLOY_TEMPLATE="$W/base.toml"
+    RC=0
+    run() { local log="$1"; shift; set +e; "$@" > "$log" 2>&1; RC=$?; set -e; }
+    # The path a render wrote, from its own `wrote <path>` line (so a later per-target path is followed).
+    wrote() { sed -n 's/^  wrote \(.*\) (gitignored) for env=.*$/\1/p' "$1" | tail -n 1; }
+    aws_region() { python3 -I -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["aws"]["region"])' "$1" 2> /dev/null || echo "<unparsed>"; }
+    # `<n> <old line> => <new line>` for two files of equal line count; `count <a> <b>` when they differ.
+    line_delta() {
+        python3 -I -c 'import sys
+    a = open(sys.argv[1]).read().split("\n"); b = open(sys.argv[2]).read().split("\n")
+    if len(a) != len(b):
+        print("count", len(a), len(b))
+    else:
+        d = [(x, y) for x, y in zip(a, b) if x != y]
+        print(len(d), " | ".join(x + " => " + y for x, y in d))' "$1" "$2"
+    }
+    # R1: the default render (no region argument).
+    run "$W/r1.log" just laya-deploy-config "$A" off "$SRV"
+    O1="$(wrote "$W/r1.log")"
+    if [ "$RC" -eq 0 ] && [ -n "$O1" ] && [ -f "$O1" ]; then
+        cp "$O1" "$W/r1.toml"
+        echo "CASE R1 default: rendered $O1, aws.region $(aws_region "$W/r1.toml"), sha256 $(shasum -a 256 "$W/r1.toml" | cut -c 1-12)"
+    else
+        fail "CASE R1 default: exit $RC, no rendered config (log: $W/r1.log)"; tail -3 "$W/r1.log" >&2 || true
+        : > "$W/r1.toml"
+    fi
+    # R2: an explicit us-east-1 render is byte-identical to the default one.
+    run "$W/r2.log" just laya-deploy-config "$A" off "$SRV" dev ze-kasher-dev us-east-1
+    O2="$(wrote "$W/r2.log")"
+    if [ "$RC" -eq 0 ] && [ -n "$O2" ] && cmp -s "$O2" "$W/r1.toml" && [ "$(aws_region "$O2")" = "us-east-1" ]; then
+        echo "CASE R2 explicit us-east-1: cmp-equal to R1, aws.region us-east-1"
+    else
+        fail "CASE R2 explicit us-east-1: exit $RC, not cmp-equal to R1 or aws.region $( [ -n "$O2" ] && aws_region "$O2" ) (log: $W/r2.log)"
+    fi
+    # R3: eu-west-1 changes exactly one line, the region line.
+    run "$W/r3.log" just laya-deploy-config "$A" off "$SRV" dev augury-dev eu-west-1
+    O3="$(wrote "$W/r3.log")"
+    if [ "$RC" -eq 0 ] && [ -n "$O3" ] && [ -f "$O3" ]; then
+        R3_REGION="$(aws_region "$O3")"
+        R3_DELTA="$(line_delta "$W/r1.toml" "$O3")"
+        if [ "$R3_REGION" = "eu-west-1" ] && [ "$R3_DELTA" = '1 region = "us-east-1" => region = "eu-west-1"' ]; then
+            echo "CASE R3 eu-west-1: aws.region eu-west-1, exactly one line differs from R1 (region = \"us-east-1\" => region = \"eu-west-1\")"
+        else
+            fail "CASE R3 eu-west-1: aws.region $R3_REGION, line delta against R1: $R3_DELTA"
+        fi
+    else
+        fail "CASE R3 eu-west-1: exit $RC, no rendered config (log: $W/r3.log)"; tail -3 "$W/r3.log" >&2 || true
+    fi
+    CALLS="$(wc -l < "$REC" | tr -d ' ')"
+    [ "$CALLS" -eq 0 ] || fail "the aws recorder was called $CALLS time(s): $(head -n 3 "$REC" | tr '\n' ';')"
+    echo "AWS CALLS: $CALLS"
+    if [ "$FAILS" -eq 0 ]; then
+        echo "REGION SELFTEST OK"
+    else
+        echo "REGION SELFTEST FAILED ($FAILS failed checks)" >&2
+        exit 1
+    fi
 
 # Prove every deploy refusal OFFLINE on the synthetic tiny artifact (the only one 08-09 writes),
 # DRY_RUN=1 throughout, with `aws` shadowed by a recorder that must stay empty. Cases: placeholder,
@@ -2701,6 +2873,17 @@ laya-deploy-selftest:
     elif [ -n "$POS_SKIPPED" ]; then
         echo "SKIP positive dry run: $POS_SKIPPED"
     fi
+    # The region parameter (plan 13-01, D-20): its own offline recipe, required to end REGION SELFTEST OK.
+    set +e
+    just _laya-region-selftest > "$CASES/region.log" 2>&1
+    rrc=$?
+    set -e
+    if [ "$rrc" -eq 0 ] && grep -qx 'REGION SELFTEST OK' "$CASES/region.log" && grep -qx 'AWS CALLS: 0' "$CASES/region.log"; then
+        echo "REGION: $(grep -c '^CASE ' "$CASES/region.log") cases, AWS CALLS: 0, REGION SELFTEST OK"
+    else
+        fail "the region selftest: exit $rrc without REGION SELFTEST OK (log: $CASES/region.log)"
+        tail -4 "$CASES/region.log" >&2 || true
+    fi
     # Independent checks: the resolver proof on file, and the bootstrap build.
     RP="$(head -n 1 "$PROOF")"
     echo "RESOLVER PROOF: $RP ($(sed -n 's/^cargo_pmcp_version=/cargo-pmcp /p' "$PROOF"), sdk $(sed -n 's/^sdk_commit=//p' "$PROOF" | cut -c 1-12))"
@@ -2734,7 +2917,7 @@ laya-deploy-selftest:
 # and (re)assert its posture on every run: all public access blocked, SSE-S3 default encryption,
 # tags project=aprender component=decide-weights env=<env>. No lifecycle expiry: objects are
 # content-addressed (decide/<server>/<sha256>.apr) and immutable; a new model is a new key.
-laya-weights-bucket env="dev" profile="ze-kasher-dev":
+laya-weights-bucket env="dev" profile="ze-kasher-dev" region="us-east-1":
     #!/usr/bin/env bash
     set -euo pipefail
     ENV="{{ trim_start_match(env, "env=") }}"
@@ -2743,13 +2926,19 @@ laya-weights-bucket env="dev" profile="ze-kasher-dev":
         *) echo "ERROR: '$ENV' is not a known environment (expected dev or prod)" >&2; exit 2 ;;
     esac
     P="{{profile}}"
+    R="{{region}}"
     ACCOUNT="$(aws sts get-caller-identity --profile "$P" --query Account --output text)"
     BUCKET="aprender-decide-weights-${ACCOUNT}-${ENV}"
     if aws s3api head-bucket --profile "$P" --bucket "$BUCKET" 2>/dev/null; then
         echo "  exists:  $BUCKET"
     else
-        # us-east-1 takes no LocationConstraint.
-        aws s3api create-bucket --profile "$P" --region us-east-1 --bucket "$BUCKET" > /dev/null
+        # us-east-1 takes no LocationConstraint; every other region must name it.
+        if [ "$R" = "us-east-1" ]; then
+            aws s3api create-bucket --profile "$P" --region "$R" --bucket "$BUCKET" > /dev/null
+        else
+            aws s3api create-bucket --profile "$P" --region "$R" --bucket "$BUCKET" \
+                --create-bucket-configuration "LocationConstraint=$R" > /dev/null
+        fi
         echo "  created: $BUCKET"
     fi
     aws s3api put-public-access-block --profile "$P" --bucket "$BUCKET" \
@@ -2758,7 +2947,7 @@ laya-weights-bucket env="dev" profile="ze-kasher-dev":
         --server-side-encryption-configuration '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
     aws s3api put-bucket-tagging --profile "$P" --bucket "$BUCKET" \
         --tagging "TagSet=[{Key=project,Value=aprender},{Key=component,Value=decide-weights},{Key=env,Value=$ENV}]"
-    echo "  private, SSE-S3, tagged: s3://$BUCKET (region us-east-1)"
+    echo "  private, SSE-S3, tagged: s3://$BUCKET (region $R)"
 
 # Upload <apr> content-addressed to s3://aprender-decide-weights-<account>-<env>/decide/<server>/<sha256>.apr.
 # `just laya-verify` on the exact file runs FIRST and must accept it before any AWS call (sts
