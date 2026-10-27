@@ -1,0 +1,188 @@
+{
+  "schema": "laya-baseline-evidence-v1",
+  "phase": "13",
+  "plan": "13-11",
+  "server": "aprender-mcp-decide-motivation",
+  "triple": {
+    "pmcp_target": "dev",
+    "aws_account": "816069129666",
+    "region": "us-east-1",
+    "endpoint": "https://aprender-mcp-decide-motivation.us-east.true-mcp.com/mcp"
+  },
+  "protects": "the ze-kasher-dev deployment's local record against the augury-dev work of plans 13-04..13-09",
+  "archive": {
+    "dir": "models/decide/ze-kasher-dev-archive-20261027",
+    "manifest": "models/decide/ze-kasher-dev-archive-20261027/MANIFEST.sha256",
+    "manifest_sha256": "b01bc7216ddd1e349b079a2bf9aa314a2f8030a0730ed94233d348429a44ad90",
+    "files": [
+      {
+        "path": "models/decide/deploy-config-aprender-mcp-decide-motivation.toml",
+        "sha256": "5c7d8e7572045d76915bfb24105e9daa7eedfdfd5732b146d8bb00d7c42207aa",
+        "bytes": 7606,
+        "mtime_utc": "2026-10-26T21:51:51Z"
+      },
+      {
+        "path": "models/decide/deploy-aprender-mcp-decide-motivation.log",
+        "sha256": "1e4759e01f101fe9e452afb3655e36f2cc54f873571be0f172eaf6ced6bbbc01",
+        "bytes": 5194,
+        "mtime_utc": "2026-10-26T22:13:47Z"
+      },
+      {
+        "path": "models/decide/deploy-aprender-mcp-decide-motivation.state/deployment.toml",
+        "sha256": "264f146c2c79c06d0ba424d16746db68fe203b15dd4f808007113054fac05a84",
+        "bytes": 262,
+        "mtime_utc": "2026-10-26T22:13:47Z"
+      },
+      {
+        "path": "models/decide/deploy-aprender-mcp-decide-motivation.state/stack.ts",
+        "sha256": "7e570ac4561963a4c778bc52a3ee171d776fe9849cb034b3c5ec43d1f5408162",
+        "bytes": 6754,
+        "mtime_utc": "2026-10-26T22:12:30Z"
+      },
+      {
+        "path": "models/decide/deploy-health-aprender-mcp-decide-motivation.json",
+        "sha256": "4cfffba98f1ff02ce738e7826f66aceb45c63f9cc10f23608ecebd3fe4651486",
+        "bytes": 131,
+        "mtime_utc": "2026-10-26T22:14:10Z"
+      },
+      {
+        "path": "models/decide/deploy-probe-aprender-mcp-decide-motivation.log",
+        "sha256": "e2a0a33e5959bccdaa0fd11f7844f2d19fc24407cf25daa3dfc78aca50752809",
+        "bytes": 2712,
+        "mtime_utc": "2026-10-26T22:14:36Z"
+      },
+      {
+        "path": "models/decide/eligibility-aprender-mcp-decide-motivation.log",
+        "sha256": "3bca2702b2db77d8a0b9c2e8a5fd78d652860f03302bf03a93cf67b8900f0c2d",
+        "bytes": 2635,
+        "mtime_utc": "2026-10-26T22:11:34Z"
+      },
+      {
+        "path": "models/decide/eligibility-upload-aprender-mcp-decide-motivation.log",
+        "sha256": "3ad67537109ec95d93dea871cbc2aae81dd2184d43c169737422a15de6a17975",
+        "bytes": 2635,
+        "mtime_utc": "2026-10-26T22:01:33Z"
+      },
+      {
+        "path": "models/decide/deploy-evidence-aprender-mcp-decide-motivation.json",
+        "sha256": "b392e351a439396768b9a00a7387090e4482f9a711b4a307c9a705b058878783",
+        "bytes": 3889,
+        "mtime_utc": "2026-10-26T22:21:45Z"
+      },
+      {
+        "path": "models/decide/resolver-proof-aprender-mcp-decide-motivation.txt",
+        "sha256": "91d1ee98898d5c69c492cc0db0f76999063c23c97ccfa3065987649b86b1f192",
+        "bytes": 550,
+        "mtime_utc": "2026-10-26T19:45:36Z"
+      },
+      {
+        "path": "models/decide/plan-concentrated.json",
+        "sha256": "b2a5628682de4ca9cc9520860efd131a1a63bbf310b841906e54049dc36da252",
+        "bytes": 293,
+        "mtime_utc": "2026-10-26T22:18:45Z"
+      },
+      {
+        "path": "models/decide/plan-distributed.json",
+        "sha256": "68cdc457c40369f45c8f26f180b6e75d241e3b21d3bd3791156b57bfe0645293",
+        "bytes": 289,
+        "mtime_utc": "2026-10-26T22:18:47Z"
+      }
+    ],
+    "absent": [],
+    "check_ok": true,
+    "built_via": "temporary sibling then rename (models/decide/ze-kasher-dev-archive-20261027.tmp -> models/decide/ze-kasher-dev-archive-20261027, after shasum -a 256 -c passed)"
+  },
+  "ordering": {
+    "rule": "every writer plan depends on 13-11; no writer SUMMARY existed and no laya recipe was running when the archive was taken",
+    "writer_summaries_absent": true,
+    "writer_summaries_checked": [
+      "13-04-SUMMARY.md",
+      "13-06-SUMMARY.md",
+      "13-07-SUMMARY.md"
+    ],
+    "no_laya_process": true,
+    "process_check": "pgrep -fl '[j]ust .*aprender-mcp-decide-motivation' returned 1 (no match); no `just` process of any kind was running"
+  },
+  "committed_cross_check": {
+    "record": "12-DEPLOY-EVIDENCE.json",
+    "record_path": ".planning/phases/12-motivation-v1-decide-server-for-experiment-coach-laya-pilot/12-DEPLOY-EVIDENCE.json",
+    "record_commit": "9a66e695ffe279f45a7dcf730daf125fdc757f93",
+    "record_committer_utc": "2026-10-26T22:22:30Z",
+    "committed_before_base": true,
+    "checks": [
+      {
+        "file": "deploy-evidence-aprender-mcp-decide-motivation.json",
+        "key": "cold_samples[].probe_id == live.cold_samples[].probe_id (4, in order)",
+        "equal": true
+      },
+      {
+        "file": "deploy-aprender-mcp-decide-motivation.state/deployment.toml",
+        "key": "deployment.endpoint == live_attempts[0].endpoint",
+        "equal": true
+      },
+      {
+        "file": "deploy-config-aprender-mcp-decide-motivation.toml",
+        "key": "environment.APRENDER_DECIDE_SHA256 == config.sha_pin",
+        "equal": true
+      },
+      {
+        "file": "deploy-config-aprender-mcp-decide-motivation.toml",
+        "key": "environment.APRENDER_DECIDE_S3_URI endswith config.key",
+        "equal": true
+      },
+      {
+        "file": "plan-concentrated.json",
+        "key": "live.plan_only.concentrated on 8 shared keys",
+        "equal": true
+      },
+      {
+        "file": "plan-distributed.json",
+        "key": "live.plan_only.distributed on 8 shared keys",
+        "equal": true
+      },
+      {
+        "file": "eligibility-aprender-mcp-decide-motivation.log",
+        "key": "last JSON line deploy_eligible true and artifact_sha256 d202f495...",
+        "equal": true
+      },
+      {
+        "file": "eligibility-upload-aprender-mcp-decide-motivation.log",
+        "key": "last JSON line deploy_eligible true and artifact_sha256 d202f495...",
+        "equal": true
+      }
+    ],
+    "all_equal": true,
+    "rest_on_ordering": [
+      "deploy-aprender-mcp-decide-motivation.log",
+      "deploy-aprender-mcp-decide-motivation.state/stack.ts",
+      "deploy-health-aprender-mcp-decide-motivation.json",
+      "deploy-probe-aprender-mcp-decide-motivation.log",
+      "resolver-proof-aprender-mcp-decide-motivation.txt"
+    ]
+  },
+  "anchor": {
+    "commit": "61586f888fec2c7d936adb4f43283a07751f3a5b",
+    "committer_utc": "2026-10-27T18:41:01Z",
+    "role": "supporting observation: an mtime can be preserved by cp -p, so it is not proof",
+    "all_before": true,
+    "mtime_after_base": []
+  },
+  "endpoint_record": "https://aprender-mcp-decide-motivation.us-east.true-mcp.com/mcp",
+  "artifact": {
+    "path": "models/decide/laya-motivation-v1.apr",
+    "sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+    "copied": false
+  },
+  "later_checks": [
+    "13-04 Task 2/3",
+    "13-06 Task 2/3",
+    "13-07 Task 1",
+    "13-08 Task 2",
+    "13-09 Task 3",
+    "13-10 Task 2"
+  ],
+  "read_only": true,
+  "measured_on": "2026-10-27",
+  "measured_at_utc": "2026-10-27T23:06:50Z",
+  "commit": "bb0e14661219a6a536a843c1ed508f3813e9a800"
+}
