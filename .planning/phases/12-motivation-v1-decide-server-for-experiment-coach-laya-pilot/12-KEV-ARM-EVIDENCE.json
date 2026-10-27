@@ -1,7 +1,7 @@
 {
   "schema": "laya-kev-arm-evidence-v1",
   "phase": "12",
-  "plan": "12-14",
+  "plan": "12-15",
   "branch": "spike/016-upstream-sync",
   "commit": "32103ba83ce4165598ae31ddde89b5c9856b43f3",
   "worktree_dirty": [
@@ -144,6 +144,87 @@
     "measured_peak_rss_bytes_timed_row": 12974178304,
     "measured_peak_rss_bytes_parity_run": 24029200384
   },
-  "outcome": "prepared",
-  "outcome_note": "preparation and probe complete; the full arm has NOT run (D-24: awaiting the owner's budget choice at the plan-14 checkpoint)"
+  "outcome": "blocked",
+  "outcome_note": "closed by owner decision (12-KEV-OWNER-REPLY-2.json): the full dump was stopped after 134 of 395 rows; the owner declined the remaining compute because 142 s per post (uncached ~6,800-token guide prefill) is not practical; no fit was run, no eval-probs.json exists, the arm enters the bake-off as blocked:budget",
+  "prior_plan": "12-14",
+  "failure_class": "budget",
+  "run": {
+    "option": "full",
+    "status": "stopped_by_owner",
+    "stop_reason": "owner decision 2026-10-26, verbatim in 12-KEV-OWNER-REPLY-2.json: per-post cost (about 142 s warm, more than 300 s per post as the owner priced it with load and overheads) is not practical without a prefix cache or GPU",
+    "rows_scored": {
+      "eval": 100,
+      "train": 34
+    },
+    "rows_planned": {
+      "eval": 100,
+      "train": 295
+    },
+    "attempts": 1,
+    "attempts_note": "one start (dump: 395 rows in file, 0 already present, 395 to score); no resume, no DROPPED or REFUSED line; the process was killed, so there is no rc file; the last line of scores.jsonl is complete JSON (the file ends with a newline, all 135 lines parse)",
+    "rc": null,
+    "rc_reason": "process killed by the owner's stop; /tmp/p12-15-dump.rc was never written",
+    "total_hours": 5.351298174560278,
+    "total_hours_derivation": "sum of the `ms` field over every scored row / 3.6e6 (excludes the 56 s model load)",
+    "per_row_warm_s": 142.4040976665,
+    "per_row_warm_s_derivation": "median of the ms field over the 134 scored rows / 1000 (min 139.3 s, max 159.8 s; 6853 to 6966 tokens per row)",
+    "peak_rss_bytes": null,
+    "peak_rss_reason": "not recoverable: the dump ran under /usr/bin/time -l, which prints its resource report only when the child exits, and the child was killed; the log holds per-row lines only. Measured elsewhere: 12,974,178,304 bytes on the timed row (timing.peak_rss_bytes) and 24,029,200,384 on the parity run",
+    "threads": 14,
+    "scores_path": "models/kev/motivation-v1/scores.jsonl",
+    "scores_sha256": "3c8e86ed6a7e21ce54fca4dbfb428329cacd8a59808f24459bf61bfaab6cc2b2",
+    "scores_bytes": 31155,
+    "scores_identity_sha256": "879bb1aa9ab229e348599e047524c8c7f54694fde73e06f5af5ef9807e80459a",
+    "kept_for_resume": "scores.jsonl, scores-identity.json and rows-chosen.json (gitignored) are kept; a resume is valid because the identity header binds the GGUF, head, rows file, driver binary, worktree commit and threads",
+    "resume_command": "nohup sh -c 'lockf -k -t 3600 /tmp/aprender-laya-real-weights.lock env RAYON_NUM_THREADS=14 /usr/bin/time -l .planning/spikes/033-motivation-kev-4b-arm/target/release/motivation-kev-4b-arm dump models/kev/kev-4b/kev-4b-merged-f32.gguf models/kev/kev-4b/head.safetensors models/kev/motivation-v1/rows-chosen.json models/kev/motivation-v1/scores.jsonl --identity models/kev/motivation-v1/scores-identity.json > /tmp/p12-15-dump.log 2>&1; echo $? > /tmp/p12-15-dump.rc' > /dev/null 2>&1 &",
+    "resume_note": "the dump command takes `out.jsonl` as the 4th positional argument and --identity; the command above is the one plan 12-15 Task 1 ran, repeated with the same identity file. Running it needs a new owner decision (the 1-hour authorisation is spent)"
+  },
+  "partial_eval": {
+    "calibration": "none: raw dumped probabilities, zero-shot, the head's own temperature; no fit, no eval row used for any fitting",
+    "n_eval_rows": 100,
+    "gold_class_counts": {
+      "social_affiliative": 23,
+      "conspiratorial": 14,
+      "other": 63
+    },
+    "auc_one_vs_rest": {
+      "social_affiliative": 0.6956521739130435,
+      "conspiratorial": 0.904485049833887,
+      "other": 0.6726726726726727
+    },
+    "argmax_accuracy": 0.17,
+    "predicted_class_counts": {
+      "social_affiliative": 5,
+      "conspiratorial": 95,
+      "other": 0
+    },
+    "keying": "(split, row); eval label sequence of rows-chosen.json asserted equal to eval.jsonl; counts asserted",
+    "script": ".planning/spikes/033-motivation-kev-4b-arm/tools/partial_eval.py",
+    "script_run": "uv run --offline --project scripts/laya_train --frozen python -I .planning/spikes/033-motivation-kev-4b-arm/tools/partial_eval.py",
+    "label_order": [
+      "social_affiliative",
+      "conspiratorial",
+      "other"
+    ],
+    "label_order_source": "confirmed",
+    "label_order_source_detail": "task.json criteria order (data.load_task labels) is the order encode_rows.py passes to Kev as `criteria`; kev/api.py question_keys() returns list(criteria) and kev/model.py encode() builds the option spans in q[\"options\"] order, so the dump's three probabilities follow it; rows-chosen opts are ascending token positions (asserted)",
+    "caveats": [
+      "n conspiratorial is only 14, so the AUCs (conspiratorial 0.904 especially) are noisy and carry wide intervals that were not computed",
+      "95 of 100 rows are predicted conspiratorial: raw argmax accuracy 0.17 is below the 0.63 majority-class rate, and the probabilities are uncalibrated, so the ranking signal (AUC) and the decision rule (argmax) disagree by construction",
+      "this is a raw zero-shot read in a regime about 6.6x Kev's 1,024-token training branch; no bias or temperature was fitted (D-11 fit not run)",
+      "no calibrated Kev number exists and no eval-probs.json was written: the arm enters the bake-off as blocked:budget and these figures are not a ranked comparison with Laya"
+    ]
+  },
+  "fit": null,
+  "fit_reason": "not run: the owner stopped the dump before the train rows needed for the D-11 fit were scored (34 of 295); fit_kev.py was not written",
+  "eval_probs": null,
+  "eval_probs_reason": "no calibrated Kev eval probabilities exist; models/kev/motivation-v1/eval-probs.json was not written",
+  "bakeoff_arm": "blocked:budget:.planning/phases/12-motivation-v1-decide-server-for-experiment-coach-laya-pilot/12-KEV-ARM-EVIDENCE.json",
+  "cleanup_12_15": {
+    "deleted": [],
+    "note": "models/kev/kev-4b/merged no longer exists (removed in plan 12-14, see cleanup); nothing deleted by plan 12-15. The GGUF is kept: free disk is above the plan's 25 GiB threshold",
+    "gguf_kept": "models/kev/kev-4b/kev-4b-merged-f32.gguf",
+    "regenerate": "tools/export_kev4b.py then the offline converter (12-14)",
+    "free_bytes_after": 41364643840
+  }
 }

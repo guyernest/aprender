@@ -1,0 +1,34 @@
+{
+  "schema": "laya-kev-owner-reply-v1",
+  "phase": "12",
+  "plan": "12-15",
+  "supersedes": {
+    "file": "12-KEV-OWNER-REPLY.json",
+    "sha256": "b510ef4d74ee4d7d219c26812c709ad0e254ccee47a56a4b7c1bb6d3bcf094be",
+    "note": "the first reply (option full, 2026-10-26) stays byte-identical in git history; this reply changes the option to stopped after 134 of the 395 chosen rows were scored"
+  },
+  "option": "stopped",
+  "replied_on": "2026-10-26",
+  "replies": [
+    {
+      "order": 1,
+      "when": "2026-10-26, while the full dump was running (rows scored so far: eval 100, train 34)",
+      "reply": "Let's stop it and rethink the model."
+    },
+    {
+      "order": 2,
+      "when": "2026-10-26, after seeing a corrected comparison of Kev and Laya",
+      "reply": "It seems that the Laya is winning on speed and performance, and running the Kev for the classification with more than 300 seconds per post is not reasonable. If we don't optimize Kev to use prefill or cache, and use GPU, it is not practical. What do you think?"
+    },
+    {
+      "order": 3,
+      "when": "2026-10-26, approving the recommendation (1: close 12-15 as a documented partial; 2: run 12-16 with Kev as a blocked / AUC-only reference arm; 3: Kev prefix-cache / GPU optimisation is a separate future spike, not started)",
+      "reply": "yes, proceed with the three steps"
+    }
+  ],
+  "evidence_state": "the dump was killed after 134 of 395 rows were scored: all 100 eval rows and 34 train rows (scores.jsonl: identity header + 134 row lines, final line complete JSON); 261 train rows were not scored",
+  "prior_evidence_sha256": "7304b8797a2a05f8c902d3594ff39c0dab10d2ba6b57216679904a8aa99cdd52",
+  "prior_evidence_note": "12-KEV-ARM-EVIDENCE.json as committed in 9c66d7ac5 (outcome prepared); it is rewritten by plan 12-15 as outcome blocked",
+  "compute_authorisation": "The remaining compute (261 train rows, about 10.3 h at the measured 142 s per row) is declined by the owner. No further Kev scoring runs under plan 12-15; the 1-hour authorisation of the first reply is spent, not renewed. The kept scores.jsonl and identity file make a later resume valid, but a resume needs a new owner decision.",
+  "owner_context_not_an_option_change": "Steps 2 and 3 are the owner's approved routing for plan 12-16 and a future spike. The prefix-cache / GPU optimisation is not started here."
+}
