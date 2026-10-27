@@ -242,6 +242,10 @@ deploying antisemitism-v1 to augury.
 
 </deferred>
 
+## Owner decisions after review (2026-10-27)
+
+- CI wiring of the new Phase 13 selftests: keep local-only; no ci/explicit-test-commands.d fragments (owner, during /gsd-plan-phase 13 --reviews).
+
 ---
 
 *Phase: 13-motivation-v1-on-augury-dev-second-server-and-enrichment-handoff*

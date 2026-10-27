@@ -1020,26 +1020,26 @@ Known constraints: the only edge host pattern seen is `<server>.us-east.true-mcp
 
 Plans:
 **Wave 1**
-- [ ] 13-01-PLAN.md — commit the justfile region parameter with its offline check in both regions, positional args, and re-mutation (D-05, D-20)
-- [ ] 13-02-PLAN.md — declare motivation-record-v1 and motivation-enrichment-v1 as a kind:schema contract (D-13, D-14, D-15, D-16)
-- [ ] 13-11-PLAN.md — wave 1: archive the ze-kasher-dev local record with a pinned sha256 manifest and a pre-phase mtime anchor before any phase-13 command writes it (D-06, D-02)
+- [ ] 13-01-PLAN.md — commit the justfile region parameter with its offline check in both regions, positional args, the state snapshot, the eligibility export that keeps row_verify measuring, and re-mutation (D-05, D-20)
+- [ ] 13-02-PLAN.md — declare motivation-record-v1 and motivation-enrichment-v1 as a kind:schema contract with structured bounds and the d15_amendment (D-13, D-14, D-15, D-16)
+- [ ] 13-11-PLAN.md — wave 1: archive the ze-kasher-dev local record with a pinned sha256 manifest before any phase-13 writer, cross-checked against Phase 12's committed record, never re-pinned (D-06, D-02)
 
 **Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 13-03-PLAN.md — prepare_motivation.py --enrichment: train-only merge, conflict/eval-overlap drops, v1 byte identity by check (D-09..D-12, D-15, D-16)
-- [ ] 13-04-PLAN.md — deployment triple as the key: _laya-target-check, per-profile state dir, endpoint check, wiring guard (D-06)
-- [ ] 13-05-PLAN.md — selection note and the seeded reference rule (D-17)
+- [ ] 13-04-PLAN.md — deployment triple as the key: _laya-target-check with accounts and the PMCP_API_URL guard, live account check, per-profile state dir, endpoint check, ordered wiring guard, teardown reachable from containment (D-06)
+- [ ] 13-05-PLAN.md — selection note with a generated rule section and the seeded reference rule (D-17)
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 13-06-PLAN.md — M2M token from a mode-600 file, laya-probe-auth, unauthenticated-refusal probe, re-exec in verify/deploy (D-07)
+- [ ] 13-06-PLAN.md — M2M token from a mode-600 file (form-body, no redirects), laya-probe-auth, unauthenticated-refusal probe, re-exec in verify/deploy executed through shims (D-07)
 
 **Wave 4** *(blocked on Wave 3 completion)*
-- [ ] 13-07-PLAN.md — re-verify the wave-1 archive of the ze-kasher-dev local record, D-18 read-only probe, eu-west-1 config, upload to the augury bucket, owner login (D-18, D-19)
+- [ ] 13-07-PLAN.md — re-verify the wave-1 archive, D-18 read-only probe, the offline selftest before the eu-west-1 config, upload to the augury bucket with a remote sha256, owner login (D-18, D-19)
 
 **Wave 5** *(blocked on Wave 4 completion)*
-- [ ] 13-08-PLAN.md — publish on augury-dev, owner enables OAuth and creates the M2M client, refusal and authenticated identity (D-06, D-07)
+- [ ] 13-08-PLAN.md — publish on augury-dev timed from the DEPLOYING line with a bounded-open watchdog, owner enables OAuth and creates the M2M client, refusal and authenticated identity (D-06, D-07)
 
 **Wave 6** *(blocked on Wave 5 completion)*
-- [ ] 13-09-PLAN.md — authenticated timings and acceptance replay; ze-kasher-dev shown unchanged (D-07, D-02)
+- [ ] 13-09-PLAN.md — authenticated timings and acceptance replay with a successful 4-text call; ze-kasher-dev shown unchanged by derived checks (D-07, D-02)
 
 **Wave 7** *(blocked on Wave 6 completion)*
 - [ ] 13-10-PLAN.md — hand-off to the owner and phase closure checks (D-08, D-04)

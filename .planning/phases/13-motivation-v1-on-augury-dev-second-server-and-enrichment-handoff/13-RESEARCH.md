@@ -503,13 +503,18 @@ for src in enrichment_sources:                               # file order
 | A8 | Recommended selection-note numbers (120/105/75, band 0.20 and 0.45-0.75, quotas 45/30/30) | Q5 pattern | the note is discretionary (D-17); owner may adjust |
 | A9 | The guide's evidence taxonomy needs a `none` value for `other` with no evidence | Q4 | If the expert records only clear/weak/mixed, `none` is simply unused |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Does the existing counter-coach M2M client work for the new host?** Known: pool shared (P7 issuer is the counter-coach pool); scopes are per resource-server host. Unclear until the owner enables OAuth. Recommendation: plan for a new client; make the helper's failure message precise.
+   RESOLVED: 13-08 Task 3. The owner creates an M2M client for the new host that accepts form-body credentials. The executor proves it with an authenticated identity call minted `(auth form)`. An `invalid_scope` / `invalid_client` / `m2m-auth-method` refusal is a checkpoint naming only the status and the OAuth error code.
 2. **Where does the owner want the M2M file?** Recommendation: a mode-700 temp dir outside the checkout (partner runbook step form), path passed via `LAYA_M2M_FILE`, removed after.
+   RESOLVED: a mode-600 (or 400) file outside the checkout, passed only as `LAYA_M2M_FILE`. 13-06 Task 1: `scripts/laya_deploy/m2m_token.py` checks the opened descriptor (regular, owner, exact mode). 13-08 Task 3: a path under the repository is refused, and the path is kept only in the gitignored `models/decide/augury-dev/m2m-file-path`.
 3. **Should `laya-deploy-verify` (4 cold samples) run authenticated in this phase?** Phase 12 ran it (`12-DEPLOY-EVIDENCE.json live`). Recommendation: yes, with the token env, because it is the only source of cold-sample evidence on the new tenant; it is reported, not gated.
+   RESOLVED: 13-09 Task 1. It runs authenticated (`LAYA_M2M_FILE=... just laya-deploy-verify ... augury-dev 2`, re-exec'd under the helper from 13-06). The timings are reported, not gated.
 4. **Contract vs doc for the format (D-13)?** Recommendation: contract (`kind: schema`); owner may prefer a doc. Neither blocks the ingest.
+   RESOLVED: 13-02. `contracts/motivation-enrichment-v1.yaml`, `kind: schema`, accepted by `pv validate` and `pv lint`, with structured bounds that the 13-03 and 13-05 validators mirror.
 5. **Does the owner want the selection helper shipped?** D-03 forbids collecting posts here, not shipping a rule; recommend a tiny reference implementation with a synthetic selftest.
+   RESOLVED: 13-05. `scripts/laya_train/select_motivation.py` is a reference implementation with a synthetic-record selftest and `--print-rule`. `13-SELECTION-NOTE.md` embeds the generated rule section.
 
 ## Environment Availability
 
