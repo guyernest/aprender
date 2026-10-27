@@ -4,7 +4,7 @@ idea: llm-decision-classifier
 name: motivation-kev-4b-arm
 type: standard
 validates: "Given the Phase 12 motivation-v1 split and the partner's guide (Sections 4.1-4.4, 5, 6; 4.5 omitted), when Kev-4B runs through the Rust path (PEFT merge in fp32 -> llama.cpp f32 GGUF -> upstream Qwen35Model with batched prefill and hidden readout + the pointer head) it matches a torch fp32 oracle, and one real train row is timed so the owner can price the reference arm before any multi-hour compute"
-verdict: PENDING
+verdict: PARTIAL
 related: [015, 017, 020]
 tags: [kev, qwen3.5, gguf, prefill, motivation, reference-arm]
 ---
@@ -51,4 +51,24 @@ The instruction branch is about 6.8k tokens, about 6.6x Kev's 1,024-token traini
 (the author marks it untested). Kev is a reference arm; a good or bad number here is a finding, not a verdict on the method.
 
 ## Verdict
-PENDING: the owner chooses the Kev budget at the plan-14 checkpoint; the arm's own run is plan 12-15.
+PARTIAL. The Rust path is validated (parity, above); the reference arm as served is impractical; the quality read is partial and raw.
+
+- **Cost measured.** Plan 12-15 started the full dump (100 eval + 295 train rows) under the identity-bound resumable driver. Median
+  142 s per post on 14 CPU threads (min 139 s, max 160 s; 6,853 to 6,966 tokens per row). The post itself is about 100 tokens: the rest
+  is the shared guide (about 6,800 tokens), prefilled again from scratch for every post. Laya's served path is about 1 s warm per post.
+- **Stopped by the owner, 2026-10-26** (`12-KEV-OWNER-REPLY-2.json`, quotes verbatim): after 134 of 395 rows (all 100 eval, 34 train;
+  5.35 h of scoring) the owner stopped the run and declined the remaining ~10.3 h. Outcome `blocked`, failure class `budget`. No bias or
+  temperature fit was run (D-11 not exercised), `fit_kev.py` was not written and no `eval-probs.json` exists.
+- **Partial result, raw and uncalibrated** (`tools/partial_eval.py`; zero-shot, the head's own temperature, no fitting, 100 eval rows,
+  gold: other 63, social_affiliative 23, conspiratorial 14): argmax accuracy 0.17 (95/100 predicted conspiratorial, 5 social_affiliative,
+  0 other); one-vs-rest AUC conspiratorial 0.904, social_affiliative 0.696, other 0.673. Only 14 conspiratorial rows, so these are
+  noisy; the ranking signal and the argmax decision disagree because the probabilities are uncalibrated. This is NOT a calibrated Kev
+  number and no parity or superiority of either arm is claimed. (An earlier ad-hoc read keyed gold labels by `row` alone, so eval rows
+  0-99 were overwritten by train rows 0-99 and it showed chance level; the script keys by (split, row) and asserts the eval label
+  sequence and class counts.)
+- **Reopen condition.** A prefix cache of the shared guide prefix (CPU or GPU) would cut per-post compute roughly 60x (about 100 new
+  tokens instead of about 6,900), plus batching. That is a separate spike, not started. Upstream's prefix/prefill state is in the memory
+  note `aprender-upstream-qwen35-prefix-and-prefill-state.md`. AWS GPU quota in ze-kasher-dev us-east-1 is G/VT 8 vCPU only, so a GPU
+  host needs a quota step first.
+- **Kept for a resume.** `models/kev/motivation-v1/{scores.jsonl, scores-identity.json, rows-chosen.json}` and the GGUF are kept
+  (gitignored). Resuming with the same `dump` command and identity file is valid, and needs a new owner decision.
