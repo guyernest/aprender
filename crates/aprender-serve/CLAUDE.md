@@ -979,3 +979,18 @@ reuse by loading the activation vector once per midi-tile instead of twice.
 - **Q8K path**: Existing `fused_q4k_q8k_ffn_up_gate_into` still used when Q8K activations available
 - **Key files**: `crates/aprender-serve/src/quantize/fused_gate_up.rs`,
   `crates/aprender-serve/src/gguf/inference/fused_matmul_into.rs` (`fused_gate_up_matmul_into`)
+
+## Performance Targets (Ollama Parity)
+
+| Model | CPU (tok/s) | GPU (tok/s) | Memory |
+|-------|-------------|-------------|--------|
+| 1B Q4_K | 100+ | 500+ | 600MB |
+| 7B Q4_K | 30+ | 150+ | 4GB |
+| 13B Q4_K | 15+ | 80+ | 8GB |
+
+These are **targets**, not measurements. For what is actually measured against Ollama,
+see `docs/BEATS.md`: GPU decode on RTX 4090 sm_89 is at **parity** (1.015–1.109×), and
+`contracts/beat-ollama-decode-throughput-speed-v1.yaml` enforces `beat_threshold: 0.9000`
+— a no-collapse floor. The old "apr beats Ollama 1.371×" headline is **withdrawn**.
+
+Architecture: Trueno SIMD backend, realizar fused dequant+matmul kernels, PagedAttention KV cache, optional wgpu/CUDA.

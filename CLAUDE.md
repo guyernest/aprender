@@ -317,22 +317,8 @@ Feature flag (`crates/apr-cli/Cargo.toml`): `inference = ["realizar", "trueno", 
 "training", "visualization", "zram"]` — so `inference` is on unless you pass
 `--no-default-features`. GPU work needs `--features cuda`, which pulls in `inference`,
 `realizar/cuda` and `entrenar/cuda`.
-Always profile with `apr profile`/`apr trace`/`apr bench` before optimizing.
-
-### Performance Targets (Ollama Parity)
-
-| Model | CPU (tok/s) | GPU (tok/s) | Memory |
-|-------|-------------|-------------|--------|
-| 1B Q4_K | 100+ | 500+ | 600MB |
-| 7B Q4_K | 30+ | 150+ | 4GB |
-| 13B Q4_K | 15+ | 80+ | 8GB |
-
-These are **targets**, not measurements. For what is actually measured against Ollama,
-see `docs/BEATS.md`: GPU decode on RTX 4090 sm_89 is at **parity** (1.015–1.109×), and
-`contracts/beat-ollama-decode-throughput-speed-v1.yaml` enforces `beat_threshold: 0.9000`
-— a no-collapse floor. The old "apr beats Ollama 1.371×" headline is **withdrawn**.
-
-Architecture: Trueno SIMD backend, realizar fused dequant+matmul kernels, PagedAttention KV cache, optional wgpu/CUDA.
+Always profile with `apr profile`/`apr trace`/`apr bench` before optimizing. Ollama-parity
+performance targets (targets, not measurements) live in `crates/aprender-serve/CLAUDE.md`.
 
 ## LAYOUT-001/002: Tensor Layout Safety
 
@@ -497,9 +483,6 @@ Mutation testing: `cargo mutants --no-times --timeout 300 --in-place -- --all-fe
 
 ## Linting
 
-Workspace-level lints in `Cargo.toml` (`[workspace.lints.rust]` / `[workspace.lints.clippy]`).
-Key: `unsafe_code = "forbid"`, `clippy::all + pedantic = "warn"`, ML-specific allows for casts/float_cmp.
-
 **Both ends of the toolchain range are gated (#2370).** `rust-toolchain.toml` pins one
 exact release, so every gate we own — `make tier1/2/3`, sovereign-ci `lint` — lints
 under that one clippy and nothing else.
@@ -522,18 +505,7 @@ Clippy's lint set is **not monotonic**: the #2370 tree is clean on 1.93/1.96/1.9
 
 ## CI/CD (`.github/workflows/`)
 
-- **ci.yml**: check, fmt, clippy, test, coverage (Codecov), mutation testing, security audit, docs, bashrs
-- **benchmark.yml**: criterion benchmarks on PR/weekly, auto PR comments
-- **security.yml**: cargo-audit, cargo-deny (license/banned crates), cargo-outdated (weekly)
-- **dependabot.yml**: weekly Rust deps, monthly GH Actions
-- **book.yml**: EXTREME TDD book to GitHub Pages
 - **binary-release.yml**: `pv` binaries on `release: published` (the release itself is cut by hand: `scripts/bump-version.sh`, tag, `gh release create`; see docs/specifications/PP-LLAMA-001-MASTER.md §7.2)
-
-## Modules
-
-**v0.4.0 (TOP 10 ML):** LinearRegression, LogisticRegression, DecisionTree, RandomForest, GBM, NaiveBayes, KNN, SVM, KMeans, PCA + model selection + metrics
-
-**v0.7.x (Advanced):** ARIMA time series, text processing (tokenizers, stop words, stemming, chat templates via minijinja), Bayesian inference (conjugate priors, BLR), GLMs (Poisson/Gamma/Binomial), ICA decomposition, graph algorithms (Dijkstra/A*/PageRank/community detection)
 
 ## Key Files
 
@@ -576,15 +548,6 @@ skill before building any of that; the raw experiments stay in `.planning/spikes
 FALSIFY-CLI-001/002. The contract deliberately hand-maintains no count — parse
 the `commands:` list, never `grep -c '^  - name:'` (117; other same-indent
 `name:` keys exist in the file).
-Key commands: `run`, `chat`, `serve`, `pull`, `finetune`, `prune`, `distill`, `merge`, `quantize`, `inspect`, `debug`, `validate`, `diff`, `tensors`, `trace`, `lint`, `explain`, `export`, `import`, `convert`, `compile`, `train`, `tune`, `eval`, `bench`, `profile`, `qa`, `mcp`, `probar`, `cbtop`, `tui`, `hex`, `tree`, `flow`, `qualify`
-
-```bash
-apr validate model.apr --quality
-apr convert model.safetensors --quantize int8 -o model-int8.apr
-apr export model.apr --format gguf -o model.gguf
-apr merge model1.apr model2.apr --strategy weighted --weights 0.7,0.3 -o merged.apr
-apr qa model.gguf --assert-tps 100 --json
-```
 
 ## PMAT Quality Analysis
 
@@ -612,16 +575,6 @@ still carries a header comment claiming it was "Updated for PMAT v2.215.0".
 
 SATD is checked by `pmat analyze satd`, but no SATD threshold is configured in
 `.pmat-gates.toml`; the pre-commit hook there is `pmat comply check --failures-only`.
-
-```bash
-pmat quality-gates              # Run all gates (config: .pmat-gates.toml)
-pmat rust-project-score         # Project analysis
-pmat analyze complexity         # Cyclomatic/cognitive complexity
-pmat analyze satd               # Zero TODO/FIXME/HACK
-pmat tdg . --include-components # Technical debt grading
-pmat query "error handling"     # Semantic code search with quality annotations (RAG-powered)
-pmat embed sync                 # Sync embeddings for codebase (run before query)
-```
 
 unwrap() banned via `.clippy.toml` disallowed-methods. Use `expect()` or `ok_or_else(|| ...)?`. See Issue #41.
 
@@ -652,13 +605,6 @@ Passing a revision where a path is expected does not error usefully — `pv` tri
 open `HEAD~3` as a file and reports `Failed to read contract file: No such file or
 directory`, which reads like a missing contract rather than a misused flag.
 
-`pv --help` lists the full set (42 subcommands + `help` in pv 0.49.0): `explain,
-validate, check-parity, scaffold, extract-pytorch, codegen, kani, probar, status,
-audit, diff, coverage, generate, graph, equations, lean, lean-status, proof-status,
-lint, score, query, invariants, coq, fuzz, mirai, flux, tla, book, infer, unlock,
-roofline, pipeline, kaizen, certify, verify-structure, verify-pipeline,
-verify-bindings, migrate`.
-
 **If `pv validate` rejects a contract** (wrong kind, missing required fields), the fix is one of:
 1. Restructure the contract to fit the existing schema (usually `KernelContract` shape with `equations`, `proof_obligations`, `falsification_tests`).
 2. Extend `aprender-contracts/src/schema/` to add the new `kind` + validator rule (real engineering task, own PMAT ticket).
@@ -688,37 +634,10 @@ verify-bindings, migrate`.
 pmat query "error handling" --limit 10
 ```
 
-### Coverage-Guided Search (pmat 3.0.0+)
+### Coverage-Guided Search
 
-**Use `pmat query --coverage` to find untested code. NEVER parse coverage JSON manually.**
-
-```bash
-# Find top uncovered functions (no query needed)
-pmat query --coverage-gaps
-
-# Find uncovered functions matching a semantic query
-pmat query "error handling" --coverage --uncovered-only
-
-# Use pre-existing coverage data (avoids re-running cargo llvm-cov)
-pmat query --coverage-gaps --coverage-file /path/to/coverage.json
-
-# Coverage auto-detection: runs `cargo llvm-cov report --json` automatically
-# Prerequisite: run `cargo llvm-cov test --lib --no-report` first to generate data
-```
-
-**Workflow for coverage improvement (MUST co-evolve with contracts):**
-1. `cargo llvm-cov test --lib --no-report` — generate coverage data
-2. `pmat query --coverage-gaps --exclude-tests` — find top uncovered functions by impact
-3. For EACH function being tested, ALSO:
-   a. Add `#[contract]` annotation if missing
-   b. Add/strengthen falsification conditions in the relevant contract YAML
-   c. Eliminate placeholder preconditions
-4. Write tests targeting those functions
-5. `make coverage` — verify improvement
-6. `pmat comply check` — verify contract density improved
-
-**RULE: Coverage without contracts is REJECTED. Both must improve together.**
-See monorepo spec Rule 7: Coverage + Contracts Co-Evolution.
+**Coverage without contracts is REJECTED** (monorepo spec Rule 7) — the workflow is the
+`coverage-contracts` skill. Never parse coverage JSON manually; use `pmat query --coverage`.
 
 ## Stack Documentation Search
 
@@ -728,16 +647,3 @@ batuta oracle --rag-index                   # Reindex (the command prints the do
 ```
 
 Use proactively for trueno SIMD patterns, cross-language equivalents, and stack best practices.
-
-## SSC Training Infrastructure Status (snapshot 2026-03-22 — STALE, re-verify before acting)
-
-This block has not been re-measured in ~5 months and one of its premises no longer
-holds: it points at "trueno 0.4.36" as an external crate, but since APR-MONO trueno is
-in-tree as `crates/aprender-compute` and has no independent version to wait on.
-
-- **SSC canary eval**: 90% accuracy, SHIP gate PASS — classifier ready to ship
-- **entrenar cuBLAS integration**: GEMM parity verified between CPU and GPU paths
-- **Blackwell (GB10) training**: Blocked by JIT pre-warming bug in custom PTX kernels. Must use fused NF4 kernel path until trueno 0.4.36 ships with pre-compiled kernels
-- **apr-cli inference NOT affected**: `apr run` / `apr serve` use cuBLAS (GPU) or trueno SIMD (CPU) — pre-compiled, no custom PTX involved
-- **Trained model (LoRA adapter)**: Architecture-independent safetensors — works on any GPU or CPU via standard PEFT loading
-- **Key tickets**: trueno#200 (Blackwell JIT), trueno#203 (pre-compiled kernels), entrenar#300 (cuBLAS backward)

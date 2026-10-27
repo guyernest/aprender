@@ -1,5 +1,9 @@
 {
   "model_profile": "balanced",
+  "model_overrides": {
+    "gsd-phase-researcher": "sonnet",
+    "gsd-pattern-mapper": "sonnet"
+  },
   "commit_docs": true,
   "parallelization": true,
   "search_gitignored": false,
