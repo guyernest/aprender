@@ -2300,7 +2300,12 @@ _laya-state-snapshot:
 # and a COPY of the base template passed as LAYA_DEPLOY_TEMPLATE (the tracked template is never edited;
 # LAYA_REGION_SELFTEST_TEMPLATE replaces the base). Cases: R1 the default render; R2 an explicit
 # us-east-1 render, cmp-equal to R1; R3 an eu-west-1 render that differs from R1 in exactly the region
-# line. Both config paths a render of the server id can reach (models/decide/deploy-config-<id>.toml and
+# line; R4/R5 a template with zero / two `region = "us-east-1"` lines is refused and the pre-seeded output
+# is unchanged; R6 malformed and injecting regions (a quote, a newline, a `touch` canary) are refused
+# before any interpolation and never echoed, and the `region=eu-west-1` form renders; R7 LAYA_DEPLOY_TEMPLATE
+# with DRY_RUN unset is refused with zero recorder calls; BUCKET laya-weights-bucket's create-bucket argv
+# per region (a scripted fake aws for that table only). Both config paths a render of the server id can
+# reach (models/decide/deploy-config-<id>.toml and
 # models/decide/augury-dev/deploy-config-<id>.toml) are backed up and restored on EXIT. Ends with
 # `REGION SELFTEST OK`, or `REGION SELFTEST FAILED (<k> failed checks)` and exit 1. Row region-selftest.
 _laya-region-selftest:
@@ -2395,6 +2400,110 @@ _laya-region-selftest:
     else
         fail "CASE R3 eu-west-1: exit $RC, no rendered config (log: $W/r3.log)"; tail -3 "$W/r3.log" >&2 || true
     fi
+    # The refusal half. The output file is PRE-SEEDED with known bytes: a refused render leaves it unchanged.
+    SEED="p13-01 pre-seeded output: a refused render must leave these bytes"
+    seed() { printf '%s\n' "$SEED" > "$CFG"; SEED_SHA="$(shasum -a 256 "$CFG" | awk '{print $1}')"; }
+    unchanged() { [ -f "$CFG" ] && [ "$(shasum -a 256 "$CFG" | awk '{print $1}')" = "$SEED_SHA" ]; }
+    ONE_LINE="expected exactly one 'region = \"us-east-1\"' line"
+    # R4: a template copy with the region line removed; R5: a second exact region line under a new table.
+    grep -v '^region = "us-east-1"$' "$W/base.toml" > "$W/zero.toml" || true
+    { cat "$W/base.toml"; printf '\n[p13-r5]\nregion = "us-east-1"\n'; } > "$W/two.toml"
+    for c in "R4 zero-region-lines:zero" "R5 two-region-lines:two"; do
+        label="${c%%:*}"; tpl="${c##*:}"
+        seed
+        run "$W/$tpl.log" env LAYA_DEPLOY_TEMPLATE="$W/$tpl.toml" just laya-deploy-config "$A" off "$SRV"
+        if [ "$RC" -ne 0 ] && grep -qF "$ONE_LINE" "$W/$tpl.log" && unchanged; then
+            echo "CASE $label: REFUSED as expected (exit $RC, $ONE_LINE), output sha256 unchanged"
+        else
+            fail "CASE $label: exit $RC, expected the one-line refusal and an unchanged output (log: $W/$tpl.log)"; tail -3 "$W/$tpl.log" >&2 || true
+        fi
+    done
+    # R6: malformed and injecting regions are refused BEFORE any interpolation, the value never echoed.
+    CANARY="$W/canary-created"
+    NL="$(printf 'eu-west-1\nx')"
+    r6_refuse() {
+        local kind="$1" value="$2" log="$W/r6-$1.log"
+        seed
+        run "$log" just laya-deploy-config "$A" off "$SRV" dev ze-kasher-dev "$value"
+        if [ "$RC" -eq 2 ] && grep -q '^REFUSED region: ' "$log" && unchanged && [ ! -e "$CANARY" ] \
+            && python3 -I -c 'import sys; v = sys.argv[2]; sys.exit(1 if v and v in open(sys.argv[1]).read() else 0)' "$log" "$value"; then
+            echo "CASE R6 $kind: REFUSED as expected ($(grep -m 1 '^REFUSED region: ' "$log")), output unchanged, value not echoed"
+        else
+            fail "CASE R6 $kind: exit $RC, expected exit 2 REFUSED region:, an unchanged output, no canary and the value absent from the log (log: $log)"
+        fi
+    }
+    r6_refuse upper-case 'EU-WEST-1'
+    r6_refuse trailing-quote 'eu-west-1"'
+    r6_refuse empty ''
+    r6_refuse underscores 'eu_west_1'
+    r6_refuse path '../x'
+    r6_refuse embedded-newline "$NL"
+    r6_refuse canary "x\"; touch $CANARY; \""
+    [ ! -e "$CANARY" ] || fail "CASE R6 canary: the injected touch ran ($CANARY exists)"
+    run "$W/r6-prefix.log" just laya-deploy-config "$A" off "$SRV" dev augury-dev region=eu-west-1
+    O6="$(wrote "$W/r6-prefix.log")"
+    if [ "$RC" -eq 0 ] && [ -n "$O6" ] && [ "$(aws_region "$O6")" = "eu-west-1" ]; then
+        echo "CASE R6 prefix-form: region=eu-west-1 renders aws.region eu-west-1"
+    else
+        fail "CASE R6 prefix-form: exit $RC, region=eu-west-1 did not render aws.region eu-west-1 (log: $W/r6-prefix.log)"
+    fi
+    # R7: LAYA_DEPLOY_TEMPLATE in a LIVE run (DRY_RUN unset) is refused before any AWS call: the
+    # recorder is first on PATH, so a broken refusal shows up as a recorder call, never a real one.
+    seed
+    R7_BEFORE="$(wc -l < "$REC" | tr -d ' ')"
+    run "$W/r7.log" env -u DRY_RUN LAYA_DEPLOY_TEMPLATE="$W/base.toml" just laya-deploy-config "$A" off "$SRV"
+    R7_AFTER="$(wc -l < "$REC" | tr -d ' ')"
+    if [ "$RC" -eq 2 ] && grep -q '^REFUSED template: ' "$W/r7.log" && [ "$R7_AFTER" -eq "$R7_BEFORE" ] && unchanged; then
+        echo "CASE R7 live-template: REFUSED as expected ($(grep -m 1 '^REFUSED template: ' "$W/r7.log")), 0 recorder calls, output unchanged"
+    else
+        fail "CASE R7 live-template: exit $RC, recorder calls $R7_BEFORE -> $R7_AFTER; expected exit 2 REFUSED template: with no call (log: $W/r7.log)"
+    fi
+    # BUCKET: laya-weights-bucket's create-bucket argv against a scripted fake aws, first on PATH for
+    # this table only (the bucket is absent; every argv is recorded; an unknown call exits 97).
+    FB="$W/fakeaws"
+    FLOG="$W/fake-aws-calls.log"
+    mkdir -p "$FB"
+    cat > "$FB/aws" <<'SH'
+    #!/usr/bin/env bash
+    printf '%s\n' "$*" >> "$FAKE_BUCKET_LOG"
+    case "$1 $2" in
+        "sts get-caller-identity") echo 111122223333 ;;
+        "s3api head-bucket") exit 254 ;;
+        "s3api create-bucket"|"s3api put-public-access-block"|"s3api put-bucket-encryption"|"s3api put-bucket-tagging") exit 0 ;;
+        *) echo "fake aws: unexpected call: $*" >&2; exit 97 ;;
+    esac
+    SH
+    chmod +x "$FB/aws"
+    export FAKE_BUCKET_LOG="$FLOG"
+    PATH_BEFORE_TABLE="$PATH"
+    export PATH="$FB:$PATH"
+    create_argv() { grep '^s3api create-bucket ' "$FLOG" || true; }
+    : > "$FLOG"
+    run "$W/bucket-us.log" just laya-weights-bucket dev ze-kasher-dev us-east-1
+    ARGV="$(create_argv)"
+    if [ "$RC" -eq 0 ] && printf '%s' "$ARGV" | grep -q -- '--region us-east-1' && ! printf '%s' "$ARGV" | grep -q -- '--create-bucket-configuration'; then
+        echo "BUCKET us-east-1: create-bucket --region us-east-1, no --create-bucket-configuration"
+    else
+        fail "BUCKET us-east-1: exit $RC, create-bucket argv '$ARGV' (log: $W/bucket-us.log)"
+    fi
+    : > "$FLOG"
+    run "$W/bucket-eu.log" just laya-weights-bucket dev augury-dev eu-west-1
+    ARGV="$(create_argv)"
+    if [ "$RC" -eq 0 ] && printf '%s' "$ARGV" | grep -q -- '--region eu-west-1' && printf '%s' "$ARGV" | grep -q -- '--create-bucket-configuration LocationConstraint=eu-west-1'; then
+        echo "BUCKET eu-west-1: create-bucket --region eu-west-1 --create-bucket-configuration LocationConstraint=eu-west-1"
+    else
+        fail "BUCKET eu-west-1: exit $RC, create-bucket argv '$ARGV' (log: $W/bucket-eu.log)"
+    fi
+    : > "$FLOG"
+    run "$W/bucket-refuse.log" just laya-weights-bucket dev ze-kasher-dev EU-WEST-1
+    FCALLS="$(wc -l < "$FLOG" | tr -d ' ')"
+    if [ "$RC" -eq 2 ] && grep -q '^REFUSED region: ' "$W/bucket-refuse.log" && [ "$FCALLS" -eq 0 ]; then
+        echo "BUCKET refuse: EU-WEST-1 REFUSED as expected (exit 2), 0 fake-aws calls"
+    else
+        fail "BUCKET refuse: exit $RC with $FCALLS fake-aws call(s); expected exit 2 REFUSED region: and no call (log: $W/bucket-refuse.log)"
+    fi
+    export PATH="$PATH_BEFORE_TABLE"
+    [ "$(command -v aws)" = "$SHIM/aws" ] || fail "the aws recorder is not first on PATH again after the BUCKET table"
     CALLS="$(wc -l < "$REC" | tr -d ' ')"
     [ "$CALLS" -eq 0 ] || fail "the aws recorder was called $CALLS time(s): $(head -n 3 "$REC" | tr '\n' ';')"
     echo "AWS CALLS: $CALLS"
@@ -3553,6 +3662,12 @@ laya-gates-selftest:
             echo '["arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"]' ;;
         "iam get-policy") echo v1 ;;
         "iam get-policy-version") echo '{"Statement":[{"Effect":"Allow","Action":["logs:CreateLogStream","logs:PutLogEvents"],"Resource":"*"}]}' ;;
+        "s3api head-bucket")
+            [ "$mode" = bucket-absent ] && exit 254
+            echo "fake aws: unexpected call: $*" >&2; exit 97 ;;
+        "s3api create-bucket"|"s3api put-public-access-block"|"s3api put-bucket-encryption"|"s3api put-bucket-tagging")
+            [ "$mode" = bucket-absent ] && exit 0
+            echo "fake aws: unexpected call: $*" >&2; exit 97 ;;
         "lambda put-function-concurrency") echo '{}' ;;
         "lambda get-function-concurrency") echo 0 ;;
         "iam delete-role-policy")
@@ -4017,6 +4132,28 @@ laya-gates-selftest:
         must_fail hygiene-stale-graph '^FAIL HYGIENE graph-fresh: exit 1' env PATH="$P:$PATH" LAYA_GAP_ONLY=HYGIENE just laya-gap-regression
         must_pass class-a '^LAYA GAP STAGES OK \(A; not the full regression\)' env LAYA_GAP_ONLY=A just laya-gap-regression
         grep -q '^PASS CLASS A$' "$(logof class-a)" || red "class-a: no PASS CLASS A line"
+    }
+    row_region_selftest() {
+        grep -v '^region = "us-east-1"$' crates/aprender-mcp-decide-lambda/.pmcp/deploy.toml.template > "$W/region-zero.toml" || true
+        must_fail zero-line-template '^REGION SELFTEST FAILED' env LAYA_REGION_SELFTEST_TEMPLATE="$W/region-zero.toml" just _laya-region-selftest
+        must_pass default '^REGION SELFTEST OK$' just _laya-region-selftest
+        grep -qx 'AWS CALLS: 0' "$(logof default)" || red "default: the region selftest did not report AWS CALLS: 0"
+    }
+    row_weights_bucket_region() {
+        : > "$FAKE_AWS_LOG"
+        must_fail malformed '^REFUSED region' env PATH="$FAKE:$PATH" FAKE_AWS_MODE=bucket-absent just laya-weights-bucket dev ze-kasher-dev EU-WEST-1
+        [ ! -s "$FAKE_AWS_LOG" ] || red "malformed: the fake aws was called before the region refusal ($(head -n 1 "$FAKE_AWS_LOG" | cut -c 1-60))"
+        : > "$FAKE_AWS_LOG"
+        must_pass eu-west-1 '\(region eu-west-1\)$' env PATH="$FAKE:$PATH" FAKE_AWS_MODE=bucket-absent just laya-weights-bucket dev augury-dev eu-west-1
+        grep -q '^s3api create-bucket .*--create-bucket-configuration LocationConstraint=eu-west-1' "$FAKE_AWS_LOG" \
+            || red "eu-west-1: the fake aws recorded no create-bucket naming LocationConstraint=eu-west-1"
+        : > "$FAKE_AWS_LOG"
+    }
+    row_prepare_motivation_args() {
+        mkdir -p "$W/pm"
+        must_fail spaced-csv 'REFUSED csv-missing' just laya-prepare-motivation --csv "$W/pm/no such dir/a b.csv" --out "$W/pm/o"
+        if grep -q 'unrecognized arguments' "$(logof spaced-csv)"; then red "spaced-csv: the spaced path was word-split (unrecognized arguments)"; fi
+        must_pass selftest '^PREPARE MOTIVATION SELFTEST OK' just laya-prepare-motivation --selftest
     }
     # ---- dispatch -------------------------------------------------------------------------------
     UNKNOWN=""
