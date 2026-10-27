@@ -136,7 +136,14 @@ None - plan executed exactly as written. Two procedural notes, neither changing 
 
 ## Issues Encountered
 
-None.
+- **STATE.md not updated (known tooling defect, skipped as instructed):** `state.advance-plan`, `state.record-metric`,
+  `state.add-decision` and `state.record-session` all exit 1 with "04-VERIFICATION.md has status gaps_acknowledged,
+  which is outside the closed set"; STATE.md was left byte-identical (cmp against a pre-call copy). The Phase 4 file was
+  not touched. `state.update-progress` returned `updated: false` ("phase scope is unscoped"). `state.advance-plan` also
+  warned of a milestone-lock mismatch (it resolves the current phase as 08 from STATE.md, while the claim is phase 13).
+- **ROADMAP.md updated:** `roadmap.update-plan-progress 13` succeeded (1/11 plans executed, 13-11 checked).
+- **Requirements:** D-06 and D-02 are CONTEXT decision ids, not REQUIREMENTS.md ids (the plan says no REQ id maps to
+  Phase 13), so `requirements.mark-complete` was not run.
 
 ## Tracer Feedback Gate
 
