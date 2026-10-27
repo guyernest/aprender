@@ -173,7 +173,12 @@ None. T-13-01, T-13-02, T-13-03 and T-13-38 are mitigated as registered and are 
 ## Deferred / Notes
 
 - `interpolation_finding`: other laya recipes still interpolate parameters textually. This is pre-existing and out of scope, recorded in the evidence for a later phase.
-- STATE/ROADMAP verbs: see below. The owner's uncommitted `.planning/STATE.md`, `config.json` and `state.json` were never staged.
+- STATE/ROADMAP verbs:
+  - `roadmap.update-plan-progress 13` ran (rc 0) and committed ROADMAP.md as 2/11 plans executed, with 13-01 checked.
+  - The STATE.md verbs (`state.advance-plan` / `record-metric` / `add-decision` / `record-session`) were deliberately not run. STATE.md carries the owner's uncommitted edit, which the dispatch says not to touch, and those verbs would write into it. Its bytes were confirmed unchanged by cmp.
+  - `requirements.mark-complete` was skipped: D-05 and D-20 are CONTEXT decision ids, not REQUIREMENTS.md ids.
+  - The owner's uncommitted `.planning/STATE.md`, `config.json` and `state.json` were never staged.
+- No `.planning` record cites the antisemite eligibility logs' bytes (searched: only REVIEWS and a review diagnostic name the path), so deviation 1 invalidates no recorded evidence.
 
 ## Next
 
