@@ -1,0 +1,287 @@
+contract: motivation-enrichment
+metadata:
+  version: "1.0.0"
+  created: '2026-10-27'
+  author: PAIML Engineering
+  kind: schema
+  # ONT-7: the two formats are declared for the committed tree; no backend, host or feature
+  # qualifies the declaration.
+  valid_under:
+    world: committed
+  description: >
+    The two partner-facing formats of the motivation-v1 enrichment loop, declared BEFORE any file
+    in either format exists (Phase 13 D-13, D-14). The first is the per-post record
+    `motivation-record-v1`: what a run of the experiment team's stored posts through the
+    motivation-v1 server produces, one JSON object per post, kept only in the partner repository.
+    The second is the enrichment file `motivation-enrichment-v1`: what the expert returns after
+    annotating a selection of those posts, a header line and one row per post, carrying the
+    expert's own label and the evidence for the recorded function (D-15), and the annotation mode
+    of the round (D-16).
+
+    The ingest in scripts/laya_train/prepare_motivation.py is the single implementation of these
+    rules (OPS-03). Its selftest loads this file and asserts that its constants equal the values
+    declared here, and the record selector does the same for the record format; nothing
+    re-implements the validation in a shell script. Every bound a validator enforces is a
+    structured value in this file (a type, a pattern, a character cap, an enum, a constant, a
+    length, a range or a tolerance), so a mirror check compares values rather than prose. The
+    contract verifier accepts this file as a schema contract and checks its metadata only; it is
+    NOT taken as a check of the field rules, which the two validators enforce and boundary-test.
+
+    The served task is unchanged: the three-class model continues (D-01), with the labels
+    social_affiliative, conspiratorial and other in served order. An enrichment label is the
+    expert's own judgement, never a copied model prediction (D-03). Enriched rows go to train
+    only; the v1 eval set stays frozen byte for byte (D-11), and a text that carries more than one
+    mapped label across sources is dropped whole, with no source precedence (D-12).
+  references:
+    - "scripts/laya_train/prepare_motivation.py"
+    - "scripts/laya_train/data.py"
+    - "contracts/decide-apr-v1.yaml"
+    - ".planning/phases/13-motivation-v1-on-augury-dev-second-server-and-enrichment-handoff/13-CONTEXT.md"
+
+served_task:
+  # D-01: the three-class model continues. Served order is the label index (task.json criteria
+  # order, decide-apr-v1 D-05), so social_affiliative is label 0, conspiratorial 1, other 2.
+  labels: [social_affiliative, conspiratorial, other]
+  task_sha256: f74a3ad3cfc00c160cc2959d95beb219aec859b394b883e87577a56dc14e7ea3
+  artifact: laya-motivation-v1.apr
+  artifact_sha256: d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd
+
+formats:
+  motivation-record-v1:
+    # D-14: the output of one run of a stored post through the served model.
+    residence: "partner repository only; aprender reads it in place and never copies or prints it"
+    encoding: "JSON Lines, UTF-8, one object per line, no header line"
+    keys_closed: true
+    note: >
+      The text is part of the record because the expert reads it while annotating and the ingest
+      normalizes and groups on it. The server-derived fields (labels, probabilities,
+      artifact_sha256, tokens, truncated) are copied from the classify response of
+      aprender-mcp-decide without change.
+    fields:
+      post_id:
+        type: string
+        pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+        note: "the partner's own identifier of the stored post; the enrichment row joins back on it"
+      source:
+        type: string
+        pattern: '^[a-z0-9][a-z0-9_-]{0,63}$'
+        note: "the partner's name for the collection the post came from"
+      text:
+        type: string
+        min_chars: 1
+        min_chars_after_trim: true
+        max_chars: 20000
+        note: "the post text exactly as sent to the server; at least one character after trimming"
+      labels:
+        type: array
+        equals: [social_affiliative, conspiratorial, other]
+        note: "the served label list in served order, as the classify response returns it"
+      probabilities:
+        type: array
+        items: number
+        length: 3
+        range: [0.0, 1.0]
+        sum_tolerance: 1.0e-5
+        aligned_to: labels
+        note: "one probability per served label, in the same order; they sum to one within the tolerance"
+      artifact_sha256:
+        type: string
+        pattern: '^[0-9a-f]{64}$'
+        equals_this_round: d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd
+        note: "the model.artifact_sha256 of the classify response"
+      deployment:
+        type: object
+        keys_closed: true
+        one_value_per_file: true
+        note: "the D-06 identity of the deployment that scored the post, plus its endpoint; one deployment per record file"
+        fields:
+          pmcp_target:
+            type: string
+            pattern: '^[a-z0-9][a-z0-9-]{0,62}$'
+          aws_account:
+            type: string
+            pattern: '^[0-9]{12}$'
+          region:
+            type: string
+            pattern: '^[a-z]{2}(-[a-z]+)+-[0-9]$'
+            note: "the region pattern of plan 13-01"
+          endpoint:
+            type: string
+            pattern: '^https://[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?/mcp$'
+        this_round:
+          pmcp_target: augury-dev
+          aws_account: "783960389328"
+          region: eu-west-1
+          endpoint: "as printed by the deploy"
+      tokens:
+        type: integer
+        min: 1
+        note: "the built row tokens the server charged for this post"
+      truncated:
+        type: boolean
+        note: "whether the server cut the post to fit its token budget"
+      scored_at:
+        type: string
+        pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?Z$'
+        note: "RFC 3339 time in UTC, ending in Z"
+
+  motivation-enrichment-v1:
+    # D-13, D-15, D-16: what the expert returns.
+    encoding: "JSON Lines, UTF-8: line 1 is the header object, every later line one annotated post"
+    keys_closed: true
+    header:
+      format:
+        type: string
+        const: motivation-enrichment-v1
+      annotation_mode:
+        type: string
+        enum: [prediction_shown, blind]
+        this_round: prediction_shown
+        note: "recorded and counted, never acted on"
+      artifact_sha256:
+        type: string
+        pattern: '^[0-9a-f]{64}$'
+        note: "the model whose output the expert saw"
+      guide:
+        type: string
+        min_chars: 1
+        max_chars: 200
+        note: "the guide designation"
+    row:
+      post_id:
+        type: string
+        pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+        note: "the post_id of the record the row annotates"
+      text:
+        type: string
+        min_chars: 1
+        min_chars_after_trim: true
+        max_chars: 20000
+        note: "repeated from the record so the ingest never joins two partner files"
+      label:
+        type: string
+        enum: [social_affiliative, conspiratorial, other]
+        note: "the EXPERT's label, never a copied model prediction (D-03)"
+      evidence:
+        type: string
+        enum: [clear, weak, mixed, none]
+        note: "the evidence for the RECORDED function"
+      selection_slice:
+        type: string
+        enum: [control, uncertainty, quota, unspecified]
+        note: "which selection slice put the post in front of the expert"
+    caps:
+      file_bytes: 16777216
+      rows: 20000
+      text_chars: 20000
+    unique: [post_id]
+
+d15_amendment:
+  # Review Round 1 (Codex MEDIUM): these choices go beyond the literal clear, weak, mixed list of
+  # D-15 and are written down before the partner builds its annotation sheet.
+  added_evidence_level: none
+  added_evidence_level_source: >
+    "The class Other covers three situations ... no evidence of either motivational function,
+    weak evidence only ..., and clear evidence of both (mixed)". The first of those situations
+    cannot be expressed with clear, weak or mixed, so an other post with no evidence records none.
+  refused_pairs: [other+clear, social_affiliative+none, conspiratorial+none]
+  evidence_meaning: "the evidence for the RECORDED function"
+  evidence_meaning_source: >
+    "Posts with weak evidence of the other function keep their class". A clear social-affiliative
+    post with weak conspiratorial evidence keeps its class, so the evidence value must describe
+    the recorded function, not the strongest evidence anywhere in the post.
+  status: >
+    pending the owner's confirmation in the 13-10 hand-off, before the partner builds its sheet;
+    a change is a motivation-enrichment-v2
+  unchanged: "the D-15 mapping itself (weak and mixed count as other)"
+
+mapping:
+  # D-15: (expert label, evidence) to the served label used for training. Every cell is listed.
+  source:
+    - "The class Other covers three situations ... no evidence of either motivational function, weak evidence only ..., and clear evidence of both (mixed)"
+    - "Weak evidence ... does not, on its own, assign a class"
+    - "Posts with weak evidence of the other function keep their class"
+  cells:
+    - {label: social_affiliative, evidence: clear, served: social_affiliative}
+    - {label: social_affiliative, evidence: weak, served: other}
+    - {label: social_affiliative, evidence: mixed, served: other}
+    - {label: social_affiliative, evidence: none, refused: enrichment-label-evidence}
+    - {label: conspiratorial, evidence: clear, served: conspiratorial}
+    - {label: conspiratorial, evidence: weak, served: other}
+    - {label: conspiratorial, evidence: mixed, served: other}
+    - {label: conspiratorial, evidence: none, refused: enrichment-label-evidence}
+    - {label: other, evidence: none, served: other}
+    - {label: other, evidence: weak, served: other}
+    - {label: other, evidence: mixed, served: other}
+    - {label: other, evidence: clear, refused: enrichment-label-evidence}
+  grouping_compares: mapped_labels
+  counted: >
+    Every (label, evidence) cell is counted in the manifest, whatever it maps to, so the rule that
+    weak and mixed count as other stays open for the retrain after the guide is frozen.
+
+merge:
+  # D-11, D-12: rule names in application order, exactly as the ingest prints them.
+  scope: train_only
+  eval:
+    byte_identical_to_v1: true
+    sha256: ee95d71fcb5d90d515b9fc6741e5df51087e763fa7f251ace83d9f11d5ccd575
+  base_train_sha256: f1d84f19ec38ed85356bcbcd1eae6ef8ad07fb97e014f61a17d37adc0d68d378
+  identity: nfc-trim-ws-v1
+  rules:
+    - name: base-build-unchanged
+      meaning: >
+        The v1 build runs first and unchanged; the eval rows and the partner's train rows are fixed
+        before any enrichment file is read.
+    - name: dropped_eval_overlap
+      meaning: >
+        An enriched text whose nfc-trim-ws-v1 identity matches an eval text is dropped, whatever its
+        label; eval rows are never modified.
+    - name: dropped_partner_mixed_group
+      meaning: >
+        An enriched text that matches a partner group the v1 build dropped for carrying more than
+        one label stays dropped; enrichment cannot bring such a group back.
+    - name: dropped_conflict_groups
+      meaning: >
+        A normalized-text group across the partner train rows and the enriched rows that carries
+        more than one mapped label is dropped WHOLE, the partner row included; no source takes
+        precedence.
+    - name: collapsed_same_label
+      meaning: >
+        A group with one mapped label becomes one row: the partner's exact text when the partner
+        has one, else the first enriched text.
+  append_order: >
+    The surviving partner train rows in v1 order, then the new enriched rows in file order, with
+    the files in command-line order.
+
+manifest:
+  file: enrichment-manifest.json
+  location: "the output directory, beside task.json, train.jsonl and eval.jsonl"
+  schema: motivation-enrichment-manifest-v1
+  content: "counts and sha256 values only, never a text"
+
+refusals:
+  - {name: enrichment-missing, meaning: "the enrichment path does not exist or is not a regular file"}
+  - {name: enrichment-in-repo, meaning: "the enrichment path resolves inside the aprender repository"}
+  - {name: enrichment-size, meaning: "the file is larger than caps.file_bytes or has more than caps.rows rows"}
+  - {name: enrichment-encoding, meaning: "the file is not valid UTF-8 or a text holds a character that cannot be encoded"}
+  - {name: enrichment-json, meaning: "a line is not one JSON object, or an object repeats a key"}
+  - {name: enrichment-header, meaning: "line 1 is missing, lacks a header field, carries an unknown key or has the wrong format value"}
+  - {name: enrichment-row, meaning: "a post line lacks a row field or carries an unknown key"}
+  - {name: enrichment-field, meaning: "a field has the wrong type or breaks its pattern or character bounds"}
+  - {name: enrichment-label, meaning: "a row label is not one of the served labels"}
+  - {name: enrichment-evidence, meaning: "a row evidence value is not one of clear, weak, mixed or none"}
+  - {name: enrichment-slice, meaning: "a row selection_slice is not one of the declared slices"}
+  - {name: enrichment-annotation-mode, meaning: "the header annotation_mode is not one of the declared modes"}
+  - {name: enrichment-label-evidence, meaning: "the (label, evidence) pair is one of the refused pairs"}
+  - {name: enrichment-duplicate-post-id, meaning: "a post_id appears more than once in one file"}
+  - {name: enrichment-empty, meaning: "the file has a header and no post rows"}
+  - {name: enrichment-sha256, meaning: "the file does not hash to the sha256 the run was told to expect"}
+  - {name: enrichment-out, meaning: "the output directory is the v1 data directory or otherwise refused"}
+
+no_text_rule: >
+  A refusal names a row number (the header is row 0, the posts are rows 1 to N), a field and at
+  most a character count, never a value. The ingest prints counts and sha256 values only.
+
+anchoring: >
+  D-16: with annotation_mode prediction_shown the expert sees motivation-v1's prediction, so the
+  labels may be anchored to it. The hand-off of any retrain on such data must say so.
