@@ -1,0 +1,1623 @@
+{
+  "schema": "motivation-bakeoff-v1",
+  "not_a_gate": true,
+  "rules": {
+    "ranking": "metrics.macro_f1 on the shared eval split, descending (D-05)",
+    "tiebreak": "macro-F1 equal rounded to 4 decimals -> lower false-assignment rate at 0.6 ranks first; no false-assignment ceiling",
+    "clearly_beats": "reference macro-F1 - Laya macro-F1 >= 0.05 -> finding reference_arm_clearly_beats_laya; a finding, never a switch (D-06)",
+    "clearly_beats_margin": 0.05,
+    "thresholds": [
+      0.5,
+      0.6,
+      0.7,
+      0.85
+    ],
+    "false_assignment": "eval other rows whose largest non-other probability is strictly > threshold, over all eval other rows (D-05); client_ge is the same with >=, reported only",
+    "length": "len(text) in code points; tertile cuts numpy.percentile at 100/3 and 200/3; band 0 if len <= c1, 1 if len <= c2, else 2 (D-14)",
+    "ece": "metrics.ece_top_label, class-stratified percentile bootstrap 95 % interval, 10000 resamples, RandomState(13); reported, not a gate; the interval is not required to contain the point (D-13)",
+    "band_interval_min_rows": 30,
+    "source_batch": "unmeasured (D-04, D-15)",
+    "alignment": "row identity (index + text_sha256; SetFit row_ids), never truth labels",
+    "counts_only": true
+  },
+  "eval": {
+    "n": 100,
+    "per_class_counts": {
+      "social_affiliative": 23,
+      "conspiratorial": 14,
+      "other": 63
+    },
+    "labels": [
+      "social_affiliative",
+      "conspiratorial",
+      "other"
+    ],
+    "other_index": 2,
+    "length": {
+      "unit": "code points",
+      "cuts": [
+        126.00000000000003,
+        244.0
+      ],
+      "band_counts": [
+        34,
+        33,
+        33
+      ]
+    }
+  },
+  "prior": {
+    "pi_train": {
+      "n": 295,
+      "counts": {
+        "social_affiliative": 66,
+        "conspiratorial": 41,
+        "other": 188
+      },
+      "fractions": {
+        "social_affiliative": 0.22372881355932203,
+        "conspiratorial": 0.13898305084745763,
+        "other": 0.6372881355932203
+      }
+    }
+  },
+  "arms": {
+    "laya": {
+      "status": "completed",
+      "n": 100,
+      "macro_f1": 0.7475947000934631,
+      "per_class": [
+        {
+          "label": "social_affiliative",
+          "support": 23,
+          "predicted": 24,
+          "tp": 17,
+          "precision": 0.7083333333333334,
+          "recall": 0.7391304347826086
+        },
+        {
+          "label": "conspiratorial",
+          "support": 14,
+          "predicted": 10,
+          "tp": 8,
+          "precision": 0.8,
+          "recall": 0.5714285714285714
+        },
+        {
+          "label": "other",
+          "support": 63,
+          "predicted": 66,
+          "tp": 55,
+          "precision": 0.8333333333333334,
+          "recall": 0.873015873015873
+        }
+      ],
+      "false_assignment": {
+        "0.5": {
+          "threshold": 0.5,
+          "numerator": 8,
+          "denominator": 63,
+          "rate": 0.12698412698412698,
+          "comparison": ">",
+          "client_ge": {
+            "numerator": 8,
+            "denominator": 63,
+            "rate": 0.12698412698412698,
+            "comparison": ">="
+          }
+        },
+        "0.6": {
+          "threshold": 0.6,
+          "numerator": 7,
+          "denominator": 63,
+          "rate": 0.1111111111111111,
+          "comparison": ">",
+          "client_ge": {
+            "numerator": 7,
+            "denominator": 63,
+            "rate": 0.1111111111111111,
+            "comparison": ">="
+          }
+        },
+        "0.7": {
+          "threshold": 0.7,
+          "numerator": 6,
+          "denominator": 63,
+          "rate": 0.09523809523809523,
+          "comparison": ">",
+          "client_ge": {
+            "numerator": 6,
+            "denominator": 63,
+            "rate": 0.09523809523809523,
+            "comparison": ">="
+          }
+        },
+        "0.85": {
+          "threshold": 0.85,
+          "numerator": 4,
+          "denominator": 63,
+          "rate": 0.06349206349206349,
+          "comparison": ">",
+          "client_ge": {
+            "numerator": 4,
+            "denominator": 63,
+            "rate": 0.06349206349206349,
+            "comparison": ">="
+          }
+        }
+      },
+      "recall_at": {
+        "0.6": {
+          "social_affiliative": {
+            "assigned": 17,
+            "support": 23,
+            "recall": 0.7391304347826086
+          },
+          "conspiratorial": {
+            "assigned": 8,
+            "support": 14,
+            "recall": 0.5714285714285714
+          }
+        },
+        "0.85": {
+          "social_affiliative": {
+            "assigned": 14,
+            "support": 23,
+            "recall": 0.6086956521739131
+          },
+          "conspiratorial": {
+            "assigned": 5,
+            "support": 14,
+            "recall": 0.35714285714285715
+          }
+        }
+      },
+      "ece": {
+        "point": 0.09355141013860704,
+        "lo": 0.06072920187562706,
+        "hi": 0.17318382391333587,
+        "n_resamples": 10000,
+        "seed": 13,
+        "method": "class-stratified percentile bootstrap, 2.5/97.5",
+        "note": "not required to contain the point: resampled ECE sums absolute bin gaps, so it is biased upward and a correct point (0.0, say) can sit below lo"
+      },
+      "bands": [
+        {
+          "band": 0,
+          "rule": "len <= c1",
+          "n": 34,
+          "per_class": [
+            {
+              "label": "social_affiliative",
+              "support": 4,
+              "predicted": 4,
+              "tp": 3,
+              "precision": 0.75,
+              "recall": 0.75
+            },
+            {
+              "label": "conspiratorial",
+              "support": 2,
+              "predicted": 3,
+              "tp": 2,
+              "precision": 0.6666666666666666,
+              "recall": 1.0
+            },
+            {
+              "label": "other",
+              "support": 28,
+              "predicted": 27,
+              "tp": 26,
+              "precision": 0.9629629629629629,
+              "recall": 0.9285714285714286
+            }
+          ],
+          "false_assignment": {
+            "0.5": {
+              "threshold": 0.5,
+              "numerator": 2,
+              "denominator": 28,
+              "rate": 0.07142857142857142,
+              "comparison": ">",
+              "client_ge": {
+                "numerator": 2,
+                "denominator": 28,
+                "rate": 0.07142857142857142,
+                "comparison": ">="
+              }
+            },
+            "0.6": {
+              "threshold": 0.6,
+              "numerator": 2,
+              "denominator": 28,
+              "rate": 0.07142857142857142,
+              "comparison": ">",
+              "client_ge": {
+                "numerator": 2,
+                "denominator": 28,
+                "rate": 0.07142857142857142,
+                "comparison": ">="
+              }
+            },
+            "0.7": {
+              "threshold": 0.7,
+              "numerator": 1,
+              "denominator": 28,
+              "rate": 0.03571428571428571,
+              "comparison": ">",
+              "client_ge": {
+                "numerator": 1,
+                "denominator": 28,
+                "rate": 0.03571428571428571,
+                "comparison": ">="
+              }
+            },
+            "0.85": {
+              "threshold": 0.85,
+              "numerator": 1,
+              "denominator": 28,
+              "rate": 0.03571428571428571,
+              "comparison": ">",
+              "client_ge": {
+                "numerator": 1,
+                "denominator": 28,
+                "rate": 0.03571428571428571,
+                "comparison": ">="
+              }
+            }
+          },
+          "recall_at": {
+            "0.6": {
+              "social_affiliative": {
+                "assigned": 3,
+                "support": 4,
+                "recall": 0.75
+              },
+              "conspiratorial": {
+                "assigned": 2,
+                "support": 2,
+                "recall": 1.0
+              }
+            },
+            "0.85": {
+              "social_affiliative": {
+                "assigned": 1,
+                "support": 4,
+                "recall": 0.25
+              },
+              "conspiratorial": {
+                "assigned": 2,
+                "support": 2,
+                "recall": 1.0
+              }
+            }
+          },
+          "ece": {
+            "point": 0.12454099514905147,
+            "interval": {
+              "lo": 0.05658740357441063,
+              "hi": 0.2051080096732168,
+              "n_resamples": 10000,
+              "seed": 13
+            }
+          }
+        },
+        {
+          "band": 1,
+          "rule": "c1 < len <= c2",
+          "n": 33,
+          "per_class": [
+            {
+              "label": "social_affiliative",
+              "support": 7,
+              "predicted": 5,
+              "tp": 3,
+              "precision": 0.6,
+              "recall": 0.42857142857142855
+            },
+            {
+              "label": "conspiratorial",
+              "support": 5,
+              "predicted": 4,
+              "tp": 3,
+              "precision": 0.75,
+              "recall": 0.6
+            },
+            {
+              "label": "other",
+              "support": 21,
+              "predicted": 24,
+              "tp": 19,
+              "precision": 0.7916666666666666,
+              "recall": 0.9047619047619048
+            }
+          ],
+          "false_assignment": {
+            "0.5": {
+              "threshold": 0.5,
+              "numerator": 2,
+              "denominator": 21,
+              "rate": 0.09523809523809523,
+              "comparison": ">",
+              "client_ge": {
+                "numerator": 2,
+                "denominator": 21,
+                "rate": 0.09523809523809523,
+                "comparison": ">="
+              }
+            },
+            "0.6": {
+              "threshold": 0.6,
+              "numerator": 1,
+              "denominator": 21,
+              "rate": 0.047619047619047616,
+              "comparison": ">",
+              "client_ge": {
+                "numerator": 1,
+                "denominator": 21,
+                "rate": 0.047619047619047616,
+                "comparison": ">="
+              }
+            },
+            "0.7": {
+              "threshold": 0.7,
+              "numerator": 1,
+              "denominator": 21,
+              "rate": 0.047619047619047616,
+              "comparison": ">",
+              "client_ge": {
+                "numerator": 1,
+                "denominator": 21,
+                "rate": 0.047619047619047616,
+                "comparison": ">="
+              }
+            },
+            "0.85": {
+              "threshold": 0.85,
+              "numerator": 1,
+              "denominator": 21,
+              "rate": 0.047619047619047616,
+              "comparison": ">",
+              "client_ge": {
+                "numerator": 1,
+                "denominator": 21,
+                "rate": 0.047619047619047616,
+                "comparison": ">="
+              }
+            }
+          },
+          "recall_at": {
+            "0.6": {
+              "social_affiliative": {
+                "assigned": 3,
+                "support": 7,
+                "recall": 0.42857142857142855
+              },
+              "conspiratorial": {
+                "assigned": 3,
+                "support": 5,
+                "recall": 0.6
+              }
+            },
+            "0.85": {
+              "social_affiliative": {
+                "assigned": 3,
+                "support": 7,
+                "recall": 0.42857142857142855
+              },
+              "conspiratorial": {
+                "assigned": 1,
+                "support": 5,
+                "recall": 0.2
+              }
+            }
+          },
+          "ece": {
+            "point": 0.1686944907361811,
+            "interval": {
+              "lo": 0.08202618663058135,
+              "hi": 0.296448601872632,
+              "n_resamples": 10000,
+              "seed": 13
+            }
+          }
+        },
+        {
+          "band": 2,
+          "rule": "len > c2",
+          "n": 33,
+          "per_class": [
+            {
+              "label": "social_affiliative",
+              "support": 12,
+              "predicted": 15,
+              "tp": 11,
+              "precision": 0.7333333333333333,
+              "recall": 0.9166666666666666
+            },
+            {
+              "label": "conspiratorial",
+              "support": 7,
+              "predicted": 3,
+              "tp": 3,
+              "precision": 1.0,
+              "recall": 0.42857142857142855
+            },
+            {
+              "label": "other",
+              "support": 14,
+              "predicted": 15,
+              "tp": 10,
+              "precision": 0.6666666666666666,
+              "recall": 0.7142857142857143
+            }
+          ],
+          "false_assignment": {
+            "0.5": {
+              "threshold": 0.5,
+              "numerator": 4,
+              "denominator": 14,
+              "rate": 0.2857142857142857,
+              "comparison": ">",
+              "client_ge": {
+                "numerator": 4,
+                "denominator": 14,
+                "rate": 0.2857142857142857,
+                "comparison": ">="
+              }
+            },
+            "0.6": {
+              "threshold": 0.6,
+              "numerator": 4,
+              "denominator": 14,
+              "rate": 0.2857142857142857,
+              "comparison": ">",
+              "client_ge": {
+                "numerator": 4,
+                "denominator": 14,
+                "rate": 0.2857142857142857,
+                "comparison": ">="
+              }
+            },
+            "0.7": {
+              "threshold": 0.7,
+              "numerator": 4,
+              "denominator": 14,
+              "rate": 0.2857142857142857,
+              "comparison": ">",
+              "client_ge": {
+                "numerator": 4,
+                "denominator": 14,
+                "rate": 0.2857142857142857,
+                "comparison": ">="
+              }
+            },
+            "0.85": {
+              "threshold": 0.85,
+              "numerator": 2,
+              "denominator": 14,
+              "rate": 0.14285714285714285,
+              "comparison": ">",
+              "client_ge": {
+                "numerator": 2,
+                "denominator": 14,
+                "rate": 0.14285714285714285,
+                "comparison": ">="
+              }
+            }
+          },
+          "recall_at": {
+            "0.6": {
+              "social_affiliative": {
+                "assigned": 11,
+                "support": 12,
+                "recall": 0.9166666666666666
+              },
+              "conspiratorial": {
+                "assigned": 3,
+                "support": 7,
+                "recall": 0.42857142857142855
+              }
+            },
+            "0.85": {
+              "social_affiliative": {
+                "assigned": 10,
+                "support": 12,
+                "recall": 0.8333333333333334
+              },
+              "conspiratorial": {
+                "assigned": 2,
+                "support": 7,
+                "recall": 0.2857142857142857
+              }
+            }
+          },
+          "ece": {
+            "point": 0.15382409366694363,
+            "interval": {
+              "lo": 0.08756601444699547,
+              "hi": 0.2933343921195377,
+              "n_resamples": 10000,
+              "seed": 13
+            }
+          }
+        }
+      ]
+    },
+    "laya_zero_shot": {
+      "status": "completed",
+      "n": 100,
+      "macro_f1": 0.3695652173913044,
+      "per_class": [
+        {
+          "label": "social_affiliative",
+          "support": 23,
+          "predicted": 17,
+          "tp": 2,
+          "precision": 0.11764705882352941,
+          "recall": 0.08695652173913043
+        },
+        {
+          "label": "conspiratorial",
+          "support": 14,
+          "predicted": 31,
+          "tp": 9,
+          "precision": 0.2903225806451613,
+          "recall": 0.6428571428571429
+        },
+        {
+          "label": "other",
+          "support": 63,
+          "predicted": 52,
+          "tp": 35,
+          "precision": 0.6730769230769231,
+          "recall": 0.5555555555555556
+        }
+      ],
+      "false_assignment": {
+        "0.5": {
+          "threshold": 0.5,
+          "numerator": 17,
+          "denominator": 63,
+          "rate": 0.2698412698412698,
+          "comparison": ">",
+          "client_ge": {
+            "numerator": 17,
+            "denominator": 63,
+            "rate": 0.2698412698412698,
+            "comparison": ">="
+          }
+        },
+        "0.6": {
+          "threshold": 0.6,
+          "numerator": 6,
+          "denominator": 63,
+          "rate": 0.09523809523809523,
+          "comparison": ">",
+          "client_ge": {
+            "numerator": 6,
+            "denominator": 63,
+            "rate": 0.09523809523809523,
+            "comparison": ">="
+          }
+        },
+        "0.7": {
+          "threshold": 0.7,
+          "numerator": 4,
+          "denominator": 63,
+          "rate": 0.06349206349206349,
+          "comparison": ">",
+          "client_ge": {
+            "numerator": 4,
+            "denominator": 63,
+            "rate": 0.06349206349206349,
+            "comparison": ">="
+          }
+        },
+        "0.85": {
+          "threshold": 0.85,
+          "numerator": 1,
+          "denominator": 63,
+          "rate": 0.015873015873015872,
+          "comparison": ">",
+          "client_ge": {
+            "numerator": 1,
+            "denominator": 63,
+            "rate": 0.015873015873015872,
+            "comparison": ">="
+          }
+        }
+      },
+      "recall_at": {
+        "0.6": {
+          "social_affiliative": {
+            "assigned": 1,
+            "support": 23,
+            "recall": 0.043478260869565216
+          },
+          "conspiratorial": {
+            "assigned": 6,
+            "support": 14,
+            "recall": 0.42857142857142855
+          }
+        },
+        "0.85": {
+          "social_affiliative": {
+            "assigned": 0,
+            "support": 23,
+            "recall": 0.0
+          },
+          "conspiratorial": {
+            "assigned": 1,
+            "support": 14,
+            "recall": 0.07142857142857142
+          }
+        }
+      },
+      "ece": {
+        "point": 0.1393175259232521,
+        "lo": 0.09391398265212775,
+        "hi": 0.2381698172912001,
+        "n_resamples": 10000,
+        "seed": 13,
+        "method": "class-stratified percentile bootstrap, 2.5/97.5",
+        "note": "not required to contain the point: resampled ECE sums absolute bin gaps, so it is biased upward and a correct point (0.0, say) can sit below lo"
+      },
+      "bands": [
+        {
+          "band": 0,
+          "rule": "len <= c1",
+          "n": 34,
+          "per_class": [
+            {
+              "label": "social_affiliative",
+              "support": 4,
+              "predicted": 9,
+              "tp": 1,
+              "precision": 0.1111111111111111,
+              "recall": 0.25
+            },
+            {
+              "label": "conspiratorial",
+              "support": 2,
+              "predicted": 9,
+              "tp": 1,
+              "precision": 0.1111111111111111,
+              "recall": 0.5
+            },
+            {
+              "label": "other",
+              "support": 28,
+              "predicted": 16,
+              "tp": 14,
+              "precision": 0.875,
+              "recall": 0.5
+            }
+          ],
+          "false_assignment": {
+            "0.5": {
+              "threshold": 0.5,
+              "numerator": 7,
+              "denominator": 28,
+              "rate": 0.25,
+              "comparison": ">",
+              "client_ge": {
+                "numerator": 7,
+                "denominator": 28,
+                "rate": 0.25,
+                "comparison": ">="
+              }
+            },
+            "0.6": {
+              "threshold": 0.6,
+              "numerator": 3,
+              "denominator": 28,
+              "rate": 0.10714285714285714,
+              "comparison": ">",
+              "client_ge": {
+                "numerator": 3,
+                "denominator": 28,
+                "rate": 0.10714285714285714,
+                "comparison": ">="
+              }
+            },
+            "0.7": {
+              "threshold": 0.7,
+              "numerator": 2,
+              "denominator": 28,
+              "rate": 0.07142857142857142,
+              "comparison": ">",
+              "client_ge": {
+                "numerator": 2,
+                "denominator": 28,
+                "rate": 0.07142857142857142,
+                "comparison": ">="
+              }
+            },
+            "0.85": {
+              "threshold": 0.85,
+              "numerator": 1,
+              "denominator": 28,
+              "rate": 0.03571428571428571,
+              "comparison": ">",
+              "client_ge": {
+                "numerator": 1,
+                "denominator": 28,
+                "rate": 0.03571428571428571,
+                "comparison": ">="
+              }
+            }
+          },
+          "recall_at": {
+            "0.6": {
+              "social_affiliative": {
+                "assigned": 1,
+                "support": 4,
+                "recall": 0.25
+              },
+              "conspiratorial": {
+                "assigned": 1,
+                "support": 2,
+                "recall": 0.5
+              }
+            },
+            "0.85": {
+              "social_affiliative": {
+                "assigned": 0,
+                "support": 4,
+                "recall": 0.0
+              },
+              "conspiratorial": {
+                "assigned": 1,
+                "support": 2,
+                "recall": 0.5
+              }
+            }
+          },
+          "ece": {
+            "point": 0.20320679335033193,
+            "interval": {
+              "lo": 0.14475219234385914,
+              "hi": 0.381042306914049,
+              "n_resamples": 10000,
+              "seed": 13
+            }
+          }
+        },
+        {
+          "band": 1,
+          "rule": "c1 < len <= c2",
+          "n": 33,
+          "per_class": [
+            {
+              "label": "social_affiliative",
+              "support": 7,
+              "predicted": 2,
+              "tp": 0,
+              "precision": 0.0,
+              "recall": 0.0
+            },
+            {
+              "label": "conspiratorial",
+              "support": 5,
+              "predicted": 11,
+              "tp": 3,
+              "precision": 0.2727272727272727,
+              "recall": 0.6
+            },
+            {
+              "label": "other",
+              "support": 21,
+              "predicted": 20,
+              "tp": 15,
+              "precision": 0.75,
+              "recall": 0.7142857142857143
+            }
+          ],
+          "false_assignment": {
+            "0.5": {
+              "threshold": 0.5,
+              "numerator": 5,
+              "denominator": 21,
+              "rate": 0.23809523809523808,
+              "comparison": ">",
+              "client_ge": {
+                "numerator": 5,
+                "denominator": 21,
+                "rate": 0.23809523809523808,
+                "comparison": ">="
+              }
+            },
+            "0.6": {
+              "threshold": 0.6,
+              "numerator": 2,
+              "denominator": 21,
+              "rate": 0.09523809523809523,
+              "comparison": ">",
+              "client_ge": {
+                "numerator": 2,
+                "denominator": 21,
+                "rate": 0.09523809523809523,
+                "comparison": ">="
+              }
+            },
+            "0.7": {
+              "threshold": 0.7,
+              "numerator": 1,
+              "denominator": 21,
+              "rate": 0.047619047619047616,
+              "comparison": ">",
+              "client_ge": {
+                "numerator": 1,
+                "denominator": 21,
+                "rate": 0.047619047619047616,
+                "comparison": ">="
+              }
+            },
+            "0.85": {
+              "threshold": 0.85,
+              "numerator": 0,
+              "denominator": 21,
+              "rate": 0.0,
+              "comparison": ">",
+              "client_ge": {
+                "numerator": 0,
+                "denominator": 21,
+                "rate": 0.0,
+                "comparison": ">="
+              }
+            }
+          },
+          "recall_at": {
+            "0.6": {
+              "social_affiliative": {
+                "assigned": 0,
+                "support": 7,
+                "recall": 0.0
+              },
+              "conspiratorial": {
+                "assigned": 2,
+                "support": 5,
+                "recall": 0.4
+              }
+            },
+            "0.85": {
+              "social_affiliative": {
+                "assigned": 0,
+                "support": 7,
+                "recall": 0.0
+              },
+              "conspiratorial": {
+                "assigned": 0,
+                "support": 5,
+                "recall": 0.0
+              }
+            }
+          },
+          "ece": {
+            "point": 0.24945034764029764,
+            "interval": {
+              "lo": 0.18040646517818626,
+              "hi": 0.3742401172717413,
+              "n_resamples": 10000,
+              "seed": 13
+            }
+          }
+        },
+        {
+          "band": 2,
+          "rule": "len > c2",
+          "n": 33,
+          "per_class": [
+            {
+              "label": "social_affiliative",
+              "support": 12,
+              "predicted": 6,
+              "tp": 1,
+              "precision": 0.16666666666666666,
+              "recall": 0.08333333333333333
+            },
+            {
+              "label": "conspiratorial",
+              "support": 7,
+              "predicted": 11,
+              "tp": 5,
+              "precision": 0.45454545454545453,
+              "recall": 0.7142857142857143
+            },
+            {
+              "label": "other",
+              "support": 14,
+              "predicted": 16,
+              "tp": 6,
+              "precision": 0.375,
+              "recall": 0.42857142857142855
+            }
+          ],
+          "false_assignment": {
+            "0.5": {
+              "threshold": 0.5,
+              "numerator": 5,
+              "denominator": 14,
+              "rate": 0.35714285714285715,
+              "comparison": ">",
+              "client_ge": {
+                "numerator": 5,
+                "denominator": 14,
+                "rate": 0.35714285714285715,
+                "comparison": ">="
+              }
+            },
+            "0.6": {
+              "threshold": 0.6,
+              "numerator": 1,
+              "denominator": 14,
+              "rate": 0.07142857142857142,
+              "comparison": ">",
+              "client_ge": {
+                "numerator": 1,
+                "denominator": 14,
+                "rate": 0.07142857142857142,
+                "comparison": ">="
+              }
+            },
+            "0.7": {
+              "threshold": 0.7,
+              "numerator": 1,
+              "denominator": 14,
+              "rate": 0.07142857142857142,
+              "comparison": ">",
+              "client_ge": {
+                "numerator": 1,
+                "denominator": 14,
+                "rate": 0.07142857142857142,
+                "comparison": ">="
+              }
+            },
+            "0.85": {
+              "threshold": 0.85,
+              "numerator": 0,
+              "denominator": 14,
+              "rate": 0.0,
+              "comparison": ">",
+              "client_ge": {
+                "numerator": 0,
+                "denominator": 14,
+                "rate": 0.0,
+                "comparison": ">="
+              }
+            }
+          },
+          "recall_at": {
+            "0.6": {
+              "social_affiliative": {
+                "assigned": 0,
+                "support": 12,
+                "recall": 0.0
+              },
+              "conspiratorial": {
+                "assigned": 3,
+                "support": 7,
+                "recall": 0.42857142857142855
+              }
+            },
+            "0.85": {
+              "social_affiliative": {
+                "assigned": 0,
+                "support": 12,
+                "recall": 0.0
+              },
+              "conspiratorial": {
+                "assigned": 0,
+                "support": 7,
+                "recall": 0.0
+              }
+            }
+          },
+          "ece": {
+            "point": 0.19051157254161258,
+            "interval": {
+              "lo": 0.14517514764359502,
+              "hi": 0.369245100969618,
+              "n_resamples": 10000,
+              "seed": 13
+            }
+          }
+        }
+      ]
+    },
+    "setfit": {
+      "status": "completed",
+      "n": 100,
+      "macro_f1": 0.6253561253561254,
+      "per_class": [
+        {
+          "label": "social_affiliative",
+          "support": 23,
+          "predicted": 29,
+          "tp": 17,
+          "precision": 0.5862068965517241,
+          "recall": 0.7391304347826086
+        },
+        {
+          "label": "conspiratorial",
+          "support": 14,
+          "predicted": 26,
+          "tp": 10,
+          "precision": 0.38461538461538464,
+          "recall": 0.7142857142857143
+        },
+        {
+          "label": "other",
+          "support": 63,
+          "predicted": 45,
+          "tp": 39,
+          "precision": 0.8666666666666667,
+          "recall": 0.6190476190476191
+        }
+      ],
+      "false_assignment": {
+        "0.5": {
+          "threshold": 0.5,
+          "numerator": 21,
+          "denominator": 63,
+          "rate": 0.3333333333333333,
+          "comparison": ">",
+          "client_ge": {
+            "numerator": 21,
+            "denominator": 63,
+            "rate": 0.3333333333333333,
+            "comparison": ">="
+          }
+        },
+        "0.6": {
+          "threshold": 0.6,
+          "numerator": 13,
+          "denominator": 63,
+          "rate": 0.20634920634920634,
+          "comparison": ">",
+          "client_ge": {
+            "numerator": 13,
+            "denominator": 63,
+            "rate": 0.20634920634920634,
+            "comparison": ">="
+          }
+        },
+        "0.7": {
+          "threshold": 0.7,
+          "numerator": 9,
+          "denominator": 63,
+          "rate": 0.14285714285714285,
+          "comparison": ">",
+          "client_ge": {
+            "numerator": 9,
+            "denominator": 63,
+            "rate": 0.14285714285714285,
+            "comparison": ">="
+          }
+        },
+        "0.85": {
+          "threshold": 0.85,
+          "numerator": 0,
+          "denominator": 63,
+          "rate": 0.0,
+          "comparison": ">",
+          "client_ge": {
+            "numerator": 0,
+            "denominator": 63,
+            "rate": 0.0,
+            "comparison": ">="
+          }
+        }
+      },
+      "recall_at": {
+        "0.6": {
+          "social_affiliative": {
+            "assigned": 15,
+            "support": 23,
+            "recall": 0.6521739130434783
+          },
+          "conspiratorial": {
+            "assigned": 6,
+            "support": 14,
+            "recall": 0.42857142857142855
+          }
+        },
+        "0.85": {
+          "social_affiliative": {
+            "assigned": 10,
+            "support": 23,
+            "recall": 0.43478260869565216
+          },
+          "conspiratorial": {
+            "assigned": 4,
+            "support": 14,
+            "recall": 0.2857142857142857
+          }
+        }
+      },
+      "ece": {
+        "point": 0.11107520766771847,
+        "lo": 0.0733263717140889,
+        "hi": 0.20694185892570915,
+        "n_resamples": 10000,
+        "seed": 13,
+        "method": "class-stratified percentile bootstrap, 2.5/97.5",
+        "note": "not required to contain the point: resampled ECE sums absolute bin gaps, so it is biased upward and a correct point (0.0, say) can sit below lo"
+      },
+      "bands": [
+        {
+          "band": 0,
+          "rule": "len <= c1",
+          "n": 34,
+          "per_class": [
+            {
+              "label": "social_affiliative",
+              "support": 4,
+              "predicted": 3,
+              "tp": 2,
+              "precision": 0.6666666666666666,
+              "recall": 0.5
+            },
+            {
+              "label": "conspiratorial",
+              "support": 2,
+              "predicted": 7,
+              "tp": 2,
+              "precision": 0.2857142857142857,
+              "recall": 1.0
+            },
+            {
+              "label": "other",
+              "support": 28,
+              "predicted": 24,
+              "tp": 23,
+              "precision": 0.9583333333333334,
+              "recall": 0.8214285714285714
+            }
+          ],
+          "false_assignment": {
+            "0.5": {
+              "threshold": 0.5,
+              "numerator": 5,
+              "denominator": 28,
+              "rate": 0.17857142857142858,
+              "comparison": ">",
+              "client_ge": {
+                "numerator": 5,
+                "denominator": 28,
+                "rate": 0.17857142857142858,
+                "comparison": ">="
+              }
+            },
+            "0.6": {
+              "threshold": 0.6,
+              "numerator": 2,
+              "denominator": 28,
+              "rate": 0.07142857142857142,
+              "comparison": ">",
+              "client_ge": {
+                "numerator": 2,
+                "denominator": 28,
+                "rate": 0.07142857142857142,
+                "comparison": ">="
+              }
+            },
+            "0.7": {
+              "threshold": 0.7,
+              "numerator": 2,
+              "denominator": 28,
+              "rate": 0.07142857142857142,
+              "comparison": ">",
+              "client_ge": {
+                "numerator": 2,
+                "denominator": 28,
+                "rate": 0.07142857142857142,
+                "comparison": ">="
+              }
+            },
+            "0.85": {
+              "threshold": 0.85,
+              "numerator": 0,
+              "denominator": 28,
+              "rate": 0.0,
+              "comparison": ">",
+              "client_ge": {
+                "numerator": 0,
+                "denominator": 28,
+                "rate": 0.0,
+                "comparison": ">="
+              }
+            }
+          },
+          "recall_at": {
+            "0.6": {
+              "social_affiliative": {
+                "assigned": 2,
+                "support": 4,
+                "recall": 0.5
+              },
+              "conspiratorial": {
+                "assigned": 2,
+                "support": 2,
+                "recall": 1.0
+              }
+            },
+            "0.85": {
+              "social_affiliative": {
+                "assigned": 1,
+                "support": 4,
+                "recall": 0.25
+              },
+              "conspiratorial": {
+                "assigned": 1,
+                "support": 2,
+                "recall": 0.5
+              }
+            }
+          },
+          "ece": {
+            "point": 0.11946862565057523,
+            "interval": {
+              "lo": 0.09227376230443854,
+              "hi": 0.2458478595081387,
+              "n_resamples": 10000,
+              "seed": 13
+            }
+          }
+        },
+        {
+          "band": 1,
+          "rule": "c1 < len <= c2",
+          "n": 33,
+          "per_class": [
+            {
+              "label": "social_affiliative",
+              "support": 7,
+              "predicted": 7,
+              "tp": 4,
+              "precision": 0.5714285714285714,
+              "recall": 0.5714285714285714
+            },
+            {
+              "label": "conspiratorial",
+              "support": 5,
+              "predicted": 12,
+              "tp": 3,
+              "precision": 0.25,
+              "recall": 0.6
+            },
+            {
+              "label": "other",
+              "support": 21,
+              "predicted": 14,
+              "tp": 11,
+              "precision": 0.7857142857142857,
+              "recall": 0.5238095238095238
+            }
+          ],
+          "false_assignment": {
+            "0.5": {
+              "threshold": 0.5,
+              "numerator": 10,
+              "denominator": 21,
+              "rate": 0.47619047619047616,
+              "comparison": ">",
+              "client_ge": {
+                "numerator": 10,
+                "denominator": 21,
+                "rate": 0.47619047619047616,
+                "comparison": ">="
+              }
+            },
+            "0.6": {
+              "threshold": 0.6,
+              "numerator": 8,
+              "denominator": 21,
+              "rate": 0.38095238095238093,
+              "comparison": ">",
+              "client_ge": {
+                "numerator": 8,
+                "denominator": 21,
+                "rate": 0.38095238095238093,
+                "comparison": ">="
+              }
+            },
+            "0.7": {
+              "threshold": 0.7,
+              "numerator": 5,
+              "denominator": 21,
+              "rate": 0.23809523809523808,
+              "comparison": ">",
+              "client_ge": {
+                "numerator": 5,
+                "denominator": 21,
+                "rate": 0.23809523809523808,
+                "comparison": ">="
+              }
+            },
+            "0.85": {
+              "threshold": 0.85,
+              "numerator": 0,
+              "denominator": 21,
+              "rate": 0.0,
+              "comparison": ">",
+              "client_ge": {
+                "numerator": 0,
+                "denominator": 21,
+                "rate": 0.0,
+                "comparison": ">="
+              }
+            }
+          },
+          "recall_at": {
+            "0.6": {
+              "social_affiliative": {
+                "assigned": 4,
+                "support": 7,
+                "recall": 0.5714285714285714
+              },
+              "conspiratorial": {
+                "assigned": 2,
+                "support": 5,
+                "recall": 0.4
+              }
+            },
+            "0.85": {
+              "social_affiliative": {
+                "assigned": 4,
+                "support": 7,
+                "recall": 0.5714285714285714
+              },
+              "conspiratorial": {
+                "assigned": 2,
+                "support": 5,
+                "recall": 0.4
+              }
+            }
+          },
+          "ece": {
+            "point": 0.25212558166460897,
+            "interval": {
+              "lo": 0.1683559689701839,
+              "hi": 0.4306011659103277,
+              "n_resamples": 10000,
+              "seed": 13
+            }
+          }
+        },
+        {
+          "band": 2,
+          "rule": "len > c2",
+          "n": 33,
+          "per_class": [
+            {
+              "label": "social_affiliative",
+              "support": 12,
+              "predicted": 19,
+              "tp": 11,
+              "precision": 0.5789473684210527,
+              "recall": 0.9166666666666666
+            },
+            {
+              "label": "conspiratorial",
+              "support": 7,
+              "predicted": 7,
+              "tp": 5,
+              "precision": 0.7142857142857143,
+              "recall": 0.7142857142857143
+            },
+            {
+              "label": "other",
+              "support": 14,
+              "predicted": 7,
+              "tp": 5,
+              "precision": 0.7142857142857143,
+              "recall": 0.35714285714285715
+            }
+          ],
+          "false_assignment": {
+            "0.5": {
+              "threshold": 0.5,
+              "numerator": 6,
+              "denominator": 14,
+              "rate": 0.42857142857142855,
+              "comparison": ">",
+              "client_ge": {
+                "numerator": 6,
+                "denominator": 14,
+                "rate": 0.42857142857142855,
+                "comparison": ">="
+              }
+            },
+            "0.6": {
+              "threshold": 0.6,
+              "numerator": 3,
+              "denominator": 14,
+              "rate": 0.21428571428571427,
+              "comparison": ">",
+              "client_ge": {
+                "numerator": 3,
+                "denominator": 14,
+                "rate": 0.21428571428571427,
+                "comparison": ">="
+              }
+            },
+            "0.7": {
+              "threshold": 0.7,
+              "numerator": 2,
+              "denominator": 14,
+              "rate": 0.14285714285714285,
+              "comparison": ">",
+              "client_ge": {
+                "numerator": 2,
+                "denominator": 14,
+                "rate": 0.14285714285714285,
+                "comparison": ">="
+              }
+            },
+            "0.85": {
+              "threshold": 0.85,
+              "numerator": 0,
+              "denominator": 14,
+              "rate": 0.0,
+              "comparison": ">",
+              "client_ge": {
+                "numerator": 0,
+                "denominator": 14,
+                "rate": 0.0,
+                "comparison": ">="
+              }
+            }
+          },
+          "recall_at": {
+            "0.6": {
+              "social_affiliative": {
+                "assigned": 9,
+                "support": 12,
+                "recall": 0.75
+              },
+              "conspiratorial": {
+                "assigned": 2,
+                "support": 7,
+                "recall": 0.2857142857142857
+              }
+            },
+            "0.85": {
+              "social_affiliative": {
+                "assigned": 5,
+                "support": 12,
+                "recall": 0.4166666666666667
+              },
+              "conspiratorial": {
+                "assigned": 1,
+                "support": 7,
+                "recall": 0.14285714285714285
+              }
+            }
+          },
+          "ece": {
+            "point": 0.12695984561774998,
+            "interval": {
+              "lo": 0.09475817643428146,
+              "hi": 0.29013514450393785,
+              "n_resamples": 10000,
+              "seed": 13
+            }
+          }
+        }
+      ]
+    },
+    "kev": {
+      "status": "blocked",
+      "failure_class": "budget",
+      "evidence": ".planning/phases/12-motivation-v1-decide-server-for-experiment-coach-laya-pilot/12-KEV-ARM-EVIDENCE.json",
+      "evidence_sha256": "b117b126965737d55eafba54d149235f015b830e3604b9cccb3353d691f00958"
+    }
+  },
+  "laya_seeds": [
+    {
+      "seed": 13,
+      "macro_f1": 0.7475947000934631,
+      "ece_post": 0.09355141013860704
+    },
+    {
+      "seed": 17,
+      "macro_f1": 0.7197408326440584,
+      "ece_post": 0.11968235582113264
+    },
+    {
+      "seed": 23,
+      "macro_f1": 0.7404761904761905,
+      "ece_post": 0.09142689019441604
+    }
+  ],
+  "ranking": [
+    {
+      "rank": 1,
+      "arm": "laya",
+      "macro_f1": 0.7475947000934631,
+      "false_assignment_0_6": {
+        "numerator": 7,
+        "denominator": 63,
+        "rate": 0.1111111111111111
+      },
+      "tiebreak_applied": false
+    },
+    {
+      "rank": 2,
+      "arm": "setfit",
+      "macro_f1": 0.6253561253561254,
+      "false_assignment_0_6": {
+        "numerator": 13,
+        "denominator": 63,
+        "rate": 0.20634920634920634
+      },
+      "tiebreak_applied": false
+    }
+  ],
+  "findings": [],
+  "source_batch": "unmeasured (the mapping is not available; D-04, D-15)",
+  "threshold_note": "the declared false-assignment rate counts a largest non-other probability STRICTLY greater than the threshold (D-05); experiment-coach assigns at p >= min_prob, so client_ge holds the client-equivalent counts (>=), reported only and never ranked; the two differ only at exact threshold equality; Laya and Kev probabilities are stored f32 values widened to float64",
+  "inputs": [
+    {
+      "label": "data/task.json",
+      "path": "data/decide/motivation-v1/task.json",
+      "sha256": "f74a3ad3cfc00c160cc2959d95beb219aec859b394b883e87577a56dc14e7ea3"
+    },
+    {
+      "label": "data/train.jsonl",
+      "path": "data/decide/motivation-v1/train.jsonl",
+      "sha256": "f1d84f19ec38ed85356bcbcd1eae6ef8ad07fb97e014f61a17d37adc0d68d378"
+    },
+    {
+      "label": "data/eval.jsonl",
+      "path": "data/decide/motivation-v1/eval.jsonl",
+      "sha256": "ee95d71fcb5d90d515b9fc6741e5df51087e763fa7f251ace83d9f11d5ccd575"
+    },
+    {
+      "label": "laya/eval-probs.json",
+      "path": "models/decide/laya-motivation-v1/eval-probs.json",
+      "sha256": "95955f3da1f91071504fd720831d2572c54f6db52a28ef6edb208acfe47b288d"
+    },
+    {
+      "label": "laya/zero-shot-probs.json",
+      "path": "models/decide/laya-motivation-v1/zero-shot-probs.json",
+      "sha256": "e0d289e0c734bf0a29b6fb992b65be2df7bef670365145de0c3c4e3ebca82fce"
+    },
+    {
+      "label": "laya/gate-report.json",
+      "path": "models/decide/laya-motivation-v1/gate-report.json",
+      "sha256": "ba4c605240bba21808ec2cb97f28e426fd7f79e167b89c42fe0d01db5993db23"
+    },
+    {
+      "label": "laya/seeds/seed-13/eval-probs.json",
+      "path": "models/decide/laya-motivation-v1/seeds/seed-13/eval-probs.json",
+      "sha256": "95955f3da1f91071504fd720831d2572c54f6db52a28ef6edb208acfe47b288d"
+    },
+    {
+      "label": "laya/seeds/seed-17/eval-probs.json",
+      "path": "models/decide/laya-motivation-v1/seeds/seed-17/eval-probs.json",
+      "sha256": "5d4c0ddb2cd20529c9cb13225633cb52c7fdcae9fe070ab95d9bf0d90f1a4d74"
+    },
+    {
+      "label": "laya/seeds/seed-23/eval-probs.json",
+      "path": "models/decide/laya-motivation-v1/seeds/seed-23/eval-probs.json",
+      "sha256": "d448687d094c5a797bc4972dd2aa757c2c3318c0074a1acfba9217848040b218"
+    },
+    {
+      "label": "setfit/probability-dump.json",
+      "path": "models/setfit/motivation-v1-s32e1b16-seed13/test-probabilities.json",
+      "sha256": "4dc0f3764c71d692ae256fbe8523056928203a5b951d9fe054215c01664c0bb6"
+    },
+    {
+      "label": "kev/blocked-evidence",
+      "path": ".planning/phases/12-motivation-v1-decide-server-for-experiment-coach-laya-pilot/12-KEV-ARM-EVIDENCE.json",
+      "sha256": "b117b126965737d55eafba54d149235f015b830e3604b9cccb3353d691f00958"
+    }
+  ],
+  "setfit_provenance": {
+    "artifact_sha256": "52227695fdb9f47c96dff1f5e32da364699ff8b12cc997f0470ccea4312abbe9",
+    "dataset_fingerprint": "e18595a2e1079b993708dcebfe3c0fd11bd3b561468486ef103f84d04e902428"
+  }
+}
