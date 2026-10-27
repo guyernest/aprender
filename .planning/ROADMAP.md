@@ -953,7 +953,7 @@ Owner decisions already made (2026-10-26), to be recorded in this phase's CONTEX
 Known constraints: no server-side prior correction exists (serving is `softmax(z / T)`); the fine-tune gate's ECE on about 11 conspiratorial eval rows is noisy; three labels and the guide's indicators lengthen the per-call prefix, reducing texts per call; the first edge `/health` on a new id can 404 and trigger containment (F-10-12-1).
 **Requirements**: none mapped; the plans implement CONTEXT decisions D-01..D-26 (D-23: deployed with profile ze-kasher-dev in us-east-1; "augury-dev" is not an AWS target)
 **Depends on:** Phase 10
-**Plans:** 16/16 plans executed in 10 waves — verified `passed` 11/11 (`12-VERIFICATION.md`, 2026-10-26). Plan 12-15 closed as a documented partial by owner decision: the Kev-4B arm was stopped after 134 of 395 rows (about 142 s per post on CPU) and is recorded `blocked`/`budget`, so the bake-off compares Laya and SetFit with Kev unranked. Advisory code review: 0 critical, 6 warning, 5 info, all open (`12-REVIEW-DISPOSITION.md`); follow-up planned for WR-06 (served door of 8 overstated for the 97-token task) and the waiver findings WR-01/WR-02.
+**Plans:** 16/19 plans executed in 10 waves (plans 12-17 to 12-19 are the review follow-up, waves 11 to 13, planned and not yet executed) — verified `passed` 11/11 (`12-VERIFICATION.md`, 2026-10-26). Plan 12-15 closed as a documented partial by owner decision: the Kev-4B arm was stopped after 134 of 395 rows (about 142 s per post on CPU) and is recorded `blocked`/`budget`, so the bake-off compares Laya and SetFit with Kev unranked. Advisory code review: 0 critical, 6 warning, 5 info, all open (`12-REVIEW-DISPOSITION.md`); follow-up planned as three gap-closure plans grouped by class: 12-17 waiver soundness (WR-01, WR-02, IN-01, IN-02), 12-18 door-claim honesty (WR-06), 12-19 evidence and tooling integrity (WR-03, WR-04, WR-05, IN-03, IN-04, IN-05; IN-05 expected `accepted` after a refuting experiment).
 
 Plans:
 **Wave 1**
@@ -991,3 +991,12 @@ Plans:
 
 **Wave 10** *(blocked on Wave 9 completion)*
 - [x] 12-16-PLAN.md — the bake-off run, 12-HANDOFF.md led by the false-assignment rate (prior correction D-22, unmeasured source batch D-15, pilot/gate status), and the project docs naming the second served model
+
+**Wave 11** *(review follow-up, gap closure from `12-REVIEW.md`; blocked on Wave 10)*
+- [ ] 12-17-PLAN.md — waiver soundness (WR-01, WR-02, IN-01, IN-02): a declared `max_waived_ece` ceiling, one-outcome binding (`eval_probs_sha256`), the closed waivable set in both readers, the unspent declaration retired, contract bumped via pv; the shipped motivation artifact and live antisemitism-v1 re-verified by a real laya-verify, byte-identical
+
+**Wave 12** *(blocked on Wave 11; ordering only, the plans share the disposition ledger and derived contract files)*
+- [ ] 12-18-PLAN.md — door-claim honesty (WR-06): `served_max_texts` stated as a ceiling, admitted counts derived from measured post lengths (5 / 4), a non-vacuous test, a budget-derived `door_b`, the lambda README; no served behaviour, constant or artifact changes, no redeploy
+
+**Wave 13** *(blocked on Wave 12; ordering only)*
+- [ ] 12-19-PLAN.md — evidence and tooling integrity (WR-03, WR-04, WR-05, IN-03, IN-04, IN-05): bake-off inputs bound to their recorded hashes and a missing blocked-evidence file refused (real run byte-identical), `apr eval --dump-probabilities` writability pre-flight, two justfile messages (own hunks only), IN-05 recorded `accepted` with a standing guard
