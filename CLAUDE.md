@@ -274,12 +274,22 @@ calls took 1.08-1.15 s (the stance deployment measured 22.6-27.0 s cold, 0.87-0.
 `08-GATE-RUN-EVIDENCE.json` and `08-LIVE-REDEPLOY-EVIDENCE.json` (Phase 8 directory),
 `10-GATE-RUN-EVIDENCE.json`, `10-RENAME-DEPLOY-EVIDENCE.json` and `10-LIVE-DEPLOY-EVIDENCE.json` (the
 first deployment, under the previous id) (Phase 10 directory).
+Since 2026-10-26 a second server, `aprender-mcp-decide-motivation`, serves the `motivation-v1` PILOT
+(`laya-motivation-v1.apr`, sha256 d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd,
+labels `[social_affiliative, conspiratorial, other]`; the task is condensed from Dr. Iris Yuster's
+25 October 2026 draft guide, which is not frozen, so a retrain is expected after the freeze). Its
+declared gate run passed on the first attempt and no waiver was used (margin 0.3780, post-calibration
+ECE 0.0936, in-distribution claim scope); the door is the shared one above. SetFit (s32) was measured
+and Kev-4B was stopped by the owner as blocked (`budget`) as reference arms; the comparison and the
+prior-correction guidance are in the hand-off. Records: `12-GATE-RUN-EVIDENCE.json`,
+`12-DEPLOY-EVIDENCE.json`, `12-BAKEOFF-EVIDENCE.json` and `12-HANDOFF.md` (Phase 12 directory).
 
 The served artifact is `.apr` (`contracts/decide-apr-v1.yaml`), so the SafeTensors carve-out
 above is NOT widened: safetensors is read only by the back-office packer (`aprender_decide::pack`,
 driven by `crates/aprender-decide/examples/pack_laya.rs`), never by a server. The thin servers
-(`crates/aprender-mcp-decide` and `crates/aprender-mcp-decide-lambda` are transport only, as is the
-per-server crate `crates/aprender-mcp-decide-antisemite-lambda`) own transport and the boundary
+(`crates/aprender-mcp-decide` and `crates/aprender-mcp-decide-lambda` are transport only, as are the
+per-server crates `crates/aprender-mcp-decide-antisemite-lambda` and
+`crates/aprender-mcp-decide-motivation-lambda`) own transport and the boundary
 in `contracts/decide-tool-boundary-v1.yaml`, exactly as the
 forecast servers do. Training stays in Python (`scripts/laya_train`, gated by
 `contracts/laya-finetune-gate-v1.yaml`), and Rust re-derives that gate from the packed bytes

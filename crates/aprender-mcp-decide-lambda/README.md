@@ -102,6 +102,19 @@ The previous endpoint https://aprender-mcp-decide.us-east.true-mcp.com/mcp was r
 The stance demo (`laya-stance-64.apr`, sha256 24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a)
 is no longer served since 2026-10-22 (D-13): the first deployment of this artifact replaced it in place.
 
+### Served servers
+
+Two servers are live, one server id and one thin crate each. The door (8 texts and 800 built tokens) is the same for both.
+
+| Server id | Thin crate | Artifact | Status |
+|---|---|---|---|
+| `aprender-mcp-decide-antisemite` | `crates/aprender-mcp-decide-antisemite-lambda` | `laya-antisemitism-v1.apr` | `antisemitism-v1`, described above |
+| `aprender-mcp-decide-motivation` | `crates/aprender-mcp-decide-motivation-lambda` | `laya-motivation-v1.apr`, sha256 `d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd` | `motivation-v1`, a PILOT on the 25 October 2026 draft of Dr. Iris Yuster's guide: gate passed on the first declared run, no waiver; labels `social_affiliative`, `conspiratorial`, `other` (in task order); auth off, 10,240 MB; since 2026-10-26 |
+
+The motivation server's endpoint is `https://aprender-mcp-decide-motivation.us-east.true-mcp.com/mcp` (POST only). Its records are
+`12-DEPLOY-EVIDENCE.json`, `12-GATE-RUN-EVIDENCE.json`, `12-ACCEPTANCE-REPLAY.json` and the hand-off `12-HANDOFF.md`, all in
+`.planning/phases/12-motivation-v1-decide-server-for-experiment-coach-laya-pilot/`; the pin and the measured limits for that server are in them, not in the antisemitism tables on this page.
+
 ### Connecting an MCP client
 
 POST JSON-RPC to the endpoint. The server is stateless:
@@ -169,7 +182,7 @@ open, and the follow-on plan 10-06 is deferred by the owner. Nothing here claims
 ## One server id, one thin crate
 
 A served model is a server id named for its dataset, `aprender-mcp-decide-<dataset>` (the first
-is `aprender-mcp-decide-antisemite`).
+is `aprender-mcp-decide-antisemite`, the second `aprender-mcp-decide-motivation`).
 One server id has one thin crate named `<id>-lambda`, and that crate is a shim over this one: its `main.rs` calls `bootstrap::run` and nothing else.
 The server id equals the crate name minus `-lambda`, because `cargo pmcp deploy` resolves a server id to
 `<deploy-root>/<server>-lambda` before any other search. `tests::thin_server_crates_are_shims` fails a
