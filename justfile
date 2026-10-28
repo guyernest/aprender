@@ -2236,6 +2236,50 @@ laya-deploy apr run data base server env="dev" profile="ze-kasher-dev":
     if [ -z "$INSTALLED_VER" ] || [ "$INSTALLED_VER" != "$PROVEN_VER" ]; then
         refuse resolver-proof "the proof is for cargo-pmcp ${PROVEN_VER:-?}, the installed tool is ${INSTALLED_VER:-absent}; re-run just laya-resolver-proof <sdk> <commit> <scratch> $SERVER"
     fi
+    # (4b) D-07 (plan 13-06): a REDEPLOY of an OAuth-protected server probes its identity with a token minted
+    # from LAYA_M2M_FILE; without one the identity probe is refused and this recipe would CONTAIN a healthy
+    # function. A token already in the caller's environment is refused. The auth path is account-checked
+    # before a token is minted or used (D-08; the (5b) check below still runs). With the file, this recipe
+    # re-execs ITSELF, every argument kept, under scripts/laya_deploy/m2m_token.py (the child carries the token
+    # in APRENDER_DECIDE_PROBE_TOKEN and LAYA_M2M_MINTED=1, so it does not re-exec again). The token host is the
+    # helper's --token-host choice: LAYA_M2M_TOKEN_HOST, else <state dir>/m2m-token-host, else this profile's
+    # existing STATE endpoint; with none of them there is nothing to authenticate to (a first publish is auth
+    # off) and the run is refused. The expires_in floor is 2400 s, to outlast the build, the deploy, the edge
+    # settle and the identity probe. RISK: a token that expires before the identity probe makes this recipe
+    # contain a healthy function; LAYA_M2M_MIN_EXPIRES (300..86400) lowers the floor to match a shorter
+    # Cognito validity, at that risk.
+    if [ -n "${APRENDER_DECIDE_PROBE_TOKEN+x}" ] && [ "${LAYA_M2M_MINTED:-}" != "1" ]; then
+        refuse probe-auth "APRENDER_DECIDE_PROBE_TOKEN is set in the caller's environment; unset it and name the client file in LAYA_M2M_FILE"
+    fi
+    if [ -n "${LAYA_M2M_FILE:-}" ] || [ "${LAYA_M2M_MINTED:-}" = "1" ]; then
+        just _laya-account-check "$PROFILE" "$CFG_REGION"
+    fi
+    if [ -n "${LAYA_M2M_FILE:-}" ] && [ "${LAYA_M2M_MINTED:-}" != "1" ]; then
+        MINEXP="${LAYA_M2M_MIN_EXPIRES:-2400}"
+        case "$MINEXP" in ''|*[!0-9]*) refuse probe-auth "config: LAYA_M2M_MIN_EXPIRES is not a whole number of seconds" ;; esac
+        if [ "${#MINEXP}" -gt 5 ] || [ "$((10#$MINEXP))" -lt 300 ] || [ "$((10#$MINEXP))" -gt 86400 ]; then
+            refuse probe-auth "config: LAYA_M2M_MIN_EXPIRES must be in 300..86400"
+        fi
+        STATE_FILE="$SD/deploy-$SERVER.state/deployment.toml"
+        EH=""
+        if [ -f "$STATE_FILE" ]; then
+            EP="$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["deployment"]["endpoint"])' "$STATE_FILE" 2> /dev/null)" \
+                || refuse probe-auth "$STATE_FILE has no [deployment] endpoint"
+            GOT="$(just _laya-endpoint-check "$EP" "$PROFILE")"
+            [ "$GOT" = "$SERVER" ] || refuse probe-auth "$STATE_FILE names server $GOT, not $SERVER"
+            EH="${EP#https://}"
+            EH="${EH%%/*}"
+        fi
+        if [ -z "$EH" ] && [ -z "${LAYA_M2M_TOKEN_HOST:-}" ] && [ ! -e "$SD/m2m-token-host" ]; then
+            refuse probe-auth "LAYA_M2M_FILE was given but no endpoint exists yet (a first publish is auth off, D-07)"
+        fi
+        TH="$(python3 -I scripts/laya_deploy/m2m_token.py --token-host --state-dir "$SD" --endpoint-host "$EH")"
+        if [ "${DRY_RUN:-0}" = "1" ]; then
+            echo "DRY-RUN: LAYA_M2M_FILE is set; the live run mints a token for $TH before the first probe"
+        else
+            exec python3 -I scripts/laya_deploy/m2m_token.py --file "$LAYA_M2M_FILE" --expect-host "$TH" --min-expires "$((10#$MINEXP))" -- just laya-deploy "$APR" "{{run}}" "{{data}}" "{{base}}" "$SERVER" "$ENV" "$PROFILE"
+        fi
+    fi
     # (5) ELIGIBILITY -- the Rust verifier on the exact file (decide-apr-v1 deploy_eligibility),
     # never `inspect`, and nothing below reaches AWS unless it accepted.
     mkdir -p "$SD"
@@ -4052,6 +4096,41 @@ laya-deploy-verify apr server profile="ze-kasher-dev" samples="2":
         GOT="$(just _laya-endpoint-check "$ENDPOINT" "$P")"
         [ "$GOT" = "$SERVER" ] || { echo "REFUSED target-endpoint: $STATE names server $GOT, not $SERVER" >&2; exit 2; }
     fi
+    # D-07 (plan 13-06): an OAuth-protected server is probed with a token minted from LAYA_M2M_FILE. A token
+    # already in the caller's environment is refused (it would skip the file's checks). With the file, this
+    # recipe re-execs ITSELF, every argument kept, under scripts/laya_deploy/m2m_token.py, which execs the child
+    # with the token in APRENDER_DECIDE_PROBE_TOKEN and LAYA_M2M_MINTED=1 (so the child does not re-exec again).
+    # The token host is the helper's --token-host choice: LAYA_M2M_TOKEN_HOST, else <state dir>/m2m-token-host,
+    # else the STATE endpoint's host. The expires_in floor is 1800 s (the cold samples, the identity check and
+    # five warm calls); LAYA_M2M_MIN_EXPIRES (300..86400) overrides it for a shorter Cognito validity.
+    if [ -n "${APRENDER_DECIDE_PROBE_TOKEN+x}" ] && [ "${LAYA_M2M_MINTED:-}" != "1" ]; then
+        echo "REFUSED probe-auth: APRENDER_DECIDE_PROBE_TOKEN is set in the caller's environment; unset it and name the client file in LAYA_M2M_FILE" >&2
+        exit 2
+    fi
+    if [ -n "${LAYA_M2M_FILE:-}" ] && [ "${LAYA_M2M_MINTED:-}" != "1" ]; then
+        MINEXP="${LAYA_M2M_MIN_EXPIRES:-1800}"
+        case "$MINEXP" in ''|*[!0-9]*) echo "REFUSED probe-auth: config: LAYA_M2M_MIN_EXPIRES is not a whole number of seconds" >&2; exit 2 ;; esac
+        if [ "${#MINEXP}" -gt 5 ] || [ "$((10#$MINEXP))" -lt 300 ] || [ "$((10#$MINEXP))" -gt 86400 ]; then
+            echo "REFUSED probe-auth: config: LAYA_M2M_MIN_EXPIRES must be in 300..86400" >&2
+            exit 2
+        fi
+        EP="${ENDPOINT:-}"
+        if [ -z "$EP" ] && [ -f "$STATE" ]; then
+            EP="$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["deployment"]["endpoint"])' "$STATE" 2> /dev/null || true)"
+        fi
+        EH="${EP#https://}"
+        EH="${EH%%/*}"
+        if [ -z "$EH" ] && [ -z "${LAYA_M2M_TOKEN_HOST:-}" ] && [ ! -e "$SD/m2m-token-host" ]; then
+            TH="<the endpoint host of $STATE>"
+        else
+            TH="$(python3 -I scripts/laya_deploy/m2m_token.py --token-host --state-dir "$SD" --endpoint-host "$EH")"
+        fi
+        if [ "${DRY_RUN:-0}" = "1" ]; then
+            echo "DRY-RUN: LAYA_M2M_FILE is set; the live run mints a token for $TH before the first probe"
+        else
+            exec python3 -I scripts/laya_deploy/m2m_token.py --file "$LAYA_M2M_FILE" --expect-host "$TH" --min-expires "$((10#$MINEXP))" -- just laya-deploy-verify "$APR" "$SERVER" "$P" "$N"
+        fi
+    fi
     cargo build --release -q -p aprender-mcp-decide-lambda --example probe
     TD="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
     PROBE="$TD/release/examples/probe"
@@ -4243,6 +4322,89 @@ laya-probe-auth profile url *args:
     if [ "${LAYA_M2M_ALLOW_BASIC:-0}" = "1" ]; then FLAGS+=(--allow-basic); fi
     set +x
     exec python3 -I scripts/laya_deploy/m2m_token.py "${FLAGS[@]}" -- "$PROBE" --url "$URL" "$@"
+
+# Measure where the platform refuses an UNAUTHENTICATED caller (plan 13-06, D-07). <url> must be
+# https://<host>/mcp and <wait_s> an integer 0..3600. tools/list is POSTed without a bearer, every
+# LAYA_AUTH_POLL_SLEEP seconds (default 15) within <wait_s>, until it answers HTTP 401 (so the poll
+# measures when OAuth takes effect); only THEN is one tools/call of the tool classify (one synthetic text)
+# sent, never while tools/list is open, so an open server is never asked for a cold classify. Both must
+# be 401. initialize (200 on augury, RESEARCH P6) and GET /.well-known/oauth-protected-resource are
+# recorded as OBSERVATIONS, never pass criteria. No bearer is ever sent. Prints `auth-refusal ok:
+# tools/list 401, tools/call 401 after <k> poll(s) (<s> s); first_401_utc <UTC>; initialize <code>
+# (observed, not asserted); oauth-protected-resource <code> (observed)`, whose first_401_utc plan 13-08
+# records as the auth window. `REFUSED auth-open:` (exit 1) when tools/list stays open past the wait or
+# tools/call is not 401, `REFUSED auth-check: transport` (exit 1) on a curl failure, `REFUSED
+# auth-check: config` (exit 2) on a malformed argument. Row auth-refusal-check.
+[positional-arguments]
+_laya-auth-refusal-check url wait_s:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    URL="$1"
+    WAIT="$2"
+    config() { echo "REFUSED auth-check: config $1" >&2; exit 2; }
+    python3 -I -c 'import re, sys; sys.exit(0 if re.fullmatch(r"https://[a-z0-9-]+(\.[a-z0-9-]+)+/mcp", sys.argv[1]) else 1)' "$URL" \
+        || config "the URL (${#URL} characters) is not https://<host>/mcp"
+    case "$WAIT" in ''|*[!0-9]*) config "wait_s is not a whole number of seconds" ;; esac
+    [ "${#WAIT}" -le 4 ] && [ "$((10#$WAIT))" -le 3600 ] || config "wait_s is over 3600"
+    WAIT=$((10#$WAIT))
+    SLEEP="${LAYA_AUTH_POLL_SLEEP:-15}"
+    case "$SLEEP" in ''|*[!0-9]*) config "LAYA_AUTH_POLL_SLEEP is not a whole number of seconds" ;; esac
+    [ "${#SLEEP}" -le 4 ] && [ "$((10#$SLEEP))" -le 3600 ] || config "LAYA_AUTH_POLL_SLEEP is over 3600"
+    SLEEP=$((10#$SLEEP))
+    HOST="${URL#https://}"
+    HOST="${HOST%/mcp}"
+    TMP="$(mktemp)"
+    trap 'rm -f "$TMP"' EXIT
+    post() {
+        curl -s -m 30 -o "$TMP" -w '%{http_code}' -X POST "$URL" -H 'content-type: application/json' \
+            -H 'accept: application/json, text/event-stream' -d "$1"
+    }
+    LIST='{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+    CALL='{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"classify","arguments":{"texts":["auth refusal probe"]}}}'
+    INIT='{"jsonrpc":"2.0","id":3,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"laya-auth-refusal-check","version":"1"}}}'
+    START=$SECONDS
+    k=0
+    while :; do
+        k=$((k + 1))
+        set +e
+        code="$(post "$LIST")"
+        crc=$?
+        set -e
+        elapsed=$((SECONDS - START))
+        if [ "$crc" -ne 0 ]; then
+            echo "REFUSED auth-check: transport (curl exit $crc) on tools/list, poll $k" >&2
+            exit 1
+        fi
+        if [ "$code" = "401" ]; then
+            FIRST="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            break
+        fi
+        if [ "$elapsed" -ge "$WAIT" ] || [ $((elapsed + SLEEP)) -gt "$WAIT" ] || [ "$k" -ge 241 ]; then
+            echo "REFUSED auth-open: unauthenticated tools/list answered HTTP $code after $k poll(s) ($elapsed s, wait $WAIT s); tools/call was not sent" >&2
+            exit 1
+        fi
+        echo "  tools/list answered HTTP $code without a bearer (poll $k, $elapsed s); polling again in $SLEEP s" >&2
+        sleep "$SLEEP"
+    done
+    # Only now, with tools/list refused, one tools/call: it must be refused too.
+    set +e
+    ccode="$(post "$CALL")"
+    crc=$?
+    set -e
+    if [ "$crc" -ne 0 ]; then
+        echo "REFUSED auth-check: transport (curl exit $crc) on tools/call" >&2
+        exit 1
+    fi
+    if [ "$ccode" != "401" ]; then
+        echo "REFUSED auth-open: tools/call answered HTTP $ccode without a bearer although tools/list answered 401" >&2
+        exit 1
+    fi
+    # Observations, never pass criteria.
+    set +e
+    icode="$(post "$INIT")" || icode="transport"
+    pcode="$(curl -s -m 30 -o /dev/null -w '%{http_code}' "https://$HOST/.well-known/oauth-protected-resource")" || pcode="transport"
+    set -e
+    echo "auth-refusal ok: tools/list 401, tools/call 401 after $k poll(s) ($elapsed s); first_401_utc $FIRST; initialize $icode (observed, not asserted); oauth-protected-resource $pcode (observed)"
 
 # The scripted curl of the auth refusal cases (plan 13-06), written to <out>; used by `_laya-auth-selftest` and the
 # gate row auth-refusal-check, never by a live recipe. It logs "<METHOD> <json-rpc method>" (or "GET <url>") to
