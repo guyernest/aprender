@@ -1,0 +1,19 @@
+{
+  "schema": "laya-deploy-owner-reply-v1",
+  "phase": "13",
+  "plan": "13-07",
+  "step": "pmcp-login",
+  "target": "augury-dev",
+  "command": "PMCP_TARGET=augury-dev cargo pmcp deploy login",
+  "run_by": "owner, in the owner's own terminal (the executor never logs in, refreshes, runs `cargo pmcp configure use` or prints a token)",
+  "reply": "logged-in",
+  "replied_on": "2026-10-28T04:43:02Z",
+  "token_gate_line": "pmcp.run token expires_at 2026-10-28T05:41:33.765569+00:00 (58 min left)",
+  "token_gate": {
+    "measured_on": "2026-10-28T04:43:13Z",
+    "rc": 0,
+    "threshold_min": 45,
+    "read": "~/.pmcp/credentials.toml key pmcp-run.expires_at only (python3 -I tomllib); no token value read into the output or stored"
+  },
+  "note": "~/.pmcp/credentials.toml has ONE pmcp-run slot, so this augury-dev login replaced any ze-kasher-dev session; no ze-kasher-dev pmcp operation is planned in phase 13. The deploy itself is plan 13-08 and was not started here."
+}
