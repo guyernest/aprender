@@ -145,59 +145,339 @@ SENTINEL = "ZQXJ-sentinel-select-4qp"                   # planted in the selftes
 
 
 # ------------------------------------------------------------------------------------------------ the rule
-# RED (plan 13-05 Task 1): the selftest below is written first. These stubs return neutral values, so every behaviour
-# case fails on its assertion rather than on a crash.
+# The one implementation of the declared rule (OPS-03); 13-SELECTION-NOTE.md embeds rule_markdown() verbatim.
+
+class _BadConstant(ValueError):
+    pass
+
+
+def _no_constant(_name):
+    raise _BadConstant()
+
+
+def _loads(line):
+    """One JSON value with floats as exact Decimals, a repeated key and NaN / Infinity refused."""
+    return json.loads(line, object_pairs_hook=_object_no_duplicates, parse_float=Decimal, parse_constant=_no_constant)
+
+
+def _is_int(v):
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def _record_fields(sid, n, line, expect_sha256):
+    """(post_id, text, probabilities as Decimals, deployment) of one record line, or a DataError naming the source id,
+    the row, the field and at most a character count."""
+    where = "%s row %d" % (sid, n)
+    try:
+        d = _loads(line)
+    except _DuplicateKey:
+        raise DataError("select-json", "%s: an object repeats a key" % where)
+    except _BadConstant:
+        raise DataError("select-json", "%s: a NaN or Infinity constant is not a JSON number" % where)
+    except (ValueError, RecursionError):
+        raise DataError("select-json", "%s: not one JSON object" % where)
+    if not isinstance(d, dict):
+        raise DataError("select-json", "%s: not one JSON object" % where)
+    if sorted(d) != sorted(RECORD_KEYS):
+        missing = [k for k in RECORD_KEYS if k not in d]
+        unknown = len(set(d) - set(RECORD_KEYS))
+        raise DataError("select-record", "%s: missing field(s) %s, %d unknown key(s); expected exactly %s"
+                        % (where, missing, unknown, list(RECORD_KEYS)))
+
+    def at(field):
+        return "%s field %s" % (where, field)
+
+    for field, pattern in (("post_id", POST_ID_PATTERN), ("source", SOURCE_PATTERN)):
+        v = d[field]
+        if not isinstance(v, str):
+            raise DataError("select-record", "%s: not a string" % at(field))
+        if not re.fullmatch(pattern, v):
+            raise DataError("select-record", "%s: %d characters, not matching the declared pattern" % (at(field), len(v)))
+    t = d["text"]
+    if not isinstance(t, str):
+        raise DataError("select-record", "%s: not a string" % at("text"))
+    try:
+        data.refuse_unencodable(t, "select", sid, n, "text")
+    except DataError:                                   # its own rule name and its code point never escape
+        raise DataError("select-record", "%s: not encodable as UTF-8" % at("text"))
+    if len(data.normalize(t)) < TEXT_MIN_CHARS:
+        raise DataError("select-record", "%s: %d characters, none left after trimming" % (at("text"), len(t)))
+    if len(t) > TEXT_MAX_CHARS:
+        raise DataError("select-record", "%s: %d characters, at most %d" % (at("text"), len(t), TEXT_MAX_CHARS))
+    if d["labels"] != list(LABELS):
+        raise DataError("select-labels", "%s: not the served labels in served order (%s)" % (at("labels"), ", ".join(LABELS)))
+    probs = d["probabilities"]
+    if not isinstance(probs, list) or len(probs) != PROB_LENGTH:
+        raise DataError("select-probabilities", "%s: not a list of %d numbers" % (at("probabilities"), PROB_LENGTH))
+    vals = []
+    for k, p in enumerate(probs, 1):
+        if not (_is_int(p) or isinstance(p, Decimal)):
+            raise DataError("select-probabilities", "%s: item %d is not a number" % (at("probabilities"), k))
+        v = Decimal(p)
+        if not PROB_RANGE[0] <= v <= PROB_RANGE[1]:
+            raise DataError("select-probabilities", "%s: item %d outside [%s, %s]" % (at("probabilities"), k, *PROB_RANGE))
+        vals.append(v)
+    if abs(sum(vals) - 1) > SUM_TOLERANCE:
+        raise DataError("select-probabilities", "%s: the sum is off 1 by more than %s" % (at("probabilities"), SUM_TOLERANCE))
+    art = d["artifact_sha256"]
+    if not isinstance(art, str) or not re.fullmatch(SHA256_PATTERN, art):
+        raise DataError("select-sha", "%s: not 64 lower-case hex digits" % at("artifact_sha256"))
+    if art != expect_sha256:
+        raise DataError("select-sha", "%s: not the artifact this selection expects (--expect-sha256)" % at("artifact_sha256"))
+    dep = d["deployment"]
+    if not isinstance(dep, dict) or sorted(dep) != sorted(DEPLOYMENT_KEYS):
+        raise DataError("select-deployment", "%s: not an object with exactly %s" % (at("deployment"), list(DEPLOYMENT_KEYS)))
+    for k in DEPLOYMENT_KEYS:
+        v = dep[k]
+        if not isinstance(v, str) or not re.fullmatch(DEPLOYMENT_PATTERNS[k], v):
+            raise DataError("select-deployment", "%s: %s, not matching the declared pattern" % (
+                at("deployment." + k), "%d characters" % len(v) if isinstance(v, str) else "not a string"))
+    if not _is_int(d["tokens"]) or d["tokens"] < TOKENS_MIN:
+        raise DataError("select-record", "%s: not an integer of at least %d" % (at("tokens"), TOKENS_MIN))
+    if not isinstance(d["truncated"], bool):
+        raise DataError("select-record", "%s: not a boolean" % at("truncated"))
+    s = d["scored_at"]
+    if not isinstance(s, str) or not re.fullmatch(SCORED_AT_PATTERN, s):
+        raise DataError("select-record", "%s: not an RFC 3339 UTC time ending in Z" % at("scored_at"))
+    return d["post_id"], t, vals, dep
+
 
 def read_records(path, source_id, expect_sha256):
-    return {"id": source_id, "sha256": "", "records": []}
-
-
-def known_identities(dirpath):
-    return set()
+    """One motivation-record-v1 file, read in place: {id, sha256, records [(row, post_id, text, probabilities)]}.
+    Never names the file: only the generated source id."""
+    sid = source_id
+    path = Path(path)
+    if not path.is_file():
+        raise DataError("select-missing", "%s: the --records path does not exist or is not a regular file" % sid)
+    if _under_repo(path):
+        raise DataError("select-in-repo", "%s: the --records path resolves inside the aprender repository; record files "
+                        "are read in place in the partner repository and never copied here" % sid)
+    raw = path.read_bytes()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise DataError("select-json", "%s row %d: not valid UTF-8" % (sid, raw[:e.start].count(b"\n") + 1))
+    lines = data.jsonl_lines(text)
+    if not lines:
+        raise DataError("select-record", "%s: no records" % sid)
+    records, first = [], None
+    for n, line in enumerate(lines, 1):
+        pid, t, vals, dep = _record_fields(sid, n, line, expect_sha256)
+        if first is None:
+            first = dep
+        elif dep != first:
+            raise DataError("select-deployment", "%s row %d field deployment: differs from row 1; a record file holds one "
+                            "deployment" % (sid, n))
+        records.append((n, pid, t, vals))
+    return {"id": sid, "sha256": sha256_bytes(raw), "records": records}
 
 
 def refuse_duplicate_post_ids(sources):
-    return None
+    seen = {}
+    for s in sources:
+        for n, pid, _t, _p in s["records"]:
+            if pid in seen:
+                raise DataError("select-duplicate-post-id", "%s row %d field post_id: repeats the post_id of %s row %d"
+                                % (s["id"], n, *seen[pid]))
+            seen[pid] = (s["id"], n)
+
+
+def known_identities(dirpath):
+    """The nfc-trim-ws-v1 identities of a v1 data dir's train.jsonl and eval.jsonl texts (never printed)."""
+    d = Path(dirpath)
+    files = [d / name for name in EXCLUDE_FILES]
+    if not d.is_dir() or not all(f.is_file() for f in files):
+        raise DataError("select-exclude-missing", "the --exclude-data dir (default data/decide/motivation-v1) does not hold "
+                        "train.jsonl and eval.jsonl; on a machine without the aprender v1 data dir pass --no-exclude (the "
+                        "ingest's eval-overlap and conflict rules still apply later)")
+    known = set()
+    for f in files:
+        try:
+            lines = data.jsonl_lines(f.read_text(encoding="utf-8"))
+        except UnicodeDecodeError:
+            raise DataError("select-exclude-missing", "%s of the --exclude-data dir is not UTF-8" % f.name)
+        for n, line in enumerate(lines, 1):
+            try:
+                row = json.loads(line)
+            except ValueError:
+                row = None
+            if not isinstance(row, dict) or not isinstance(row.get("text"), str):
+                raise DataError("select-exclude-missing", "%s row %d of the --exclude-data dir: not a v1 data row" % (f.name, n))
+            try:
+                known.add(normalized_sha256(row["text"]))
+            except UnicodeEncodeError:
+                raise DataError("select-exclude-missing", "%s row %d of the --exclude-data dir: not UTF-8" % (f.name, n))
+    return known
 
 
 def parse_budget(text):
-    return DEFAULT_BUDGET
+    if not re.fullmatch(r"[0-9]{1,9}", str(text)) or not BUDGET_MIN <= int(text) <= BUDGET_MAX:
+        raise DataError("select-budget", "--budget must be an integer from %d to %d (the enrichment file's row cap)"
+                        % (BUDGET_MIN, BUDGET_MAX))
+    return int(text)
 
 
 def targets(budget):
-    return {k: 0 for k in TARGET_KEYS}
+    """The per-slice and per-label targets of a budget, by the declared integer formula."""
+    control = budget * SHARES["control"] // PERCENT
+    uncertainty = budget * SHARES["uncertainty"] // PERCENT
+    quota = budget - control - uncertainty
+    t = {"control": control, "uncertainty": uncertainty, "quota": quota}
+    rest = quota
+    for lab, num in QUOTA_SPLIT.items():
+        if num is not None:
+            t["quota_" + lab] = quota * num // QUOTA_DENOMINATOR
+            rest -= t["quota_" + lab]
+    for lab, num in QUOTA_SPLIT.items():
+        if num is None:
+            t["quota_" + lab] = rest
+    return {k: t[k] for k in TARGET_KEYS}
 
 
 def top_two(probs):
-    return Decimal(0), Decimal(0)
+    s = sorted(probs, reverse=True)
+    return s[0], s[1]
 
 
 def band_eligible(p1, p2):
-    return False
+    return (p1 - p2 < BAND["top_two_margin_below"]
+            or BAND["top_probability_min"] <= p1 <= BAND["top_probability_max"])
 
 
 def predicted(probs):
-    return 0
+    best = max(probs)
+    return next(i for i, p in enumerate(probs) if p == best)
 
 
 def rank_key(seed, post_id):
-    return ""
+    return hashlib.sha256(("%s:%s" % (seed, post_id)).encode("utf-8")).hexdigest()
+
+
+def _quota_split_json():
+    return dict({"denominator": QUOTA_DENOMINATOR},
+                **{lab: (num if num is not None else "the rest") for lab, num in QUOTA_SPLIT.items()})
+
+
+def _band_json():
+    return dict({k: str(v) for k, v in BAND.items()}, straddles_motivation_min_prob=str(MOTIVATION_MIN_PROB))
 
 
 def select(sources, known, seed, budget):
-    return {"counts": {}}, []
+    """(header, rows) of the declared rule over validated sources; `known` is a set of excluded identities or None."""
+    t = targets(budget)
+    excluded = duplicates = 0
+    by_identity = {}
+    for s in sources:
+        for _n, pid, text, probs in s["records"]:
+            ident = normalized_sha256(text)
+            if known is not None and ident in known:
+                excluded += 1
+                continue
+            item = (rank_key(seed, pid), pid, probs)
+            cur = by_identity.get(ident)
+            if cur is not None:
+                duplicates += 1
+                if item[0] >= cur[0]:
+                    continue
+            by_identity[ident] = item
+    pool = sorted(by_identity.values(), key=lambda x: x[0])
+    eligible = {pid for _k, pid, probs in pool if band_eligible(*top_two(probs))}
+    taken, drawn = set(), []
+
+    def draw(slice_name, candidates, n):
+        got = [c for c in candidates if c[1] not in taken][:n]
+        for key, pid, _p in got:
+            taken.add(pid)
+            drawn.append((SLICES.index(slice_name), key, pid, slice_name))
+        return len(got)
+
+    per_slice, shortfall, per_label = {}, {}, {}
+    per_slice["control"] = draw("control", pool, t["control"])
+    per_slice["uncertainty"] = draw("uncertainty", [c for c in pool if c[1] in eligible], t["uncertainty"])
+    for lab in QUOTA_SPLIT:
+        idx = LABELS.index(lab)
+        per_label[lab] = draw("quota", [c for c in pool if predicted(c[2]) == idx], t["quota_" + lab])
+    per_slice["quota"] = sum(per_label.values())
+    for k in ("control", "uncertainty"):
+        shortfall[k] = t[k] - per_slice[k]
+    for lab in QUOTA_SPLIT:
+        shortfall["quota_" + lab] = t["quota_" + lab] - per_label[lab]
+    counts = {
+        "pool": len(pool),
+        "band_eligible": len(eligible),
+        "band_share_of_pool": round(len(eligible) / len(pool), 6) if pool else 0.0,
+        "duplicate_text_skipped": duplicates,
+        "excluded_known_text": excluded,
+        "per_slice": per_slice,
+        "per_predicted_label_in_quota": per_label,
+        "shortfall": shortfall,
+    }
+    header = {"format": SELECTION_FORMAT, "seed": seed, "budget": budget, "shares": dict(SHARES),
+              "quota_split": _quota_split_json(), "band": _band_json(), "targets": t,
+              "control_population": CONTROL_POPULATION,
+              "records": [{"id": s["id"], "sha256": s["sha256"]} for s in sources], "counts": counts}
+    drawn.sort()
+    return header, [{"post_id": pid, "selection_slice": sl, "rank_key": key} for _o, key, pid, sl in drawn]
 
 
 def render(header, rows):
-    return b""
+    return "".join(json.dumps(x) + "\n" for x in [header] + rows).encode("utf-8")
 
 
 def rule_values():
-    return {}
+    """The rule as one JSON object, from the constants only (the note's fenced block)."""
+    return {
+        "format": SELECTION_FORMAT, "default_budget": DEFAULT_BUDGET, "budget_range": [BUDGET_MIN, BUDGET_MAX],
+        "shares_percent": dict(SHARES), "quota_split": _quota_split_json(), "band": _band_json(),
+        "default_seed": DEFAULT_SEED,
+        "rank_key": "sha256 of the UTF-8 bytes of <seed>:<post_id>, lower-case hex, ascending",
+        "draw_order": list(SLICES), "no_backfill": True,
+        "targets": {str(b): targets(b) for b in (DEFAULT_BUDGET, RULE_EXAMPLE_BUDGET)},
+    }
 
 
 def rule_markdown():
-    return ""
+    """The markdown rule section 13-SELECTION-NOTE.md embeds verbatim, from the constants only; byte-stable."""
+    a, b = targets(DEFAULT_BUDGET), targets(RULE_EXAMPLE_BUDGET)
+    A, B = DEFAULT_BUDGET, RULE_EXAMPLE_BUDGET
+    s = SHARES
+    m, lo, hi = BAND["top_two_margin_below"], BAND["top_probability_min"], BAND["top_probability_max"]
+    named = [lab for lab, num in QUOTA_SPLIT.items() if num is not None]
+    rest = [lab for lab, num in QUOTA_SPLIT.items() if num is None][0]
+    L = ["_Generated by `select_motivation.py --print-rule` from the script's constants. Never edit this region by hand;"
+         " regenerate it._", "",
+         "| Slice | Share | Formula for a budget B | At budget %d | At budget %d |" % (A, B),
+         "|-------|-------|------------------------|--------------|--------------|",
+         "| control | %d %% | B * %d // %d | %d | %d |" % (s["control"], s["control"], PERCENT, a["control"], b["control"]),
+         "| uncertainty | %d %% | B * %d // %d | %d | %d |" % (s["uncertainty"], s["uncertainty"], PERCENT, a["uncertainty"],
+                                                            b["uncertainty"]),
+         "| quota | %d %% | B - control - uncertainty | %d | %d |" % (s["quota"], a["quota"], b["quota"]),
+         "", "| Quota part (predicted label) | Formula | At budget %d | At budget %d |" % (A, B),
+         "|------------------------------|---------|--------------|--------------|"]
+    for lab in named:
+        L.append("| %s | quota * %d // %d | %d | %d |" % (lab, QUOTA_SPLIT[lab], QUOTA_DENOMINATOR, a["quota_" + lab],
+                                                         b["quota_" + lab]))
+    L.append("| %s | quota - %s | %d | %d |" % (rest, " - ".join(named), a["quota_" + rest], b["quota_" + rest]))
+    L += ["",
+          "- **Budget:** %d by default; any integer from %d to %d (the row cap of a motivation-enrichment-v1 file). The"
+          " partner may change the budget; the shares then scale by the integer formulas above." % (A, BUDGET_MIN, BUDGET_MAX),
+          "- **Band (the uncertainty slice):** a post is band-eligible when `p1 - p2 < %s` or `%s <= p1 <= %s`, where p1"
+          " and p2 are its largest and second-largest probabilities, compared as exact decimals. The interval straddles"
+          " experiment-coach's `motivation_min_prob` %s." % (m, lo, hi, MOTIVATION_MIN_PROB),
+          "- **Predicted label (the quota slice):** the label of the largest probability; a tie goes to the earlier label"
+          " in served order (%s)." % ", ".join(LABELS),
+          "- **Seed:** `%s` by default (`--seed` changes it, and the selection header records it)." % DEFAULT_SEED,
+          "- **Rank key:** the lower-case hex sha256 of the UTF-8 bytes of `<seed>:<post_id>`. Smaller keys are drawn"
+          " first, so neither file order nor line order changes the selection.",
+          "- **Pool:** a record whose text (nfc-trim-ws-v1) is already a motivation-v1 train or eval text is excluded;"
+          " records with the same text are then deduplicated, keeping the smaller rank key.",
+          "- **Draw order:** (1) control: the smallest rank keys of the whole pool; (2) uncertainty: the smallest rank"
+          " keys among the band-eligible posts not yet drawn; (3) quota: for each predicted label, the smallest rank keys"
+          " among that label's posts not yet drawn.",
+          "- **No post twice, no backfill:** a slice that finds too few posts takes all it finds and the header reports"
+          " the shortfall; no other slice makes up the difference.",
+          "", "```json", json.dumps(rule_values(), indent=2), "```"]
+    return "\n".join(L) + "\n"
 
 
 # ------------------------------------------------------------------------------------------------ selftest fixtures
@@ -808,8 +1088,35 @@ def main(argv=None):
     if args.print_rule:
         sys.stdout.write(rule_markdown())
         return 0
-    print("SELECT NOT IMPLEMENTED (plan 13-05 RED)", file=sys.stderr)
-    return 1
+    if not args.records or args.out is None:
+        ap.error("--records and --out are required (or --print-rule, or --selftest)")
+    if not args.seed:
+        ap.error("--seed must not be empty")
+    if not re.fullmatch(SHA256_PATTERN, args.expect_sha256):
+        ap.error("--expect-sha256 must be 64 lower-case hex digits")
+    try:
+        budget = parse_budget(args.budget)
+        out = Path(args.out)
+        if _under_repo(out):
+            raise DataError("select-out-in-repo", "--out resolves inside the aprender repository; a selection is written "
+                            "in the partner repository or a scratch dir")
+        if out.exists() or out.is_symlink():
+            raise DataError("select-out-exists", "--out already exists; a selection is written once")
+        known = None if args.no_exclude else known_identities(
+            Path(args.exclude_data) if args.exclude_data else DEFAULT_EXCLUDE)
+        sources = [read_records(p, "source-%d" % k, args.expect_sha256) for k, p in enumerate(args.records, 1)]
+        refuse_duplicate_post_ids(sources)
+        header, rows = select(sources, known, args.seed, budget)
+        body = render(header, rows)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with open(out, "xb") as f:                      # write-once: never replaces a file
+            f.write(body)
+    except DataError as e:                              # every input refusal: one REFUSED line, exit 2, no traceback
+        print(str(e), file=sys.stderr)
+        return 2
+    print(json.dumps(header["counts"], sort_keys=True))  # counts only: no text, no file name
+    print("SELECT OK")
+    return 0
 
 
 if __name__ == "__main__":
