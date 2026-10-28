@@ -67,6 +67,7 @@ import csv
 import io
 import json
 import math
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -309,6 +310,124 @@ def _capture(argv):
     return rc, out.getvalue(), err.getvalue()
 
 
+_DROP = object()                                        # _synthetic_enrichment: remove this key from the default
+FIXTURE_ARTIFACT_SHA256 = "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd"
+
+
+def _synthetic_enrichment(path, rows, header=None):
+    """A made-up motivation-enrichment-v1 file (never posts, D-03: synthetic fixtures only). `rows` items are dicts merged
+    over a default row whose text carries the planted sentinel, or raw str lines; `header` is a dict merged over the
+    default header, or a raw str line. A value of _DROP removes that key. Returns the path."""
+    head = {"format": "motivation-enrichment-v1", "annotation_mode": "prediction_shown",
+            "artifact_sha256": FIXTURE_ARTIFACT_SHA256, "guide": GUIDE_DESIGNATION}
+
+    def merged(base, over):
+        d = dict(base)
+        d.update(over)
+        return {k: v for k, v in d.items() if v is not _DROP}
+
+    lines = [header if isinstance(header, str) else json.dumps(merged(head, header or {}))]
+    for i, r in enumerate(rows):
+        if isinstance(r, str):
+            lines.append(r)
+            continue
+        default = {"post_id": "fx-%d" % i, "text": "made-up enrichment post %d %s" % (i, SENTINEL), "label": "other",
+                   "evidence": "none", "selection_slice": "control"}
+        lines.append(json.dumps(merged(default, r)))
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes("".join(line + "\n" for line in lines).encode("utf-8"))
+    return path
+
+
+def _enrichment_cases(tmp, good, base_files, case):
+    """The enrichment rules (D-09..D-12, D-15, D-16) over synthetic fixtures and the synthetic CSV, through main() with
+    captured streams. Every fixture text AND every fixture file name carries the planted sentinel."""
+    produced = set()
+
+    def run(argv):
+        return _capture(["--csv", str(good), "--no-pin"] + argv)
+
+    def rule_of(err):
+        m = re.search(r"REFUSED ([A-Za-z0-9_-]+):", err)
+        return m.group(1) if m else None
+
+    def refused(name, rule, argv, where=()):
+        rc, o, e = run(argv)
+        got = rule_of(e)
+        if got:
+            produced.add(got)
+        ok = rc == 2 and got == rule and SENTINEL not in o + e and all(w in e for w in where)
+        case(name, ok, "exit %s %s" % (rc, got))
+        return e
+
+    def fx(name, rows, header=None):
+        return _synthetic_enrichment(tmp / "enr" / ("%s-%s.jsonl" % (name, SENTINEL)), rows, header)
+
+    outs = iter(range(1, 10 ** 6))
+
+    def fresh():
+        return tmp / ("enr-out-%d" % next(outs))
+
+    print("enrichment (tracer: D-09, D-10, D-11):")
+    try:
+        check_v1_identity(base_files, False)
+        case("check_v1_identity refuses a synthetic build (train.jsonl, eval.jsonl named; task.json not)", False, "accepted")
+    except PrepareFailed as e:
+        case("check_v1_identity refuses a synthetic build (train.jsonl, eval.jsonl named; task.json not)",
+             "train.jsonl" in str(e) and "eval.jsonl" in str(e) and "task.json" not in str(e), str(e)[:90])
+    except Exception as e:                               # a missing function is a FAIL, never a crash
+        case("check_v1_identity refuses a synthetic build (train.jsonl, eval.jsonl named; task.json not)", False, type(e).__name__)
+    try:
+        check_v1_identity(base_files, True)
+        case("check_v1_identity with enrichment names eval.jsonl only (train may differ)", False, "accepted")
+    except PrepareFailed as e:
+        case("check_v1_identity with enrichment names eval.jsonl only (train may differ)",
+             "eval.jsonl" in str(e) and "train.jsonl" not in str(e) and "task.json" not in str(e), str(e)[:90])
+    except Exception as e:
+        case("check_v1_identity with enrichment names eval.jsonl only (train may differ)", False, type(e).__name__)
+    try:
+        check_v1_identity(dict(base_files, **{"task.json": base_files["task.json"] + b" "}), True)
+        case("check_v1_identity on tampered task.json bytes names task.json", False, "accepted")
+    except PrepareFailed as e:
+        case("check_v1_identity on tampered task.json bytes names task.json", "task.json" in str(e), str(e)[:90])
+    except Exception as e:
+        case("check_v1_identity on tampered task.json bytes names task.json", False, type(e).__name__)
+
+    tracer = fx("tracer", [{"label": "conspiratorial", "evidence": "clear"}, {"label": "social_affiliative", "evidence": "clear"},
+                           {"label": "other", "evidence": "none"}, {"label": "conspiratorial", "evidence": "weak"}])
+    out = fresh()
+    rc, o, e = run(["--enrichment", str(tracer), "--out", str(out)])
+    case("one synthetic file: exit 0, PREPARE OK, no sentinel on stdout or stderr",
+         rc == 0 and "PREPARE OK" in o and SENTINEL not in o + e, "exit %s" % rc)
+    got = {n: (out / n).read_bytes() for n in ("task.json", "train.jsonl", "eval.jsonl", "enrichment-manifest.json")
+           if (out / n).is_file()}
+    case("eval.jsonl and task.json are the base build's bytes (D-11)",
+         got.get("eval.jsonl") == base_files["eval.jsonl"] and got.get("task.json") == base_files["task.json"])
+    tr = got.get("train.jsonl", b"")
+    case("train.jsonl is the base train rows, then the 4 mapped rows",
+         tr.startswith(base_files["train.jsonl"]) and tr.count(b"\n") == base_files["train.jsonl"].count(b"\n") + 4)
+    tail = [json.loads(x)["label"] for x in tr[len(base_files["train.jsonl"]):].decode("utf-8").splitlines()]
+    case("the added rows carry the mapped labels (conspiratorial+weak -> other)",
+         tail == ["conspiratorial", "social_affiliative", "other", "other"], str(tail))
+    mbody = got.get("enrichment-manifest.json", b"").decode("utf-8")
+    m = json.loads(mbody) if mbody else {}
+    case("enrichment-manifest.json: schema, source-1, sha256 of the file, no text and no file name",
+         m.get("schema") == "motivation-enrichment-manifest-v1" and SENTINEL not in mbody
+         and [s.get("id") for s in m.get("sources", [])] == ["source-1"]
+         and m["sources"][0].get("sha256") == sha256_file(tracer) and "tracer" not in mbody, mbody[:0])
+    case("the manifest pins the base eval and train and counts rows_added 4",
+         m.get("base", {}).get("eval_sha256") == sha256_bytes(base_files["eval.jsonl"])
+         and m.get("base", {}).get("base_train_sha256") == sha256_bytes(base_files["train.jsonl"])
+         and m.get("totals", {}).get("rows_added") == 4 and m.get("train_sha256") == sha256_bytes(tr))
+    refused("--enrichment without --out: REFUSED enrichment-out", "enrichment-out", ["--enrichment", str(tracer)])
+    refused("--out data/decide/motivation-v1 with --enrichment: REFUSED enrichment-out", "enrichment-out",
+            ["--enrichment", str(tracer), "--out", str(DEFAULT_OUT / "." )])
+    refused("an --enrichment path under the repo: REFUSED enrichment-in-repo", "enrichment-in-repo",
+            ["--enrichment", str(HERE / "data.py"), "--out", str(fresh())])
+    return produced
+
+
 def selftest():
     """The declared rule over a synthetic CSV (no post text): duplicate collapse, the mixed-label drop, the seeded
     stratified text-disjoint split, determinism, write-once, every refusal and the no-text promise over captured stdout
@@ -448,6 +567,8 @@ def selftest():
             print(SENTINEL)
             print(SENTINEL, file=sys.stderr)
         case("control: the capture sees a sentinel on stdout and on stderr", SENTINEL in probe_out.getvalue() and SENTINEL in probe_err.getvalue())
+
+        _enrichment_cases(tmp, good, files, case)
 
     print("%d case(s) failed" % len(failures) if failures else "all cases ok")
     if not failures:
