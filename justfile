@@ -3682,6 +3682,17 @@ laya-deploy-selftest:
         fail "the target selftest: exit $trc without TARGET SELFTEST OK (log: $CASES/target.log)"
         tail -4 "$CASES/target.log" >&2 || true
     fi
+    # The D-07 auth tooling (plan 13-06): its own offline recipe, required to end AUTH SELFTEST OK.
+    set +e
+    just _laya-auth-selftest > "$CASES/auth.log" 2>&1
+    arc=$?
+    set -e
+    if [ "$arc" -eq 0 ] && grep -qx 'AUTH SELFTEST OK' "$CASES/auth.log" && grep -qx 'AWS CALLS: 0' "$CASES/auth.log"; then
+        echo "AUTH: $(grep -c -E '^(CHAIN|REFUSAL|PROBE-AUTH|RE-EXEC|TOKEN HOST|WIRING)' "$CASES/auth.log") case lines, AWS CALLS: 0, AUTH SELFTEST OK"
+    else
+        fail "the auth selftest: exit $arc without AUTH SELFTEST OK (log: $CASES/auth.log)"
+        tail -4 "$CASES/auth.log" >&2 || true
+    fi
     # Independent checks: the resolver proof on file, and the bootstrap build.
     RP="$(head -n 1 "$PROOF")"
     echo "RESOLVER PROOF: $RP ($(sed -n 's/^cargo_pmcp_version=/cargo-pmcp /p' "$PROOF"), sdk $(sed -n 's/^sdk_commit=//p' "$PROOF" | cut -c 1-12))"
@@ -4233,6 +4244,44 @@ laya-probe-auth profile url *args:
     set +x
     exec python3 -I scripts/laya_deploy/m2m_token.py "${FLAGS[@]}" -- "$PROBE" --url "$URL" "$@"
 
+# The scripted curl of the auth refusal cases (plan 13-06), written to <out>; used by `_laya-auth-selftest` and the
+# gate row auth-refusal-check, never by a live recipe. It logs "<METHOD> <json-rpc method>" (or "GET <url>") to
+# $CURL_CALLS and answers a status code: the nth tools/list gets line n of $CURL_LIST (the last line repeats),
+# tools/call $CURL_CALL, initialize $CURL_INIT, a GET $CURL_PRM; CURL_MODE=transport is a curl transport error.
+[positional-arguments]
+_laya-auth-curl-shim out:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cat > "$1" <<'SH'
+    #!/usr/bin/env bash
+    out=""; data=""; method=GET; url=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -o) out="$2"; shift 2 ;;
+            -d) data="$2"; shift 2 ;;
+            -X) method="$2"; shift 2 ;;
+            -w|-m|-H) shift 2 ;;
+            -*) shift ;;
+            *) url="$1"; shift ;;
+        esac
+    done
+    if [ "${CURL_MODE:-}" = "transport" ]; then echo "$method transport-error" >> "$CURL_CALLS"; exit 7; fi
+    rpc="$(printf '%s' "$data" | sed -n 's/.*"method":"\([a-z/]*\)".*/\1/p')"
+    case "$rpc" in
+        tools/list)
+            n=$(( $(grep -c '^POST tools/list$' "$CURL_CALLS") + 1 ))
+            code="$(sed -n "${n}p" "$CURL_LIST")"
+            [ -n "$code" ] || code="$(tail -n 1 "$CURL_LIST")" ;;
+        tools/call) code="$CURL_CALL" ;;
+        initialize) code="$CURL_INIT" ;;
+        *) code="$CURL_PRM" ;;
+    esac
+    if [ -n "$rpc" ]; then echo "$method $rpc" >> "$CURL_CALLS"; else echo "$method $url" >> "$CURL_CALLS"; fi
+    if [ -n "$out" ]; then printf '{"error":"invalid_request","error_description":"No Bearer token provided"}' > "$out"; fi
+    printf '%s' "$code"
+    SH
+    chmod +x "$1"
+
 # Prove the D-07 auth tooling OFFLINE (plan 13-06). DRY_RUN=1 and the ambient target / M2M variables
 # unset at setup; an aws recorder first on PATH with a positive control (AWS CALLS: 0); the fixture pmcp
 # config as LAYA_PMCP_CONFIG; the tiny fixture packed to its golden sha256. CHAIN: the helper's
@@ -4240,7 +4289,14 @@ laya-probe-auth profile url *args:
 # a mode-600 client file, then `laya-probe-auth augury-dev http://127.0.0.1:<port>/mcp --apr <tiny>`:
 # the stub's first /mcp line must be authorization_bearer_matches=true and the recipe's output must hold
 # neither the issued token nor the client secret (LAYA_AUTH_SELFTEST_STUB_MISMATCH=1 starts the stub with
-# --stub-mismatch, so this case FAILS: the must-fail of row auth-selftest). D-06: every file a case can
+# --stub-mismatch, so this case FAILS: the must-fail of row auth-selftest). Then the tables, each line
+# prefixed by its name: REFUSAL accept/refuse (`_laya-auth-refusal-check` against a scripted curl, with the
+# tools/call count while tools/list is open), PROBE-AUTH refuse (laya-probe-auth refuses before any probe),
+# RE-EXEC (DRY_RUN mints nothing; a pre-set token is refused), RE-EXEC LIVE (DRY_RUN unset for those runs
+# only: a python3 shim that intercepts only the minting helper and a fake aws that answers sts and stops at
+# the first lambda call EXECUTE both re-exec branches: one helper invocation, every argument kept, the
+# child's AWS calls carry the fixture token), TOKEN HOST (the precedence at the helper's argv) and WIRING
+# (the guarded re-exec; no probe line carries the argv bearer). D-06: every file a case can
 # write under BOTH state dirs (models/decide and models/decide/augury-dev) is backed up at setup and
 # restored with `cp -p` on EXIT (removed when it was absent), and models/decide/augury-dev is removed
 # only when this run created it and it is empty, so `_laya-state-snapshot` is unchanged around it. Ends
@@ -4357,6 +4413,301 @@ _laya-auth-selftest:
         fi
     else
         fail "CHAIN: the stub did not write its port within 10 s (log $W/stub.log)"
+    fi
+    # A fixture client file for the cases below (never read by a real token endpoint: no case reaches one).
+    CLIENT="$W/m2m-fixture.json"
+    python3 -I - "$CLIENT" "$SRV" <<'PY'
+    import json, os, secrets, sys
+    fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        json.dump({"client_id": "fixture-client-" + secrets.token_hex(4), "client_secret": "fixture-secret-" + secrets.token_urlsafe(18),
+                   "token_url": f"https://{sys.argv[2]}.eu-west.augury.pmcp.run/oauth2/token"}, fh)
+    PY
+    EPH="$SRV.eu-west.augury.pmcp.run"
+    EPU="https://$EPH/mcp"
+    # ---- REFUSAL: _laya-auth-refusal-check against a scripted curl (first on PATH for this table only) ----
+    CS="$W/curlshim"
+    mkdir -p "$CS"
+    just _laya-auth-curl-shim "$CS/curl"
+    RN=0
+    rcase() {
+        local kind="$1" name="$2" want="$3" pat="$4" list="$5" call="$6" url="$7" wait="$8" mode="${9:-}" log rc
+        RN=$((RN + 1))
+        log="$W/refusal-$RN.log"
+        LAST_LOG="$log"
+        printf '%s\n' $list > "$W/curl-list"
+        : > "$W/curl-calls"
+        set +e
+        env PATH="$CS:$PATH" CURL_LIST="$W/curl-list" CURL_CALLS="$W/curl-calls" CURL_CALL="$call" CURL_INIT=200 CURL_PRM=200 \
+            CURL_MODE="$mode" LAYA_AUTH_POLL_SLEEP=0 just _laya-auth-refusal-check "$url" "$wait" > "$log" 2>&1
+        rc=$?
+        set -e
+        if [ "$rc" -eq "$want" ] && grep -Eq -- "$pat" "$log"; then
+            echo "REFUSAL $kind: $name -> exit $rc, $(grep -Eo -m 1 -- "$pat.*" "$log" | cut -c 1-230)"
+            return 0
+        fi
+        fail "REFUSAL $kind: $name: exit $rc (want $want), expected a line matching '$pat' (log $log)"
+        tail -3 "$log" >&2 || true
+        return 1
+    }
+    if rcase accept "tools/list 401, tools/call 401" 0 '^auth-refusal ok: tools/list 401, tools/call 401 after 1 poll\(s\)' "401" 401 "$EPU" 0; then
+        grep -Eq 'first_401_utc [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z; initialize 200 \(observed, not asserted\); oauth-protected-resource 200 \(observed\)$' "$LAST_LOG" \
+            || fail "REFUSAL accept: the ok line lacks first_401_utc or the two observed codes"
+        [ "$(grep -c '^POST initialize$' "$W/curl-calls" || true)" -eq 1 ] && [ "$(grep -c '^GET ' "$W/curl-calls" || true)" -eq 1 ] \
+            || fail "REFUSAL accept: initialize and the oauth-protected-resource GET were not each sent once"
+    fi
+    rcase accept "tools/list 200 then 401 within wait 30" 0 '^auth-refusal ok: tools/list 401, tools/call 401 after 2 poll\(s\)' "200 401" 401 "$EPU" 30 || true
+    if rcase refuse "tools/list 200 with wait 0" 1 '^REFUSED auth-open: unauthenticated tools/list answered HTTP 200' "200" 401 "$EPU" 0; then
+        NC="$(grep -c '^POST tools/call$' "$W/curl-calls" || true)"
+        if [ "$NC" -eq 0 ]; then
+            echo "REFUSAL refuse: call count while tools/list is open -> 0 tools/call requests sent"
+        else
+            fail "REFUSAL refuse: call count: $NC tools/call request(s) sent while tools/list answered 200"
+        fi
+    fi
+    rcase refuse "tools/list 401, tools/call 200" 1 '^REFUSED auth-open: tools/call' "401" 200 "$EPU" 0 || true
+    rcase refuse "curl transport failure" 1 '^REFUSED auth-check: transport' "401" 401 "$EPU" 0 transport || true
+    rcase refuse "an http URL" 2 '^REFUSED auth-check: config' "401" 401 "http://$EPH/mcp" 0 || true
+    rcase refuse "a URL not ending /mcp" 2 '^REFUSED auth-check: config' "401" 401 "https://$EPH/health" 0 || true
+    rcase refuse "a non-integer wait" 2 '^REFUSED auth-check: config' "401" 401 "$EPU" soon || true
+    rcase refuse "a wait over 3600" 2 '^REFUSED auth-check: config' "401" 401 "$EPU" 3601 || true
+    # ---- PROBE-AUTH: laya-probe-auth refuses before any probe runs ----
+    PN=0
+    pa_case() {
+        local name="$1" pat="$2" log rc
+        shift 2
+        PN=$((PN + 1))
+        log="$W/probe-auth-$PN.log"
+        set +e
+        "$@" > "$log" 2>&1
+        rc=$?
+        set -e
+        if [ "$rc" -eq 2 ] && grep -Eq -- "$pat" "$log" && ! grep -Eq '^probe: |^\{' "$log"; then
+            echo "PROBE-AUTH refuse: $name -> exit 2, $(grep -Eo -m 1 -- "$pat.*" "$log" | cut -c 1-170)"
+        else
+            fail "PROBE-AUTH refuse: $name: exit $rc, expected exit 2 with '$pat' and no probe output (log $log)"
+            tail -3 "$log" >&2 || true
+        fi
+    }
+    BFIX="fixture-bearer-$(python3 -I -c 'import secrets; print(secrets.token_hex(12))')"
+    pa_case "LAYA_M2M_FILE unset" '^REFUSED probe-auth: LAYA_M2M_FILE is not set' env -u LAYA_M2M_FILE just laya-probe-auth augury-dev "$EPU" --apr "$A"
+    pa_case "APRENDER_DECIDE_PROBE_TOKEN pre-set" '^REFUSED probe-auth: APRENDER_DECIDE_PROBE_TOKEN is already set' \
+        env LAYA_M2M_FILE="$CLIENT" APRENDER_DECIDE_PROBE_TOKEN="$BFIX" just laya-probe-auth augury-dev "$EPU" --apr "$A"
+    pa_case "the argv bearer flag" '^REFUSED probe-auth: a probe argument starts with --bearer' \
+        env LAYA_M2M_FILE="$CLIENT" just laya-probe-auth augury-dev "$EPU" --apr "$A" --bearer "$BFIX"
+    pa_case "a --bearer=<value> word" '^REFUSED probe-auth: a probe argument starts with --bearer' \
+        env LAYA_M2M_FILE="$CLIENT" just laya-probe-auth augury-dev "$EPU" --apr "$A" "--bearer=$BFIX"
+    if grep -qF -- "$BFIX" "$W"/probe-auth-*.log; then fail "PROBE-AUTH refuse: a refused bearer value appears in a recipe log"; fi
+    pa_case "a second --url" '^REFUSED probe-auth: a second --url' env LAYA_M2M_FILE="$CLIENT" just laya-probe-auth augury-dev "$EPU" --apr "$A" --url "$EPU"
+    pa_case "the us-east motivation URL with profile augury-dev" '^REFUSED target-endpoint: ' \
+        env LAYA_M2M_FILE="$CLIENT" just laya-probe-auth augury-dev https://aprender-mcp-decide-motivation.us-east.true-mcp.com/mcp --apr "$A"
+    cp "$CLIENT" "$W/m2m-644.json"
+    chmod 644 "$W/m2m-644.json"
+    pa_case "a mode-644 client file" '^REFUSED m2m-file-mode: ' env LAYA_M2M_FILE="$W/m2m-644.json" just laya-probe-auth augury-dev "http://127.0.0.1:9/mcp" --apr "$A"
+    pa_case "LAYA_M2M_MIN_EXPIRES out of range" '^REFUSED probe-auth: config' env LAYA_M2M_FILE="$CLIENT" LAYA_M2M_MIN_EXPIRES=60 just laya-probe-auth augury-dev "$EPU" --apr "$A"
+    # ---- the fixture deployment on augury-dev for SRV (restored on EXIT): a STATE and a DRY_RUN-rendered config ----
+    mkdir -p "$AUG_DIR/deploy-$SRV.state"
+    printf '[deployment]\nendpoint = "%s"\n' "$EPU" > "$AUG_DIR/deploy-$SRV.state/deployment.toml"
+    just laya-deploy-config "$A" off "$SRV" dev augury-dev eu-west-1 > "$W/augury-config.log" 2>&1 || { fail "could not render the augury-dev fixture config (log $W/augury-config.log)"; }
+    # ---- RE-EXEC (dry): DRY_RUN prints what the live run would mint and mints nothing ----
+    XN=0
+    rx_dry() {
+        local name="$1" pat="$2" want="$3" log rc
+        shift 3
+        XN=$((XN + 1))
+        log="$W/reexec-dry-$XN.log"
+        set +e
+        "$@" > "$log" 2>&1
+        rc=$?
+        set -e
+        if { [ "$want" = any ] || [ "$rc" -eq "$want" ]; } && grep -Eq -- "$pat" "$log" && ! grep -q 'm2m-token ok\|REFUSED m2m-' "$log"; then
+            echo "RE-EXEC $name -> exit $rc, $(grep -Eo -m 1 -- "$pat.*" "$log" | cut -c 1-170)"
+        else
+            fail "RE-EXEC $name: exit $rc, expected '$pat' and nothing minted (log $log)"
+            tail -3 "$log" >&2 || true
+        fi
+    }
+    rx_dry "laya-deploy-verify DRY_RUN" "^DRY-RUN: LAYA_M2M_FILE is set; the live run mints a token for $EPH before the first probe\$" 0 \
+        env LAYA_M2M_FILE="$W/absent-client.json" just laya-deploy-verify "$A" "$SRV" augury-dev 2
+    rx_dry "laya-deploy DRY_RUN" "^DRY-RUN: LAYA_M2M_FILE is set; the live run mints a token for $EPH before the first probe\$" any \
+        env LAYA_M2M_FILE="$W/absent-client.json" just laya-deploy "$A" "$T" "$T/data" "$T/checkpoint" "$SRV" dev augury-dev
+    rx_dry "laya-deploy-verify with a pre-set token" '^REFUSED probe-auth: APRENDER_DECIDE_PROBE_TOKEN is set' 2 \
+        env APRENDER_DECIDE_PROBE_TOKEN="$BFIX" just laya-deploy-verify "$A" "$SRV" augury-dev 2
+    rx_dry "laya-deploy with a pre-set token" '^REFUSED probe-auth: APRENDER_DECIDE_PROBE_TOKEN is set' 2 \
+        env APRENDER_DECIDE_PROBE_TOKEN="$BFIX" just laya-deploy "$A" "$T" "$T/data" "$T/checkpoint" "$SRV" dev augury-dev
+    # ---- RE-EXEC LIVE: both live branches EXECUTED, through a python3 shim (intercepts only the minting helper) and a fake aws ----
+    REAL_PY="$(command -v python3)"
+    PS="$W/pyshim"
+    FA="$W/fakeaws"
+    mkdir -p "$PS" "$FA"
+    python3 -I -c 'import secrets; print("fixture-token-" + secrets.token_urlsafe(24))' > "$W/shim-token"
+    chmod 600 "$W/shim-token"
+    SHIM_TOKEN="$(cat "$W/shim-token")"
+    SHIM_SHA="$(printf '%s' "$SHIM_TOKEN" | shasum -a 256 | awk '{print $1}')"
+    cat > "$PS/python3" <<'SH'
+    #!/usr/bin/env bash
+    # Intercepts ONLY `python3 -I scripts/laya_deploy/m2m_token.py --file ...`: records that argv (it holds no secret),
+    # then execs the words after `--` with a fixture token, as the helper would. Anything else is the real python3.
+    if [ "${1:-}" = "-I" ] && [ "${2:-}" = "scripts/laya_deploy/m2m_token.py" ] && [ "${3:-}" = "--file" ]; then
+        shift 2
+        if [ -f "$SHIM_HELPER_LOG" ] && [ "$(wc -l < "$SHIM_HELPER_LOG" | tr -d ' ')" -ge 3 ]; then
+            echo "python3 shim: a re-exec loop (3 helper invocations already)" >&2
+            exit 99
+        fi
+        printf '%s\n' "$*" >> "$SHIM_HELPER_LOG"
+        [ "${SHIM_NO_EXEC:-0}" = "1" ] && exit 0
+        while [ $# -gt 0 ] && [ "$1" != "--" ]; do shift; done
+        [ $# -gt 0 ] && shift
+        APRENDER_DECIDE_PROBE_TOKEN="$(cat "$SHIM_TOKEN_FILE")"
+        export APRENDER_DECIDE_PROBE_TOKEN LAYA_M2M_MINTED=1
+        exec "$@"
+    fi
+    exec "$SHIM_REAL_PY" "$@"
+    SH
+    cat > "$FA/aws" <<'SH'
+    #!/usr/bin/env bash
+    # Answers sts with the augury-dev account and stops at the first lambda call; logs each argv with the sha256 of the
+    # token it sees in APRENDER_DECIDE_PROBE_TOKEN (never the token) and the LAYA_M2M_MINTED it sees.
+    t="${APRENDER_DECIDE_PROBE_TOKEN:-}"
+    if [ -n "$t" ]; then h="$(printf '%s' "$t" | shasum -a 256 | awk '{print $1}')"; else h=none; fi
+    printf '%s token_sha256=%s minted=%s\n' "$*" "$h" "${LAYA_M2M_MINTED:-unset}" >> "$FAKE_AWS_LOG"
+    case "$1 $2" in
+        "sts get-caller-identity") echo 783960389328 ;;
+        "lambda "*) echo "fake aws: stopping at the first lambda call" >&2; exit 254 ;;
+        *) echo "fake aws: unexpected call" >&2; exit 97 ;;
+    esac
+    SH
+    chmod +x "$PS/python3" "$FA/aws"
+    live() {
+        local log="$1"
+        shift
+        : > "$W/helper-argv.log"
+        : > "$W/fake-aws.log"
+        set +e
+        env -u DRY_RUN -u LAYA_PMCP_CONFIG PATH="$PS:$FA:$PATH" SHIM_REAL_PY="$REAL_PY" SHIM_HELPER_LOG="$W/helper-argv.log" \
+            SHIM_TOKEN_FILE="$W/shim-token" FAKE_AWS_LOG="$W/fake-aws.log" LAYA_M2M_FILE="$CLIENT" "$@" > "$log" 2>&1
+        LRC=$?
+        set -e
+    }
+    live_check() {
+        local name="$1" want_argv="$2" log="$3" probe_line="$4" n
+        n="$(wc -l < "$W/helper-argv.log" | tr -d ' ')"
+        if [ "$n" -ne 1 ]; then fail "RE-EXEC LIVE $name: $n helper invocation(s), expected exactly 1 (log $log)"; tail -3 "$log" >&2 || true; return; fi
+        if [ "$(cat "$W/helper-argv.log")" != "$want_argv" ]; then fail "RE-EXEC LIVE $name: helper argv '$(cat "$W/helper-argv.log")' is not '$want_argv'"; return; fi
+        if grep -qF -- "$SHIM_TOKEN" "$log"; then fail "RE-EXEC LIVE $name: the fixture token is in the recipe output"; return; fi
+        if ! grep -Eq -- "$probe_line token_sha256=$SHIM_SHA minted=1\$" "$W/fake-aws.log"; then
+            fail "RE-EXEC LIVE $name: the child's AWS call did not carry the fixture token and LAYA_M2M_MINTED=1 ($(tail -2 "$W/fake-aws.log" | tr '\n' ';'))"
+            return
+        fi
+        echo "RE-EXEC LIVE $name: 1 helper invocation, argv preserved ($want_argv); the child's $(grep -Eo -m 1 -- "$probe_line" "$W/fake-aws.log" | cut -c 1-40) call carried the fixture token (sha256 ${SHIM_SHA:0:12}) and LAYA_M2M_MINTED=1; token absent from the output"
+    }
+    live "$W/reexec-live-verify.log" just laya-deploy-verify "$A" "$SRV" augury-dev 2
+    live_check "laya-deploy-verify" "--file $CLIENT --expect-host $EPH --min-expires 1800 -- just laya-deploy-verify $A $SRV augury-dev 2" \
+        "$W/reexec-live-verify.log" '^lambda get-function-configuration .*'
+    live "$W/reexec-live-verify-600.log" env LAYA_M2M_MIN_EXPIRES=600 just laya-deploy-verify "$A" "$SRV" augury-dev 2
+    live_check "laya-deploy-verify with LAYA_M2M_MIN_EXPIRES=600" "--file $CLIENT --expect-host $EPH --min-expires 600 -- just laya-deploy-verify $A $SRV augury-dev 2" \
+        "$W/reexec-live-verify-600.log" '^lambda get-function-configuration .*'
+    live "$W/reexec-live-deploy.log" just laya-deploy "$A" "$T" "$T/data" "$T/checkpoint" "$SRV" dev augury-dev
+    live_check "laya-deploy" "--file $CLIENT --expect-host $EPH --min-expires 2400 -- just laya-deploy $A $T $T/data $T/checkpoint $SRV dev augury-dev" \
+        "$W/reexec-live-deploy.log" '^sts get-caller-identity .*'
+    grep -Eq '^REFUSED eligibility: .*SyntheticNotDeployable' "$W/reexec-live-deploy.log" \
+        || fail "RE-EXEC LIVE laya-deploy: the child did not stop at REFUSED eligibility ... SyntheticNotDeployable"
+    if grep -v '^sts get-caller-identity ' "$W/fake-aws.log" | grep -q .; then
+        fail "RE-EXEC LIVE laya-deploy: a non-sts AWS call ran ($(grep -v '^sts ' "$W/fake-aws.log" | head -1 | cut -c 1-80))"
+    else
+        echo "RE-EXEC LIVE laya-deploy: the child stopped at $(grep -Eo -m 1 'REFUSED eligibility: .*SyntheticNotDeployable' "$W/reexec-live-deploy.log" | cut -c 1-90) before any non-sts AWS call"
+    fi
+    # ---- TOKEN HOST: the precedence, observed at laya-probe-auth's helper argv (the shim records it and runs nothing) ----
+    COG="augury-fixture.auth.eu-west-1.amazoncognito.com"
+    HN=0
+    th_case() {
+        local name="$1" want="$2" log rc
+        shift 2
+        HN=$((HN + 1))
+        log="$W/token-host-$HN.log"
+        : > "$W/helper-argv.log"
+        set +e
+        env PATH="$PS:$PATH" SHIM_REAL_PY="$REAL_PY" SHIM_HELPER_LOG="$W/helper-argv.log" SHIM_NO_EXEC=1 LAYA_M2M_FILE="$CLIENT" \
+            "$@" just laya-probe-auth augury-dev "$EPU" --apr "$A" > "$log" 2>&1
+        rc=$?
+        set -e
+        case "$want" in
+            REFUSED*)
+                if [ "$rc" -eq 2 ] && grep -qF -- "$want" "$log" && [ ! -s "$W/helper-argv.log" ]; then
+                    echo "TOKEN HOST $name -> exit 2, $(grep -F -m 1 -- "$want" "$log" | cut -c 1-170)"
+                else
+                    fail "TOKEN HOST $name: exit $rc, expected '$want' and no helper run (log $log)"
+                fi ;;
+            *)
+                if [ "$rc" -eq 0 ] && grep -q -- "--expect-host $want " "$W/helper-argv.log"; then
+                    echo "TOKEN HOST $name -> the helper gets --expect-host $want"
+                else
+                    fail "TOKEN HOST $name: exit $rc, the helper argv '$(cat "$W/helper-argv.log")' lacks --expect-host $want (log $log)"
+                fi ;;
+        esac
+    }
+    th_case "neither variable nor note" "$EPH" env
+    th_case "LAYA_M2M_TOKEN_HOST set" "$COG" env LAYA_M2M_TOKEN_HOST="$COG"
+    printf '%s\n' "$COG" > "$AUG_DIR/m2m-token-host"
+    th_case "the m2m-token-host note (variable unset)" "$COG" env -u LAYA_M2M_TOKEN_HOST
+    th_case "variable and note differ" "REFUSED probe-auth: token-host conflict" env LAYA_M2M_TOKEN_HOST="other-fixture.auth.eu-west-1.amazoncognito.com"
+    printf '%s\n' "evil.example.com" > "$AUG_DIR/m2m-token-host"
+    th_case "a note outside pmcp.run / amazoncognito.com" "REFUSED probe-auth: the token host evil.example.com" env
+    rm -f "$AUG_DIR/m2m-token-host"
+    # ---- WIRING: the guarded re-exec in both recipes; no probe line anywhere carries the argv bearer ----
+    just --dump --dump-format json > "$W/dump.json"
+    set +e
+    python3 -I - "$W/dump.json" > "$W/wiring.log" 2>&1 <<'PY'
+    import json, re, sys
+    recipes = json.load(open(sys.argv[1]))["recipes"]
+    render = lambda line: "".join(f if isinstance(f, str) else "<interpolation>" for f in line)
+    problems = []
+    for n in ("laya-deploy-verify", "laya-deploy"):
+        body = [render(l) for l in recipes[n]["body"]]
+        ex = [i for i, l in enumerate(body) if re.match(r"\s*exec python3 -I scripts/laya_deploy/m2m_token\.py --file ", l)]
+        if len(ex) != 1:
+            problems.append(f"WIRING {n}: {len(ex)} exec line(s) of the minting helper, expected 1")
+            continue
+        e = ex[0]
+        g = next((i for i in range(e - 1, -1, -1) if re.match(r"\s*if .*LAYA_M2M_FILE", body[i])), None)
+        if g is None or '"${LAYA_M2M_MINTED:-}" != "1"' not in body[g]:
+            problems.append(f"WIRING {n}: the helper exec (line {e}) is not under an `if` that requires LAYA_M2M_MINTED != 1 (guard line {g})")
+            continue
+        r = next((i for i in range(e) if "APRENDER_DECIDE_PROBE_TOKEN+x" in body[i] and '"${LAYA_M2M_MINTED:-}" != "1"' in body[i]), None)
+        if r is None:
+            problems.append(f"WIRING {n}: no refusal of a pre-set APRENDER_DECIDE_PROBE_TOKEN before the helper exec")
+            continue
+        print(f"WIRING {n}: pre-set-token refusal at line {r} < LAYA_M2M_MINTED-guarded helper exec at line {e} (guard line {g})")
+    def probe_lines(body):
+        return [l.strip() for l in body if not l.strip().startswith("#") and ('"$PROBE"' in l or "--example probe" in l)]
+    # case table: the pattern must see a planted bearer and must not flag a clean line
+    pv = '"$' + 'PROBE"'  # built, so this case table is not itself a probe line of this recipe
+    if not any("--bearer" in l for l in probe_lines([f'    {pv} --url "$U" --bearer "$X"'])) or any("--bearer" in l for l in probe_lines([f'    {pv} --url "$U"', f'    # {pv} --bearer x'])):
+        problems.append("WIRING probe argv: the case table failed (a planted --bearer is not caught, or a clean/comment line is)")
+    count, names = 0, 0
+    for n, rec in recipes.items():
+        if not n.startswith(("laya", "_laya")):
+            continue
+        pl = probe_lines([render(l) for l in rec["body"]])
+        if pl:
+            names += 1
+            count += len(pl)
+        for l in pl:
+            if "--bearer" in l:
+                problems.append(f"WIRING probe argv: {n} runs the probe with the argv bearer: {l[:100]}")
+    if count == 0:
+        problems.append("WIRING probe argv: no probe line found at all (the scan is blind)")
+    else:
+        print(f"WIRING probe argv: {count} probe line(s) in {names} recipe(s), none carries --bearer; case table: a planted --bearer is caught")
+    for p in problems:
+        print("FAIL " + p)
+    sys.exit(1 if problems else 0)
+    PY
+    wrc=$?
+    set -e
+    grep -v '^FAIL ' "$W/wiring.log" || true
+    if [ "$wrc" -ne 0 ]; then
+        while IFS= read -r l; do fail "${l#FAIL }"; done < <(grep '^FAIL ' "$W/wiring.log" || echo "FAIL WIRING: the check exited $wrc")
     fi
     CALLS="$(wc -l < "$REC" | tr -d ' ')"
     echo "AWS CALLS: $CALLS"
@@ -5171,6 +5522,33 @@ laya-gates-selftest:
         [ "$RC" -eq 1 ] || red "augury-names-ze-kasher-dev: exit $RC, not 1"
         must_pass fixture '^TARGET SELFTEST OK$' just _laya-target-selftest
         grep -qx 'AWS CALLS: 0' "$(logof fixture)" || red "fixture: the target selftest did not report AWS CALLS: 0"
+    }
+    # D-07 (plan 13-06): the unauthenticated refusal probe, the authenticated probe path and the auth selftest.
+    row_auth_refusal_check() {
+        local C="$W/authcurl" S="$W/authcurl-list" L="$W/authcurl-calls" U="https://$SRV.eu-west.augury.pmcp.run/mcp"
+        mkdir -p "$C"
+        just _laya-auth-curl-shim "$C/curl"
+        printf '200\n' > "$S"; : > "$L"
+        must_fail open-list '^REFUSED auth-open: unauthenticated tools/list answered HTTP 200' \
+            env PATH="$C:$PATH" CURL_LIST="$S" CURL_CALLS="$L" CURL_CALL=401 CURL_INIT=200 CURL_PRM=200 LAYA_AUTH_POLL_SLEEP=0 just _laya-auth-refusal-check "$U" 0
+        [ "$RC" -eq 1 ] || red "open-list: exit $RC, not 1"
+        if grep -q '^POST tools/call$' "$L"; then red "open-list: tools/call was sent while tools/list answered 200"; fi
+        printf '401\n' > "$S"; : > "$L"
+        must_pass refused '^auth-refusal ok: tools/list 401, tools/call 401 after 1 poll\(s\)' \
+            env PATH="$C:$PATH" CURL_LIST="$S" CURL_CALLS="$L" CURL_CALL=401 CURL_INIT=200 CURL_PRM=200 LAYA_AUTH_POLL_SLEEP=0 just _laya-auth-refusal-check "$U" 0
+    }
+    row_probe_auth() {
+        must_fail no-m2m-file '^REFUSED probe-auth: LAYA_M2M_FILE is not set' \
+            env -u LAYA_M2M_FILE just laya-probe-auth augury-dev "https://$SRV.eu-west.augury.pmcp.run/mcp" --apr "$W/none.apr"
+        [ "$RC" -eq 2 ] || red "no-m2m-file: exit $RC, not 2"
+        must_pass chain '^AUTH SELFTEST OK$' just _laya-auth-selftest
+        grep -q '^CHAIN bearer reached the wire (authorization_bearer_matches=true)' "$(logof chain)" || red "chain: the auth selftest printed no CHAIN line"
+    }
+    row_auth_selftest() {
+        must_fail stub-mismatch '^AUTH SELFTEST FAILED' env LAYA_AUTH_SELFTEST_STUB_MISMATCH=1 just _laya-auth-selftest
+        [ "$RC" -eq 1 ] || red "stub-mismatch: exit $RC, not 1"
+        must_pass fixture '^AUTH SELFTEST OK$' just _laya-auth-selftest
+        grep -qx 'AWS CALLS: 0' "$(logof fixture)" || red "fixture: the auth selftest did not report AWS CALLS: 0"
     }
     # ---- dispatch -------------------------------------------------------------------------------
     UNKNOWN=""
