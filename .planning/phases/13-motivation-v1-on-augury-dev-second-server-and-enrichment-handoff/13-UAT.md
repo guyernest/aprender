@@ -1,18 +1,14 @@
 ---
-status: testing
+status: complete
 phase: 13-motivation-v1-on-augury-dev-second-server-and-enrichment-handoff
 source: [13-VERIFICATION.md]
 started: 2026-10-28T09:01:33Z
-updated: 2026-10-28T10:10:00Z
+updated: 2026-10-28T10:20:00Z
 ---
 
 ## Current Test
 
-number: 3
-name: Owner decides whether the uncertainty band's inert margin clause stays as declared
-expected: |
-  Keep as is (the note and selftest already say so) or request new constants and a regenerated note
-awaiting: user response
+[testing complete]
 
 ## Tests
 
@@ -30,14 +26,16 @@ resolution: "Confirmed by the owner (2026-10-28). The contract status line in co
 
 ### 3. Owner decides whether the uncertainty band's inert margin clause (with three labels summing to 1, `p1 - p2 < 0.20` adds nothing beyond `p1 <= 0.75`) stays as declared
 expected: Keep as is (the note and selftest already say so) or request new constants and a regenerated note
-result: [pending]
+result: pass
+reported: "keep"
+resolution: "Kept as declared by the owner (2026-10-28). The band is effectively p1 <= 0.75; the selection note and selftest already say so. No regeneration."
 
 ## Summary
 
 total: 3
-passed: 2
+passed: 3
 issues: 0
-pending: 1
+pending: 0
 skipped: 0
 blocked: 0
 
