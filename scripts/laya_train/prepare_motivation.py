@@ -1,6 +1,7 @@
 """The motivation CSV (the partner file) -> a Laya data dir, and the measured prefix of the condensed task (plan 12-01).
 
     uv run --project scripts/laya_train --frozen python -I scripts/laya_train/prepare_motivation.py [--csv PATH] [--out DIR] [--no-pin]
+    uv run --project scripts/laya_train --frozen python -I scripts/laya_train/prepare_motivation.py --enrichment PATH [--enrichment PATH ...] [--enrichment-sha256 HEX ...] --out DIR [--csv PATH] [--no-pin]
     uv run --project scripts/laya_train --frozen python -I scripts/laya_train/prepare_motivation.py --measure [--task PATH] [--csv PATH] [--max-texts N]
     uv run --project scripts/laya_train --frozen python -I scripts/laya_train/prepare_motivation.py --selftest | --selftest-tokenizer
     (or: just laya-prepare-motivation <the same arguments>)
@@ -38,6 +39,54 @@ DECLARED RULES (written before the run; the run only applies them):
                   before the run. The calibration slice is NOT drawn here: train.py draws it from train.jsonl itself.
     no shift      no shift.jsonl is written: the requester's live labelled sample, when it exists, is a reported probe
                   for a later run.
+    RULE v1-identity (Phase 13 D-10)
+                  a run on the pinned CSV builds exactly v1's bytes (task.json f74a3ad3..., train.jsonl f1d84f19...,
+                  eval.jsonl ee95d71f...); check_v1_identity enforces it in every pinned run (PREPARE FAILED otherwise),
+                  so a run without --enrichment writes exactly what data/decide/motivation-v1 holds.
+
+ENRICHMENT (Phase 13 D-09; the format, mapping, merge rules and 17 refusal names are declared in
+contracts/motivation-enrichment-v1.yaml, which the selftest mirrors value for value):
+
+    in place      each --enrichment file (format motivation-enrichment-v1) is READ IN PLACE in the partner repository
+                  and never copied: a path whose resolved form (symlinks followed) lies under the resolved repo root is
+                  REFUSED enrichment-in-repo. The files are named source-1, source-2, ... in command-line order; a file
+                  name is never printed or written (it could carry a post fragment), only the generated id and the
+                  file's sha256. --enrichment-sha256 (one per --enrichment, in order) pins the expected bytes.
+    RULE enrichment-train-only (D-11)
+                  the v1 build runs first and unchanged (base-build-unchanged); enriched rows go to train.jsonl only,
+                  after the surviving partner train rows (in v1 order), in file order with the files in command-line
+                  order; eval.jsonl and task.json are the base build's bytes. --out is required and must not resolve
+                  to data/decide/motivation-v1 (REFUSED enrichment-out).
+    RULE enrichment-eval-overlap (D-11)
+                  an enriched text whose nfc-trim-ws-v1 identity matches an eval text is dropped, whatever its label
+                  (dropped_eval_overlap); eval rows are never modified.
+    RULE enrichment-conflict (D-12)
+                  an enriched text matching a partner group the v1 build dropped as mixed stays dropped
+                  (dropped_partner_mixed_group). A normalized-text group across the partner train rows and the enriched
+                  rows carrying more than one MAPPED label is dropped WHOLE, the partner row included, with no source
+                  precedence (dropped_conflict_groups, dropped_conflict_rows_partner, dropped_conflict_rows_enriched).
+                  A group with one mapped label becomes one row, the partner's exact text when the partner has one,
+                  else the first enriched text (collapsed_same_label counts the rows collapsed away).
+    RULE enrichment-mapping (D-15, with the contract's d15_amendment)
+                  (expert label, evidence for the recorded function) -> served label:
+                      social_affiliative + clear -> social_affiliative    social_affiliative + weak | mixed -> other
+                      conspiratorial + clear     -> conspiratorial        conspiratorial + weak | mixed     -> other
+                      other + none | weak | mixed -> other
+                      other + clear, social_affiliative + none, conspiratorial + none -> REFUSED enrichment-label-evidence
+                  from the guide: "The class Other covers three situations ... no evidence of either motivational
+                  function, weak evidence only ..., and clear evidence of both (mixed)"; "Weak evidence ... does not,
+                  on its own, assign a class"; "Posts with weak evidence of the other function keep their class".
+                  Every (label, evidence) cell is counted, so weak/mixed -> other stays open for the post-freeze retrain.
+    RULE enrichment-annotation-mode (D-16)
+                  the header's annotation_mode (prediction_shown | blind) is validated, recorded and counted in the
+                  manifest, and NEVER acted on: it changes no row. With prediction_shown the labels may be anchored to
+                  motivation-v1's predictions, which the hand-off of any retrain must say.
+    manifest      enrichment-manifest.json (schema motivation-enrichment-manifest-v1) beside the three files: the
+                  base pins, per source {id, sha256, rows_in, per_label, per_evidence, cells, per_slice,
+                  annotation_mode}, the totals, train_sha256 and train_counts. Counts and sha256 values only, never a
+                  text or a file name. A refusal names the source id, a row number (header row 0, posts 1 to N), a
+                  field and at most a count, never a value. After the merge, data.py's group_train, refuse_overlap and
+                  calibration_split run on the new train rows; their refusals pass through under their own names.
 
 What is asserted before anything is written (exactly what train.py asserts, via data.py's own validators): the rows
 written are accepted by group_train, refuse_overlap and calibration_split, and all three criteria are present in eval.
@@ -166,6 +215,13 @@ def eval_count(n_groups):
 
 def build(csv_path):
     """({file name: bytes}, counts-only summary) for the CSV and the approved INSTRUCTIONS / DESCRIPTIONS."""
+    files, summary, _ = _build_v1(csv_path)
+    return files, summary
+
+
+def _build_v1(csv_path):
+    """build()'s statements, unchanged and in the same order, plus the internal context the enrichment merge needs:
+    ({file name: bytes}, summary, {kept, eval_rows, eval_hashes, mixed_hashes, train_rows, csv_sha256})."""
     csv_path = Path(csv_path)
     rows = read_rows(csv_path)
     groups = {}                                         # normalized hash -> [first exact text, [labels]]
@@ -204,7 +260,11 @@ def build(csv_path):
                "mixed_label_groups_dropped": len(mixed), "mixed_label_rows_dropped": sum(len(g[1]) for g in mixed),
                "train": train_counts, "eval": eval_counts, "split_seed": SPLIT_SEED, "eval_divisor": EVAL_DIVISOR,
                "csv_sha256": sha256_file(csv_path)}
-    return files, summary
+    ctx = {"kept": kept, "eval_rows": eval_rows, "train_rows": train_rows,
+           "eval_hashes": {normalized_sha256(t) for t, _ in eval_rows},
+           "mixed_hashes": {h for h, g in groups.items() if len(set(g[1])) > 1},
+           "csv_sha256": summary["csv_sha256"]}
+    return files, summary, ctx
 
 
 def check_pin(summary):
@@ -220,6 +280,289 @@ def check_approved(files):
     got = sha256_bytes(files["task.json"])
     if got != APPROVED_TASK_SHA256:
         raise PrepareFailed("task.json would hash to %s, not the approved %s" % (got[:12], APPROVED_TASK_SHA256[:12]))
+
+
+# ------------------------------------------------------------------------------------------------ v1 identity (D-10)
+
+V1_TASK_SHA256 = APPROVED_TASK_SHA256
+V1_TRAIN_SHA256 = "f1d84f19ec38ed85356bcbcd1eae6ef8ad07fb97e014f61a17d37adc0d68d378"
+V1_EVAL_SHA256 = "ee95d71fcb5d90d515b9fc6741e5df51087e763fa7f251ace83d9f11d5ccd575"
+
+
+def check_v1_identity(files, enriched):
+    """On the pinned CSV the build must be v1's bytes (D-10): task.json and eval.jsonl always, train.jsonl too unless
+    the run is enriched. PrepareFailed names each differing file with sha256 prefixes only."""
+    want = {"task.json": V1_TASK_SHA256, "eval.jsonl": V1_EVAL_SHA256}
+    if not enriched:
+        want["train.jsonl"] = V1_TRAIN_SHA256
+    bad = ["%s (%s, not v1's %s)" % (n, sha256_bytes(files.get(n, b""))[:12], w[:12])
+           for n, w in sorted(want.items()) if sha256_bytes(files.get(n, b"")) != w]
+    if bad:
+        raise PrepareFailed("the pinned CSV no longer builds v1's bytes (D-10): %s" % "; ".join(bad))
+
+
+# ------------------------------------------------------------------------------------------------ the enrichment (D-09)
+# Every value below is declared in contracts/motivation-enrichment-v1.yaml; the selftest's contract mirror compares them.
+
+ENRICHMENT_CONTRACT = REPO / "contracts" / "motivation-enrichment-v1.yaml"
+ENRICHMENT_FORMAT = "motivation-enrichment-v1"
+HEADER_KEYS = ("format", "annotation_mode", "artifact_sha256", "guide")
+ROW_KEYS_ENRICHMENT = ("post_id", "text", "label", "evidence", "selection_slice")
+EVIDENCE = ("clear", "weak", "mixed", "none")
+SLICES = ("control", "uncertainty", "quota", "unspecified")
+ANNOTATION_MODES = ("prediction_shown", "blind")
+POST_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+SHA256_PATTERN = r"^[0-9a-f]{64}$"
+TEXT_MIN_CHARS, TEXT_MAX_CHARS = 1, 20000               # min after trim (nfc-trim-ws-v1)
+GUIDE_MIN_CHARS, GUIDE_MAX_CHARS = 1, 200
+CAPS = {"file_bytes": 16777216, "rows": 20000, "text_chars": 20000}
+REFUSED_PAIR = "enrichment-label-evidence"
+MAPPING = {                                             # RULE enrichment-mapping: (label, evidence) -> served, None refused
+    ("social_affiliative", "clear"): "social_affiliative",
+    ("social_affiliative", "weak"): "other",
+    ("social_affiliative", "mixed"): "other",
+    ("social_affiliative", "none"): None,
+    ("conspiratorial", "clear"): "conspiratorial",
+    ("conspiratorial", "weak"): "other",
+    ("conspiratorial", "mixed"): "other",
+    ("conspiratorial", "none"): None,
+    ("other", "none"): "other",
+    ("other", "weak"): "other",
+    ("other", "mixed"): "other",
+    ("other", "clear"): None,
+}
+MERGE_RULES = ("base-build-unchanged", "dropped_eval_overlap", "dropped_partner_mixed_group", "dropped_conflict_groups",
+               "collapsed_same_label")
+TOTALS_KEYS = ("dropped_eval_overlap", "dropped_partner_mixed_group", "dropped_conflict_groups",
+               "dropped_conflict_rows_partner", "dropped_conflict_rows_enriched", "collapsed_same_label", "rows_added")
+ENRICHMENT_REFUSALS = (
+    "enrichment-missing", "enrichment-in-repo", "enrichment-size", "enrichment-encoding", "enrichment-json",
+    "enrichment-header", "enrichment-row", "enrichment-field", "enrichment-label", "enrichment-evidence",
+    "enrichment-slice", "enrichment-annotation-mode", "enrichment-label-evidence", "enrichment-duplicate-post-id",
+    "enrichment-empty", "enrichment-sha256", "enrichment-out")
+MANIFEST_NAME = "enrichment-manifest.json"
+MANIFEST_SCHEMA = "motivation-enrichment-manifest-v1"
+SOURCE_COUNT_KEYS = ("rows_in", "per_label", "per_evidence", "cells", "per_slice", "annotation_mode")
+
+
+class _DuplicateKey(ValueError):
+    pass
+
+
+def _object_no_duplicates(pairs):
+    keys = [k for k, _ in pairs]
+    if len(set(keys)) != len(keys):
+        raise _DuplicateKey()
+    return dict(pairs)
+
+
+def _under_repo(path):
+    """True when `path`, resolved with symlinks followed, lies under the resolved repo root (both sides resolved)."""
+    try:
+        Path(path).resolve().relative_to(REPO.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _cell(label, evidence):
+    return "%s+%s" % (label, evidence)
+
+
+def read_enrichment(path, source_id, expected_sha256=None):
+    """One motivation-enrichment-v1 file, read in place: {id, sha256, annotation_mode, rows, counts} with rows
+    [(row number, text, mapped label index, label, evidence, selection_slice)].
+
+    Every DataError names the source id, the row number (header row 0), the field and at most a count; never a value
+    and never the file name."""
+    sid = source_id
+    path = Path(path)
+    if not path.is_file():
+        raise DataError("enrichment-missing", "%s: the --enrichment path does not exist or is not a regular file" % sid)
+    if _under_repo(path):
+        raise DataError("enrichment-in-repo", "%s: the --enrichment path resolves inside the aprender repository; an "
+                        "enrichment file is read in place in the partner repository and never copied here" % sid)
+    cap = CAPS["file_bytes"]
+    size = path.stat().st_size
+    if size > cap:
+        raise DataError("enrichment-size", "%s: %d bytes, more than caps.file_bytes %d" % (sid, size, cap))
+    with open(path, "rb") as f:
+        raw = f.read(cap + 1)
+    if len(raw) > cap:
+        raise DataError("enrichment-size", "%s: more than caps.file_bytes %d" % (sid, cap))
+    sha = sha256_bytes(raw)
+    if expected_sha256 is not None and sha != expected_sha256:
+        raise DataError("enrichment-sha256", "%s hashes to %s..., not the --enrichment-sha256 given for it" % (sid, sha[:12]))
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise DataError("enrichment-encoding", "%s row %d: not valid UTF-8 (byte %d)"
+                        % (sid, raw[:e.start].count(b"\n"), e.start))
+    lines = data.jsonl_lines(text)
+
+    def obj_of(n, line):
+        try:
+            obj = json.loads(line, object_pairs_hook=_object_no_duplicates)
+        except _DuplicateKey:
+            raise DataError("enrichment-json", "%s row %d: an object repeats a key" % (sid, n))
+        except (ValueError, RecursionError):
+            raise DataError("enrichment-json", "%s row %d: not one JSON object" % (sid, n))
+        if not isinstance(obj, dict):
+            raise DataError("enrichment-json", "%s row %d: not one JSON object" % (sid, n))
+        return obj
+
+    def key_set(n, obj, want, rule):
+        if sorted(obj) != sorted(want):
+            missing = [k for k in want if k not in obj]
+            unknown = len(set(obj) - set(want))
+            raise DataError(rule, "%s row %d: missing field(s) %s, %d unknown key(s); expected exactly %s"
+                            % (sid, n, missing, unknown, list(want)))
+
+    if not lines:
+        raise DataError("enrichment-header", "%s row 0: the header line is missing" % sid)
+    head = obj_of(0, lines[0])
+    key_set(0, head, HEADER_KEYS, "enrichment-header")
+    if not isinstance(head["format"], str) or head["format"] != ENRICHMENT_FORMAT:
+        raise DataError("enrichment-header", "%s row 0 field format: not %s" % (sid, ENRICHMENT_FORMAT))
+    mode = head["annotation_mode"]
+    if not isinstance(mode, str) or mode not in ANNOTATION_MODES:
+        raise DataError("enrichment-annotation-mode", "%s row 0 field annotation_mode: not one of %s"
+                        % (sid, ", ".join(ANNOTATION_MODES)))
+    art = head["artifact_sha256"]
+    if not isinstance(art, str) or not re.fullmatch(SHA256_PATTERN, art):
+        raise DataError("enrichment-header", "%s row 0 field artifact_sha256: not 64 lower-case hex digits" % sid)
+    guide = head["guide"]
+    if not isinstance(guide, str) or not GUIDE_MIN_CHARS <= len(guide) <= GUIDE_MAX_CHARS:
+        raise DataError("enrichment-header", "%s row 0 field guide: %s, expected a string of %d to %d characters"
+                        % (sid, "%d characters" % len(guide) if isinstance(guide, str) else "not a string",
+                           GUIDE_MIN_CHARS, GUIDE_MAX_CHARS))
+    posts = lines[1:]
+    if not posts:
+        raise DataError("enrichment-empty", "%s: a header and no post rows" % sid)
+    if len(posts) > CAPS["rows"]:
+        raise DataError("enrichment-size", "%s: %d post rows, more than caps.rows %d" % (sid, len(posts), CAPS["rows"]))
+
+    def enum(n, d, field, values, rule):
+        v = d[field]
+        if not isinstance(v, str):
+            raise DataError("enrichment-field", "%s row %d field %s: not a string" % (sid, n, field))
+        if v not in values:
+            raise DataError(rule, "%s row %d field %s: a value of %d characters, not one of %s"
+                            % (sid, n, field, len(v), ", ".join(values)))
+        return v
+
+    rows, seen = [], {}
+    for n, line in enumerate(posts, 1):
+        d = obj_of(n, line)
+        key_set(n, d, ROW_KEYS_ENRICHMENT, "enrichment-row")
+        pid = d["post_id"]
+        if not isinstance(pid, str):
+            raise DataError("enrichment-field", "%s row %d field post_id: not a string" % (sid, n))
+        if not re.fullmatch(POST_ID_PATTERN, pid):
+            raise DataError("enrichment-field", "%s row %d field post_id: %d characters, not matching the declared "
+                            "pattern" % (sid, n, len(pid)))
+        t = d["text"]
+        if not isinstance(t, str):
+            raise DataError("enrichment-field", "%s row %d field text: not a string" % (sid, n))
+        try:
+            data.refuse_unencodable(t, "enrichment", sid, n, "text")
+        except DataError:                                # its own rule name and its code point never escape
+            raise DataError("enrichment-encoding", "%s row %d field text: not encodable as UTF-8" % (sid, n))
+        if len(data.normalize(t)) < TEXT_MIN_CHARS:
+            raise DataError("enrichment-field", "%s row %d field text: %d characters, none left after trimming"
+                            % (sid, n, len(t)))
+        if len(t) > TEXT_MAX_CHARS:
+            raise DataError("enrichment-field", "%s row %d field text: %d characters, at most %d"
+                            % (sid, n, len(t), TEXT_MAX_CHARS))
+        label = enum(n, d, "label", LABELS, "enrichment-label")
+        evidence = enum(n, d, "evidence", EVIDENCE, "enrichment-evidence")
+        sl = enum(n, d, "selection_slice", SLICES, "enrichment-slice")
+        if pid in seen:
+            raise DataError("enrichment-duplicate-post-id", "%s row %d field post_id: repeats the post_id of row %d"
+                            % (sid, n, seen[pid]))
+        seen[pid] = n
+        served = MAPPING[(label, evidence)]
+        if served is None:
+            raise DataError(REFUSED_PAIR, "%s row %d fields label and evidence: a pair the declared mapping refuses"
+                            % (sid, n))
+        rows.append((n, t, LABELS.index(served), label, evidence, sl))
+    counts = {
+        "rows_in": len(rows),
+        "per_label": {lab: sum(1 for r in rows if r[3] == lab) for lab in LABELS},
+        "per_evidence": {ev: sum(1 for r in rows if r[4] == ev) for ev in EVIDENCE},
+        "cells": {_cell(lab, ev): sum(1 for r in rows if (r[3], r[4]) == (lab, ev))
+                  for (lab, ev), served in MAPPING.items() if served is not None},
+        "per_slice": {s: sum(1 for r in rows if r[5] == s) for s in SLICES},
+        "annotation_mode": {m: (len(rows) if m == mode else 0) for m in ANNOTATION_MODES},
+    }
+    return {"id": sid, "sha256": sha, "annotation_mode": mode, "rows": rows, "counts": counts}
+
+
+def merge_enrichment(ctx, base_files, sources):
+    """The contract's merge, in its declared order, over the unchanged base build: eval overlap, partner mixed group,
+    conflict groups dropped whole (no precedence), same-label collapse keeping the partner's exact text, then the append
+    order. Returns ({file name: bytes} with the new train.jsonl and MANIFEST_NAME, the manifest). annotation_mode is
+    never read here (D-16)."""
+    train_rows = ctx["train_rows"]
+    partner = {}
+    for i, (t, _) in enumerate(train_rows):
+        partner.setdefault(normalized_sha256(t), i)
+    totals = dict.fromkeys(TOTALS_KEYS, 0)
+    groups = {}                                         # normalized hash -> [(text, y)] in file / command-line order
+    for src in sources:
+        for _, text, y, _, _, _ in src["rows"]:
+            h = normalized_sha256(text)
+            if h in ctx["eval_hashes"]:
+                totals["dropped_eval_overlap"] += 1
+            elif h in ctx["mixed_hashes"]:
+                totals["dropped_partner_mixed_group"] += 1
+            else:
+                groups.setdefault(h, []).append((text, y))
+    conflict, added = set(), []
+    for h, members in groups.items():
+        labs = {y for _, y in members}
+        if h in partner:
+            labs.add(train_rows[partner[h]][1])
+        if len(labs) > 1:
+            conflict.add(h)
+            totals["dropped_conflict_groups"] += 1
+            totals["dropped_conflict_rows_enriched"] += len(members)
+        elif h in partner:
+            totals["collapsed_same_label"] += len(members)
+        else:
+            totals["collapsed_same_label"] += len(members) - 1
+            added.append(members[0])
+    kept_partner = [r for r in train_rows if normalized_sha256(r[0]) not in conflict]
+    totals["dropped_conflict_rows_partner"] = len(train_rows) - len(kept_partner)
+    totals["rows_added"] = len(added)
+    new_train = kept_partner + added
+    # What train.py asserts, on the rows about to be written; a refusal passes through under its own data.py name.
+    group_train(new_train)
+    refuse_overlap(new_train, ctx["eval_rows"])
+    train_counts = {LABELS[c]: sum(1 for _, y in new_train if y == c) for c in range(len(LABELS))}
+    if min(train_counts.values()) == 0:
+        raise PrepareFailed("the enriched train.jsonl would hold no row of some criterion: %s" % train_counts)
+    calibration_split(new_train, contract.constant("calibration_slice_fraction", "float"),
+                      contract.constant("calibration_slice_min_per_class", "int"), SPLIT_SEED, len(LABELS))
+    named = lambda rs: [(t, LABELS[y]) for t, y in rs]  # noqa: E731
+    if jsonl_bytes(named(ctx["eval_rows"])) != base_files["eval.jsonl"]:
+        raise PrepareFailed("the enriched run's eval.jsonl is not the base build's bytes (D-11)")
+    train_bytes = jsonl_bytes(named(new_train))
+    manifest = {
+        "schema": MANIFEST_SCHEMA,
+        "format": ENRICHMENT_FORMAT,
+        "base": {"csv_sha256": ctx["csv_sha256"], "task_sha256": sha256_bytes(base_files["task.json"]),
+                 "base_train_sha256": sha256_bytes(base_files["train.jsonl"]),
+                 "eval_sha256": sha256_bytes(base_files["eval.jsonl"])},
+        "sources": [dict({"id": s["id"], "sha256": s["sha256"]}, **s["counts"]) for s in sources],
+        "totals": totals,
+        "train_rows": len(new_train),
+        "train_sha256": sha256_bytes(train_bytes),
+        "train_counts": train_counts,
+    }
+    files = {"task.json": base_files["task.json"], "train.jsonl": train_bytes, "eval.jsonl": base_files["eval.jsonl"],
+             MANIFEST_NAME: (json.dumps(manifest, sort_keys=True, indent=2) + "\n").encode("utf-8")}
+    return files, manifest
 
 
 # ------------------------------------------------------------------------------------------------ the served prefix
@@ -415,14 +758,14 @@ def _enrichment_cases(tmp, good, base_files, case):
     case("enrichment-manifest.json: schema, source-1, sha256 of the file, no text and no file name",
          m.get("schema") == "motivation-enrichment-manifest-v1" and SENTINEL not in mbody
          and [s.get("id") for s in m.get("sources", [])] == ["source-1"]
-         and m["sources"][0].get("sha256") == sha256_file(tracer) and "tracer" not in mbody, mbody[:0])
+         and m["sources"][0].get("sha256") == sha256_file(tracer) and "tracer" not in mbody)
     case("the manifest pins the base eval and train and counts rows_added 4",
          m.get("base", {}).get("eval_sha256") == sha256_bytes(base_files["eval.jsonl"])
          and m.get("base", {}).get("base_train_sha256") == sha256_bytes(base_files["train.jsonl"])
          and m.get("totals", {}).get("rows_added") == 4 and m.get("train_sha256") == sha256_bytes(tr))
     refused("--enrichment without --out: REFUSED enrichment-out", "enrichment-out", ["--enrichment", str(tracer)])
     refused("--out data/decide/motivation-v1 with --enrichment: REFUSED enrichment-out", "enrichment-out",
-            ["--enrichment", str(tracer), "--out", str(DEFAULT_OUT / "." )])
+            ["--enrichment", str(tracer), "--out", str(DEFAULT_OUT) + "/."])
     refused("an --enrichment path under the repo: REFUSED enrichment-in-repo", "enrichment-in-repo",
             ["--enrichment", str(HERE / "data.py"), "--out", str(fresh())])
     return produced
@@ -625,6 +968,10 @@ def main(argv=None):
     ap.add_argument("--measure", action="store_true", help="measure the task's prefix with the served tokenizer and print ONE JSON line")
     ap.add_argument("--max-texts", type=int, default=None, help="--measure: ENFORCE this served door (REFUSED prefix-budget when N x P exceeds the total)")
     ap.add_argument("--no-pin", action="store_true", help="accept a CSV that is not the pinned partner file")
+    ap.add_argument("--enrichment", action="append", default=[], metavar="PATH",
+                    help="a motivation-enrichment-v1 file, read in place (repeatable; source-1, source-2, ... in order)")
+    ap.add_argument("--enrichment-sha256", action="append", default=[], metavar="HEX",
+                    help="the expected sha256 of each --enrichment file, one per file in the same order")
     ap.add_argument("--selftest", action="store_true", help="the declared rule over a synthetic CSV, torch-free")
     ap.add_argument("--selftest-tokenizer", action="store_true", help="the measurement against the served tokenizer (no model)")
     args = ap.parse_args(argv)
@@ -634,13 +981,37 @@ def main(argv=None):
         if args.selftest_tokenizer:
             return selftest_tokenizer()
         if args.measure:
+            if args.enrichment or args.enrichment_sha256:
+                ap.error("--enrichment is a prepare-mode option, not a --measure one")
             return measure_main(ap, args)
         csv_path = Path(args.csv) if args.csv else DEFAULT_CSV
         out = Path(args.out) if args.out else DEFAULT_OUT
-        files, summary = build(csv_path)
+        pins = list(args.enrichment_sha256)
+        if args.enrichment:
+            if args.out is None:
+                raise DataError("enrichment-out", "--enrichment needs an explicit --out; data/decide/motivation-v1 is "
+                                "never written with enrichment")
+            if out.resolve() == DEFAULT_OUT.resolve():
+                raise DataError("enrichment-out", "--out resolves to data/decide/motivation-v1, the v1 data dir; an "
+                                "enriched run writes elsewhere")
+            if pins and len(pins) != len(args.enrichment):
+                raise DataError("enrichment-sha256", "%d --enrichment-sha256 value(s) for %d --enrichment file(s); give "
+                                "one per file, in the same order" % (len(pins), len(args.enrichment)))
+        elif pins:
+            raise DataError("enrichment-sha256", "--enrichment-sha256 was given without --enrichment")
+        files, summary, ctx = _build_v1(csv_path)
         if not args.no_pin:
             check_pin(summary)
         check_approved(files)
+        if not args.no_pin:
+            check_v1_identity(files, False)
+        manifest = None
+        if args.enrichment:
+            sources = [read_enrichment(p, "source-%d" % k, pins[k - 1] if pins else None)
+                       for k, p in enumerate(args.enrichment, 1)]
+            files, manifest = merge_enrichment(ctx, files, sources)
+            if not args.no_pin:
+                check_v1_identity(files, True)
         status = write_once(out, files)
     except DataError as e:                              # every input refusal: one REFUSED <rule> line, exit 2, no traceback
         print(str(e), file=sys.stderr)
@@ -652,6 +1023,12 @@ def main(argv=None):
         where = out.resolve().relative_to(REPO)
     except ValueError:
         where = out
+    if manifest is not None:                            # the generated id and the sha256, never the file name
+        for s in manifest["sources"]:
+            print("enrichment %s sha256 %s rows %d %s" % (s["id"], s["sha256"], s["rows_in"], json.dumps(
+                {k: s[k] for k in SOURCE_COUNT_KEYS if k != "rows_in"}, sort_keys=True)))
+        print("enrichment totals %s train_counts %s" % (json.dumps(manifest["totals"], sort_keys=True),
+                                                        json.dumps(manifest["train_counts"], sort_keys=True)))
     print("prepared %s (%s): %s" % (where, status, json.dumps(summary, sort_keys=True)))
     for name in sorted(files):
         print("  %-12s %5d lines  sha256 %s" % (name, files[name].count(b"\n"), sha256_bytes(files[name])))
