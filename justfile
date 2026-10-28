@@ -2761,6 +2761,13 @@ _laya-region-selftest:
 # unchanged; ISOLATION 2: an augury-dev laya-deploy with no augury config is REFUSED config even though
 # the default config exists; ISOLATION 3: with it, the same deploy reaches REFUSED eligibility
 # (SyntheticNotDeployable), every config and target check having passed on the augury file.
+# Then the case tables: TARGET (the committed table: must-pass and at least ten must-refuse, among them
+# each stale env variable, a conflicting PMCP_API_URL and a wrong-region api_url), ACCOUNT (the live
+# account check against a scripted fake sts, forced by LAYA_ACCOUNT_CHECK_FORCE=1), STATE, ENDPOINT
+# (anchored suffix, spoof hosts, loopback only under DRY_RUN=1), WIRING (ordered line indices over
+# every recipe body: target check < account check < first AWS line), TEARDOWN REACHABLE (laya-deploy's
+# exported environment reaches CONTAINED; its wrong-region twin is refused before any put) and VERIFY
+# STATE (laya-deploy-verify reads the augury-dev STATE and writes its plan files under its state dir).
 # The default and augury-dev config paths of the server id (LAYA_SELFTEST_SERVER, default
 # aprender-mcp-decide-antisemite) and every augury-dev file a case can write come back byte-identical
 # (or absent) on EXIT. Ends with `TARGET SELFTEST OK`, or `TARGET SELFTEST FAILED (<k> failed checks)`
@@ -2783,7 +2790,8 @@ _laya-target-selftest:
     AUG_DIR="$(just _laya-state-dir augury-dev)"
     AUG="$AUG_DIR/deploy-config-$SRV.toml"
     # Every file a case can write: the default config and the augury-dev state a deploy reaches.
-    KEEP=("$CFG" "$AUG" "$AUG_DIR/eligibility-$SRV.log" "$AUG_DIR/plan-concentrated.json" "$AUG_DIR/plan-distributed.json")
+    KEEP=("$CFG" "$AUG" "$AUG_DIR/eligibility-$SRV.log" "$AUG_DIR/plan-concentrated.json" "$AUG_DIR/plan-distributed.json"
+        models/decide/plan-concentrated.json models/decide/plan-distributed.json)
     AUG_DIR_CREATED=0
     [ -d "$AUG_DIR" ] || AUG_DIR_CREATED=1
     k=0
@@ -2858,6 +2866,303 @@ _laya-target-selftest:
     else
         fail "ISOLATION 3 augury-config: exit $RC, expected REFUSED eligibility SyntheticNotDeployable after target-check ok (log: $W/iso3.log)"
         tail -3 "$W/iso3.log" >&2 || true
+    fi
+    # TARGET: the committed table as a must-pass / must-refuse case table (CLAUDE.md rule 7). Every
+    # refusal is exit 2 with nothing on stdout; an env disagreement is set on that one command only.
+    cfg_get() { python3 -I -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["targets"][sys.argv[2]]["api_url"])' "$LAYA_PMCP_CONFIG" "$1" 2> /dev/null || echo unreadable; }
+    API_AUG="$(cfg_get augury-dev)"
+    API_US="$(cfg_get dev)"
+    # variant <out> <key> <value>: the fixture config with ONE key of [targets.augury-dev] replaced.
+    variant() {
+        just _laya-pmcp-fixture-config "$1"
+        python3 -I - "$1" "$2" "$3" <<'PY'
+    import re, sys
+    p, key, value = sys.argv[1:4]
+    t = open(p).read()
+    t, n = re.subn(r'(\[targets\.augury-dev\][^\[]*?^' + key + r' = )"[^"]*"', lambda m: m.group(1) + '"' + value + '"', t, count=1, flags=re.M | re.S)
+    assert n == 1, key
+    open(p, "w").write(t)
+    PY
+    }
+    variant "$W/cfg-profile.toml" aws_profile ze-kasher-dev
+    variant "$W/cfg-api.toml" api_url https://fixture3.execute-api.us-east-1.amazonaws.com
+    variant "$W/cfg-type.toml" type aws-lambda
+    tcase() {
+        local want="$1" label="$2" expect="$3" out
+        shift 3
+        set +e; "$@" < /dev/null > "$W/tc.out" 2> "$W/tc.err"; RC=$?; set -e
+        out="$(cat "$W/tc.out")"
+        if [ "$want" = accept ] && [ "$RC" -eq 0 ] && [ "$out" = "$expect" ]; then
+            echo "TARGET accept: $label -> $out"
+        elif [ "$want" = refuse ] && [ "$RC" -eq 2 ] && [ -z "$out" ] && grep -Eq "^$expect" "$W/tc.err"; then
+            echo "TARGET refuse: $label (exit 2, $(grep -E -m 1 "^$expect" "$W/tc.err" | cut -c 1-150))"
+        else
+            fail "TARGET $want $label: exit $RC, stdout '$out' (stderr: $(head -n 2 "$W/tc.err" | tr '\n' ' ' | cut -c 1-200))"
+        fi
+    }
+    L_US='dev us-east-1 .us-east.true-mcp.com 816069129666'
+    L_AUG='augury-dev eu-west-1 .eu-west.augury.pmcp.run 783960389328'
+    tcase accept "ze-kasher-dev us-east-1" "$L_US" just _laya-target-check ze-kasher-dev us-east-1
+    tcase accept "augury-dev with an empty region (the table's)" "$L_AUG" just _laya-target-check augury-dev ""
+    tcase accept "augury-dev eu-west-1 with AWS_PROFILE=augury-dev" "$L_AUG" env AWS_PROFILE=augury-dev just _laya-target-check augury-dev eu-west-1
+    tcase accept "augury-dev with PMCP_API_URL equal to the target's own api_url" "$L_AUG" env PMCP_API_URL="$API_AUG" just _laya-target-check augury-dev eu-west-1
+    tcase refuse "unknown profile mam-dev" 'REFUSED target: ' just _laya-target-check mam-dev ""
+    tcase refuse "augury-dev with region us-east-1" 'REFUSED target: ' just _laya-target-check augury-dev us-east-1
+    tcase refuse "augury-dev with PMCP_TARGET=dev" 'REFUSED target: PMCP_TARGET ' env PMCP_TARGET=dev just _laya-target-check augury-dev eu-west-1
+    tcase refuse "augury-dev with AWS_PROFILE=ze-kasher-dev" 'REFUSED target: AWS_PROFILE ' env AWS_PROFILE=ze-kasher-dev just _laya-target-check augury-dev eu-west-1
+    tcase refuse "augury-dev with AWS_REGION=us-east-1" 'REFUSED target: AWS_REGION ' env AWS_REGION=us-east-1 just _laya-target-check augury-dev eu-west-1
+    tcase refuse "augury-dev with AWS_DEFAULT_REGION=us-east-1" 'REFUSED target: AWS_DEFAULT_REGION ' env AWS_DEFAULT_REGION=us-east-1 just _laya-target-check augury-dev eu-west-1
+    tcase refuse "augury-dev with PMCP_API_URL = the us-east-1 control plane" 'REFUSED target: PMCP_API_URL ' env PMCP_API_URL="$API_US" just _laya-target-check augury-dev eu-west-1
+    tcase refuse "a config whose augury-dev target names profile ze-kasher-dev" 'REFUSED target-config: ' env LAYA_PMCP_CONFIG="$W/cfg-profile.toml" just _laya-target-check augury-dev eu-west-1
+    tcase refuse "a config whose augury-dev api_url is an us-east-1 execute-api host" 'REFUSED target-config: ' env LAYA_PMCP_CONFIG="$W/cfg-api.toml" just _laya-target-check augury-dev eu-west-1
+    tcase refuse "a config whose augury-dev target is not of type pmcp-run" 'REFUSED target-config: ' env LAYA_PMCP_CONFIG="$W/cfg-type.toml" just _laya-target-check augury-dev eu-west-1
+    tcase refuse "an absent config file" 'REFUSED target-config: ' env LAYA_PMCP_CONFIG="$W/no-such-config.toml" just _laya-target-check augury-dev eu-west-1
+    tcase refuse "LAYA_PMCP_CONFIG set without DRY_RUN=1" 'REFUSED target-config: LAYA_PMCP_CONFIG ' env -u DRY_RUN just _laya-target-check augury-dev eu-west-1
+    tcase refuse "a profile with an embedded newline" 'REFUSED target: ' just _laya-target-check "$(printf 'augury-dev\nx')" ""
+    # ACCOUNT: the live account check against a scripted fake aws (first on PATH for this table only),
+    # forced under DRY_RUN=1 by LAYA_ACCOUNT_CHECK_FORCE=1; FAKE_ACCOUNT is what its sts answers.
+    FA="$W/fake-account"
+    FALOG="$W/fake-account-calls.log"
+    mkdir -p "$FA"
+    cat > "$FA/aws" <<'SH'
+    #!/usr/bin/env bash
+    printf '%s\n' "$*" >> "$FAKE_ACCOUNT_LOG"
+    case "$1 $2" in
+        "sts get-caller-identity")
+            if [ "$FAKE_ACCOUNT" = fail ]; then echo "An error occurred (ExpiredToken) when calling the GetCallerIdentity operation" >&2; exit 255; fi
+            echo "$FAKE_ACCOUNT" ;;
+        *) echo "fake aws: unexpected call: $*" >&2; exit 97 ;;
+    esac
+    SH
+    chmod +x "$FA/aws"
+    export FAKE_ACCOUNT_LOG="$FALOG"
+    PATH_BEFORE_TABLE="$PATH"
+    export PATH="$FA:$PATH"
+    acase() {
+        local want="$1" label="$2" answer="$3" pat="$4" prof="$5" calls
+        : > "$FALOG"
+        set +e; env FAKE_ACCOUNT="$answer" LAYA_ACCOUNT_CHECK_FORCE=1 just _laya-account-check "$prof" "" < /dev/null > "$W/ac.log" 2>&1; RC=$?; set -e
+        calls="$(grep -c "^sts get-caller-identity --profile $prof " "$FALOG" || true)"
+        if [ "$want" = accept ] && [ "$RC" -eq 0 ] && grep -Eq "$pat" "$W/ac.log" && [ "$calls" -eq 1 ]; then
+            echo "ACCOUNT accept: $label ($(grep -Eo -m 1 "$pat" "$W/ac.log"), 1 sts call)"
+        elif [ "$want" = refuse ] && [ "$RC" -eq 2 ] && grep -Eq "$pat" "$W/ac.log" && [ "$calls" -eq 1 ]; then
+            echo "ACCOUNT refuse: $label (exit 2, $(grep -Eo -m 1 "$pat" "$W/ac.log" | cut -c 1-140))"
+        else
+            fail "ACCOUNT $want $label: exit $RC, $calls sts call(s) (log: $(head -n 3 "$W/ac.log" | tr '\n' ' ' | cut -c 1-200))"
+        fi
+    }
+    acase accept "augury-dev, sts answers 783960389328" 783960389328 '^target-account ok: profile augury-dev is account 783960389328$' augury-dev
+    acase accept "ze-kasher-dev, sts answers 816069129666" 816069129666 '^target-account ok: profile ze-kasher-dev is account 816069129666$' ze-kasher-dev
+    acase refuse "augury-dev, sts answers ze-kasher-dev's account" 816069129666 '^REFUSED target-account: profile augury-dev resolves to an account ending 9666, not the table.s 783960389328$' augury-dev
+    acase refuse "ze-kasher-dev, sts answers augury-dev's account" 783960389328 '^REFUSED target-account: profile ze-kasher-dev resolves to an account ending 9328, not the table.s 816069129666$' ze-kasher-dev
+    acase refuse "augury-dev, sts exits 255" fail '^REFUSED target-account: cannot read the account for profile augury-dev$' augury-dev
+    acase refuse "augury-dev, a non-numeric answer" None '^REFUSED target-account: profile augury-dev did not answer a 12-digit account id' augury-dev
+    : > "$FALOG"
+    set +e; env FAKE_ACCOUNT=783960389328 just _laya-account-check augury-dev "" < /dev/null > "$W/ac-dry.log" 2>&1; RC=$?; set -e
+    if [ "$RC" -eq 0 ] && grep -qx 'target-account: not checked (DRY_RUN=1)' "$W/ac-dry.log" && [ ! -s "$FALOG" ]; then
+        echo "ACCOUNT accept: DRY_RUN=1 without LAYA_ACCOUNT_CHECK_FORCE -> not checked, 0 fake-aws calls"
+    else
+        fail "ACCOUNT dry-run: exit $RC, fake-aws calls $(wc -l < "$FALOG" | tr -d ' '); expected 'not checked' and no call"
+    fi
+    export PATH="$PATH_BEFORE_TABLE"
+    [ "$(command -v aws)" = "$SHIM/aws" ] || fail "the aws recorder is not first on PATH again after the ACCOUNT table"
+    # STATE: the per-profile local state dir.
+    scase() {
+        local want="$1" in="$2" expect="${3:-}" out label
+        label="${in:-<empty>}"
+        set +e; out="$(just _laya-state-dir "$in" 2> "$W/sd.err")"; RC=$?; set -e
+        if [ "$want" = accept ] && [ "$RC" -eq 0 ] && [ "$out" = "$expect" ]; then
+            echo "STATE accept: $label -> $out"
+        elif [ "$want" = refuse ] && [ "$RC" -eq 2 ] && [ -z "$out" ] && grep -q '^REFUSED state-dir: ' "$W/sd.err"; then
+            echo "STATE refuse: '$label' (exit 2, $(head -n 1 "$W/sd.err" | cut -c 1-120))"
+        else
+            fail "STATE $want '$label': exit $RC, got '$out'"
+        fi
+    }
+    scase accept ze-kasher-dev models/decide
+    scase accept augury-dev models/decide/augury-dev
+    scase refuse ../x
+    scase refuse ""
+    scase refuse Augury
+    # ENDPOINT: an endpoint must live under its profile's tenant (anchored suffix, no spoof host).
+    US_MOT="https://aprender-mcp-decide-motivation.us-east.true-mcp.com/mcp"
+    EU_MOT="https://aprender-mcp-decide-motivation.eu-west.augury.pmcp.run/mcp"
+    ecase() {
+        local want="$1" url="$2" prof="$3" expect="${4:-}" out
+        set +e; out="$(just _laya-endpoint-check "$url" "$prof" 2> "$W/ep.err")"; RC=$?; set -e
+        if [ "$want" = accept ] && [ "$RC" -eq 0 ] && [ "$out" = "$expect" ]; then
+            echo "ENDPOINT accept: $url for $prof -> $out"
+        elif [ "$want" = refuse ] && [ "$RC" -eq 2 ] && [ -z "$out" ] && grep -q '^REFUSED target-endpoint: ' "$W/ep.err"; then
+            echo "ENDPOINT refuse: $url for $prof (exit 2)"
+        else
+            fail "ENDPOINT $want $url for $prof: exit $RC, got '$out' ($(head -n 1 "$W/ep.err" | cut -c 1-160))"
+        fi
+    }
+    ecase accept "$EU_MOT" augury-dev aprender-mcp-decide-motivation
+    ecase accept "$US_MOT" ze-kasher-dev aprender-mcp-decide-motivation
+    ecase refuse "$US_MOT" augury-dev
+    ecase refuse "$EU_MOT" ze-kasher-dev
+    ecase refuse "http://aprender-mcp-decide-motivation.eu-west.augury.pmcp.run/mcp" augury-dev
+    ecase refuse "https://aprender-mcp-decide-motivation.eu-west.augury.pmcp.run/health" augury-dev
+    ecase refuse "https://aprender-mcp-decide-motivation.eu-west.augury.pmcp.run.evil.example/mcp" augury-dev
+    ecase refuse "https://x.evil.eu-west.augury.pmcp.run/mcp" augury-dev
+    ecase accept "http://127.0.0.1:8787/mcp" augury-dev loopback
+    set +e; out="$(env -u DRY_RUN -u LAYA_PMCP_CONFIG just _laya-endpoint-check http://127.0.0.1:8787/mcp augury-dev 2> "$W/ep.err")"; RC=$?; set -e
+    if [ "$RC" -eq 2 ] && [ -z "$out" ] && grep -q '^REFUSED target-endpoint: ' "$W/ep.err"; then
+        echo "ENDPOINT refuse: http://127.0.0.1:8787/mcp for augury-dev without DRY_RUN=1 (exit 2)"
+    else
+        fail "ENDPOINT refuse loopback without DRY_RUN: exit $RC, got '$out'"
+    fi
+    # WIRING (ordered): every laya/_laya recipe that runs `aws <s3|s3api|sts|lambda|iam|logs>` or
+    # `cargo pmcp deploy` on a code line (not a comment, not an echo/printf) calls the target check and
+    # then the account check at SMALLER line indices than that first AWS line. Plus laya-deploy's export
+    # before its deploy and its first contain, laya-deploy-verify's endpoint check before its build, and
+    # laya-deploy-config's template refusal before both checks. Line indices, never mere presence.
+    just --dump --dump-format json > "$W/dump.json"
+    set +e
+    python3 -I - "$W/dump.json" > "$W/wiring.log" 2>&1 <<'PY'
+    import json, re, sys
+    recipes = json.load(open(sys.argv[1]))["recipes"]
+    render = lambda line: "".join(f if isinstance(f, str) else "<interpolation>" for f in line)
+    AWS = re.compile(r"(^|[^A-Za-z0-9_./-])aws (s3|s3api|sts|lambda|iam|logs)\b|\bcargo pmcp deploy\b")
+    def code(line):
+        s = line.strip()
+        if not s or s.startswith("#"):
+            return False
+        s = re.sub(r"^(\|\||&&)\s*", "", s)
+        return not re.match(r"(echo|printf)\b", s)
+    def first(body, pred):
+        return next((i for i, l in enumerate(body) if pred(l)), None)
+    problems = []
+    if "_laya-iam-check" not in recipes:
+        problems.append("the recipe enumeration lacks _laya-iam-check (must-match control: it is not the full list)")
+    found = {}
+    for n in recipes:
+        if not n.startswith(("laya", "_laya")) or n.endswith("-selftest"):
+            continue
+        body = [render(l) for l in recipes[n]["body"]]
+        k = first(body, lambda l: code(l) and AWS.search(l))
+        if k is not None:
+            found[n] = (body, k)
+    WIRED = ["laya-deploy-config", "laya-deploy", "laya-upload", "laya-grant", "laya-deploy-verify", "laya-teardown", "laya-weights-bucket"]
+    for n in WIRED:
+        if n not in found:
+            problems.append(f"{n} is not in the AWS-touching set: the AWS-line pattern no longer sees it")
+    if "_laya-iam-check" in found:
+        problems.append("must-not-match control: _laya-iam-check (pure) was classified as AWS-touching")
+    for n, (body, k) in sorted(found.items()):
+        i = first(body, lambda l: code(l) and "just _laya-target-check" in l)
+        if n == "_laya-account-check":
+            if i is not None and i < k:
+                print(f"WIRING self {n}: target {i} < aws {k}")
+            else:
+                problems.append(f"{n}: its target check (line {i}) is not before its sts line {k}")
+            continue
+        j = first(body, lambda l: code(l) and "just _laya-account-check" in l)
+        if i is not None and j is not None and i < j < k:
+            print(f"WIRING order {n}: target {i} < account {j} < aws {k}")
+        else:
+            problems.append(f"WIRING order {n}: target {i}, account {j}, first aws {k}: the checks are missing or not before the first AWS line")
+    if "laya-deploy" in found:
+        body = found["laya-deploy"][0]
+        e = first(body, lambda l: code(l) and re.search(r"\bexport PMCP_TARGET=", l))
+        u = first(body, lambda l: code(l) and re.search(r"\bunset PMCP_API_URL\b", l))
+        d = first(body, lambda l: code(l) and "cargo pmcp deploy" in l)
+        cd = first(body, lambda l: code(l) and re.search(r"\bcontain\(\) \{", l))
+        c = first(body, lambda l: code(l) and re.search(r"\bcontain \"", l))
+        if None not in (e, u, d, cd, c) and max(e, u) < min(d, cd, c):
+            print(f"WIRING laya-deploy export: export PMCP_TARGET {e}, unset PMCP_API_URL {u} < contain() {cd}, first contain {c}, cargo pmcp deploy {d}")
+        else:
+            problems.append(f"WIRING laya-deploy export: export PMCP_TARGET {e}, unset PMCP_API_URL {u}, contain() {cd}, first contain {c}, cargo pmcp deploy {d}")
+    else:
+        problems.append("must-match control: laya-deploy is not in the AWS-touching set")
+    if "laya-deploy-verify" in found:
+        body = found["laya-deploy-verify"][0]
+        ep = first(body, lambda l: code(l) and "just _laya-endpoint-check" in l)
+        cb = first(body, lambda l: code(l) and re.search(r"\bcargo build\b", l))
+        if ep is not None and cb is not None and ep < cb:
+            print(f"WIRING laya-deploy-verify endpoint: endpoint check {ep} < cargo build {cb}")
+        else:
+            problems.append(f"WIRING laya-deploy-verify endpoint: endpoint check {ep}, cargo build {cb}: the STATE endpoint is not checked before the probe build")
+    if "laya-deploy-config" in found:
+        body = found["laya-deploy-config"][0]
+        tp = first(body, lambda l: "REFUSED template" in l)
+        i = first(body, lambda l: code(l) and "just _laya-target-check" in l)
+        j = first(body, lambda l: code(l) and "just _laya-account-check" in l)
+        if None not in (tp, i, j) and tp < i and tp < j:
+            print(f"WIRING laya-deploy-config template: REFUSED template {tp} < target {i}, account {j}")
+        else:
+            problems.append(f"WIRING laya-deploy-config template: REFUSED template {tp}, target {i}, account {j}")
+    print(f"WIRING controls: {len(found)} AWS-touching recipes; laya-deploy {'in' if 'laya-deploy' in found else 'NOT in'} the set, _laya-iam-check enumerated and {'NOT ' if '_laya-iam-check' in found else ''}outside it")
+    for p in problems:
+        print(f"FAIL WIRING {p}")
+    sys.exit(1 if problems else 0)
+    PY
+    wrc=$?
+    set -e
+    grep -v '^FAIL WIRING' "$W/wiring.log" || true
+    WP="$(grep -c '^FAIL WIRING' "$W/wiring.log" || true)"
+    if [ "$wrc" -ne 0 ] || [ "$WP" -ne 0 ]; then
+        grep '^FAIL WIRING' "$W/wiring.log" >&2 || true
+        FAILS=$((FAILS + (WP > 0 ? WP : 1)))
+    fi
+    # TEARDOWN REACHABLE: contain() runs laya-teardown with exactly the environment laya-deploy exports,
+    # so containment on augury-dev must pass the target and account checks; the wrong-region twin is
+    # refused before any put. A scripted fake aws, first on PATH for this case only.
+    FT="$W/fake-teardown"
+    FTLOG="$W/fake-teardown-calls.log"
+    mkdir -p "$FT"
+    cat > "$FT/aws" <<'SH'
+    #!/usr/bin/env bash
+    printf '%s\n' "$*" >> "$FAKE_TEARDOWN_LOG"
+    case "$1 $2" in
+        "sts get-caller-identity") echo 783960389328 ;;
+        "lambda put-function-concurrency") echo '{}' ;;
+        "lambda get-function-concurrency") echo 0 ;;
+        "lambda get-function") echo "arn:aws:iam::783960389328:role/fake-decide-fn-role" ;;
+        "iam delete-role-policy") echo "An error occurred (NoSuchEntity) when calling the DeleteRolePolicy operation: The role policy cannot be found." >&2; exit 254 ;;
+        *) echo "fake aws: unexpected call: $*" >&2; exit 97 ;;
+    esac
+    SH
+    chmod +x "$FT/aws"
+    export FAKE_TEARDOWN_LOG="$FTLOG"
+    read -r X_TARGET X_REGION _ _ <<< "$(just _laya-target-check augury-dev "" 2> /dev/null)"
+    PATH_BEFORE_TABLE="$PATH"
+    export PATH="$FT:$PATH"
+    : > "$FTLOG"
+    run "$W/teardown-ok.log" env PMCP_TARGET="$X_TARGET" AWS_PROFILE=augury-dev AWS_REGION="$X_REGION" LAYA_ACCOUNT_CHECK_FORCE=1 \
+        just laya-teardown "$SRV" dev augury-dev
+    if [ "$RC" -eq 0 ] && grep -q '^  CONTAINED: ' "$W/teardown-ok.log" && ! grep -q 'REFUSED' "$W/teardown-ok.log" \
+        && grep -q '^target-check ok: profile augury-dev ' "$W/teardown-ok.log" && grep -q '^target-account ok: profile augury-dev is account 783960389328$' "$W/teardown-ok.log" \
+        && grep -q '^sts get-caller-identity --profile augury-dev ' "$FTLOG" && grep -q '^lambda put-function-concurrency ' "$FTLOG"; then
+        echo "TEARDOWN REACHABLE accept: PMCP_TARGET=$X_TARGET AWS_PROFILE=augury-dev AWS_REGION=$X_REGION (laya-deploy's exports) -> $(grep -m 1 'CONTAINED: ' "$W/teardown-ok.log" | sed 's/^ *//' | cut -c 1-90), target and account checks passed"
+    else
+        fail "TEARDOWN REACHABLE accept: exit $RC, expected CONTAINED and no REFUSED with laya-deploy's exported environment (log: $W/teardown-ok.log)"
+        tail -3 "$W/teardown-ok.log" >&2 || true
+    fi
+    : > "$FTLOG"
+    run "$W/teardown-twin.log" env PMCP_TARGET="$X_TARGET" AWS_PROFILE=augury-dev AWS_REGION=us-east-1 LAYA_ACCOUNT_CHECK_FORCE=1 \
+        just laya-teardown "$SRV" dev augury-dev
+    if [ "$RC" -eq 2 ] && grep -q '^REFUSED target' "$W/teardown-twin.log" && ! grep -q 'put-function-concurrency' "$FTLOG"; then
+        echo "TEARDOWN REACHABLE refuse: the twin with AWS_REGION=us-east-1 is REFUSED target (exit 2), no put-function-concurrency call"
+    else
+        fail "TEARDOWN REACHABLE refuse: exit $RC, expected exit 2 REFUSED target and no put-function-concurrency (log: $W/teardown-twin.log)"
+    fi
+    export PATH="$PATH_BEFORE_TABLE"
+    [ "$(command -v aws)" = "$SHIM/aws" ] || fail "the aws recorder is not first on PATH again after the TEARDOWN case"
+    # VERIFY STATE: laya-deploy-verify reads the augury-dev deployment's STATE from its own state dir and
+    # writes its plan files there; the default plan files keep their bytes.
+    P_BEFORE="$(sha_or_absent models/decide/plan-concentrated.json) $(sha_or_absent models/decide/plan-distributed.json)"
+    rm -f "$AUG_DIR/plan-concentrated.json" "$AUG_DIR/plan-distributed.json"
+    WANT_STATE="<endpoint from $AUG_DIR/deploy-$SRV.state/deployment.toml>"
+    run "$W/verify-state.log" just laya-deploy-verify "$A" "$SRV" augury-dev
+    P_AFTER="$(sha_or_absent models/decide/plan-concentrated.json) $(sha_or_absent models/decide/plan-distributed.json)"
+    if [ "$RC" -eq 0 ] && grep -qF "probe --url $WANT_STATE --apr" "$W/verify-state.log" \
+        && [ -s "$AUG_DIR/plan-concentrated.json" ] && [ -s "$AUG_DIR/plan-distributed.json" ] && [ "$P_AFTER" = "$P_BEFORE" ]; then
+        echo "VERIFY STATE augury-dev: the DRY_RUN plan names $WANT_STATE and wrote its plan files under $AUG_DIR/; the default plan files unchanged"
+    else
+        fail "VERIFY STATE augury-dev: exit $RC, expected $WANT_STATE, plan files under $AUG_DIR/ and the default ones unchanged ($P_BEFORE -> $P_AFTER) (log: $W/verify-state.log)"
+        grep -m 1 'probe --url' "$W/verify-state.log" >&2 || tail -3 "$W/verify-state.log" >&2 || true
     fi
     [ "$(command -v aws)" = "$SHIM/aws" ] || fail "the aws recorder is not first on PATH at the end"
     CALLS="$(wc -l < "$REC" | tr -d ' ')"
@@ -4046,11 +4351,13 @@ laya-gates-selftest:
     #!/usr/bin/env bash
     printf '%s\n' "$*" >> "${FAKE_AWS_LOG:-/dev/null}"
     mode="${FAKE_AWS_MODE:-ok}"
-    B="aprender-decide-weights-123456789012-dev"
+    # FAKE_AWS_ACCOUNT (plan 13-04, row account-check) is what sts answers; the default is the fake's own.
+    ACCT="${FAKE_AWS_ACCOUNT:-123456789012}"
+    B="aprender-decide-weights-$ACCT-dev"
     S="${FAKE_SERVER:?FAKE_SERVER names the server whose role policy this fake returns}"
     case "$1 $2" in
-        "lambda get-function") echo "arn:aws:iam::123456789012:role/decide-fn-role" ;;
-        "sts get-caller-identity") echo "123456789012" ;;
+        "lambda get-function") echo "arn:aws:iam::$ACCT:role/decide-fn-role" ;;
+        "sts get-caller-identity") echo "$ACCT" ;;
         "iam list-role-policies")
             [ "$mode" = list-fail ] && { echo "An error occurred (AccessDenied) when calling the ListRolePolicies operation" >&2; exit 255; }
             echo '["pmcp-declared"]' ;;
@@ -4567,6 +4874,44 @@ laya-gates-selftest:
         must_fail spaced-csv 'REFUSED csv-missing' just laya-prepare-motivation --csv "$W/pm/no such dir/a b.csv" --out "$W/pm/o"
         if grep -q 'unrecognized arguments' "$(logof spaced-csv)"; then red "spaced-csv: the spaced path was word-split (unrecognized arguments)"; fi
         must_pass selftest '^PREPARE MOTIVATION SELFTEST OK' just laya-prepare-motivation --selftest
+    }
+    # The deployment triple (plan 13-04, D-06): the four pure helpers and their selftest.
+    row_target_check() {
+        must_fail wrong-region '^REFUSED target: ' just _laya-target-check augury-dev us-east-1
+        [ "$RC" -eq 2 ] || red "wrong-region: exit $RC, not 2"
+        must_fail stale-pmcp-target '^REFUSED target: PMCP_TARGET ' env PMCP_TARGET=dev just _laya-target-check augury-dev eu-west-1
+        [ "$RC" -eq 2 ] || red "stale-pmcp-target: exit $RC, not 2"
+        must_fail api-url-conflict '^REFUSED target: PMCP_API_URL ' env PMCP_API_URL=https://fixture1.execute-api.us-east-1.amazonaws.com just _laya-target-check augury-dev eu-west-1
+        [ "$RC" -eq 2 ] || red "api-url-conflict: exit $RC, not 2"
+        must_pass augury '^augury-dev eu-west-1 \.eu-west\.augury\.pmcp\.run 783960389328$' just _laya-target-check augury-dev eu-west-1
+    }
+    row_account_check() {
+        : > "$FAKE_AWS_LOG"
+        must_fail foreign-account '^REFUSED target-account: profile augury-dev resolves to an account ending 9666' \
+            env PATH="$FAKE:$PATH" LAYA_ACCOUNT_CHECK_FORCE=1 FAKE_AWS_ACCOUNT=816069129666 just _laya-account-check augury-dev eu-west-1
+        [ "$RC" -eq 2 ] || red "foreign-account: exit $RC, not 2"
+        must_pass table-account '^target-account ok: profile augury-dev is account 783960389328$' \
+            env PATH="$FAKE:$PATH" LAYA_ACCOUNT_CHECK_FORCE=1 FAKE_AWS_ACCOUNT=783960389328 just _laya-account-check augury-dev eu-west-1
+        [ "$(grep -c '^sts get-caller-identity --profile augury-dev ' "$FAKE_AWS_LOG")" -eq 2 ] || red "the forced account check did not ask the fake sts once per case"
+        : > "$FAKE_AWS_LOG"
+    }
+    row_state_dir() {
+        must_fail dot-dot '^REFUSED state-dir: ' just _laya-state-dir ../x
+        must_pass ze-kasher-dev '^models/decide$' just _laya-state-dir ze-kasher-dev
+        must_pass augury-dev '^models/decide/augury-dev$' just _laya-state-dir augury-dev
+    }
+    row_endpoint_check() {
+        must_fail us-east-for-augury '^REFUSED target-endpoint: ' just _laya-endpoint-check https://aprender-mcp-decide-motivation.us-east.true-mcp.com/mcp augury-dev
+        must_pass eu-west '^aprender-mcp-decide-motivation$' just _laya-endpoint-check https://aprender-mcp-decide-motivation.eu-west.augury.pmcp.run/mcp augury-dev
+    }
+    row_target_selftest() {
+        just _laya-pmcp-fixture-config "$W/target-bad.toml"
+        sed 's/^aws_profile = "augury-dev"$/aws_profile = "ze-kasher-dev"/' "$W/target-bad.toml" > "$W/target-bad2.toml"
+        cmp -s "$W/target-bad.toml" "$W/target-bad2.toml" && { red "could not plant ze-kasher-dev into the fixture's augury-dev target"; return; }
+        must_fail augury-names-ze-kasher-dev '^TARGET SELFTEST FAILED' env LAYA_TARGET_SELFTEST_CONFIG="$W/target-bad2.toml" just _laya-target-selftest
+        [ "$RC" -eq 1 ] || red "augury-names-ze-kasher-dev: exit $RC, not 1"
+        must_pass fixture '^TARGET SELFTEST OK$' just _laya-target-selftest
+        grep -qx 'AWS CALLS: 0' "$(logof fixture)" || red "fixture: the target selftest did not report AWS CALLS: 0"
     }
     # ---- dispatch -------------------------------------------------------------------------------
     UNKNOWN=""
