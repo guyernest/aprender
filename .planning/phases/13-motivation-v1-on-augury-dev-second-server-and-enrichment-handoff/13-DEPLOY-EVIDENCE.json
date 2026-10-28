@@ -148,17 +148,63 @@
     "temp_deleted": true
   },
   "ze_kasher_before": {
-    "identity_probe": null,
+    "run_by": "owner",
+    "run_at": "2026-10-28, after 04:20Z (owner output files written 04:32Z)",
+    "identity_probe": {
+      "probe": "identity",
+      "probe_id": "probe-18e29747b7b3c1d0-28b3",
+      "one_tool_named_classify": true,
+      "description_has_labels_in_order": true,
+      "response_labels_match": true,
+      "identity_matches": true,
+      "artifact_sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+      "elapsed_ms": [
+        16046,
+        1452,
+        732
+      ],
+      "tokens_total": 105,
+      "shape": "identity",
+      "load_header": "cold;load_ms=13375"
+    },
+    "identity_probe_rc": {
+      "true_rc": 0,
+      "recorded_rc": 1,
+      "note": "the rc file reads 1 but is INVERTED: the owner pasted the probe line with a leading `! ` (shell negation), so `echo $?` recorded the negated status; the probe itself exited 0 (identity_matches true, artifact_sha256 equal to the pin). Recorded as found, not rewritten."
+    },
     "lambda": {
-      "state": "not_read",
-      "reason": "the executor's read-only call to the ze-kasher-dev account was refused by the Claude Code permission classifier ([Interfere With Workloads] / [Production Reads]); no AWS call reached the account, so this is NOT an AWS 'unreadable' answer"
+      "state": "present",
+      "keys": {
+        "LastModified": "2026-10-26T22:20:47.000+0000",
+        "CodeSha256": "9KJKCAWkS+Ss7x4xaf4hcpycyjm5QDxMe8Dsy/NTDPU=",
+        "MemorySize": 10240,
+        "State": "Active",
+        "Architectures": [
+          "arm64"
+        ],
+        "env_APRENDER_DECIDE_SHA256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+        "reserved_concurrency": null
+      },
+      "get_function_configuration_rc": 0,
+      "get_function_concurrency_rc": 0,
+      "reserved_concurrency_note": "get-function-concurrency returned rc 0 with empty output and empty stderr: no reserved concurrency configured"
     },
     "read_only_ops": [
       "probe --url https://aprender-mcp-decide-motivation.us-east.true-mcp.com/mcp --apr models/decide/laya-motivation-v1.apr --expect-sha256 d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
       "aws lambda get-function-configuration --profile ze-kasher-dev --region us-east-1 --function-name aprender-mcp-decide-motivation --query <the seven keys>",
       "aws lambda get-function-concurrency --profile ze-kasher-dev --region us-east-1 --function-name aprender-mcp-decide-motivation"
     ],
-    "pending": "owner-run or permitted read at the checkpoint"
+    "owner_outputs_sha256": {
+      "p13-07-zk-probe.log": "4bb86152ef50a9e037be0c657221e769027a4a9b7ebccec0e886dba124c73185",
+      "p13-07-zk-probe.rc": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "p13-07-zk.cfg.err": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "p13-07-zk.cfg.json": "c00fde3808810eeb222a83b69b33f39b8f7fd55c66adef27b19a732003681511",
+      "p13-07-zk.cfg.rc": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "p13-07-zk.conc.err": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "p13-07-zk.conc.json": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "p13-07-zk.conc.rc": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    "owner_outputs_copy": "<executor scratch dir>/p13-07-zk-owner/ (verbatim copies of the owner's /tmp/p13-07-zk* files)"
   },
   "augury_antisemite_before": {
     "health": {
@@ -193,7 +239,8 @@
       "kind": "executor-permission",
       "what": "the P10 ze-kasher-dev baseline (identity probe and the seven Lambda keys) could not be read by the executor: the Claude Code permission classifier refused the read-only aws lambda call against the ze-kasher-dev account; the identity probe was therefore not attempted",
       "effect": "Task 1's verify needs ze_kasher_before.identity_probe.identity_matches true and a three-state Lambda record; both wait on the owner",
-      "resolution": "pending"
+      "resolution": "resolved 2026-10-28: the owner ran the three read-only reads (identity probe, get-function-configuration, get-function-concurrency) in their own terminal; the executor recorded the outputs and made no ze-kasher-dev AWS call. Baseline: identity_matches true, sha d202f495..., Lambda present, reserved concurrency none.",
+      "resolved_by": "owner-run reads"
     }
   ],
   "measured_on": "2026-10-28",
