@@ -1,0 +1,344 @@
+{
+  "schema": "laya-acceptance-replay-v1",
+  "phase": "13",
+  "plan": "13-09",
+  "date": "2026-10-28T05:41:24Z",
+  "commit": "5e1fa9b88",
+  "triple": {
+    "pmcp_target": "augury-dev",
+    "aws_account": "783960389328",
+    "region": "eu-west-1",
+    "endpoint": "https://aprender-mcp-decide-motivation.eu-west.augury.pmcp.run/mcp"
+  },
+  "endpoint_source": "13-DEPLOY-EVIDENCE.json triple.endpoint (models/decide/augury-dev/deploy-aprender-mcp-decide-motivation.state/deployment.toml)",
+  "server": "aprender-mcp-decide-motivation",
+  "auth_posture": "on (M2M client-credentials; token minted from a mode-600 file into the probe's environment only)",
+  "auth_method_note": "every call was LAYA_M2M_FILE=<m2m-file> SSL_CERT_FILE=/etc/ssl/cert.pem just laya-probe-auth augury-dev <endpoint> --apr models/decide/laya-motivation-v1.apr ... (prefixed with the LIVE env -u array); one mint per call, every mint line ending (auth form); token host from models/decide/augury-dev/m2m-token-host, LAYA_M2M_TOKEN_HOST unset; SSL_CERT_FILE is the macOS system trust store (F-13-08-3), verification on",
+  "token": {
+    "host": "counter-coach.eu-west.augury.pmcp.run",
+    "http_code": 200,
+    "expires_in": 900,
+    "method": "form"
+  },
+  "mints": 8,
+  "unauthenticated_refusal": {
+    "tools_list": 401,
+    "tools_call": 401,
+    "initialize": {
+      "code": 200,
+      "note": "observed, not asserted"
+    },
+    "line": "auth-refusal ok: tools/list 401, tools/call 401 after 1 poll(s) (0 s); first_401_utc 2026-10-28T05:41:22Z; initialize 200 (observed, not asserted); oauth-protected-resource 200 (observed)",
+    "polls": 1,
+    "wall_s": 0,
+    "first_401_utc": "2026-10-28T05:41:22Z",
+    "command": "env -u DRY_RUN just _laya-auth-refusal-check <endpoint> 0 (no bearer sent), after every authenticated call"
+  },
+  "artifact_sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+  "pilot_label": "pilot",
+  "labels": [
+    "social_affiliative",
+    "conspiratorial",
+    "other"
+  ],
+  "labels_source": "key order of data/decide/motivation-v1/task.json criteria; every replay line's labels",
+  "chosen_max_texts": 8,
+  "P": 97,
+  "probe": "cargo build --release -p aprender-mcp-decide-lambda --example probe (built from the committed Cargo.lock by laya-probe-auth); read-only tools/call with the probe's committed synthetic REPLAY_TEXTS only; no partner text sent or recorded",
+  "identity": {
+    "probe": "identity",
+    "probe_id": "probe-18e29add087e1bb8-a7e7",
+    "one_tool_named_classify": true,
+    "description_has_labels_in_order": true,
+    "response_labels_match": true,
+    "identity_matches": true,
+    "artifact_sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+    "elapsed_ms": [
+      823,
+      214,
+      763
+    ],
+    "tokens_total": 105,
+    "shape": "identity",
+    "load_header": "warm"
+  },
+  "replays": [
+    {
+      "n": 1,
+      "from": 0,
+      "line": {
+        "probe": "replay",
+        "probe_id": "probe-18e29ae3821f22b8-a836",
+        "n_texts": 1,
+        "n_results": 1,
+        "one_result_per_text": true,
+        "probabilities_len_match": true,
+        "probabilities_in_unit_range": true,
+        "sums_within_tolerance": true,
+        "max_abs_sum_deviation": 1.1175870895385742e-08,
+        "label_is_argmax": true,
+        "labels_in_task_order": true,
+        "identity_matches": true,
+        "artifact_sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+        "labels": [
+          "social_affiliative",
+          "conspiratorial",
+          "other"
+        ],
+        "tokens_total": 105,
+        "truncated": 0,
+        "elapsed_ms": 1094,
+        "door_max_texts": 8,
+        "shape": "replay"
+      }
+    },
+    {
+      "n": 1,
+      "from": 1,
+      "line": {
+        "probe": "replay",
+        "probe_id": "probe-18e29aea1a31aa70-a87e",
+        "n_texts": 1,
+        "n_results": 1,
+        "one_result_per_text": true,
+        "probabilities_len_match": true,
+        "probabilities_in_unit_range": true,
+        "sums_within_tolerance": true,
+        "max_abs_sum_deviation": 1.1175870895385742e-08,
+        "label_is_argmax": true,
+        "labels_in_task_order": true,
+        "identity_matches": true,
+        "artifact_sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+        "labels": [
+          "social_affiliative",
+          "conspiratorial",
+          "other"
+        ],
+        "tokens_total": 106,
+        "truncated": 0,
+        "elapsed_ms": 1098,
+        "door_max_texts": 8,
+        "shape": "replay"
+      }
+    },
+    {
+      "n": 1,
+      "from": 2,
+      "line": {
+        "probe": "replay",
+        "probe_id": "probe-18e29af0c588a148-a8be",
+        "n_texts": 1,
+        "n_results": 1,
+        "one_result_per_text": true,
+        "probabilities_len_match": true,
+        "probabilities_in_unit_range": true,
+        "sums_within_tolerance": true,
+        "max_abs_sum_deviation": 2.2351741790771484e-08,
+        "label_is_argmax": true,
+        "labels_in_task_order": true,
+        "identity_matches": true,
+        "artifact_sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+        "labels": [
+          "social_affiliative",
+          "conspiratorial",
+          "other"
+        ],
+        "tokens_total": 107,
+        "truncated": 0,
+        "elapsed_ms": 1100,
+        "door_max_texts": 8,
+        "shape": "replay"
+      }
+    },
+    {
+      "n": 7,
+      "from": 0,
+      "line": {
+        "probe": "replay",
+        "probe_id": "probe-18e29afe1c315ed8-a942",
+        "n_texts": 7,
+        "n_results": 7,
+        "one_result_per_text": true,
+        "probabilities_len_match": true,
+        "probabilities_in_unit_range": true,
+        "sums_within_tolerance": true,
+        "max_abs_sum_deviation": 2.2351741790771484e-08,
+        "label_is_argmax": true,
+        "labels_in_task_order": true,
+        "identity_matches": true,
+        "artifact_sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+        "labels": [
+          "social_affiliative",
+          "conspiratorial",
+          "other"
+        ],
+        "tokens_total": 745,
+        "truncated": 0,
+        "elapsed_ms": 4606,
+        "door_max_texts": 8,
+        "shape": "replay"
+      }
+    }
+  ],
+  "largest_multi_text_n": 7,
+  "refused_token_budget": [
+    {
+      "n": 8,
+      "from": 0,
+      "line": {
+        "probe": "replay",
+        "refused": true,
+        "n_texts": 8,
+        "refusal_bound": "classify_max_total_tokens",
+        "refusal": "classify: built rows total 850 tokens (per text [105, 106, 107, 105, 108, 107, 107, 105]), over classify_max_total_tokens 800 (contracts/decide-tool-boundary-v1.yaml); send fewer or shorter texts",
+        "door_max_texts": 8
+      }
+    }
+  ],
+  "batch_of_4": {
+    "line": {
+      "probe": "replay",
+      "probe_id": "probe-18e29b05b2150330-a985",
+      "n_texts": 4,
+      "n_results": 4,
+      "one_result_per_text": true,
+      "probabilities_len_match": true,
+      "probabilities_in_unit_range": true,
+      "sums_within_tolerance": true,
+      "max_abs_sum_deviation": 2.2351741790771484e-08,
+      "label_is_argmax": true,
+      "labels_in_task_order": true,
+      "identity_matches": true,
+      "artifact_sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+      "labels": [
+        "social_affiliative",
+        "conspiratorial",
+        "other"
+      ],
+      "tokens_total": 423,
+      "truncated": 0,
+      "elapsed_ms": 2787,
+      "door_max_texts": 8,
+      "shape": "replay"
+    },
+    "expected_tokens_total": 423,
+    "source": "12-ACCEPTANCE-REPLAY.json batch_of_4",
+    "note": "experiment-coach's batch size; the known fitting payload, admitted whole at Phase 12's token total"
+  },
+  "expected_count_refusal": {
+    "n_texts": 9,
+    "line": {
+      "probe": "replay_over_limit",
+      "probe_id": "probe-18e29b0c920be688-a9d1",
+      "n_texts": 9,
+      "is_error": true,
+      "names_count_bound": true,
+      "names_limit_value": true,
+      "names_contract": true,
+      "elapsed_ms": 560,
+      "door_max_texts": 8
+    }
+  },
+  "request_form": {
+    "method": "tools/call",
+    "tool": "classify",
+    "arguments": "{texts: [...]}",
+    "transport": "HTTPS POST to the pmcp.run endpoint with Authorization: Bearer <M2M access token>; no SigV4, no Function URL"
+  },
+  "requester_tests": {
+    "one_result_per_text": {
+      "result": "pass",
+      "proof": "one_result_per_text true and n_results == n_texts on every successful replay line (replays[*].line and batch_of_4.line: n = 1, 1, 1, 7, 4)"
+    },
+    "probabilities_length_equals_labels": {
+      "result": "pass",
+      "proof": "probabilities_len_match true on every successful replay line (3 labels)"
+    },
+    "probabilities_sum_to_1_within_1e-5": {
+      "result": "pass",
+      "proof": "sums_within_tolerance true on every successful replay line; max max_abs_sum_deviation 2.235e-08 <= 1e-5"
+    },
+    "label_is_argmax": {
+      "result": "pass",
+      "proof": "label_is_argmax true on every successful replay line"
+    },
+    "labels_in_task_order": {
+      "result": "pass",
+      "proof": "labels_in_task_order true and labels == [social_affiliative, conspiratorial, other] on every successful replay line"
+    },
+    "returned_sha_equals_pin": {
+      "result": "pass",
+      "proof": "identity_matches true and artifact_sha256 equal to the pin on identity and on every successful replay line"
+    },
+    "count_bound_refuses_above_the_door": {
+      "result": "pass",
+      "proof": "expected_count_refusal.line: is_error, names_count_bound and names_limit_value true for 9 texts (classify_max_texts 8)"
+    }
+  },
+  "timings_reported": {
+    "replay_elapsed_ms": {
+      "n1_from0": 1094,
+      "n1_from1": 1098,
+      "n1_from2": 1100,
+      "n7_from0": 4606,
+      "batch_of_4": 2787
+    },
+    "count_refusal_elapsed_ms": 560,
+    "identity_probe_elapsed_ms_this_run": [
+      823,
+      214,
+      763
+    ],
+    "identity_probe_load_header_this_run": "warm",
+    "tokens_total": {
+      "n1": [
+        105,
+        106,
+        107
+      ],
+      "n7": 745,
+      "batch_of_4": 423
+    },
+    "cold_wall_ms": {
+      "min": 18850,
+      "max": 22110,
+      "worst_sample": {
+        "index": 1,
+        "shape": "concentrated",
+        "probe_id": "6da24a0d-4c2a-46f5-9a24-967dab4f20c7",
+        "elapsed_ms": 22110
+      },
+      "worst_slack_to_cap_ms": 7890,
+      "phase12_note": "Phase 12 ze-kasher-dev figures are in 12-DEPLOY-EVIDENCE.json live",
+      "n_measured": 4
+    },
+    "warm_ms": {
+      "values": [
+        1161,
+        1175,
+        1131,
+        1122,
+        1105
+      ],
+      "min": 1105,
+      "max": 1175,
+      "p50": 1131,
+      "n": 5
+    },
+    "policy": "reported, not gated"
+  },
+  "deployment_acceptance": {
+    "decision": "accepted (recipe verified)",
+    "basis": "verify_attempts[0] rc 0: DEPLOY VERIFY OK aprender-mcp-decide-motivation: 4 cold samples (both shapes), every one < 30000 ms with CloudWatch cold evidence"
+  },
+  "texts_per_call_rule": "min(B, floor(800 / built_row_tokens)) for equal-length texts with built_row_tokens = P + t (P measured = 97); mixed batches are admitted while the sum of built rows is at most 800",
+  "partner_repo_unchanged": true,
+  "partner_repo": {
+    "path_note": "the experiment-coach checkout on this box (read-only: rev-parse HEAD and status --porcelain only)",
+    "head": "c632c749b02011b964c28f1a3a65f943033ff4d7",
+    "head_note": "the HEAD read today; the plan expected d822f119..., which the partner has since moved past (never RESEARCH's 0c46b68)",
+    "status_before_equals_after": true,
+    "status_lines": 3,
+    "status_note": "not clean (its own uncommitted deletion and untracked files); equality before and after is the check"
+  }
+}

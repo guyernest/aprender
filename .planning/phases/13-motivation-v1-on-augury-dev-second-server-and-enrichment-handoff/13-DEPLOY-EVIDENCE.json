@@ -700,5 +700,38 @@
       "count": 4,
       "note": "one update-function-configuration per cold sample (aws lambda wait function-updated, LastUpdateStatus Successful required); the augury antisemite function and ze-kasher-dev received no write"
     }
+  },
+  "augury_antisemite_after": {
+    "read_utc": "2026-10-28T05:42:20Z",
+    "lambda": {
+      "state": "present",
+      "keys": {
+        "LastModified": "2026-10-25T19:05:24.765+0000",
+        "CodeSha256": "X4HYupoMnkuYD4xL1MSfNEzFDbq/1H00xoQiJ+hMZ9U=",
+        "MemorySize": 10240,
+        "State": "Active",
+        "Architectures": [
+          "arm64"
+        ],
+        "env_APRENDER_DECIDE_SHA256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+        "reserved_concurrency": null
+      },
+      "get_function_configuration_rc": 0,
+      "get_function_concurrency_rc": 0,
+      "reserved_concurrency_note": "get-function-concurrency returned rc 0 with empty output: no reserved concurrency configured"
+    },
+    "unchanged": true,
+    "unchanged_rule": "derived: true when before and after are both present with equal keys or both absent; false when both present and differ or one present and one absent; null (not proven) when either is unreadable",
+    "read_only_ops": [
+      "aws lambda get-function-configuration --profile augury-dev --region eu-west-1 --function-name aprender-mcp-decide-antisemite --query <the six configuration keys>",
+      "aws lambda get-function-concurrency --profile augury-dev --region eu-west-1 --function-name aprender-mcp-decide-antisemite"
+    ],
+    "eligibility_log_cmp_backup": "byte-equal (cmp rc 0) to the plan-start scratchpad backup"
+  },
+  "archive_after": {
+    "manifest": "models/decide/ze-kasher-dev-archive-20261027/MANIFEST.sha256",
+    "manifest_ok": true,
+    "manifest_sha256_equals_13_11_pin": true,
+    "swap_backup_empty": true
   }
 }
