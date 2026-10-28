@@ -1,0 +1,262 @@
+{
+  "schema": "laya-auth-evidence-v1",
+  "phase": "13",
+  "plan": "13-06",
+  "triple": {
+    "pmcp_target": "augury-dev",
+    "aws_account": "783960389328",
+    "region": "eu-west-1",
+    "endpoint": null
+  },
+  "helper": {
+    "path": "scripts/laya_deploy/m2m_token.py",
+    "selftest_last_line": "M2M TOKEN SELFTEST OK",
+    "cases": 47,
+    "refusals": [
+      "m2m-file-missing",
+      "m2m-file-type",
+      "m2m-file-owner",
+      "m2m-file-mode",
+      "m2m-file-json",
+      "m2m-file-keys",
+      "m2m-token-url",
+      "m2m-host",
+      "m2m-http",
+      "m2m-redirect",
+      "m2m-auth-method",
+      "m2m-response",
+      "m2m-expires",
+      "m2m-usage"
+    ],
+    "auth_methods": {
+      "partner_ready": "form",
+      "diagnostic_only": "basic (--allow-basic)"
+    },
+    "redirects": "never followed (301, 302, 303, 307, 308 and an http Location refused)",
+    "file_checks": "O_NOFOLLOW open; fstat of the descriptor: regular, owner, mode exactly 0600 or 0400, size",
+    "argv_carries_token": false,
+    "prints": [
+      "host",
+      "HTTP status",
+      "expires_in",
+      "auth method"
+    ],
+    "accepted_risk": "the token is visible to same-user processes through the child's environment while it runs"
+  },
+  "chain": {
+    "line": "CHAIN bearer reached the wire (authorization_bearer_matches=true); token and secret absent from the recipe output",
+    "helper_line": "m2m-token ok: host 127.0.0.1 HTTP 200 expires_in 3600 s (auth form)",
+    "stub_line": "authorization_bearer_matches=true",
+    "token_absent_from_logs": true,
+    "secret_absent_from_logs": true,
+    "mismatch_run_failed": true
+  },
+  "refusal_check": {
+    "recipe": "_laya-auth-refusal-check",
+    "asserted": [
+      "tools/list 401",
+      "tools/call 401"
+    ],
+    "observed": [
+      "initialize",
+      "oauth-protected-resource"
+    ],
+    "tools_call_only_after_401": true,
+    "lines": [
+      "REFUSAL accept: tools/list 401, tools/call 401 -> exit 0, auth-refusal ok: tools/list 401, tools/call 401 after 1 poll(s) (0 s); first_401_utc 2026-10-28T03:38:00Z; initialize 200 (observed, not asserted); oauth-protected-resource 200 (observed)",
+      "REFUSAL accept: tools/list 200 then 401 within wait 30 -> exit 0, auth-refusal ok: tools/list 401, tools/call 401 after 2 poll(s) (0 s); first_401_utc 2026-10-28T03:38:00Z; initialize 200 (observed, not asserted); oauth-protected-resource 200 (observed)",
+      "REFUSAL accept: call count after polling -> tools/list, tools/list, then 1 tools/call (none while tools/list was open)",
+      "REFUSAL refuse: tools/list 200 with wait 0 -> exit 1, REFUSED auth-open: unauthenticated tools/list answered HTTP 200 after 1 poll(s) (0 s, wait 0 s); tools/call was not sent",
+      "REFUSAL refuse: call count while tools/list is open -> 0 tools/call requests sent",
+      "REFUSAL refuse: tools/list 401, tools/call 200 -> exit 1, REFUSED auth-open: tools/call answered HTTP 200 without a bearer although tools/list answered 401",
+      "REFUSAL refuse: curl transport failure -> exit 1, REFUSED auth-check: transport (curl exit 7) on tools/list, poll 1",
+      "REFUSAL refuse: an http URL -> exit 2, REFUSED auth-check: config the URL (65 characters) is not https://<host>/mcp",
+      "REFUSAL refuse: a URL not ending /mcp -> exit 2, REFUSED auth-check: config the URL (69 characters) is not https://<host>/mcp",
+      "REFUSAL refuse: a non-integer wait -> exit 2, REFUSED auth-check: config wait_s is not a whole number of seconds",
+      "REFUSAL refuse: a wait over 3600 -> exit 2, REFUSED auth-check: config wait_s is over 3600"
+    ]
+  },
+  "probe_auth": {
+    "recipe": "laya-probe-auth",
+    "lines": [
+      "PROBE-AUTH refuse: LAYA_M2M_FILE unset -> exit 2, REFUSED probe-auth: LAYA_M2M_FILE is not set: name the mode-600 M2M client file (outside the checkout)",
+      "PROBE-AUTH refuse: APRENDER_DECIDE_PROBE_TOKEN pre-set -> exit 2, REFUSED probe-auth: APRENDER_DECIDE_PROBE_TOKEN is already set in the caller's environment; unset it (the token is minted from LAYA_M2M_FILE)",
+      "PROBE-AUTH refuse: the argv bearer flag -> exit 2, REFUSED probe-auth: a probe argument starts with --bearer; the token comes only from LAYA_M2M_FILE (the argument is not echoed)",
+      "PROBE-AUTH refuse: a --bearer=<value> word -> exit 2, REFUSED probe-auth: a probe argument starts with --bearer; the token comes only from LAYA_M2M_FILE (the argument is not echoed)",
+      "PROBE-AUTH refuse: a second --url -> exit 2, REFUSED probe-auth: a second --url among the probe arguments; the URL is this recipe's second argument",
+      "PROBE-AUTH refuse: the us-east motivation URL with profile augury-dev -> exit 2, REFUSED target-endpoint: aprender-mcp-decide-motivation.us-east.true-mcp.com is not under *.eu-west.augury.pmcp.run, the tenant of profile augury-dev",
+      "PROBE-AUTH refuse: a mode-644 client file -> exit 2, REFUSED m2m-file-mode: the client file is mode 0644; it must be exactly 0600 or 0400",
+      "PROBE-AUTH refuse: LAYA_M2M_MIN_EXPIRES out of range -> exit 2, REFUSED probe-auth: config: LAYA_M2M_MIN_EXPIRES must be in 300..86400"
+    ]
+  },
+  "reexec": {
+    "recipes": [
+      "laya-deploy-verify",
+      "laya-deploy"
+    ],
+    "min_expires": {
+      "laya-deploy-verify": 1800,
+      "laya-deploy": 2400
+    },
+    "override": "LAYA_M2M_MIN_EXPIRES (300..86400)",
+    "dry_lines": [
+      "RE-EXEC laya-deploy-verify DRY_RUN -> exit 0, DRY-RUN: LAYA_M2M_FILE is set; the live run mints a token for aprender-mcp-decide-antisemite.eu-west.augury.pmcp.run before the first probe",
+      "RE-EXEC laya-deploy DRY_RUN -> exit 2, DRY-RUN: LAYA_M2M_FILE is set; the live run mints a token for aprender-mcp-decide-antisemite.eu-west.augury.pmcp.run before the first probe",
+      "RE-EXEC laya-deploy-verify with a pre-set token -> exit 2, REFUSED probe-auth: APRENDER_DECIDE_PROBE_TOKEN is set in the caller's environment; unset it and name the client file in LAYA_M2M_FILE",
+      "RE-EXEC laya-deploy with a pre-set token -> exit 2, REFUSED probe-auth: APRENDER_DECIDE_PROBE_TOKEN is set in the caller's environment; unset it and name the client file in LAYA_M2M_FILE"
+    ],
+    "live_lines": [
+      "RE-EXEC LIVE laya-deploy-verify: 1 helper invocation, argv preserved (--file <selftest dir>/m2m-fixture.json --expect-host aprender-mcp-decide-antisemite.eu-west.augury.pmcp.run --min-expires 1800 -- just laya-deploy-verify <selftest dir>/laya_tiny.apr aprender-mcp-decide-antisemite augury-dev 2); the child's lambda get-function-configuration --prof call carried the fixture token (sha256 a56fd4ea2e37) and LAYA_M2M_MINTED=1; token absent from the output",
+      "RE-EXEC LIVE laya-deploy-verify with LAYA_M2M_MIN_EXPIRES=600: 1 helper invocation, argv preserved (--file <selftest dir>/m2m-fixture.json --expect-host aprender-mcp-decide-antisemite.eu-west.augury.pmcp.run --min-expires 600 -- just laya-deploy-verify <selftest dir>/laya_tiny.apr aprender-mcp-decide-antisemite augury-dev 2); the child's lambda get-function-configuration --prof call carried the fixture token (sha256 a56fd4ea2e37) and LAYA_M2M_MINTED=1; token absent from the output",
+      "RE-EXEC LIVE laya-deploy: 1 helper invocation, argv preserved (--file <selftest dir>/m2m-fixture.json --expect-host aprender-mcp-decide-antisemite.eu-west.augury.pmcp.run --min-expires 2400 -- just laya-deploy <selftest dir>/laya_tiny.apr crates/aprender-decide/tests/fixtures/laya_tiny crates/aprender-decide/tests/fixtures/laya_tiny/data crates/aprender-decide/tests/fixtures/laya_tiny/checkpoint aprender-mcp-decide-antisemite dev augury-dev); the child's sts get-caller-identity --profile augury call carried the fixture token (sha256 a56fd4ea2e37) and LAYA_M2M_MINTED=1; token absent from the output",
+      "RE-EXEC LIVE laya-deploy: the child stopped at REFUSED eligibility: REFUSED SyntheticNotDeployable before any non-sts AWS call"
+    ],
+    "live_branches": {
+      "laya-deploy-verify": {
+        "helper_invocations": 1,
+        "argv_preserved": true,
+        "child_token_seen": true
+      },
+      "laya-deploy": {
+        "helper_invocations": 1,
+        "argv_preserved": true,
+        "child_token_seen": true
+      }
+    }
+  },
+  "token_host": {
+    "precedence": [
+      "LAYA_M2M_TOKEN_HOST",
+      "<state dir>/m2m-token-host",
+      "the endpoint host"
+    ],
+    "conflict_refused": true,
+    "shared_pool_note": "any *.pmcp.run host is admitted, the shared-pool counter-coach host included (intended, RESEARCH A1)",
+    "lines": [
+      "TOKEN HOST neither variable nor note -> the helper gets --expect-host aprender-mcp-decide-antisemite.eu-west.augury.pmcp.run",
+      "TOKEN HOST LAYA_M2M_TOKEN_HOST set -> the helper gets --expect-host augury-fixture.auth.eu-west-1.amazoncognito.com",
+      "TOKEN HOST the m2m-token-host note (variable unset) -> the helper gets --expect-host augury-fixture.auth.eu-west-1.amazoncognito.com",
+      "TOKEN HOST variable and note differ -> exit 2, REFUSED probe-auth: token-host conflict: LAYA_M2M_TOKEN_HOST and models/decide/augury-dev/m2m-token-host name different hosts; unset one",
+      "TOKEN HOST a note outside pmcp.run / amazoncognito.com -> exit 2, REFUSED probe-auth: the token host evil.example.com is neither the endpoint host nor a *.pmcp.run / *.amazoncognito.com host"
+    ]
+  },
+  "wiring": [
+    "WIRING laya-deploy-verify: pre-set-token refusal at line 39 < LAYA_M2M_MINTED-guarded helper exec at line 64 (guard line 43)",
+    "WIRING laya-deploy: pre-set-token refusal at line 73 < LAYA_M2M_MINTED-guarded helper exec at line 102 (guard line 79)",
+    "WIRING probe argv: 9 probe line(s) in 4 recipe(s), none carries --bearer; case table: a planted --bearer is caught"
+  ],
+  "gates_rows": [
+    "auth-refusal-check",
+    "probe-auth",
+    "auth-selftest"
+  ],
+  "aws_calls": 0,
+  "snapshot_unchanged": true,
+  "mutations": [
+    {
+      "id": "A1",
+      "edit": "the helper also prints the token to stderr after its ok line",
+      "red": true,
+      "red_line": " FAIL token-absent: the helper's stdout and stderr carry neither the token nor the secret  (selftest exit 1, 3 FAIL line(s))",
+      "restored_line": "M2M TOKEN SELFTEST OK",
+      "second_case": {
+        "case": "CHAIN (auth selftest)",
+        "red": true,
+        "red_line": "FAIL CHAIN: stub line 'authorization_bearer_matches=true', leaked: token, recipe exit 1 (log <selftest dir>/chain.log)"
+      },
+      "mutated_commit": "1a27e1298"
+    },
+    {
+      "id": "A2",
+      "edit": "the helper skips the file-mode check",
+      "red": true,
+      "red_line": " FAIL file mode 0644 refused m2m-file-mode m2m-token ok: host 127.0.0.1 HTTP 200 expires_in 3600 s (auth form) (selftest exit 1, 3 FAIL line(s))",
+      "restored_line": "M2M TOKEN SELFTEST OK",
+      "mutated_commit": "1a27e1298"
+    },
+    {
+      "id": "A3",
+      "edit": "_laya-auth-refusal-check accepts HTTP 200 on tools/list as if it were 401",
+      "red": true,
+      "red_line": "FAIL REFUSAL refuse: tools/list 200 with wait 0: exit 0 (want 1), expected a line matching '^REFUSED auth-open: unauthenticated tools/list answered HTTP 200' (log models/d (auth selftest exit 1, 2 FAIL line(s))",
+      "restored_line": "justfile restored by git checkout (git diff --quiet)",
+      "mutated_commit": "1a27e1298"
+    },
+    {
+      "id": "A4",
+      "edit": "laya-deploy-verify's re-exec `if` loses its LAYA_M2M_MINTED guard",
+      "red": true,
+      "red_line": "FAIL WIRING laya-deploy-verify: the helper exec (line 64) is not under an `if` that requires LAYA_M2M_MINTED != 1 (guard line 43) (auth selftest exit 1, 3 FAIL line(s))",
+      "restored_line": "justfile restored by git checkout (git diff --quiet)",
+      "mutated_commit": "1a27e1298"
+    },
+    {
+      "id": "A5",
+      "edit": "_laya-auth-refusal-check sends tools/call right after every tools/list poll, whatever its code",
+      "red": true,
+      "red_line": "FAIL REFUSAL refuse: call count: 1 tools/call request(s) sent while tools/list answered 200 (auth selftest exit 1, 2 FAIL line(s))",
+      "restored_line": "justfile restored by git checkout (git diff --quiet)",
+      "variant": {
+        "edit": "tools/call sent only on a poll that will be repeated (tools/list open, wait not over)",
+        "red": true,
+        "red_line": "FAIL REFUSAL accept: call count after polling: the requests were 'POST tools/list,POST tools/call,POST tools/list,POST tools/call,', expected tools/list, tools/list, tools/call (auth selftest exit 1, 1 FAIL line(s))",
+        "restored_line": "justfile restored by git checkout (git diff --quiet)",
+        "finding": "the first A5 run used this variant and stayed GREEN: the only call-count case used wait 0, which never polls twice; the polled accept case now asserts the request order tools/list, tools/list, tools/call (commit 6f6ef9b82)"
+      },
+      "mutated_commit": "6f6ef9b82"
+    },
+    {
+      "id": "A6",
+      "edit": "the helper appends the token to the exec'd argv",
+      "red": true,
+      "red_line": " FAIL argv: the exec'd child's sys.argv does not carry the token  (selftest exit 1, 1 FAIL line(s))",
+      "restored_line": "M2M TOKEN SELFTEST OK",
+      "mutated_commit": "1a27e1298"
+    },
+    {
+      "id": "A7",
+      "edit": "the helper uses the default urllib opener (redirects followed, proxies honoured)",
+      "red": true,
+      "red_line": " FAIL redirect 301 to a second loopback listener is refused; that listener saw 0 requests m2m-token ok: host 127.0.0.1 HTTP 200 expires_in 3600 s (auth form) (selftest exit 1, 4 FAIL line(s))",
+      "restored_line": "M2M TOKEN SELFTEST OK",
+      "note": "301, 302, 303 and the http-Location case turn RED (the second listener counts the followed request); 307 and 308 stay green under A7 because urllib's own handler never re-sends a POST on 307/308 (it raises HTTPError), which the helper then refuses as m2m-redirect",
+      "per_code": [
+        "FAIL redirect 301 to a second loopback listener is refused; that listener saw 0 requests m2m-token ok: host 1",
+        "FAIL redirect 302 to a second loopback listener is refused; that listener saw 0 requests m2m-token ok: host 1",
+        "FAIL redirect 303 to a second loopback listener is refused; that listener saw 0 requests m2m-token ok: host 1",
+        "ok redirect 307 to a second loopback listener is refused; that listener saw 0 requests REFUSED m2m-redirect:",
+        "ok redirect 308 to a second loopback listener is refused; that listener saw 0 requests REFUSED m2m-redirect:",
+        "FAIL redirect to an http:// Location (the downgrade form) is refused; the second listener saw 0 requests m2m-"
+      ],
+      "mutated_commit": "1a27e1298"
+    },
+    {
+      "id": "A8",
+      "edit": "the helper accepts a Basic-only mint without --allow-basic",
+      "red": true,
+      "red_line": " FAIL auth-method: a Basic-only endpoint is refused without --allow-basic; the child never runs m2m-token ok: host 127.0.0.1 HTTP 200 expires_in 3600 s (auth basic, NOT partner-ready) (selftest exit 1, 1 FAIL line(s))",
+      "restored_line": "M2M TOKEN SELFTEST OK",
+      "mutated_commit": "1a27e1298"
+    },
+    {
+      "id": "A9",
+      "edit": "the mode check becomes `mode & 0o077 == 0` (accepts 0700)",
+      "red": true,
+      "red_line": " FAIL file mode 0700 refused m2m-file-mode m2m-token ok: host 127.0.0.1 HTTP 200 expires_in 3600 s (auth form) (selftest exit 1, 1 FAIL line(s))",
+      "restored_line": "M2M TOKEN SELFTEST OK",
+      "mutated_commit": "1a27e1298"
+    },
+    {
+      "id": "A10",
+      "edit": "laya-deploy-verify's re-exec drops \"$N\" from the child's argv",
+      "red": true,
+      "red_line": "FAIL RE-EXEC LIVE laya-deploy-verify: helper argv '--file <selftest dir>/m2m-fixture.json --expect-host aprender-mcp-decide-motivation.eu-west.augury.p (auth selftest exit 1, 2 FAIL line(s))",
+      "restored_line": "justfile restored by git checkout (git diff --quiet)",
+      "mutated_commit": "1a27e1298"
+    }
+  ],
+  "credentials_recorded": "none",
+  "measured_on": "2026-10-28",
+  "commit": "6f6ef9b82",
+  "mutations_note": "A1-A4 and A6-A10 mutated the files of 1a27e1298; A5 (and its variant) was re-run on 6f6ef9b82, the call-order test fix it exposed. The restored helper selftest and auth selftest on 6f6ef9b82 are the selftest_last_line and chain.line above."
+}
