@@ -45,7 +45,7 @@ findings:
     title: "An OS error prints a traceback that includes the partner file's path (WARNING)"
   - id: WR-10
     severity: warning
-    disposition: open
+    disposition: fixed
     title: "The new contract leaves the README contract count two behind (WARNING)"
   - id: IN-01
     severity: info
@@ -75,7 +75,7 @@ findings:
     severity: info
     disposition: open
     title: "The default region conflicts with the second profile, and the snapshot covers only one extra profile (WARNING, low)"
-open: 18
+open: 17
 total: 18
 recorded: 2026-10-28T08:39:05.874Z
 ---
@@ -94,7 +94,7 @@ recorded: 2026-10-28T08:39:05.874Z
 | WR-07 | warning | open | - |
 | WR-08 | warning | open | - |
 | WR-09 | warning | open | - |
-| WR-10 | warning | open | - |
+| WR-10 | warning | fixed | 8bad5bae7: make readme-sync, 1852; check_readme_claims and readme_contract pass |
 | IN-01 | info | open | - |
 | IN-02 | info | open | - |
 | IN-03 | info | open | - |
