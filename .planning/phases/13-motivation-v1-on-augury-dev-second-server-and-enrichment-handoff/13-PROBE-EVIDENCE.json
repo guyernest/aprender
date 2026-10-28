@@ -1,0 +1,85 @@
+{
+  "schema": "laya-probe-evidence-v1",
+  "phase": "13",
+  "plan": "13-07",
+  "triple": {
+    "pmcp_target": "augury-dev",
+    "aws_account": "783960389328",
+    "region": "eu-west-1",
+    "endpoint": null
+  },
+  "probes": {
+    "P1": {
+      "command": "aws sts get-caller-identity --profile augury-dev --query Account --output text",
+      "result": "783960389328",
+      "pass": true
+    },
+    "P2": {
+      "command": "just _laya-target-check augury-dev eu-west-1; just _laya-account-check augury-dev eu-west-1; cargo pmcp configure show augury-dev (live mode, every control-plane override cleared)",
+      "result": "augury-dev eu-west-1 .eu-west.augury.pmcp.run 783960389328 | target-account ok: profile augury-dev is account 783960389328 | aws_profile = augury-dev  (source: target); region      = eu-west-1  (source: target)",
+      "pass": true
+    },
+    "P3": {
+      "command": "curl https://counter-coach.eu-west.augury.pmcp.run/health",
+      "result": "HTTP 200 status healthy serverId counter-coach",
+      "pass": true
+    }
+  },
+  "observations": {
+    "P4": {
+      "command": "curl https://aprender-mcp-decide-motivation.eu-west.augury.pmcp.run/health",
+      "code": 404,
+      "status": "not_found",
+      "note": "the id is not on the augury tenant yet (the F-10-12-1 first-404 state); observation, not a pass criterion"
+    },
+    "P5": {
+      "command": "curl https://aprender-mcp-decide-antisemite.eu-west.augury.pmcp.run/health",
+      "code": 200,
+      "hasDeployment": true,
+      "lambda": {
+        "state": "present",
+        "keys": {
+          "LastModified": "2026-10-25T19:05:24.765+0000",
+          "CodeSha256": "X4HYupoMnkuYD4xL1MSfNEzFDbq/1H00xoQiJ+hMZ9U=",
+          "MemorySize": 10240,
+          "State": "Active",
+          "Architectures": [
+            "arm64"
+          ],
+          "env_APRENDER_DECIDE_SHA256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+          "reserved_concurrency": null
+        }
+      },
+      "read_only_ops": [
+        "aws lambda get-function-configuration --profile augury-dev --region eu-west-1 --function-name aprender-mcp-decide-antisemite --query <the seven keys>",
+        "aws lambda get-function-concurrency --profile augury-dev --region eu-west-1 --function-name aprender-mcp-decide-antisemite"
+      ],
+      "note": "observed read-only; not claimed"
+    },
+    "P11": {
+      "read": "~/.pmcp/credentials.toml pmcp-run.expires_at (that key only)",
+      "expires_at": "2026-10-28T03:34:47.977256+00:00",
+      "note": "expired at the probe time; the owner logs in at Task 2"
+    }
+  },
+  "bucket": {
+    "name": "aprender-decide-weights-783960389328-dev",
+    "state": "present",
+    "head_bucket_rc": 0,
+    "location": "eu-west-1",
+    "fallback_used": false,
+    "keys": [
+      "decide/aprender-mcp-decide-antisemite/2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e.apr"
+    ]
+  },
+  "partner_repo_before": {
+    "path": "/Users/guy/projects/mcp/motivation-experiment",
+    "head": "c632c749b02011b964c28f1a3a65f943033ff4d7",
+    "status_porcelain_lines": 3,
+    "note": "HEAD read as is (the plan expected d822f119...; RESEARCH said 0c46b68); raw listing in the executor's scratch file"
+  },
+  "d18_go": true,
+  "read_only": true,
+  "measured_on": "2026-10-28",
+  "measured_at_utc": "2026-10-28T03:52:11Z"
+}

@@ -1,0 +1,201 @@
+{
+  "schema": "laya-deploy-evidence-v3",
+  "phase": "13",
+  "plan": "13-07",
+  "server": "aprender-mcp-decide-motivation",
+  "triple": {
+    "pmcp_target": "augury-dev",
+    "aws_account": "783960389328",
+    "region": "eu-west-1",
+    "endpoint": null
+  },
+  "deployments": {
+    "augury": {
+      "pmcp_target": "augury-dev",
+      "aws_account": "783960389328",
+      "region": "eu-west-1",
+      "endpoint": null
+    },
+    "ze_kasher_dev": {
+      "pmcp_target": "dev",
+      "aws_account": "816069129666",
+      "region": "us-east-1",
+      "endpoint": "https://aprender-mcp-decide-motivation.us-east.true-mcp.com/mcp"
+    }
+  },
+  "profile": "augury-dev",
+  "env": "dev",
+  "auth": "off at first publish; the owner enables OAuth right after (D-07)",
+  "tier_mb": 10240,
+  "artifact_path": "models/decide/laya-motivation-v1.apr",
+  "run_dir": "models/decide/laya-motivation-v1",
+  "artifact_sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+  "state_dir": "models/decide/augury-dev",
+  "archive": {
+    "dir": "models/decide/ze-kasher-dev-archive-20261027",
+    "manifest": "models/decide/ze-kasher-dev-archive-20261027/MANIFEST.sha256",
+    "manifest_sha256": "b01bc7216ddd1e349b079a2bf9aa314a2f8030a0730ed94233d348429a44ad90",
+    "baseline_record": "13-BASELINE-EVIDENCE.json",
+    "baseline_plan": "13-11",
+    "files": [
+      "models/decide/deploy-config-aprender-mcp-decide-motivation.toml",
+      "models/decide/deploy-aprender-mcp-decide-motivation.log",
+      "models/decide/deploy-aprender-mcp-decide-motivation.state/deployment.toml",
+      "models/decide/deploy-aprender-mcp-decide-motivation.state/stack.ts",
+      "models/decide/deploy-health-aprender-mcp-decide-motivation.json",
+      "models/decide/deploy-probe-aprender-mcp-decide-motivation.log",
+      "models/decide/eligibility-aprender-mcp-decide-motivation.log",
+      "models/decide/eligibility-upload-aprender-mcp-decide-motivation.log",
+      "models/decide/deploy-evidence-aprender-mcp-decide-motivation.json",
+      "models/decide/resolver-proof-aprender-mcp-decide-motivation.txt",
+      "models/decide/plan-concentrated.json",
+      "models/decide/plan-distributed.json"
+    ],
+    "check_ok": true,
+    "rechecked_after_selftest": true,
+    "rechecked_after_post_render_check": true
+  },
+  "order": [
+    "selftest",
+    "config",
+    "post_render_restore_check",
+    "upload",
+    "remote_identity"
+  ],
+  "selftest": {
+    "command": "LAYA_SELFTEST_SERVER=aprender-mcp-decide-motivation LAYA_DEPLOY_SELFTEST_POSITIVE=0 just laya-deploy-selftest",
+    "rc": 0,
+    "last_line": "DEPLOY SELFTEST OK (positive dry run SKIPPED: disarmed by LAYA_DEPLOY_SELFTEST_POSITIVE=0)",
+    "aws_calls": 0,
+    "sub_selftests": {
+      "region": "REGION SELFTEST OK",
+      "target": "TARGET SELFTEST OK",
+      "auth": "AUTH SELFTEST OK"
+    },
+    "summary_lines": [
+      "REGION: 14 cases, AWS CALLS: 0, REGION SELFTEST OK",
+      "TARGET: 58 cases, AWS CALLS: 0, TARGET SELFTEST OK",
+      "AUTH: 36 case lines, AWS CALLS: 0, AUTH SELFTEST OK"
+    ],
+    "snapshot_unchanged": true,
+    "ran_before_render": true,
+    "augury_dir_absent_before": true
+  },
+  "config": {
+    "path": "models/decide/augury-dev/deploy-config-aprender-mcp-decide-motivation.toml",
+    "command": "just laya-deploy-config models/decide/laya-motivation-v1.apr off aprender-mcp-decide-motivation dev augury-dev eu-west-1 (live mode, every control-plane override cleared)",
+    "rc": 0,
+    "region": "eu-west-1",
+    "bucket": "aprender-decide-weights-783960389328-dev",
+    "s3_key": "decide/aprender-mcp-decide-motivation/d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd.apr",
+    "s3_uri": "s3://aprender-decide-weights-783960389328-dev/decide/aprender-mcp-decide-motivation/d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd.apr",
+    "iam_resource": "arn:aws:s3:::aprender-decide-weights-783960389328-dev/decide/aprender-mcp-decide-motivation/*",
+    "auth_enabled": false,
+    "sha_pin": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+    "sha256": "e0c92cf0765c60391db0e2b5a163ea585fed4cb4583570b1d69c4f33f8fefe6f"
+  },
+  "post_render_check": {
+    "selftests": [
+      "_laya-region-selftest",
+      "_laya-target-selftest",
+      "_laya-auth-selftest"
+    ],
+    "server": "aprender-mcp-decide-motivation",
+    "ok_lines": [
+      "REGION SELFTEST OK",
+      "TARGET SELFTEST OK",
+      "AUTH SELFTEST OK"
+    ],
+    "aws_calls": [
+      0,
+      0,
+      0
+    ],
+    "augury_config_unchanged": true,
+    "snapshot_unchanged": true
+  },
+  "upload": {
+    "run_by": "executor",
+    "command": "AWS_MAX_ATTEMPTS=10 AWS_RETRY_MODE=standard lockf -k -t 3600 /tmp/aprender-laya-real-weights.lock just laya-upload models/decide/laya-motivation-v1.apr models/decide/laya-motivation-v1 data/decide/motivation-v1 $BASE aprender-mcp-decide-motivation dev augury-dev (live mode, every control-plane override cleared)",
+    "sts_before": "783960389328",
+    "tries": [
+      {
+        "try": 1,
+        "rc": 0,
+        "started": "2026-10-28T04:08:31Z",
+        "ended": "2026-10-28T04:17:49Z",
+        "env": "AWS_MAX_ATTEMPTS=10 AWS_RETRY_MODE=standard (environment only; the recipe is unchanged)"
+      }
+    ],
+    "rc": 0,
+    "uploaded_line": "UPLOADED s3://aprender-decide-weights-783960389328-dev/decide/aprender-mcp-decide-motivation/d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd.apr (846196612 bytes, sha256 d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd)",
+    "head_object": {
+      "op": "aws s3api head-object --checksum-mode ENABLED",
+      "content_length": 846196612,
+      "file_bytes": 846196612,
+      "matches": true,
+      "checksum_observed": null,
+      "checksum_type": "FULL_OBJECT",
+      "note": "the checksum is an observation only: a multipart upload's checksum is a composite"
+    }
+  },
+  "remote_identity": {
+    "sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+    "matches": true,
+    "method": "downloaded and hashed",
+    "download_rc": 0,
+    "temp_path": "<executor scratch dir outside the repository>/p13-07-remote.apr",
+    "temp_deleted": true
+  },
+  "ze_kasher_before": {
+    "identity_probe": null,
+    "lambda": {
+      "state": "not_read",
+      "reason": "the executor's read-only call to the ze-kasher-dev account was refused by the Claude Code permission classifier ([Interfere With Workloads] / [Production Reads]); no AWS call reached the account, so this is NOT an AWS 'unreadable' answer"
+    },
+    "read_only_ops": [
+      "probe --url https://aprender-mcp-decide-motivation.us-east.true-mcp.com/mcp --apr models/decide/laya-motivation-v1.apr --expect-sha256 d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+      "aws lambda get-function-configuration --profile ze-kasher-dev --region us-east-1 --function-name aprender-mcp-decide-motivation --query <the seven keys>",
+      "aws lambda get-function-concurrency --profile ze-kasher-dev --region us-east-1 --function-name aprender-mcp-decide-motivation"
+    ],
+    "pending": "owner-run or permitted read at the checkpoint"
+  },
+  "augury_antisemite_before": {
+    "health": {
+      "code": 200,
+      "hasDeployment": true
+    },
+    "lambda": {
+      "state": "present",
+      "keys": {
+        "LastModified": "2026-10-25T19:05:24.765+0000",
+        "CodeSha256": "X4HYupoMnkuYD4xL1MSfNEzFDbq/1H00xoQiJ+hMZ9U=",
+        "MemorySize": 10240,
+        "State": "Active",
+        "Architectures": [
+          "arm64"
+        ],
+        "env_APRENDER_DECIDE_SHA256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+        "reserved_concurrency": null
+      }
+    },
+    "read_only_ops": [
+      "aws lambda get-function-configuration --profile augury-dev --region eu-west-1 --function-name aprender-mcp-decide-antisemite --query <the seven keys>",
+      "aws lambda get-function-concurrency --profile augury-dev --region eu-west-1 --function-name aprender-mcp-decide-antisemite"
+    ],
+    "note": "observed read-only; not claimed"
+  },
+  "eligibility_logs_antisemite": "byte-equal to the plan-start backup after every selftest of this plan (cmp)",
+  "live_attempts": [],
+  "findings": [
+    {
+      "id": "F-13-07-1",
+      "kind": "executor-permission",
+      "what": "the P10 ze-kasher-dev baseline (identity probe and the seven Lambda keys) could not be read by the executor: the Claude Code permission classifier refused the read-only aws lambda call against the ze-kasher-dev account; the identity probe was therefore not attempted",
+      "effect": "Task 1's verify needs ze_kasher_before.identity_probe.identity_matches true and a three-state Lambda record; both wait on the owner",
+      "resolution": "pending"
+    }
+  ],
+  "measured_on": "2026-10-28",
+  "commit": "52e630857312be9127f2a603b73e16b8f490d0ec"
+}
