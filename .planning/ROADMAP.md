@@ -1016,7 +1016,7 @@ Known constraints: the only edge host pattern seen is `<server>.us-east.true-mcp
 **Requirements**: none mapped; the plans implement CONTEXT decisions
 **Depends on:** Phase 12
 **Note:** CONTEXT D-06 amends the owner decision above: the augury server REUSES the id `aprender-mcp-decide-motivation` and the existing thin crate (no new crate, register unchanged); the two deployments are told apart by the triple (pmcp.run target, AWS account, region). The eu-west-1 deployability question is answered by an existing tenant (the augury antisemite Lambda in eu-west-1, RESEARCH P9), not assumed.
-**Plans:** 8/11 plans executed (7 waves)
+**Plans:** 9/11 plans executed (7 waves)
 
 Plans:
 **Wave 1**
@@ -1036,7 +1036,7 @@ Plans:
 - [x] 13-07-PLAN.md — re-verify the wave-1 archive, D-18 read-only probe, the offline selftest before the eu-west-1 config, upload to the augury bucket with a remote sha256, owner login (D-18, D-19)
 
 **Wave 5** *(blocked on Wave 4 completion)*
-- [ ] 13-08-PLAN.md — publish on augury-dev timed from the DEPLOYING line with a bounded-open watchdog, owner enables OAuth and creates the M2M client, refusal and authenticated identity (D-06, D-07)
+- [x] 13-08-PLAN.md — publish on augury-dev timed from the DEPLOYING line with a bounded-open watchdog, owner enables OAuth and creates the M2M client, refusal and authenticated identity (D-06, D-07)
 
 **Wave 6** *(blocked on Wave 5 completion)*
 - [ ] 13-09-PLAN.md — authenticated timings and acceptance replay with a successful 4-text call; ze-kasher-dev shown unchanged by derived checks (D-07, D-02)
