@@ -3734,6 +3734,14 @@ laya-weights-bucket env="dev" profile="ze-kasher-dev" region="us-east-1":
         dev|prod) ;;
         *) echo "ERROR: '$ENV' is not a known environment (expected dev or prod)" >&2; exit 2 ;;
     esac
+    # The deployment triple (plan 13-04, D-06): the profile names one pmcp.run target, account and region,
+    # checked before the first AWS call; the checked values are exported and PMCP_API_URL / AWS_DEFAULT_REGION
+    # unset, so every aws call below resolves only this target.
+    TLINE="$(just _laya-target-check "$P" "$R")"
+    read -r T_TARGET T_REGION _ _ <<< "$TLINE"
+    just _laya-account-check "$P" "$R"
+    export PMCP_TARGET="$T_TARGET" AWS_PROFILE="$P" AWS_REGION="$T_REGION"
+    unset PMCP_API_URL AWS_DEFAULT_REGION
     ACCOUNT="$(aws sts get-caller-identity --profile "$P" --query Account --output text)"
     BUCKET="aprender-decide-weights-${ACCOUNT}-${ENV}"
     if aws s3api head-bucket --profile "$P" --bucket "$BUCKET" 2>/dev/null; then
@@ -3778,10 +3786,18 @@ laya-upload apr run data base server env="dev" profile="ze-kasher-dev":
         *) refuse env "'$ENV' is not a known environment (expected dev or prod)" ;;
     esac
     [ -f "$APR" ] || refuse artifact "$APR does not exist"
+    # The deployment triple (plan 13-04, D-06): the profile names one pmcp.run target, account and region,
+    # checked before the first AWS call; the checked values are exported and PMCP_API_URL / AWS_DEFAULT_REGION
+    # unset, so every aws call below resolves only this target.
+    TLINE="$(just _laya-target-check "$P" "")"
+    read -r T_TARGET T_REGION _ _ <<< "$TLINE"
+    export PMCP_TARGET="$T_TARGET" AWS_PROFILE="$P" AWS_REGION="$T_REGION"
+    unset PMCP_API_URL AWS_DEFAULT_REGION
+    SD="$(just _laya-state-dir "$P")"
     H_LOCAL="$(sha256 "$APR")"
     # ELIGIBILITY FIRST -- the Rust verifier on the exact file (decide-apr-v1 deploy_eligibility).
-    mkdir -p models/decide
-    VLOG="models/decide/eligibility-upload-$SERVER.log"
+    mkdir -p "$SD"
+    VLOG="$SD/eligibility-upload-$SERVER.log"
     set +e
     just laya-verify "$APR" "{{run}}" "{{data}}" "{{base}}" > "$VLOG" 2>&1
     vrc=$?
@@ -3801,6 +3817,8 @@ laya-upload apr run data base server env="dev" profile="ze-kasher-dev":
     [ "$H" = "$H_LOCAL" ] || refuse eligibility "laya-verify accepted sha256 $H but $APR hashes to $H_LOCAL"
     KEY="decide/$SERVER/$H.apr"
     SIZE="$(wc -c < "$APR" | tr -d ' ')"
+    # The account, live, only after the verifier accepted the file (a no-op under DRY_RUN=1).
+    just _laya-account-check "$P" ""
     if [ "${DRY_RUN:-0}" = "1" ]; then
         echo "DRY-RUN: would upload $APR ($SIZE bytes) to s3://aprender-decide-weights-<account>-$ENV/$KEY"
         exit 0
@@ -3838,6 +3856,14 @@ laya-grant server env="dev" profile="ze-kasher-dev":
         *) echo "ERROR: '$ENV' is not a known environment (expected dev or prod)" >&2; exit 2 ;;
     esac
     read_failed() { echo "ERROR: IAM read failed: $1 -- the role's policies are UNKNOWN, not missing; nothing was concluded" >&2; exit 1; }
+    # The deployment triple (plan 13-04, D-06): the profile names one pmcp.run target, account and region,
+    # checked before the first AWS call; the checked values are exported and PMCP_API_URL / AWS_DEFAULT_REGION
+    # unset, so every aws call below resolves only this target.
+    TLINE="$(just _laya-target-check "$P" "")"
+    read -r T_TARGET T_REGION _ _ <<< "$TLINE"
+    just _laya-account-check "$P" ""
+    export PMCP_TARGET="$T_TARGET" AWS_PROFILE="$P" AWS_REGION="$T_REGION"
+    unset PMCP_API_URL AWS_DEFAULT_REGION
     ROLE_ARN="$(aws lambda get-function --profile "$P" --function-name "$SERVER" \
         --query Configuration.Role --output text 2>/dev/null)" || {
         echo "ERROR: no Lambda named '$SERVER' (or it cannot be read) -- deploy it first: just laya-deploy <apr> <run> <data> <base> $SERVER" >&2
@@ -3976,8 +4002,12 @@ _laya-grant-check docs bucket server legacy:
 # and < 30000 ms; then find the server's `decide.load performed_load=true probe_id=<uuid>` line in
 # CloudWatch -- no line, not cold (fail closed). >= <samples> per shape, alternating CONCENTRATED
 # and DISTRIBUTED, EVERY one < 30000 ms; then an identity probe (labels in order) and 5 warm calls.
-# Evidence: models/decide/deploy-evidence-<server>.json. The env bump is out-of-band drift the next
+# Evidence: <state dir>/deploy-evidence-<server>.json. The env bump is out-of-band drift the next
 # `laya-deploy` resets. DRY_RUN=1 sizes both shapes from <apr> offline and prints the plan.
+# The deployment triple (plan 13-04, D-06): `_laya-target-check` and `_laya-account-check` run right after
+# argument validation; then, live only, STATE is read from `_laya-state-dir <profile>` and its endpoint
+# must pass `_laya-endpoint-check` for the profile, all BEFORE the probe build and any AWS call. The plan
+# files and the evidence go under the same state dir.
 laya-deploy-verify apr server profile="ze-kasher-dev" samples="2":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -3992,23 +4022,42 @@ laya-deploy-verify apr server profile="ze-kasher-dev" samples="2":
         ''|*[!0-9]*) echo "ERROR: samples must be a whole number >= 2 (got '$N')" >&2; exit 2 ;;
     esac
     [ "$N" -ge 2 ] || { echo "ERROR: samples must be >= 2 per shape (accepted_region_cold)" >&2; exit 2; }
+    # The deployment triple (plan 13-04, D-06): the profile names one pmcp.run target, account and region,
+    # checked before the first AWS call; the checked values are exported and PMCP_API_URL / AWS_DEFAULT_REGION
+    # unset, so every aws call below resolves only this target.
+    TLINE="$(just _laya-target-check "$P" "")"
+    read -r T_TARGET T_REGION _ _ <<< "$TLINE"
+    just _laya-account-check "$P" ""
+    export PMCP_TARGET="$T_TARGET" AWS_PROFILE="$P" AWS_REGION="$T_REGION"
+    unset PMCP_API_URL AWS_DEFAULT_REGION
+    SD="$(just _laya-state-dir "$P")"
+    STATE="$SD/deploy-$SERVER.state/deployment.toml"
+    # Live: the deployment's STATE and its endpoint are checked BEFORE the probe build, the plan sizing
+    # and any AWS call: a state file naming another tenant's host (or another server) is refused.
+    if [ "${DRY_RUN:-0}" != "1" ]; then
+        [ -f "$STATE" ] || { echo "ERROR: $STATE does not exist -- it is written by just laya-deploy <apr> <run> <data> <base> $SERVER <env> $P" >&2; exit 2; }
+        ENDPOINT="$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["deployment"]["endpoint"])' "$STATE" 2> /dev/null)" \
+            || { echo "REFUSED target-endpoint: $STATE has no [deployment] endpoint" >&2; exit 2; }
+        GOT="$(just _laya-endpoint-check "$ENDPOINT" "$P")"
+        [ "$GOT" = "$SERVER" ] || { echo "REFUSED target-endpoint: $STATE names server $GOT, not $SERVER" >&2; exit 2; }
+    fi
     cargo build --release -q -p aprender-mcp-decide-lambda --example probe
     TD="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
     PROBE="$TD/release/examples/probe"
     # Size both shapes from the local artifact under ClassifyLimits::CONTRACTED (no network).
+    mkdir -p "$SD"
     for shape in concentrated distributed; do
-        "$PROBE" --plan-only --apr "$APR" --maximal "$shape" > "models/decide/plan-$shape.json" \
+        "$PROBE" --plan-only --apr "$APR" --maximal "$shape" > "$SD/plan-$shape.json" \
             || { echo "ERROR: cannot build the $shape maximal request for $APR" >&2; exit 1; }
     done
-    H="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["artifact_sha256"])' models/decide/plan-concentrated.json)"
+    H="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["artifact_sha256"])' "$SD/plan-concentrated.json")"
     SHAPES=()
     for _ in $(seq 1 "$N"); do SHAPES+=(concentrated distributed); done
-    STATE="models/decide/deploy-$SERVER.state/deployment.toml"
     if [ "${DRY_RUN:-0}" = "1" ]; then
         ENDPOINT="<endpoint from $STATE>"
         echo "DRY-RUN laya-deploy-verify $SERVER: artifact sha256 $H, ${#SHAPES[@]} cold samples, cap $CAP_MS ms each"
         for shape in concentrated distributed; do
-            python3 -c 'import json, sys; p = json.load(open(sys.argv[1])); print("  shape %s: %s texts, %s tokens planned, max text %s bytes" % (p["shape"], p["texts"], p["tokens_planned"], p["max_text_bytes"]))' "models/decide/plan-$shape.json"
+            python3 -c 'import json, sys; p = json.load(open(sys.argv[1])); print("  shape %s: %s texts, %s tokens planned, max text %s bytes" % (p["shape"], p["texts"], p["tokens_planned"], p["max_text_bytes"]))' "$SD/plan-$shape.json"
         done
         i=0
         for shape in "${SHAPES[@]}"; do
@@ -4019,12 +4068,10 @@ laya-deploy-verify apr server profile="ze-kasher-dev" samples="2":
             echo "    3. aws logs filter-log-events on the function's log group over the sample window: 'decide.load performed_load=true probe_id=<uuid>' required, else the sample is NOT cold (fail closed); x-decide-load header recorded"
         done
         echo "  then: probe --url $ENDPOINT --apr $APR --expect-sha256 $H (initialize, tools/list: labels in order, identity), and 5 warm single-text calls (p50/max)"
-        echo "  evidence -> models/decide/deploy-evidence-$SERVER.json (per cold sample: shape, tokens_total, elapsed_ms, load_ms, probe_id, cold_evidence cloudwatch, graviton)"
+        echo "  evidence -> $SD/deploy-evidence-$SERVER.json (per cold sample: shape, tokens_total, elapsed_ms, load_ms, probe_id, cold_evidence cloudwatch, graviton)"
         echo "DRY-RUN: stopped before the network (no AWS call, no HTTP request)"
         exit 0
     fi
-    [ -f "$STATE" ] || { echo "ERROR: $STATE does not exist -- it is written by just laya-deploy <apr> <run> <data> <base> $SERVER" >&2; exit 2; }
-    ENDPOINT="$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["deployment"]["endpoint"])' "$STATE")"
     LOG_GROUP="$(aws lambda get-function-configuration --profile "$P" --function-name "$SERVER" --query LoggingConfig.LogGroup --output text)"
     case "$LOG_GROUP" in ''|None) LOG_GROUP="/aws/lambda/$SERVER" ;; esac
     EVID="$(mktemp -d)"
@@ -4082,7 +4129,7 @@ laya-deploy-verify apr server profile="ze-kasher-dev" samples="2":
         "$PROBE" --url "$ENDPOINT" --apr "$APR" --expect-sha256 "$H" --cold-first > "$EVID/warm-$w.json" 2> "$EVID/warm-$w.err" \
             || { echo "FAIL warm call $w" >&2; FAILS=$((FAILS + 1)); }
     done
-    python3 - "$EVID" "$SERVER" "$H" "${#SHAPES[@]}" "models/decide/deploy-evidence-$SERVER.json" <<'PY'
+    python3 - "$EVID" "$SERVER" "$H" "${#SHAPES[@]}" "$SD/deploy-evidence-$SERVER.json" <<'PY'
     import glob, json, os, re, statistics, sys
     d, server, sha, n, out = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), sys.argv[5]
     def last_json(p):
@@ -4134,6 +4181,15 @@ laya-teardown server env="dev" profile="ze-kasher-dev":
         dev|prod) ;;
         *) echo "ERROR: '$ENV' is not a known environment (expected dev or prod)" >&2; exit 2 ;;
     esac
+    # The deployment triple (plan 13-04, D-06): containment on the wrong tenant is harmful, so an implicit
+    # or contradictory target is REFUSED here too. contain() in laya-deploy calls this with exactly the
+    # environment it exported, which passes (TEARDOWN REACHABLE in _laya-target-selftest).
+    TLINE="$(just _laya-target-check "$P" "")"
+    read -r T_TARGET T_REGION _ _ <<< "$TLINE"
+    just _laya-account-check "$P" ""
+    export PMCP_TARGET="$T_TARGET" AWS_PROFILE="$P" AWS_REGION="$T_REGION"
+    unset PMCP_API_URL AWS_DEFAULT_REGION
+    SD="$(just _laya-state-dir "$P")"
     aws lambda put-function-concurrency --profile "$P" --function-name "$SERVER" --reserved-concurrent-executions 0 > /dev/null
     GOT="$(aws lambda get-function-concurrency --profile "$P" --function-name "$SERVER" --query ReservedConcurrentExecutions --output text)"
     [ "$GOT" = "0" ] || { echo "ERROR: reserved concurrency of $SERVER reads '$GOT', not 0 -- it may still be serving" >&2; exit 1; }
@@ -4164,12 +4220,12 @@ laya-teardown server env="dev" profile="ze-kasher-dev":
     fi
     echo "  stack-declared weights read left in place (stack-managed; inert at reserved concurrency 0)"
     ACCOUNT="$(aws sts get-caller-identity --profile "$P" --query Account --output text)"
-    echo "  NOT RUN -- the human's call:"
+    echo "  NOT RUN -- the human's call (profile $P: pmcp.run target $T_TARGET, region $T_REGION):"
     echo "    remove the deployment (the decide config must be at the shared root while it runs):"
-    echo "      just _laya-crates-root-swap crates models/decide/deploy-config-$SERVER.toml models/decide/destroy-$SERVER.state cargo pmcp deploy destroy --manifest-path crates"
+    echo "      PMCP_TARGET=$T_TARGET AWS_PROFILE=$P AWS_REGION=$T_REGION just _laya-crates-root-swap crates $SD/deploy-config-$SERVER.toml $SD/destroy-$SERVER.state cargo pmcp deploy destroy --manifest-path crates"
     echo "    remove the weights:"
-    echo "      aws s3 rm --profile $P --recursive s3://aprender-decide-weights-${ACCOUNT}-${ENV}/decide/$SERVER/"
-    echo "    or resume serving instead: aws lambda delete-function-concurrency --profile $P --function-name $SERVER"
+    echo "      aws s3 rm --profile $P --region $T_REGION --recursive s3://aprender-decide-weights-${ACCOUNT}-${ENV}/decide/$SERVER/"
+    echo "    or resume serving instead: aws lambda delete-function-concurrency --profile $P --region $T_REGION --function-name $SERVER"
 
 # ---------------------------------------------------------------------------
 # Class C, gate honesty (plan 08-22): every Phase 8 gate is a row of scripts/laya_gates.tsv, and every
