@@ -16,3 +16,12 @@
     after every run.
   - Fix for a later plan: add the two eligibility paths to the gates selftest's backup/restore list,
     exporting each run's output first, as 13-01 did for the deploy selftest.
+
+## From plan 13-06
+
+- **The same gates-selftest defect reproduced.** Task 2's filtered sweep (row deploy-refusals) rewrote
+  `models/decide/eligibility-aprender-mcp-decide-antisemite.log` again (tiny-fixture refusal log; only the
+  build time and fixture path change). The executor restored the plan-start bytes from a pre-plan backup
+  (`cmp` equal), and `_laya-state-snapshot` then matched the plan-start snapshot. Because the plan's verify
+  takes its first snapshot BEFORE the sweep, its final cmp tripped on this file; the deploy selftest was
+  re-bracketed alone (snapshot before and after it, equal). The fix named above is still open.
