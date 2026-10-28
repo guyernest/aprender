@@ -1016,7 +1016,7 @@ Known constraints: the only edge host pattern seen is `<server>.us-east.true-mcp
 **Requirements**: none mapped; the plans implement CONTEXT decisions
 **Depends on:** Phase 12
 **Note:** CONTEXT D-06 amends the owner decision above: the augury server REUSES the id `aprender-mcp-decide-motivation` and the existing thin crate (no new crate, register unchanged); the two deployments are told apart by the triple (pmcp.run target, AWS account, region). The eu-west-1 deployability question is answered by an existing tenant (the augury antisemite Lambda in eu-west-1, RESEARCH P9), not assumed.
-**Plans:** 3/11 plans executed (7 waves)
+**Plans:** 4/11 plans executed (7 waves)
 
 Plans:
 **Wave 1**
@@ -1025,7 +1025,7 @@ Plans:
 - [x] 13-11-PLAN.md — wave 1: archive the ze-kasher-dev local record with a pinned sha256 manifest before any phase-13 writer, cross-checked against Phase 12's committed record, never re-pinned (D-06, D-02)
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 13-03-PLAN.md — prepare_motivation.py --enrichment: train-only merge, conflict/eval-overlap drops, v1 byte identity by check (D-09..D-12, D-15, D-16)
+- [x] 13-03-PLAN.md — prepare_motivation.py --enrichment: train-only merge, conflict/eval-overlap drops, v1 byte identity by check (D-09..D-12, D-15, D-16)
 - [ ] 13-04-PLAN.md — deployment triple as the key: _laya-target-check with accounts and the PMCP_API_URL guard, live account check, per-profile state dir, endpoint check, ordered wiring guard, teardown reachable from containment (D-06)
 - [ ] 13-05-PLAN.md — selection note with a generated rule section and the seeded reference rule (D-17)
 
