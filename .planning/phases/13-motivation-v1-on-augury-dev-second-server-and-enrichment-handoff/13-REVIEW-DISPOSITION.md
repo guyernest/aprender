@@ -5,7 +5,7 @@ titles: json
 findings:
   - id: CR-01
     severity: critical
-    disposition: open
+    disposition: deferred
     title: "An auth-on redeploy has no guard: it either contains a healthy server or silently reopens it (BLOCKER)"
   - id: WR-01
     severity: warning
@@ -84,7 +84,7 @@ recorded: 2026-10-28T08:39:05.874Z
 
 | Finding | Severity | Disposition | Source |
 |---------|----------|-------------|--------|
-| CR-01 | critical | open | - |
+| CR-01 | critical | deferred | Owner, 2026-10-28 (UAT test 1): accepted control is the manual procedure in section 9 of 13-HANDOFF.md; nobody runs laya-deploy against augury-dev until the guard exists |
 | WR-01 | warning | open | - |
 | WR-02 | warning | open | - |
 | WR-03 | warning | open | - |
