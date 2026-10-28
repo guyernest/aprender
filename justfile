@@ -4165,6 +4165,209 @@ laya-deploy-verify apr server profile="ze-kasher-dev" samples="2":
         exit 1
     fi
 
+# ---------------------------------------------------------------------------
+# D-07 (plan 13-06): the authenticated path to an OAuth-protected decide server. A first publish is
+# auth OFF; the owner then turns OAuth on (plan 13-08), and from then on every probe needs a token.
+# The token is minted from LAYA_M2M_FILE (a mode-0600 or 0400 file OUTSIDE the checkout, the partner's
+# Secrets Manager shape {client_id, client_secret, token_url[, scope]}) by
+# scripts/laya_deploy/m2m_token.py, which execs ONE command with the token in
+# APRENDER_DECIDE_PROBE_TOKEN (and LAYA_M2M_MINTED=1) only: never on argv, never printed, never in a
+# log or an evidence file. The probe reads that variable (examples/probe.rs TOKEN_ENV); its --bearer
+# argv form must never be used. Partner-ready acceptance requires `(auth form)` in the helper's line.
+# ---------------------------------------------------------------------------
+
+# Run the decide probe against <url> under a token minted from LAYA_M2M_FILE. Target-, account- and
+# endpoint-checked first (plan 13-04): the URL must be https://<server><tenant suffix>/mcp of <profile>
+# (loopback http://127.0.0.1:<port>/mcp only under DRY_RUN=1, for the offline CHAIN case). Refused
+# (`REFUSED probe-auth:`, exit 2, nothing run) when LAYA_M2M_FILE is unset, when
+# APRENDER_DECIDE_PROBE_TOKEN is already set, when a probe argument starts with --bearer (the probe
+# would quote a `--bearer=<value>` word verbatim in its unknown-argument error) or is a second --url.
+# The token host comes from the helper's --token-host mode: LAYA_M2M_TOKEN_HOST, else
+# <state dir>/m2m-token-host (the non-secret note plan 13-08 writes when the owner names a Cognito
+# host), else the URL's host; a conflict between the first two is refused. A host other than the URL's
+# own must be *.pmcp.run or *.amazoncognito.com, which admits any pmcp.run host, the shared-pool
+# counter-coach host included: intended, the augury servers share one Cognito pool (RESEARCH A1).
+# LAYA_M2M_MIN_EXPIRES (300..86400, default 900) is the expires_in floor; LAYA_M2M_ALLOW_BASIC=1 passes
+# --allow-basic (DIAGNOSTIC only, never for acceptance). Row probe-auth.
+[positional-arguments]
+laya-probe-auth profile url *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    P="$1"
+    URL="$2"
+    shift 2
+    refuse() { echo "REFUSED probe-auth: $1" >&2; exit 2; }
+    # The caller's environment and argv first: no bearer on a command line, no token from elsewhere.
+    [ -n "${LAYA_M2M_FILE:-}" ] || refuse "LAYA_M2M_FILE is not set: name the mode-600 M2M client file (outside the checkout)"
+    [ -z "${APRENDER_DECIDE_PROBE_TOKEN+x}" ] \
+        || refuse "APRENDER_DECIDE_PROBE_TOKEN is already set in the caller's environment; unset it (the token is minted from LAYA_M2M_FILE)"
+    for a in "$@"; do
+        case "$a" in
+            --bearer*) refuse "a probe argument starts with --bearer; the token comes only from LAYA_M2M_FILE (the argument is not echoed)" ;;
+            --url*) refuse "a second --url among the probe arguments; the URL is this recipe's second argument" ;;
+        esac
+    done
+    MIN="${LAYA_M2M_MIN_EXPIRES:-900}"
+    case "$MIN" in ''|*[!0-9]*) refuse "config: LAYA_M2M_MIN_EXPIRES is not a whole number of seconds" ;; esac
+    if [ "${#MIN}" -gt 5 ] || [ "$((10#$MIN))" -lt 300 ] || [ "$((10#$MIN))" -gt 86400 ]; then
+        refuse "config: LAYA_M2M_MIN_EXPIRES must be in 300..86400"
+    fi
+    # The deployment triple (plan 13-04, D-06), then the endpoint under this profile's tenant.
+    TLINE="$(just _laya-target-check "$P" "")"
+    read -r T_TARGET T_REGION _ _ <<< "$TLINE"
+    just _laya-account-check "$P" ""
+    export PMCP_TARGET="$T_TARGET" AWS_PROFILE="$P" AWS_REGION="$T_REGION"
+    unset PMCP_API_URL AWS_DEFAULT_REGION
+    G="$(just _laya-endpoint-check "$URL" "$P")"
+    if [ "$G" != "loopback" ]; then just _laya-server-check "$G" deployable > /dev/null; fi
+    UH="${URL#*://}"
+    UH="${UH%%/*}"
+    UH="${UH%%:*}"
+    TH="$(python3 -I scripts/laya_deploy/m2m_token.py --token-host --state-dir "$(just _laya-state-dir "$P")" --endpoint-host "$UH")"
+    cargo build --release -q -p aprender-mcp-decide-lambda --example probe
+    TD="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
+    PROBE="$TD/release/examples/probe"
+    FLAGS=(--file "$LAYA_M2M_FILE" --expect-host "$TH" --min-expires "$((10#$MIN))")
+    if [ "$G" = "loopback" ]; then FLAGS+=(--allow-loopback-http); fi
+    if [ "${LAYA_M2M_ALLOW_BASIC:-0}" = "1" ]; then FLAGS+=(--allow-basic); fi
+    set +x
+    exec python3 -I scripts/laya_deploy/m2m_token.py "${FLAGS[@]}" -- "$PROBE" --url "$URL" "$@"
+
+# Prove the D-07 auth tooling OFFLINE (plan 13-06). DRY_RUN=1 and the ambient target / M2M variables
+# unset at setup; an aws recorder first on PATH with a positive control (AWS CALLS: 0); the fixture pmcp
+# config as LAYA_PMCP_CONFIG; the tiny fixture packed to its golden sha256. CHAIN: the helper's
+# --stub-server on 127.0.0.1 (a token endpoint and an MCP endpoint that logs whether the bearer matches),
+# a mode-600 client file, then `laya-probe-auth augury-dev http://127.0.0.1:<port>/mcp --apr <tiny>`:
+# the stub's first /mcp line must be authorization_bearer_matches=true and the recipe's output must hold
+# neither the issued token nor the client secret (LAYA_AUTH_SELFTEST_STUB_MISMATCH=1 starts the stub with
+# --stub-mismatch, so this case FAILS: the must-fail of row auth-selftest). D-06: every file a case can
+# write under BOTH state dirs (models/decide and models/decide/augury-dev) is backed up at setup and
+# restored with `cp -p` on EXIT (removed when it was absent), and models/decide/augury-dev is removed
+# only when this run created it and it is empty, so `_laya-state-snapshot` is unchanged around it. Ends
+# `AUTH SELFTEST OK`, or `AUTH SELFTEST FAILED (<k> failed checks)` and exit 1. Row auth-selftest.
+_laya-auth-selftest:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export DRY_RUN=1
+    unset PMCP_TARGET PMCP_API_URL AWS_PROFILE AWS_REGION AWS_DEFAULT_REGION LAYA_ACCOUNT_CHECK_FORCE LAYA_M2M_TOKEN_HOST LAYA_M2M_MIN_EXPIRES LAYA_M2M_ALLOW_BASIC
+    unset LAYA_M2M_FILE LAYA_M2M_MINTED APRENDER_DECIDE_PROBE_TOKEN
+    ST="models/decide/selftest"
+    SRV="${LAYA_SELFTEST_SERVER:-aprender-mcp-decide-antisemite}"
+    T="crates/aprender-decide/tests/fixtures/laya_tiny"
+    GOLDEN="37d65159b2be0fa091aa840cd56c1a84b73c0bcd9e2df5906d1f8218f5448561"
+    HELPER="scripts/laya_deploy/m2m_token.py"
+    FAILS=0
+    fail() { echo "FAIL $1" >&2; FAILS=$((FAILS + 1)); }
+    mkdir -p "$ST"
+    W="$(cd "$(mktemp -d "$ST/auth.XXXXXX")" && pwd -P)"
+    ZK_DIR="$(just _laya-state-dir ze-kasher-dev)"
+    AUG_DIR="$(just _laya-state-dir augury-dev)"
+    AUG_CREATED=0
+    [ -d "$AUG_DIR" ] || AUG_CREATED=1
+    AUG_STATE_CREATED=0
+    [ -d "$AUG_DIR/deploy-$SRV.state" ] || AUG_STATE_CREATED=1
+    # Every file a case can write, under both state dirs (D-06; the list shape of laya-gates-selftest).
+    KEEP=()
+    for d in "$ZK_DIR" "$AUG_DIR"; do
+        KEEP+=("$d/plan-concentrated.json" "$d/plan-distributed.json" "$d/m2m-token-host" "$d/deploy-config-$SRV.toml"
+            "$d/eligibility-$SRV.log" "$d/eligibility-upload-$SRV.log" "$d/deploy-$SRV.state/deployment.toml")
+    done
+    k=0
+    for f in "${KEEP[@]}"; do
+        k=$((k + 1))
+        if [ -f "$f" ]; then cp -p "$f" "$W/keep-$k"; fi
+    done
+    STUB_PID=""
+    cleanup() {
+        local f n=0
+        if [ -n "$STUB_PID" ]; then kill "$STUB_PID" 2> /dev/null || true; wait "$STUB_PID" 2> /dev/null || true; fi
+        for f in "${KEEP[@]}"; do
+            n=$((n + 1))
+            if [ -f "$W/keep-$n" ]; then mkdir -p "$(dirname "$f")"; cp -p "$W/keep-$n" "$f"; else rm -f "$f"; fi
+        done
+        if [ "$AUG_STATE_CREATED" = "1" ]; then rmdir "$AUG_DIR/deploy-$SRV.state" 2> /dev/null || true; fi
+        if [ "$AUG_CREATED" = "1" ]; then rmdir "$AUG_DIR" 2> /dev/null || true; fi
+        rm -rf "$W"
+    }
+    trap cleanup EXIT
+    # No token-host note steers a case unless the case plants it.
+    rm -f "$ZK_DIR/m2m-token-host" "$AUG_DIR/m2m-token-host"
+    # The aws recorder: first on PATH, appends its argv, never reaches AWS.
+    mkdir -p "$W/shim"
+    REC="$W/aws-calls.log"
+    : > "$REC"
+    printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s"\necho "aws recorder: the auth selftest never reaches AWS" >&2\nexit 97\n' "$REC" > "$W/shim/aws"
+    chmod +x "$W/shim/aws"
+    export PATH="$W/shim:$PATH"
+    [ "$(command -v aws)" = "$W/shim/aws" ] || { echo "ERROR: the aws recorder is not first on PATH" >&2; exit 1; }
+    set +e; aws recorder-control > /dev/null 2>&1; crc=$?; set -e
+    [ "$crc" -eq 97 ] && [ "$(wc -l < "$REC" | tr -d ' ')" -eq 1 ] || { echo "ERROR: the aws recorder did not record its control call (exit $crc)" >&2; exit 1; }
+    : > "$REC"
+    echo "AWS RECORDER: control call recorded and cleared"
+    just _laya-pmcp-fixture-config "$W/pmcp-config.toml"
+    export LAYA_PMCP_CONFIG="$W/pmcp-config.toml"
+    A="$W/laya_tiny.apr"
+    just laya-pack-fixture "$T" "$T/data" "$A" > "$W/fixture.log" 2>&1 || { tail -5 "$W/fixture.log" >&2; exit 1; }
+    grep -q "sha256=$GOLDEN" "$W/fixture.log" || { echo "ERROR: laya-pack-fixture did not reproduce the golden $GOLDEN" >&2; exit 1; }
+    # ---- CHAIN: file -> helper -> probe environment -> wire, against the loopback stub ----
+    SD="$W/stub"
+    mkdir -p "$SD"
+    python3 -I - "$SD/client.json" <<'PY'
+    import json, os, secrets, sys
+    fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        json.dump({"client_id": "selftest-client-" + secrets.token_hex(4), "client_secret": "selftest-secret-" + secrets.token_urlsafe(18)}, fh)
+    PY
+    STUB_FLAGS=()
+    if [ "${LAYA_AUTH_SELFTEST_STUB_MISMATCH:-0}" = "1" ]; then STUB_FLAGS=(--stub-mismatch); fi
+    python3 -I "$HELPER" --stub-server "$SD" ${STUB_FLAGS[@]+"${STUB_FLAGS[@]}"} > "$W/stub.log" 2>&1 &
+    STUB_PID=$!
+    for _ in $(seq 1 100); do
+        [ -s "$SD/port" ] && break
+        sleep 0.1
+    done
+    if [ -s "$SD/port" ]; then
+        PORT="$(cat "$SD/port")"
+        python3 -I - "$SD/client.json" "$PORT" "$W/m2m-client.json" <<'PY'
+    import json, os, sys
+    c = json.load(open(sys.argv[1]))
+    fd = os.open(sys.argv[3], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        json.dump({**c, "token_url": f"http://127.0.0.1:{int(sys.argv[2])}/oauth2/token"}, fh)
+    PY
+        set +e
+        env LAYA_M2M_FILE="$W/m2m-client.json" just laya-probe-auth augury-dev "http://127.0.0.1:$PORT/mcp" --apr "$A" > "$W/chain.log" 2>&1
+        prc=$?
+        set -e
+        touch "$SD/stop"
+        wait "$STUB_PID" || true
+        STUB_PID=""
+        TOK="$(cat "$SD/token" 2> /dev/null || true)"
+        SEC="$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["client_secret"])' "$SD/client.json")"
+        LINE="$(head -n 1 "$SD/mcp.log" 2> /dev/null || true)"
+        LEAK=""
+        if [ -z "$TOK" ] || grep -qF -- "$TOK" "$W/chain.log"; then LEAK="$LEAK token"; fi
+        if grep -qF -- "$SEC" "$W/chain.log"; then LEAK="$LEAK secret"; fi
+        if [ "$LINE" = "authorization_bearer_matches=true" ] && [ -z "$LEAK" ] && grep -q '^m2m-token ok: host 127.0.0.1 HTTP 200 ' "$W/chain.log"; then
+            grep -m 1 '^m2m-token ok:' "$W/chain.log"
+            echo "CHAIN bearer reached the wire ($LINE); token and secret absent from the recipe output"
+        else
+            fail "CHAIN: stub line '${LINE:-<none>}', leaked:${LEAK:- none}, recipe exit $prc (log $W/chain.log)"
+            grep -v -F -e "${TOK:-<no token>}" -e "$SEC" "$W/chain.log" | tail -5 >&2 || true
+        fi
+    else
+        fail "CHAIN: the stub did not write its port within 10 s (log $W/stub.log)"
+    fi
+    CALLS="$(wc -l < "$REC" | tr -d ' ')"
+    echo "AWS CALLS: $CALLS"
+    [ "$CALLS" -eq 0 ] || fail "the aws recorder was called: $(head -3 "$REC" | tr '\n' ';')"
+    if [ "$FAILS" -eq 0 ]; then
+        echo "AUTH SELFTEST OK"
+    else
+        echo "AUTH SELFTEST FAILED ($FAILS failed checks)" >&2
+        exit 1
+    fi
+
 # CONTAINMENT FIRST: throttle <server> to reserved concurrency 0 (every invocation is refused at
 # once, warm instances included; undo with `aws lambda delete-function-concurrency`), verify it,
 # then delete the inline weights policy. The bucket stays (idle-free). Removing the deployment and
