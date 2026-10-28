@@ -459,5 +459,246 @@
     "swap_backup_empty": true,
     "eligibility_log_antisemite_cmp_backup": "byte-equal (cmp rc 0)",
     "ze_kasher_dev_addressed": false
+  },
+  "live": {
+    "outcome": "verified",
+    "final": true,
+    "tier_mb": 10240,
+    "what": "laya-motivation-v1.apr d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd under aprender-mcp-decide-motivation on augury-dev, auth on (OAuth), pilot",
+    "measured_by": "plan 13-09 Task 1: LAYA_M2M_FILE=<m2m-file> SSL_CERT_FILE=/etc/ssl/cert.pem LAYA_M2M_MIN_EXPIRES=900 just laya-deploy-verify models/decide/laya-motivation-v1.apr aprender-mcp-decide-motivation augury-dev 2 (prefixed with the LIVE env -u array)",
+    "auth": "authenticated (M2M, LAYA_M2M_FILE)",
+    "auth_mint_line": "m2m-token ok: host counter-coach.eu-west.augury.pmcp.run HTTP 200 expires_in 900 s (auth form)",
+    "auth_notes": {
+      "token_host": "counter-coach.eu-west.augury.pmcp.run (models/decide/augury-dev/m2m-token-host, the host 13-08 accepted; LAYA_M2M_TOKEN_HOST unset)",
+      "tls_trust": "SSL_CERT_FILE=/etc/ssl/cert.pem (F-13-08-3: the python.org python3 ships no CA bundle; verification stays on)",
+      "min_expires": "LAYA_M2M_MIN_EXPIRES=900: the counter-coach pool issues expires_in 900 s (13-08), below the recipe's default 1800 s floor; the recipe documents this override for a shorter Cognito validity"
+    },
+    "plan_only": {
+      "concentrated": {
+        "probe": "plan",
+        "shape": "concentrated",
+        "texts": 2,
+        "max_text_bytes": 16384,
+        "tokens_planned": 800,
+        "min_row_tokens": 97,
+        "max_texts": 8,
+        "max_total_tokens": 800,
+        "artifact_sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+        "labels": [
+          "social_affiliative",
+          "conspiratorial",
+          "other"
+        ]
+      },
+      "distributed": {
+        "probe": "plan",
+        "shape": "distributed",
+        "texts": 8,
+        "max_text_bytes": 12,
+        "tokens_planned": 800,
+        "min_row_tokens": 97,
+        "max_texts": 8,
+        "max_total_tokens": 800,
+        "artifact_sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+        "labels": [
+          "social_affiliative",
+          "conspiratorial",
+          "other"
+        ]
+      }
+    },
+    "evidence_file": {
+      "path": "models/decide/augury-dev/deploy-evidence-aprender-mcp-decide-motivation.json",
+      "present": true,
+      "fresh": true
+    },
+    "cold_samples": [
+      {
+        "index": 1,
+        "shape": "concentrated",
+        "tokens_total": 800,
+        "elapsed_ms": 22110,
+        "probe_id": "6da24a0d-4c2a-46f5-9a24-967dab4f20c7",
+        "load_header": "cold;load_ms=13767",
+        "load_ms": 13767,
+        "cold_evidence": "cloudwatch",
+        "graviton": "graviton3",
+        "log_line": "2026-10-28T05:33:56.729766Z  INFO Lambda runtime invoke{requestId=\"7e1fd83b-5e9a-4839-9df1-696b0955ed8d\" xrayTraceId=\"Root=1-6ae18935-7200583d1df24f5528643e60;Parent=a955bfb979729dc6;Sampled=0;Lineage=2:d0abfd51:0\"}: aprender_mcp_decide_lambda::bootstrap: decide.load performed_load=true probe_id=6da24a0d-4c2a-46f5-9a24-967dab4f20c7 load_ms=13767 download_ms=9198 sha_ms=2655 build_ms=1849 bytes=846196612 rss_mb=1647 peak_rss_mb=2454 graviton=graviton3 source=s3",
+        "error": null,
+        "load_fields": {
+          "performed_load": true,
+          "probe_id": "6da24a0d-4c2a-46f5-9a24-967dab4f20c7",
+          "load_ms": 13767,
+          "download_ms": 9198,
+          "sha_ms": 2655,
+          "build_ms": 1849,
+          "bytes": 846196612,
+          "rss_mb": 1647,
+          "peak_rss_mb": 2454,
+          "graviton": "graviton3",
+          "source": "s3"
+        },
+        "proven_cold": true,
+        "artifact_sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+        "artifact_sha256_source": "deploy-evidence top level: every sample's probe ran with --expect-sha256 and exited 0 (a sample whose probe exited non-zero is a failed check, not a sample)"
+      },
+      {
+        "index": 2,
+        "shape": "distributed",
+        "tokens_total": 800,
+        "elapsed_ms": 18850,
+        "probe_id": "e917d5cb-d676-4051-ae29-c9bab75193d8",
+        "load_header": "cold;load_ms=13709",
+        "load_ms": 13709,
+        "cold_evidence": "cloudwatch",
+        "graviton": "graviton3",
+        "log_line": "2026-10-28T05:34:30.021748Z  INFO Lambda runtime invoke{requestId=\"b243f3d5-7a9c-4a68-bbf5-2107a3180f7a\" xrayTraceId=\"Root=1-6ae18957-75d2541105410ba62fe6a949;Parent=f211c9e0fe398b19;Sampled=0;Lineage=2:d0abfd51:0\"}: aprender_mcp_decide_lambda::bootstrap: decide.load performed_load=true probe_id=e917d5cb-d676-4051-ae29-c9bab75193d8 load_ms=13709 download_ms=9153 sha_ms=2656 build_ms=1832 bytes=846196612 rss_mb=1649 peak_rss_mb=2456 graviton=graviton3 source=s3",
+        "error": null,
+        "load_fields": {
+          "performed_load": true,
+          "probe_id": "e917d5cb-d676-4051-ae29-c9bab75193d8",
+          "load_ms": 13709,
+          "download_ms": 9153,
+          "sha_ms": 2656,
+          "build_ms": 1832,
+          "bytes": 846196612,
+          "rss_mb": 1649,
+          "peak_rss_mb": 2456,
+          "graviton": "graviton3",
+          "source": "s3"
+        },
+        "proven_cold": true,
+        "artifact_sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+        "artifact_sha256_source": "deploy-evidence top level: every sample's probe ran with --expect-sha256 and exited 0 (a sample whose probe exited non-zero is a failed check, not a sample)"
+      },
+      {
+        "index": 3,
+        "shape": "concentrated",
+        "tokens_total": 800,
+        "elapsed_ms": 19709,
+        "probe_id": "8754f1a5-b214-46f6-bfd2-744e8d2ac604",
+        "load_header": "cold;load_ms=13745",
+        "load_ms": 13745,
+        "cold_evidence": "cloudwatch",
+        "graviton": "graviton3",
+        "log_line": "2026-10-28T05:35:02.687581Z  INFO Lambda runtime invoke{requestId=\"cfdf2c10-492d-4e66-bb30-ed366866ba64\" xrayTraceId=\"Root=1-6ae18978-63f538de727ce9f2155794e8;Parent=5ebfcca20d18d9b5;Sampled=0;Lineage=2:d0abfd51:0\"}: aprender_mcp_decide_lambda::bootstrap: decide.load performed_load=true probe_id=8754f1a5-b214-46f6-bfd2-744e8d2ac604 load_ms=13745 download_ms=9262 sha_ms=2654 build_ms=1762 bytes=846196612 rss_mb=1649 peak_rss_mb=2456 graviton=graviton3 source=s3",
+        "error": null,
+        "load_fields": {
+          "performed_load": true,
+          "probe_id": "8754f1a5-b214-46f6-bfd2-744e8d2ac604",
+          "load_ms": 13745,
+          "download_ms": 9262,
+          "sha_ms": 2654,
+          "build_ms": 1762,
+          "bytes": 846196612,
+          "rss_mb": 1649,
+          "peak_rss_mb": 2456,
+          "graviton": "graviton3",
+          "source": "s3"
+        },
+        "proven_cold": true,
+        "artifact_sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+        "artifact_sha256_source": "deploy-evidence top level: every sample's probe ran with --expect-sha256 and exited 0 (a sample whose probe exited non-zero is a failed check, not a sample)"
+      },
+      {
+        "index": 4,
+        "shape": "distributed",
+        "tokens_total": 800,
+        "elapsed_ms": 19152,
+        "probe_id": "8bf4e548-309f-48a2-9e95-c2b724e69f3f",
+        "load_header": "cold;load_ms=13866",
+        "load_ms": 13866,
+        "cold_evidence": "cloudwatch",
+        "graviton": "graviton3",
+        "log_line": "2026-10-28T05:35:36.363912Z  INFO Lambda runtime invoke{requestId=\"b91d70e7-cf7f-483b-9998-d2af1b2c0151\" xrayTraceId=\"Root=1-6ae1899a-5af6b96e392c9a7663437e35;Parent=fc16805544fdadc6;Sampled=0;Lineage=2:d0abfd51:0\"}: aprender_mcp_decide_lambda::bootstrap: decide.load performed_load=true probe_id=8bf4e548-309f-48a2-9e95-c2b724e69f3f load_ms=13866 download_ms=9350 sha_ms=2654 build_ms=1793 bytes=846196612 rss_mb=1649 peak_rss_mb=2456 graviton=graviton3 source=s3",
+        "error": null,
+        "load_fields": {
+          "performed_load": true,
+          "probe_id": "8bf4e548-309f-48a2-9e95-c2b724e69f3f",
+          "load_ms": 13866,
+          "download_ms": 9350,
+          "sha_ms": 2654,
+          "build_ms": 1793,
+          "bytes": 846196612,
+          "rss_mb": 1649,
+          "peak_rss_mb": 2456,
+          "graviton": "graviton3",
+          "source": "s3"
+        },
+        "proven_cold": true,
+        "artifact_sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+        "artifact_sha256_source": "deploy-evidence top level: every sample's probe ran with --expect-sha256 and exited 0 (a sample whose probe exited non-zero is a failed check, not a sample)"
+      }
+    ],
+    "cold_wall_ms": {
+      "min": 18850,
+      "max": 22110,
+      "worst_sample": {
+        "index": 1,
+        "shape": "concentrated",
+        "probe_id": "6da24a0d-4c2a-46f5-9a24-967dab4f20c7",
+        "elapsed_ms": 22110
+      },
+      "worst_slack_to_cap_ms": 7890,
+      "phase12_note": "Phase 12 ze-kasher-dev figures are in 12-DEPLOY-EVIDENCE.json live",
+      "n_measured": 4
+    },
+    "warm_ms": {
+      "values": [
+        1161,
+        1175,
+        1131,
+        1122,
+        1105
+      ],
+      "min": 1105,
+      "max": 1175,
+      "p50": 1131,
+      "n": 5
+    },
+    "identity": {
+      "probe": "identity",
+      "probe_id": "probe-18e29abe737a2840-a532",
+      "one_tool_named_classify": true,
+      "description_has_labels_in_order": true,
+      "response_labels_match": true,
+      "identity_matches": true,
+      "artifact_sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+      "elapsed_ms": [
+        891,
+        302,
+        780
+      ],
+      "tokens_total": 105,
+      "shape": "identity",
+      "load_header": "warm"
+    },
+    "graviton_note": "graviton per cold sample as the CloudWatch load line reports it: graviton3, graviton3, graviton3, graviton3",
+    "timings_policy": "reported, not gated; the recipe's own per-sample 30,000 ms rule decides its verdict and it does not contain",
+    "failed_checks": [],
+    "function_state": "serving",
+    "verify_attempts": [
+      {
+        "n": 1,
+        "rc": 0,
+        "verdict_line": "DEPLOY VERIFY OK aprender-mcp-decide-motivation: 4 cold samples (both shapes), every one < 30000 ms with CloudWatch cold evidence",
+        "failed_checks": [],
+        "started_utc": "2026-10-28T05:32:54Z",
+        "ended_utc": "2026-10-28T05:36:02Z",
+        "mint_line": "m2m-token ok: host counter-coach.eu-west.augury.pmcp.run HTTP 200 expires_in 900 s (auth form)"
+      }
+    ],
+    "recipe_verdict": "DEPLOY VERIFY OK aprender-mcp-decide-motivation: 4 cold samples (both shapes), every one < 30000 ms with CloudWatch cold evidence",
+    "deployment_acceptance": {
+      "decision": "accepted (recipe verified)",
+      "basis": "verify_attempts[0] rc 0: DEPLOY VERIFY OK aprender-mcp-decide-motivation: 4 cold samples (both shapes), every one < 30000 ms with CloudWatch cold evidence"
+    },
+    "contained": null,
+    "configuration_changes": {
+      "function": "aprender-mcp-decide-motivation",
+      "variable": "DECIDE_COLD_BUMP",
+      "count": 4,
+      "note": "one update-function-configuration per cold sample (aws lambda wait function-updated, LastUpdateStatus Successful required); the augury antisemite function and ze-kasher-dev received no write"
+    }
   }
 }
