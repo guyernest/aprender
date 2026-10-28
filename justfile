@@ -1711,6 +1711,189 @@ _laya-resolver-parse log server:
     [ -n "$RESOLVED" ] || { echo "REFUSED resolver-parse: no RESOLVED line in $LOG" >&2; exit 1; }
     printf 'RESOLVED=%s\nCONTROL=%s\n' "$RESOLVED" "$CONTROL"
 
+# A deployment is the TRIPLE (pmcp.run target, AWS account, region), never the server id alone
+# (plan 13-04, D-06). This is the committed table that maps a deploy profile to that triple and to the
+# host suffix its endpoints live under; a profile outside it is refused, because the target cannot be
+# derived from the profile by search (~/.pmcp/config.toml's `staging-test` also uses ze-kasher-dev).
+# Checks, all before any AWS call: the profile is a name (^[a-z0-9][a-z0-9-]{0,62}$) and in the table;
+# a non-empty <region> equals the table's (empty means the table's); PMCP_TARGET, AWS_PROFILE,
+# AWS_REGION and AWS_DEFAULT_REGION, when set and non-empty, agree with the target / profile / region
+# (cargo-pmcp and the AWS CLI would otherwise follow a stale shell value); the pmcp config
+# ($HOME/.pmcp/config.toml, or LAYA_PMCP_CONFIG only under DRY_RUN=1) has [targets.<target>] with
+# type pmcp-run, this aws_profile, this region and an api_url https://<id>.execute-api.<region>.amazonaws.com;
+# and PMCP_API_URL, when set and non-empty, is that api_url (it wins over the target's in cargo-pmcp's
+# resolver). Refusals are `REFUSED target: ...` / `REFUSED target-config: ...`, exit 2, naming an
+# api_url by its host only. Success prints ONE stdout line `<target> <region> <host_suffix> <account>`.
+# Pure: reads one local file, no network. Row target-check.
+[positional-arguments]
+_laya-target-check profile region:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    CONF="$HOME/.pmcp/config.toml"
+    if [ -n "${LAYA_PMCP_CONFIG:-}" ]; then
+        if [ "${DRY_RUN:-0}" = "1" ]; then
+            CONF="$LAYA_PMCP_CONFIG"
+        else
+            echo "REFUSED target-config: LAYA_PMCP_CONFIG is honoured only under DRY_RUN=1" >&2
+            exit 2
+        fi
+    fi
+    python3 -I - "$1" "$2" "$CONF" <<'PY'
+    import os, re, sys, tomllib
+    profile, region, conf = sys.argv[1:4]
+    # profile: (pmcp.run target, region, endpoint host suffix, AWS account)
+    TABLE = {
+        "ze-kasher-dev": ("dev", "us-east-1", ".us-east.true-mcp.com", "816069129666"),
+        "augury-dev": ("augury-dev", "eu-west-1", ".eu-west.augury.pmcp.run", "783960389328"),
+    }
+    def refuse(kind, msg):
+        print(f"REFUSED {kind}: {msg}", file=sys.stderr)
+        sys.exit(2)
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", profile):
+        refuse("target", f"the profile argument ({len(profile)} characters) is not a profile name")
+    if profile not in TABLE:
+        refuse("target", f"profile {profile} is not in the committed deploy-target table ({', '.join(sorted(TABLE))})")
+    target, want_region, suffix, account = TABLE[profile]
+    if region and region != want_region:
+        refuse("target", f"profile {profile} is pmcp.run target {target} in {want_region}; the region argument ({len(region)} characters) disagrees")
+    agree = {"PMCP_TARGET": target, "AWS_PROFILE": profile, "AWS_REGION": want_region, "AWS_DEFAULT_REGION": want_region}
+    for var, want in agree.items():
+        got = os.environ.get(var, "")
+        if got and got != want:
+            refuse("target", f"{var} is set to another value than {want}, which profile {profile} requires; unset it or set it to {want}")
+    try:
+        with open(conf, "rb") as fh:
+            cfg = tomllib.load(fh)
+    except FileNotFoundError:
+        refuse("target-config", f"the pmcp config {conf} does not exist")
+    except (OSError, tomllib.TOMLDecodeError) as e:
+        refuse("target-config", f"the pmcp config {conf} cannot be read as TOML ({type(e).__name__})")
+    t = cfg.get("targets", {}).get(target) if isinstance(cfg.get("targets"), dict) else None
+    if not isinstance(t, dict):
+        refuse("target-config", f"{conf} has no [targets.{target}] for profile {profile}")
+    if t.get("type") != "pmcp-run":
+        refuse("target-config", f"[targets.{target}] is not of type pmcp-run")
+    if t.get("aws_profile") != profile:
+        refuse("target-config", f"[targets.{target}] names another aws_profile than {profile}")
+    if t.get("region") != want_region:
+        refuse("target-config", f"[targets.{target}] names another region than {want_region}")
+    api = t.get("api_url")
+    host = api[len("https://"):].split("/", 1)[0][:80] if isinstance(api, str) and api.startswith("https://") else "<not https>"
+    if not isinstance(api, str) or not re.fullmatch(r"https://[a-z0-9]+\.execute-api\." + re.escape(want_region) + r"\.amazonaws\.com/?", api):
+        refuse("target-config", f"[targets.{target}] api_url (host {host}) is not an execute-api control plane in {want_region}")
+    env_api = os.environ.get("PMCP_API_URL", "")
+    if env_api and env_api.rstrip("/") != api.rstrip("/"):
+        env_host = env_api.split("://", 1)[-1].split("/", 1)[0][:80]
+        refuse("target", f"PMCP_API_URL names another control plane (host {env_host}) than [targets.{target}] ({host}); it would win over the target in cargo-pmcp's resolver: unset it")
+    print(f"{target} {want_region} {suffix} {account}")
+    print(f"target-check ok: profile {profile} -> pmcp.run target {target}, region {want_region}, account {account}, endpoints *{suffix}", file=sys.stderr)
+    PY
+
+# The LIVE half of the triple (plan 13-04, D-06): the profile must resolve to the table's account.
+# `_laya-target-check <profile> <region>` first (its refusals propagate), then, when DRY_RUN is not 1
+# (or DRY_RUN=1 with LAYA_ACCOUNT_CHECK_FORCE=1, honoured only there, for a selftest's scripted fake
+# aws), `aws sts get-caller-identity --profile <profile>` must answer exactly the table's 12 digits:
+# `REFUSED target-account: ...` (exit 2) otherwise, naming only the last four digits of a foreign
+# account. Under DRY_RUN=1 without the force flag it makes no AWS call (`target-account: not checked`).
+# Every AWS-touching laya recipe calls it before its first AWS call. Row account-check.
+[positional-arguments]
+_laya-account-check profile region:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    TLINE="$(just _laya-target-check "$1" "$2")"
+    read -r _ T_REGION _ T_ACCOUNT <<< "$TLINE"
+    export AWS_PROFILE="$1" AWS_REGION="$T_REGION"
+    if [ "${DRY_RUN:-0}" = "1" ] && [ "${LAYA_ACCOUNT_CHECK_FORCE:-0}" != "1" ]; then
+        echo "target-account: not checked (DRY_RUN=1)" >&2
+        exit 0
+    fi
+    set +e
+    GOT="$(aws sts get-caller-identity --profile "$1" --query Account --output text 2> /dev/null)"
+    rc=$?
+    set -e
+    if [ "$rc" -ne 0 ]; then
+        echo "REFUSED target-account: cannot read the account for profile $1" >&2
+        exit 2
+    fi
+    if [ "$GOT" != "$T_ACCOUNT" ]; then
+        if (LC_ALL=C; [[ "$GOT" =~ ^[0-9]{12}$ ]]); then
+            echo "REFUSED target-account: profile $1 resolves to an account ending ${GOT: -4}, not the table's $T_ACCOUNT" >&2
+        else
+            echo "REFUSED target-account: profile $1 did not answer a 12-digit account id (${#GOT} characters), not the table's $T_ACCOUNT" >&2
+        fi
+        exit 2
+    fi
+    echo "target-account ok: profile $1 is account $T_ACCOUNT" >&2
+
+# The local state directory of a deploy profile (plan 13-04, D-06): ze-kasher-dev keeps models/decide,
+# so every existing path is unchanged byte for byte; any other profile name gets models/decide/<profile>,
+# so a second deployment of the SAME server id never overwrites the first one's config, log, state
+# snapshot, health / probe / eligibility logs, plan files or evidence. Not a name: `REFUSED state-dir:`
+# (exit 2). Pure. Row state-dir.
+[positional-arguments]
+_laya-state-dir profile:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    P="$1"
+    if [ "$P" = "ze-kasher-dev" ]; then
+        echo "models/decide"
+        exit 0
+    fi
+    PROFILE_ERE='^[a-z0-9][a-z0-9-]{0,62}$'
+    if (LC_ALL=C; [[ "$P" =~ $PROFILE_ERE ]]); then
+        echo "models/decide/$P"
+    else
+        echo "REFUSED state-dir: the profile argument (${#P} characters) is not a profile name" >&2
+        exit 2
+    fi
+
+# An endpoint read from a state file or printed by cargo-pmcp must live under its profile's tenant
+# (plan 13-04, D-06): exactly https://<label><host_suffix>/mcp, with the suffix from the table in
+# `_laya-target-check` and <label> ^[a-z][a-z0-9-]{0,62}$; prints the label (the server id). Under
+# DRY_RUN=1 only, http://127.0.0.1:<port>/mcp is accepted and prints `loopback`. Anything else is
+# `REFUSED target-endpoint: ...` (exit 2). Reads the local pmcp config through the target check; no
+# network. Row endpoint-check.
+[positional-arguments]
+_laya-endpoint-check url profile:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    URL="$1"
+    P="$2"
+    shape() { python3 -I -c 'import re, sys; sys.exit(0 if re.fullmatch(sys.argv[2], sys.argv[1]) else 1)' "$URL" "$1"; }
+    if [ "${DRY_RUN:-0}" = "1" ] && shape 'http://127\.0\.0\.1:[0-9]{1,5}/mcp'; then
+        echo "loopback"
+        exit 0
+    fi
+    if ! shape 'https://[a-z][a-z0-9-]{0,62}\.[A-Za-z0-9.-]+/mcp'; then
+        echo "REFUSED target-endpoint: the endpoint (${#URL} characters) is not https://<server>.<host>/mcp" >&2
+        exit 2
+    fi
+    TLINE="$(just _laya-target-check "$P" "")"
+    read -r _ _ T_SUFFIX _ <<< "$TLINE"
+    python3 -I - "$URL" "$T_SUFFIX" "$P" <<'PY'
+    import re, sys
+    url, suffix, profile = sys.argv[1:4]
+    m = re.fullmatch(r"https://([a-z][a-z0-9-]{0,62})" + re.escape(suffix) + r"/mcp", url)
+    if not m:
+        host = url[len("https://"):].split("/", 1)[0][:100]
+        print(f"REFUSED target-endpoint: {host} is not under *{suffix}, the tenant of profile {profile}", file=sys.stderr)
+        sys.exit(2)
+    print(m.group(1))
+    PY
+
+# The offline fixture pmcp config (plan 13-04): [targets.dev] and [targets.augury-dev] shaped like
+# ~/.pmcp/config.toml, with fixture execute-api hosts, written to <out>. The offline selftests export
+# it as LAYA_PMCP_CONFIG (honoured only under DRY_RUN=1), so no case reads the real config.
+[positional-arguments]
+_laya-pmcp-fixture-config out:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    printf '%s\n' 'schema_version = 1' '' \
+        '[targets.augury-dev]' 'type = "pmcp-run"' 'api_url = "https://fixture2.execute-api.eu-west-1.amazonaws.com"' \
+        'aws_profile = "augury-dev"' 'region = "eu-west-1"' '' \
+        '[targets.dev]' 'type = "pmcp-run"' 'api_url = "https://fixture1.execute-api.us-east-1.amazonaws.com"' \
+        'aws_profile = "ze-kasher-dev"' 'region = "us-east-1"' > "$1"
+
 # Write the gitignored models/decide/deploy-config-<server>.toml from the tracked template
 # crates/aprender-mcp-decide-lambda/.pmcp/deploy.toml.template for <apr>: server name,
 # s3://<bucket>/decide/<server>/<sha256>.apr, the sha256 pin, and [auth] enabled from <auth> (on|off,
@@ -1724,6 +1907,9 @@ _laya-resolver-parse log server:
 # before anything else runs (`REFUSED region:`, exit 2, the value is never echoed).
 # LAYA_DEPLOY_TEMPLATE overrides the template ONLY under DRY_RUN=1 (the region selftest's zero- and
 # two-line templates); set in a live run it is `REFUSED template:` (exit 2) before any AWS call.
+# <profile> names the deployment triple (plan 13-04, D-06): `_laya-target-check` and then the live
+# `_laya-account-check` run before the sts call, and the config goes to `_laya-state-dir <profile>`
+# (models/decide for ze-kasher-dev, as before; models/decide/<profile>/ otherwise).
 [positional-arguments]
 laya-deploy-config apr auth server env="dev" profile="ze-kasher-dev" region="us-east-1":
     #!/usr/bin/env bash
@@ -1761,6 +1947,14 @@ laya-deploy-config apr auth server env="dev" profile="ze-kasher-dev" region="us-
         *) echo "ERROR: auth must be on or off, got '$AUTH_WORD'" >&2; exit 2 ;;
     esac
     test -f "$APR" || { echo "ERROR: $APR does not exist" >&2; exit 2; }
+    # The deployment triple (plan 13-04, D-06): the profile names ONE pmcp.run target, account and
+    # region, and the region argument must agree with it; then the account is checked live. Both come
+    # AFTER the template refusal above, so a refused live template makes no AWS call (13-01's R7).
+    TLINE="$(just _laya-target-check "$PROFILE" "$REGION")"
+    read -r T_TARGET T_REGION _ _ <<< "$TLINE"
+    just _laya-account-check "$PROFILE" "$REGION"
+    export PMCP_TARGET="$T_TARGET" AWS_PROFILE="$PROFILE" AWS_REGION="$T_REGION"
+    unset PMCP_API_URL AWS_DEFAULT_REGION
     # shasum directly (plan 08-22, V11-c): the rtk hook never rewrites a command inside a recipe, so a
     # proxy branch added nothing and made the identity pin depend on which `rtk` is on PATH.
     sha256() { shasum -a 256 "$1" | awk '{print $1}'; }
@@ -1771,8 +1965,10 @@ laya-deploy-config apr auth server env="dev" profile="ze-kasher-dev" region="us-
         ACCOUNT="$(aws sts get-caller-identity --profile "$PROFILE" --query Account --output text)"
         BUCKET="aprender-decide-weights-${ACCOUNT}-${ENV}"
     fi
-    OUT="models/decide/deploy-config-$SERVER.toml"
-    mkdir -p models/decide
+    # Per-target local state (D-06): models/decide for ze-kasher-dev (unchanged), models/decide/<profile> otherwise.
+    SD="$(just _laya-state-dir "$PROFILE")"
+    OUT="$SD/deploy-config-$SERVER.toml"
+    mkdir -p "$SD"
     python3 - "$TEMPLATE" "$OUT" "$SERVER" \
         "s3://$BUCKET/decide/$SERVER/$H.apr" "$H" "$AUTH" "$REGION" <<'PY'
     import re, sys, tomllib
@@ -1973,6 +2169,11 @@ laya-build-bootstrap server:
 # (containment). The edge /health GET retries HTTP 404 only (a brand-new server id's first
 # /health can 404 for minutes, F-10-12-1), bounded by LAYA_EDGE_HEALTH_TRIES / _SLEEP /
 # _MAX_SECONDS; any other status still contains at once.
+# The deployment is the triple (plan 13-04, D-06): (3c) the profile and the config's [aws] region must
+# pass `_laya-target-check`, whose values are then exported (PMCP_TARGET, AWS_PROFILE, AWS_REGION; with
+# PMCP_API_URL and AWS_DEFAULT_REGION unset), (5b) `_laya-account-check` must find the table's account,
+# every local file lives under `_laya-state-dir <profile>`, and the deployed endpoint must pass
+# `_laya-endpoint-check` for the profile or it is contained. `TARGET RECEIPT:` quotes cargo-pmcp's banner.
 laya-deploy apr run data base server env="dev" profile="ze-kasher-dev":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -1982,7 +2183,10 @@ laya-deploy apr run data base server env="dev" profile="ze-kasher-dev":
     just _laya-server-check "$SERVER" deployable
     ENV="{{ trim_start_match(env, "env=") }}"
     PROFILE="{{profile}}"
-    CFG="models/decide/deploy-config-$SERVER.toml"
+    # Per-target local state (plan 13-04, D-06): models/decide for ze-kasher-dev, models/decide/<profile>
+    # otherwise, so a deploy of the same id on another tenant never touches this one's record.
+    SD="$(just _laya-state-dir "$PROFILE")"
+    CFG="$SD/deploy-config-$SERVER.toml"
     PROOF="models/decide/resolver-proof-$SERVER.txt"
     EXPECT_PKG="crates/$SERVER-lambda"
     refuse() { echo "REFUSED $1: $2" >&2; exit "${3:-2}"; }
@@ -1995,7 +2199,7 @@ laya-deploy apr run data base server env="dev" profile="ze-kasher-dev":
     esac
     [ -f "$APR" ] || refuse artifact "$APR does not exist"
     # (1) the generated config
-    [ -f "$CFG" ] || refuse config "$CFG does not exist -- generate it: just laya-deploy-config <apr> <on|off> $SERVER"
+    [ -f "$CFG" ] || refuse config "$CFG does not exist -- generate it: just laya-deploy-config <apr> <on|off> $SERVER $ENV $PROFILE <region>"
     # (2) no placeholder left
     if grep -q 'UNSET-run-just-laya-deploy-config' "$CFG"; then
         refuse placeholder "$CFG still holds an UNSET placeholder -- regenerate it with just laya-deploy-config <apr> <on|off> $SERVER"
@@ -2013,6 +2217,17 @@ laya-deploy apr run data base server env="dev" profile="ze-kasher-dev":
     esac
     # (3b) the stack-declared weights read: exactly s3:GetObject on decide/$SERVER/* and nothing broader
     IAMLOG="$(just _laya-iam-check "$CFG" 2>&1)" || refuse iam "$(printf '%s' "$IAMLOG" | grep -m 1 '^REFUSED' | sed 's/^REFUSED iam: //')"
+    # (3c) the deployment triple (plan 13-04, D-06): the config's [aws] region and the profile must name
+    # one row of the committed target table, and the shell may not point elsewhere. Then the checked
+    # values are EXPORTED and PMCP_API_URL / AWS_DEFAULT_REGION unset, so cargo-pmcp (which then injects
+    # the target's own api_url) and every aws call below resolve only this target; the repo-root
+    # .pmcp/active-target is never consulted and `cargo pmcp configure use` is never run.
+    CFG_REGION="$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["aws"]["region"])' "$CFG" 2>/dev/null)" \
+        || refuse config "$CFG has no [aws] region"
+    TLINE="$(just _laya-target-check "$PROFILE" "$CFG_REGION")"
+    read -r T_TARGET T_REGION _ _ <<< "$TLINE"
+    export PMCP_TARGET="$T_TARGET" AWS_PROFILE="$PROFILE" AWS_REGION="$T_REGION"
+    unset PMCP_API_URL AWS_DEFAULT_REGION
     # (4) the resolver proof for the installed cargo-pmcp
     [ -f "$PROOF" ] || refuse resolver-proof "$PROOF does not exist -- run: just laya-resolver-proof <sdk> <commit> <scratch> $SERVER"
     [ "$(head -n 1 "$PROOF")" = "$EXPECT_PKG" ] || refuse resolver-proof "$PROOF names '$(head -n 1 "$PROOF")', not $EXPECT_PKG"
@@ -2023,8 +2238,8 @@ laya-deploy apr run data base server env="dev" profile="ze-kasher-dev":
     fi
     # (5) ELIGIBILITY -- the Rust verifier on the exact file (decide-apr-v1 deploy_eligibility),
     # never `inspect`, and nothing below reaches AWS unless it accepted.
-    mkdir -p models/decide
-    VLOG="models/decide/eligibility-$SERVER.log"
+    mkdir -p "$SD"
+    VLOG="$SD/eligibility-$SERVER.log"
     set +e
     just laya-verify "$APR" "{{run}}" "{{data}}" "{{base}}" > "$VLOG" 2>&1
     vrc=$?
@@ -2039,6 +2254,8 @@ laya-deploy apr run data base server env="dev" profile="ze-kasher-dev":
     sys.exit(0 if v.get("deploy_eligible") is True and v.get("artifact_sha256") == sys.argv[2] else 1)
     PY
     echo "  eligible: laya-verify accepted $APR (sha256 $H)"
+    # (5b) the profile resolves to the table's account (live sts; a no-op under DRY_RUN=1).
+    just _laya-account-check "$PROFILE" "$CFG_REGION"
     # (6) the uploaded object
     BK_KEY="${CFG_URI#s3://}"
     BUCKET="${BK_KEY%%/*}"
@@ -2067,13 +2284,13 @@ laya-deploy apr run data base server env="dev" profile="ze-kasher-dev":
     # means cargo-pmcp built something else (a cached build prints no Compiling line).
     ulimit -n 65536 || echo "WARNING: could not raise the fd limit; a link may fail with ProcessFdQuotaExceeded" >&2
     touch "crates/$SERVER-lambda/src/main.rs"
-    LOG="models/decide/deploy-$SERVER.log"
-    SNAP="models/decide/deploy-$SERVER.state"
+    LOG="$SD/deploy-$SERVER.log"
+    SNAP="$SD/deploy-$SERVER.state"
     rm -rf "$SNAP"
     contain() {
         echo "IDENTITY FAILURE: $1 -- containing (reserved concurrency 0)" >&2
         just laya-teardown "$SERVER" "$ENV" "$PROFILE" \
-            || echo "ERROR: containment failed -- throttle it by hand: aws lambda put-function-concurrency --function-name $SERVER --reserved-concurrent-executions 0" >&2
+            || echo "ERROR: containment failed -- throttle it by hand: aws lambda put-function-concurrency --profile $PROFILE --region $AWS_REGION --function-name $SERVER --reserved-concurrent-executions 0" >&2
         exit 1
     }
     # --no-post-deploy-test: this recipe's identity chain (edge health serverId, then a live
@@ -2096,12 +2313,23 @@ laya-deploy apr run data base server env="dev" profile="ze-kasher-dev":
         echo "ERROR: the deploy exited $rc (log: $LOG). If it created the function, contain it: just laya-teardown $SERVER $ENV $PROFILE" >&2
         exit "$rc"
     fi
+    # A receipt, not a gate: cargo-pmcp's own banner names the target it resolved.
+    BANNER="$(grep -m 1 '→ Using target:' "$LOG" || true)"
+    if [ -n "$BANNER" ]; then
+        echo "TARGET RECEIPT: $BANNER"
+    else
+        echo "WARNING: no cargo-pmcp target banner in $LOG" >&2
+    fi
     grep -q "Compiling $SERVER-lambda " "$LOG" || contain "the compile log does not name $SERVER-lambda"
     # The shared runtime library aprender-mcp-decide-lambda is the one other -lambda crate a thin crate builds.
     OTHER="$(grep -oE 'Compiling [A-Za-z0-9_-]+-lambda ' "$LOG" | grep -v -e "Compiling $SERVER-lambda " -e 'Compiling aprender-mcp-decide-lambda ' | sort -u | tr '\n' ' ' || true)"
     [ -z "$OTHER" ] || contain "the compile log also builds $OTHER"
     ENDPOINT="$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["deployment"]["endpoint"])' "$SNAP/deployment.toml" 2>/dev/null)" \
         || contain "no endpoint in $SNAP/deployment.toml"
+    # The endpoint must be this server under THIS profile's tenant (D-06): a deploy that landed on
+    # another tenant's host is contained, not verified.
+    GOT="$(just _laya-endpoint-check "$ENDPOINT" "$PROFILE")" || contain "the deployed endpoint is not under the tenant of profile $PROFILE"
+    [ "$GOT" = "$SERVER" ] || contain "the deployed endpoint names server $GOT, not $SERVER"
     # Read-only: the stack put the scoped read on the role before the function existed.
     just laya-grant "$SERVER" "$ENV" "$PROFILE" || contain "the function's role does not carry the stack-declared scoped weights read"
     # Edge health (D-ITEM-08-17-A). No GET reaches the bootstrap on pmcp.run: the edge answers
@@ -2117,9 +2345,9 @@ laya-deploy apr run data base server env="dev" profile="ze-kasher-dev":
     # reports success (Phase 10: about 8 minutes). The helper retries that 404 and nothing else, within
     # LAYA_EDGE_HEALTH_TRIES / _SLEEP and the elapsed cap LAYA_EDGE_HEALTH_MAX_SECONDS; every other
     # outcome contains at once, and a refusal leaves no body file behind.
-    just _laya-edge-health-get "$HEALTH_URL" "models/decide/deploy-health-$SERVER.json" \
+    just _laya-edge-health-get "$HEALTH_URL" "$SD/deploy-health-$SERVER.json" \
         || contain "GET $HEALTH_URL did not return 200 (404 retried at most ${LAYA_EDGE_HEALTH_TRIES:-40} times within ${LAYA_EDGE_HEALTH_MAX_SECONDS:-900} s, F-10-12-1)"
-    HEALTH="$(cat "models/decide/deploy-health-$SERVER.json")" || contain "no edge health body was kept for $HEALTH_URL"
+    HEALTH="$(cat "$SD/deploy-health-$SERVER.json")" || contain "no edge health body was kept for $HEALTH_URL"
     just _laya-edge-health-check "$HEALTH" "$SERVER" \
         || contain "the edge health body at $HEALTH_URL does not name $SERVER as serverId: $HEALTH"
     echo "  edge health: $HEALTH_URL names serverId $SERVER"
@@ -2127,7 +2355,7 @@ laya-deploy apr run data base server env="dev" profile="ze-kasher-dev":
     # invocation loaded the model (24.6 s, success) and the edge still answered POST /mcp with 503
     # "Server is in error state" for under a minute, then forwarded. So THAT refusal, and only
     # that one, is retried (bounded); any other probe failure contains at once. (plan 08-17)
-    PLOG="models/decide/deploy-probe-$SERVER.log"
+    PLOG="$SD/deploy-probe-$SERVER.log"
     TRIES="${LAYA_EDGE_SETTLE_TRIES:-8}"
     t=1
     while :; do
@@ -2314,11 +2542,13 @@ _laya-region-selftest:
     #!/usr/bin/env bash
     set -euo pipefail
     export DRY_RUN=1
+    # An ambient target cannot steer an offline case (plan 13-04): every case names its profile.
+    unset PMCP_TARGET PMCP_API_URL AWS_PROFILE AWS_REGION AWS_DEFAULT_REGION LAYA_ACCOUNT_CHECK_FORCE
     ST="models/decide/selftest"
     SRV="${LAYA_SELFTEST_SERVER:-aprender-mcp-decide-antisemite}"
     BASE_TEMPLATE="${LAYA_REGION_SELFTEST_TEMPLATE:-crates/aprender-mcp-decide-lambda/.pmcp/deploy.toml.template}"
     CFG="models/decide/deploy-config-$SRV.toml"
-    AUG_DIR="models/decide/augury-dev"
+    AUG_DIR="$(just _laya-state-dir augury-dev)"
     AUG="$AUG_DIR/deploy-config-$SRV.toml"
     FAILS=0
     fail() { echo "FAIL $1" >&2; FAILS=$((FAILS + 1)); }
@@ -2336,6 +2566,9 @@ _laya-region-selftest:
         rm -rf "$W"
     }
     trap cleanup EXIT
+    # The fixture pmcp config (plan 13-04): the target checks read it, never ~/.pmcp/config.toml.
+    just _laya-pmcp-fixture-config "$W/pmcp-config.toml"
+    export LAYA_PMCP_CONFIG="$W/pmcp-config.toml"
     # The aws recorder: first on PATH, appends its argv, never reaches AWS.
     SHIM="$(pwd -P)/$ST/region-shim"
     REC="$SHIM/aws-calls.log"
@@ -2388,16 +2621,20 @@ _laya-region-selftest:
     else
         fail "CASE R2 explicit us-east-1: exit $RC, not cmp-equal to R1 or aws.region $( [ -n "$O2" ] && aws_region "$O2" ) (log: $W/r2.log)"
     fi
-    # R3: eu-west-1 changes exactly one line, the region line.
+    # R3: eu-west-1 changes exactly one line, the region line. The augury-dev render goes to that
+    # profile's state dir (plan 13-04, D-06) and leaves the default path's bytes alone.
+    R3_DEFAULT_BEFORE="$(if [ -f "$CFG" ]; then shasum -a 256 "$CFG" | awk '{print $1}'; else echo absent; fi)"
     run "$W/r3.log" just laya-deploy-config "$A" off "$SRV" dev augury-dev eu-west-1
     O3="$(wrote "$W/r3.log")"
+    R3_DEFAULT_AFTER="$(if [ -f "$CFG" ]; then shasum -a 256 "$CFG" | awk '{print $1}'; else echo absent; fi)"
     if [ "$RC" -eq 0 ] && [ -n "$O3" ] && [ -f "$O3" ]; then
         R3_REGION="$(aws_region "$O3")"
         R3_DELTA="$(line_delta "$W/r1.toml" "$O3")"
-        if [ "$R3_REGION" = "eu-west-1" ] && [ "$R3_DELTA" = '1 region = "us-east-1" => region = "eu-west-1"' ]; then
-            echo "CASE R3 eu-west-1: aws.region eu-west-1, exactly one line differs from R1 (region = \"us-east-1\" => region = \"eu-west-1\")"
+        if [ "$R3_REGION" = "eu-west-1" ] && [ "$R3_DELTA" = '1 region = "us-east-1" => region = "eu-west-1"' ] \
+            && [ "$O3" = "$AUG" ] && [ "$R3_DEFAULT_AFTER" = "$R3_DEFAULT_BEFORE" ]; then
+            echo "CASE R3 eu-west-1: aws.region eu-west-1, exactly one line differs from R1 (region = \"us-east-1\" => region = \"eu-west-1\"), written to $O3, the default path's sha256 unchanged"
         else
-            fail "CASE R3 eu-west-1: aws.region $R3_REGION, line delta against R1: $R3_DELTA"
+            fail "CASE R3 eu-west-1: aws.region $R3_REGION, line delta against R1: $R3_DELTA; wrote '$O3' (want $AUG); default sha256 $R3_DEFAULT_BEFORE -> $R3_DEFAULT_AFTER"
         fi
     else
         fail "CASE R3 eu-west-1: exit $RC, no rendered config (log: $W/r3.log)"; tail -3 "$W/r3.log" >&2 || true
@@ -2516,6 +2753,123 @@ _laya-region-selftest:
         exit 1
     fi
 
+# Prove the deployment triple OFFLINE (plan 13-04, D-06): DRY_RUN=1, the ambient PMCP_TARGET /
+# PMCP_API_URL / AWS_PROFILE / AWS_REGION / AWS_DEFAULT_REGION unset at setup, an aws recorder first on
+# PATH that must stay empty (AWS CALLS: 0; scripted fake aws dirs go first on PATH for one table only),
+# and a fixture pmcp config exported as LAYA_PMCP_CONFIG (LAYA_TARGET_SELFTEST_CONFIG replaces it).
+# ISOLATION 1: an augury-dev render goes to models/decide/augury-dev/ and the default config's sha256 is
+# unchanged; ISOLATION 2: an augury-dev laya-deploy with no augury config is REFUSED config even though
+# the default config exists; ISOLATION 3: with it, the same deploy reaches REFUSED eligibility
+# (SyntheticNotDeployable), every config and target check having passed on the augury file.
+# The default and augury-dev config paths of the server id (LAYA_SELFTEST_SERVER, default
+# aprender-mcp-decide-antisemite) and every augury-dev file a case can write come back byte-identical
+# (or absent) on EXIT. Ends with `TARGET SELFTEST OK`, or `TARGET SELFTEST FAILED (<k> failed checks)`
+# and exit 1. Row target-selftest.
+_laya-target-selftest:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export DRY_RUN=1
+    unset PMCP_TARGET PMCP_API_URL AWS_PROFILE AWS_REGION AWS_DEFAULT_REGION LAYA_ACCOUNT_CHECK_FORCE
+    ST="models/decide/selftest"
+    SRV="${LAYA_SELFTEST_SERVER:-aprender-mcp-decide-antisemite}"
+    T="crates/aprender-decide/tests/fixtures/laya_tiny"
+    GOLDEN="37d65159b2be0fa091aa840cd56c1a84b73c0bcd9e2df5906d1f8218f5448561"
+    FAILS=0
+    fail() { echo "FAIL $1" >&2; FAILS=$((FAILS + 1)); }
+    sha_or_absent() { if [ -f "$1" ]; then shasum -a 256 "$1" | awk '{print $1}'; else echo absent; fi; }
+    mkdir -p "$ST"
+    W="$(cd "$(mktemp -d "$ST/target.XXXXXX")" && pwd -P)"
+    CFG="models/decide/deploy-config-$SRV.toml"
+    AUG_DIR="$(just _laya-state-dir augury-dev)"
+    AUG="$AUG_DIR/deploy-config-$SRV.toml"
+    # Every file a case can write: the default config and the augury-dev state a deploy reaches.
+    KEEP=("$CFG" "$AUG" "$AUG_DIR/eligibility-$SRV.log" "$AUG_DIR/plan-concentrated.json" "$AUG_DIR/plan-distributed.json")
+    AUG_DIR_CREATED=0
+    [ -d "$AUG_DIR" ] || AUG_DIR_CREATED=1
+    k=0
+    for f in "${KEEP[@]}"; do
+        k=$((k + 1))
+        if [ -f "$f" ]; then cp -p "$f" "$W/keep-$k"; fi
+    done
+    cleanup() {
+        local f k=0
+        for f in "${KEEP[@]}"; do
+            k=$((k + 1))
+            if [ -f "$W/keep-$k" ]; then cp -p "$W/keep-$k" "$f"; else rm -f "$f"; fi
+        done
+        if [ "$AUG_DIR_CREATED" = "1" ] && [ -d "$AUG_DIR" ]; then rmdir "$AUG_DIR" 2> /dev/null || true; fi
+        rm -rf "$W"
+    }
+    trap cleanup EXIT
+    # The pmcp config every case reads: the fixture, or LAYA_TARGET_SELFTEST_CONFIG (the row's must-fail).
+    if [ -n "${LAYA_TARGET_SELFTEST_CONFIG:-}" ]; then
+        cp "$LAYA_TARGET_SELFTEST_CONFIG" "$W/pmcp-config.toml"
+    else
+        just _laya-pmcp-fixture-config "$W/pmcp-config.toml"
+    fi
+    export LAYA_PMCP_CONFIG="$W/pmcp-config.toml"
+    # The aws recorder: first on PATH, appends its argv, never reaches AWS.
+    SHIM="$W/recorder"
+    REC="$W/aws-calls.log"
+    mkdir -p "$SHIM"
+    : > "$REC"
+    printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s"\necho "aws recorder: the target selftest never reaches AWS" >&2\nexit 97\n' "$REC" > "$SHIM/aws"
+    chmod +x "$SHIM/aws"
+    export PATH="$SHIM:$PATH"
+    [ "$(command -v aws)" = "$SHIM/aws" ] || { echo "TARGET SELFTEST FAILED: the aws recorder is not first on PATH" >&2; exit 1; }
+    set +e; aws recorder-control > /dev/null 2>&1; crc=$?; set -e
+    [ "$crc" -eq 97 ] && [ "$(wc -l < "$REC" | tr -d ' ')" -eq 1 ] || { echo "TARGET SELFTEST FAILED: the aws recorder did not record its control call (exit $crc)" >&2; exit 1; }
+    : > "$REC"
+    echo "AWS RECORDER: control call recorded and cleared"
+    RC=0
+    run() { local log="$1"; shift; set +e; "$@" < /dev/null > "$log" 2>&1; RC=$?; set -e; }
+    # The synthetic tiny artifact: laya-deploy reaches its eligibility check on it, which refuses it.
+    A="$W/tiny.apr"
+    just laya-pack-fixture "$T" "$T/data" "$A" > "$W/fixture.log" 2>&1 && grep -q "sha256=$GOLDEN" "$W/fixture.log" \
+        || { echo "TARGET SELFTEST FAILED: laya-pack-fixture did not reproduce the golden $GOLDEN" >&2; tail -3 "$W/fixture.log" >&2; exit 1; }
+    deploy_augury() { just laya-deploy "$A" "$T" "$T/data" "$T/checkpoint" "$SRV" dev augury-dev; }
+    # ISOLATION 1: the augury-dev render goes to its own state dir; the default config's bytes stay.
+    run "$W/iso-default.log" just laya-deploy-config "$A" off "$SRV"
+    [ "$RC" -eq 0 ] && [ -f "$CFG" ] || { fail "ISOLATION setup: the default ze-kasher-dev render failed (exit $RC, log: $W/iso-default.log)"; tail -3 "$W/iso-default.log" >&2 || true; }
+    D_BEFORE="$(sha_or_absent "$CFG")"
+    rm -f "$AUG"
+    run "$W/iso1.log" just laya-deploy-config "$A" off "$SRV" dev augury-dev eu-west-1
+    D_AFTER="$(sha_or_absent "$CFG")"
+    if [ "$RC" -eq 0 ] && [ -f "$AUG" ] && grep -qF "  wrote $AUG (gitignored)" "$W/iso1.log" && [ "$D_BEFORE" != absent ] && [ "$D_AFTER" = "$D_BEFORE" ]; then
+        echo "ISOLATION 1 render: augury-dev wrote $AUG; the default $CFG sha256 unchanged (${D_AFTER:0:12})"
+    else
+        fail "ISOLATION 1 render: exit $RC, augury config $( [ -f "$AUG" ] && echo present || echo absent ), default sha256 $D_BEFORE -> $D_AFTER (log: $W/iso1.log)"
+        tail -3 "$W/iso1.log" >&2 || true
+    fi
+    # ISOLATION 2: no augury config, the default one present -> the augury deploy refuses, naming its own path.
+    rm -f "$AUG"
+    run "$W/iso2.log" deploy_augury
+    if [ "$RC" -eq 2 ] && [ -f "$CFG" ] && grep -qF "REFUSED config: $AUG does not exist" "$W/iso2.log"; then
+        echo "ISOLATION 2 no-augury-config: REFUSED config naming $AUG although $CFG exists (exit 2)"
+    else
+        fail "ISOLATION 2 no-augury-config: exit $RC, expected exit 2 REFUSED config: $AUG does not exist (log: $W/iso2.log)"
+        tail -3 "$W/iso2.log" >&2 || true
+    fi
+    # ISOLATION 3: with the augury config, every config and target check passes and eligibility refuses the fixture.
+    run "$W/iso3-config.log" just laya-deploy-config "$A" off "$SRV" dev augury-dev eu-west-1
+    run "$W/iso3.log" deploy_augury
+    if [ "$RC" -ne 0 ] && grep -Eq 'REFUSED eligibility: .*SyntheticNotDeployable' "$W/iso3.log" && grep -q '^target-check ok: profile augury-dev -> pmcp.run target augury-dev' "$W/iso3.log"; then
+        echo "ISOLATION 3 augury-config: reached $(grep -Eo 'REFUSED eligibility: .*SyntheticNotDeployable' "$W/iso3.log" | head -n 1 | cut -c 1-60) after target-check ok on $AUG"
+    else
+        fail "ISOLATION 3 augury-config: exit $RC, expected REFUSED eligibility SyntheticNotDeployable after target-check ok (log: $W/iso3.log)"
+        tail -3 "$W/iso3.log" >&2 || true
+    fi
+    [ "$(command -v aws)" = "$SHIM/aws" ] || fail "the aws recorder is not first on PATH at the end"
+    CALLS="$(wc -l < "$REC" | tr -d ' ')"
+    [ "$CALLS" -eq 0 ] || fail "the aws recorder was called $CALLS time(s): $(head -n 3 "$REC" | tr '\n' ';')"
+    echo "AWS CALLS: $CALLS"
+    if [ "$FAILS" -eq 0 ]; then
+        echo "TARGET SELFTEST OK"
+    else
+        echo "TARGET SELFTEST FAILED ($FAILS failed checks)" >&2
+        exit 1
+    fi
+
 # Prove every deploy refusal OFFLINE on the synthetic tiny artifact (the only one 08-09 writes),
 # DRY_RUN=1 throughout, with `aws` shadowed by a recorder that must stay empty. Cases: placeholder,
 # sha-pin, resolver-proof, deploy-eligibility, upload-eligibility (the last two from laya-verify:
@@ -2535,6 +2889,8 @@ laya-deploy-selftest:
     #!/usr/bin/env bash
     set -euo pipefail
     export DRY_RUN=1
+    # An ambient target cannot steer an offline case (plan 13-04): every case names its profile.
+    unset PMCP_TARGET PMCP_API_URL AWS_PROFILE AWS_REGION AWS_DEFAULT_REGION LAYA_ACCOUNT_CHECK_FORCE
     T="crates/aprender-decide/tests/fixtures/laya_tiny"
     ST="models/decide/selftest"
     A="$ST/laya_tiny.apr"
@@ -2550,6 +2906,9 @@ laya-deploy-selftest:
     sha_or_absent() { if [ -f "$1" ]; then shasum -a 256 "$1" | awk '{print $1}'; else echo absent; fi; }
     rm -rf "$CASES" "$ST/snap" "$ST/root-absent"
     mkdir -p "$CASES" "$ST/shim"
+    # The fixture pmcp config (plan 13-04): the target checks read it, never ~/.pmcp/config.toml.
+    just _laya-pmcp-fixture-config "$CASES/pmcp-config.toml"
+    export LAYA_PMCP_CONFIG="$(pwd -P)/$CASES/pmcp-config.toml"
     # Keep a pre-existing generated decide config and the resolver proof; restore both on EXIT.
     BK="$(mktemp -d "$ST/bk.XXXXXX")"
     [ -f "$CFG" ] && cp -p "$CFG" "$BK/decide-deploy.toml"
@@ -3006,6 +3365,17 @@ laya-deploy-selftest:
     else
         fail "the region selftest: exit $rrc without REGION SELFTEST OK (log: $CASES/region.log)"
         tail -4 "$CASES/region.log" >&2 || true
+    fi
+    # The deployment triple (plan 13-04, D-06): its own offline recipe, required to end TARGET SELFTEST OK.
+    set +e
+    just _laya-target-selftest > "$CASES/target.log" 2>&1
+    trc=$?
+    set -e
+    if [ "$trc" -eq 0 ] && grep -qx 'TARGET SELFTEST OK' "$CASES/target.log" && grep -qx 'AWS CALLS: 0' "$CASES/target.log"; then
+        echo "TARGET: $(grep -c -E '^(ISOLATION|TARGET|ACCOUNT|STATE|ENDPOINT|WIRING|TEARDOWN|VERIFY)' "$CASES/target.log") cases, AWS CALLS: 0, TARGET SELFTEST OK"
+    else
+        fail "the target selftest: exit $trc without TARGET SELFTEST OK (log: $CASES/target.log)"
+        tail -4 "$CASES/target.log" >&2 || true
     fi
     # Independent checks: the resolver proof on file, and the bootstrap build.
     RP="$(head -n 1 "$PROOF")"
@@ -3525,6 +3895,8 @@ laya-gates-selftest:
     ONLY="${LAYA_GATES_ONLY:-}"
     FULL="${LAYA_GATES_FULL:-0}"
     export DRY_RUN=1
+    # An ambient target cannot steer an offline case (plan 13-04): every case names its profile.
+    unset PMCP_TARGET PMCP_API_URL AWS_PROFILE AWS_REGION AWS_DEFAULT_REGION LAYA_ACCOUNT_CHECK_FORCE
     [ -f "$TSV" ] || { echo "LAYA GATES SELFTEST FAILED: the gate table $TSV does not exist" >&2; exit 1; }
     W="$(mktemp -d)"
     LOGD="$W/logs"
@@ -3548,6 +3920,9 @@ laya-gates-selftest:
         rm -rf "$W"
     }
     trap cleanup EXIT
+    # The fixture pmcp config (plan 13-04): the target checks read it, never ~/.pmcp/config.toml.
+    just _laya-pmcp-fixture-config "$W/pmcp-config.toml"
+    export LAYA_PMCP_CONFIG="$W/pmcp-config.toml"
     # 1. The verdict classifier's case table, then the drift check. Both before any case.
     just --dump --dump-format json > "$W/dump.json"
     python3 -c 'import json, sys; print("\n".join(json.load(open(sys.argv[1]))["recipes"]))' "$W/dump.json" > "$W/recipes.txt"
