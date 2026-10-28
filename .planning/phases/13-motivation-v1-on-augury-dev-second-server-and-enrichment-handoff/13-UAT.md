@@ -3,15 +3,15 @@ status: testing
 phase: 13-motivation-v1-on-augury-dev-second-server-and-enrichment-handoff
 source: [13-VERIFICATION.md]
 started: 2026-10-28T09:01:33Z
-updated: 2026-10-28T10:00:00Z
+updated: 2026-10-28T10:10:00Z
 ---
 
 ## Current Test
 
-number: 2
-name: Owner confirms the d15_amendment of contracts/motivation-enrichment-v1.yaml
+number: 3
+name: Owner decides whether the uncertainty band's inert margin clause stays as declared
 expected: |
-  The owner confirms, or asks for a different convention (which would be motivation-enrichment-v2); the contract's status line stops reading `pending`
+  Keep as is (the note and selftest already say so) or request new constants and a regenerated note
 awaiting: user response
 
 ## Tests
@@ -24,7 +24,9 @@ resolution: "Deferred by the owner (2026-10-28). CR-01 is recorded as deferred i
 
 ### 2. Owner confirms the d15_amendment of contracts/motivation-enrichment-v1.yaml (evidence level `none`, evidence describes the RECORDED function, refusal of other+clear / social_affiliative+none / conspiratorial+none) before the partner builds the annotation sheet
 expected: The owner confirms, or asks for a different convention (which would be motivation-enrichment-v2); the contract's status line stops reading `pending`
-result: [pending]
+result: pass
+reported: "confirm"
+resolution: "Confirmed by the owner (2026-10-28). The contract status line in contracts/motivation-enrichment-v1.yaml now reads confirmed."
 
 ### 3. Owner decides whether the uncertainty band's inert margin clause (with three labels summing to 1, `p1 - p2 < 0.20` adds nothing beyond `p1 <= 0.75`) stays as declared
 expected: Keep as is (the note and selftest already say so) or request new constants and a regenerated note
@@ -33,9 +35,9 @@ result: [pending]
 ## Summary
 
 total: 3
-passed: 1
+passed: 2
 issues: 0
-pending: 2
+pending: 1
 skipped: 0
 blocked: 0
 
