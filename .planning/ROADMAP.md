@@ -1016,12 +1016,12 @@ Known constraints: the only edge host pattern seen is `<server>.us-east.true-mcp
 **Requirements**: none mapped; the plans implement CONTEXT decisions
 **Depends on:** Phase 12
 **Note:** CONTEXT D-06 amends the owner decision above: the augury server REUSES the id `aprender-mcp-decide-motivation` and the existing thin crate (no new crate, register unchanged); the two deployments are told apart by the triple (pmcp.run target, AWS account, region). The eu-west-1 deployability question is answered by an existing tenant (the augury antisemite Lambda in eu-west-1, RESEARCH P9), not assumed.
-**Plans:** 2/11 plans executed (7 waves)
+**Plans:** 3/11 plans executed (7 waves)
 
 Plans:
 **Wave 1**
 - [x] 13-01-PLAN.md — commit the justfile region parameter with its offline check in both regions, positional args, the state snapshot, the eligibility export that keeps row_verify measuring, and re-mutation (D-05, D-20)
-- [ ] 13-02-PLAN.md — declare motivation-record-v1 and motivation-enrichment-v1 as a kind:schema contract with structured bounds and the d15_amendment (D-13, D-14, D-15, D-16)
+- [x] 13-02-PLAN.md — declare motivation-record-v1 and motivation-enrichment-v1 as a kind:schema contract with structured bounds and the d15_amendment (D-13, D-14, D-15, D-16)
 - [x] 13-11-PLAN.md — wave 1: archive the ze-kasher-dev local record with a pinned sha256 manifest before any phase-13 writer, cross-checked against Phase 12's committed record, never re-pinned (D-06, D-02)
 
 **Wave 2** *(blocked on Wave 1 completion)*

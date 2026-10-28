@@ -152,7 +152,11 @@ It goes to the owner in the 13-10 hand-off, before the partner builds its sheet.
 ## Issues Encountered
 
 - The corpus-wide `pv lint contracts/` exits 1 because of two sigma errors that were already there before this plan, in `contracts/llm-endpoint-openai-conformance-v1.yaml`. The plan treats this as an observation; they are out of scope and already noted in 12-02-SUMMARY.
-- No STATE/ROADMAP tooling defect had been met when this was written; the outcome of the state and roadmap verbs is recorded in the metadata commit.
+- STATE/ROADMAP verbs, following the 13-01 convention:
+  - `roadmap.update-plan-progress 13` ran (rc 0) and recorded 3/11 plans executed, with 13-02 checked.
+  - The STATE.md verbs were deliberately NOT run. STATE.md carries the owner's uncommitted edit, which the dispatch says not to touch, and those verbs would write into it. Its bytes were confirmed unchanged by `cmp`.
+  - `requirements.mark-complete` was skipped: the D-ids are CONTEXT decision ids, not REQUIREMENTS.md ids.
+  - The owner's `.planning/STATE.md`, `config.json` and `state.json` were never staged.
 
 ## Next Phase Readiness
 
