@@ -1016,7 +1016,7 @@ Known constraints: the only edge host pattern seen is `<server>.us-east.true-mcp
 **Requirements**: none mapped; the plans implement CONTEXT decisions
 **Depends on:** Phase 12
 **Note:** CONTEXT D-06 amends the owner decision above: the augury server REUSES the id `aprender-mcp-decide-motivation` and the existing thin crate (no new crate, register unchanged); the two deployments are told apart by the triple (pmcp.run target, AWS account, region). The eu-west-1 deployability question is answered by an existing tenant (the augury antisemite Lambda in eu-west-1, RESEARCH P9), not assumed.
-**Plans:** 10/11 plans executed (7 waves)
+**Plans:** 11/11 plans executed (7 waves)
 
 Plans:
 **Wave 1**
@@ -1042,4 +1042,4 @@ Plans:
 - [x] 13-09-PLAN.md — authenticated timings and acceptance replay with a successful 4-text call; ze-kasher-dev shown unchanged by derived checks (D-07, D-02)
 
 **Wave 7** *(blocked on Wave 6 completion)*
-- [ ] 13-10-PLAN.md — hand-off to the owner and phase closure checks (D-08, D-04)
+- [x] 13-10-PLAN.md — hand-off to the owner and phase closure checks (D-08, D-04)
