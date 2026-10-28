@@ -1,0 +1,16 @@
+{
+  "schema": "laya-oauth-owner-reply-v1",
+  "phase": "13",
+  "plan": "13-08",
+  "server": "aprender-mcp-decide-motivation",
+  "pmcp_target": "augury-dev",
+  "steps": [
+    {
+      "step": "oauth-enable",
+      "method": "not stated",
+      "method_note": "the owner did not name the method (admin UI or the cargo-pmcp CLI)",
+      "reply": "oauth-on",
+      "replied_on": "2026-10-28T05:00:57Z"
+    }
+  ]
+}

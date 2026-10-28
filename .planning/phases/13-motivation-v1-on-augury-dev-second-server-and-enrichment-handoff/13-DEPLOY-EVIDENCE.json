@@ -38,8 +38,43 @@
       "stop_file": "/tmp/p13-08-watchdog.stop",
       "started_utc": "2026-10-28T04:53:43Z",
       "started": true,
-      "start_line": "WATCHDOG STARTED pid 31470 deadline 2026-10-28T05:19:48Z"
-    }
+      "start_line": "WATCHDOG STARTED pid 31470 deadline 2026-10-28T05:19:48Z",
+      "stop_file_written_utc": "2026-10-28T05:01:52Z",
+      "stopped_line": "WATCHDOG STOPPED by the stop file at 2026-10-28T05:02:13Z",
+      "exited": true,
+      "contained_line": null
+    },
+    "posture": "on",
+    "enabled_by": "owner",
+    "owner_reply_utc": "2026-10-28T05:00:57Z",
+    "owner_reply_utc_note": "the time the executor received the reply; the owner replied shortly after 04:55Z (exact time not recorded)",
+    "refusal_check": {
+      "command": "env -u DRY_RUN LAYA_AUTH_POLL_SLEEP=30 just _laya-auth-refusal-check <endpoint> 600",
+      "wait_s": 600,
+      "started_utc": "2026-10-28T05:01:06Z",
+      "ended_utc": "2026-10-28T05:01:29Z",
+      "rc": 0,
+      "log": "/tmp/p13-08-refusal.log"
+    },
+    "first_401_utc": "2026-10-28T05:01:09Z",
+    "polls": 1,
+    "auth_window_s": 681,
+    "auth_window_note": "upper bound: first observed 401 minus the conservative exposure start (the DEPLOYING line); the first poll ran after the owner's reply, so the true open interval ended at the owner's enablement, earlier than first_401_utc",
+    "auth_window_from_publish_done_s": 461,
+    "refusal_line": "auth-refusal ok: tools/list 401, tools/call 401 after 1 poll(s) (3 s); first_401_utc 2026-10-28T05:01:09Z; initialize 200 (observed, not asserted); oauth-protected-resource 200 (observed)",
+    "observed": {
+      "initialize": 200,
+      "oauth_protected_resource": 200
+    },
+    "discovery": {
+      "resource_matches": true,
+      "authorization_server_host": "aprender-mcp-decide-motivation.eu-west.augury.pmcp.run",
+      "token_endpoint_host": "aprender-mcp-decide-motivation.eu-west.augury.pmcp.run",
+      "token_endpoint_path": "/oauth2/token",
+      "token_endpoint_source": "/.well-known/oauth-authorization-server (and openid-configuration; both 200 and agree)",
+      "scopes_include_new_host_read_write": true
+    },
+    "watchdog_outcome": "stopped after the refusal"
   },
   "tier_mb": 10240,
   "artifact_path": "models/decide/laya-motivation-v1.apr",
@@ -281,5 +316,35 @@
     }
   ],
   "measured_on": "2026-10-28",
-  "commit": "52e630857312be9127f2a603b73e16b8f490d0ec"
+  "commit": "52e630857312be9127f2a603b73e16b8f490d0ec",
+  "live_function_after": {
+    "server": "aprender-mcp-decide-motivation",
+    "artifact_sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+    "tier_mb": 10240,
+    "auth": "on",
+    "contained": false,
+    "readback": {
+      "op": "aws lambda get-function-configuration (read-only, after OAuth was on)",
+      "read_utc": "2026-10-28T05:02:48Z",
+      "function_arn_region": "eu-west-1",
+      "function_arn_account": "783960389328",
+      "memory_mb": 10240,
+      "architecture": "arm64",
+      "state": "Active",
+      "last_update_status": "Successful",
+      "env_APRENDER_DECIDE_SHA256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+      "s3_uri_ends_with_prefix_key": true,
+      "prefix_key": "decide/aprender-mcp-decide-motivation/d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd.apr",
+      "reserved_concurrency": null,
+      "reserved_concurrency_note": "get-function-concurrency returned no ReservedConcurrentExecutions (not contained)"
+    }
+  },
+  "isolation_after_deploy": {
+    "manifest": "models/decide/ze-kasher-dev-archive-20261027/MANIFEST.sha256",
+    "manifest_ok": true,
+    "manifest_sha256_equals_13_11_pin": true,
+    "swap_backup_empty": true,
+    "eligibility_log_antisemite_cmp_backup": "byte-equal (cmp rc 0)",
+    "ze_kasher_dev_addressed": false
+  }
 }
