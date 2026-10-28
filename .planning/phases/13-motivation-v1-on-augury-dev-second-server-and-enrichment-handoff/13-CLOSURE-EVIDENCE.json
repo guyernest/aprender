@@ -1,0 +1,226 @@
+{
+  "schema": "laya-closure-evidence-v1",
+  "phase": "13",
+  "plan": "13-10",
+  "triple": {
+    "pmcp_target": "augury-dev",
+    "aws_account": "783960389328",
+    "region": "eu-west-1",
+    "endpoint": "https://aprender-mcp-decide-motivation.eu-west.augury.pmcp.run/mcp"
+  },
+  "suites": [
+    {
+      "name": "prepare-motivation-selftest",
+      "command": "uv run --project scripts/laya_train --frozen python -I scripts/laya_train/prepare_motivation.py --selftest",
+      "rc": 0,
+      "last_line": "PREPARE MOTIVATION SELFTEST OK",
+      "log": "/tmp/p13-10/prepare-motivation-selftest.log"
+    },
+    {
+      "name": "prepare-motivation-no-flag",
+      "command": "uv run --project scripts/laya_train --frozen python -I scripts/laya_train/prepare_motivation.py",
+      "rc": 0,
+      "last_line": "PREPARE OK",
+      "log": "/tmp/p13-10/prepare-motivation-no-flag.log"
+    },
+    {
+      "name": "select-motivation-selftest",
+      "command": "uv run --project scripts/laya_train --frozen python -I scripts/laya_train/select_motivation.py --selftest",
+      "rc": 0,
+      "last_line": "SELECT MOTIVATION SELFTEST OK",
+      "log": "/tmp/p13-10/select-motivation-selftest.log"
+    },
+    {
+      "name": "m2m-token-selftest",
+      "command": "python3 -I scripts/laya_deploy/m2m_token.py --selftest",
+      "rc": 0,
+      "last_line": "M2M TOKEN SELFTEST OK",
+      "log": "/tmp/p13-10/m2m-token-selftest.log"
+    },
+    {
+      "name": "region-selftest",
+      "command": "just _laya-region-selftest",
+      "rc": 0,
+      "last_line": "REGION SELFTEST OK",
+      "log": "/tmp/p13-10/region-selftest.log"
+    },
+    {
+      "name": "target-selftest",
+      "command": "just _laya-target-selftest",
+      "rc": 0,
+      "last_line": "TARGET SELFTEST OK",
+      "log": "/tmp/p13-10/target-selftest.log"
+    },
+    {
+      "name": "auth-selftest",
+      "command": "just _laya-auth-selftest",
+      "rc": 0,
+      "last_line": "AUTH SELFTEST OK",
+      "log": "/tmp/p13-10/auth-selftest.log"
+    },
+    {
+      "name": "monorepo-invariants",
+      "command": "env CARGO_INCREMENTAL=0 rtk proxy cargo test -p aprender-core --test monorepo_invariants",
+      "rc": 0,
+      "last_line": "test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.76s",
+      "log": "/tmp/p13-10/monorepo-invariants.log"
+    },
+    {
+      "name": "dup-bin-names",
+      "command": "bash scripts/check_duplicate_bin_names.sh",
+      "rc": 0,
+      "last_line": "      declaration still describes the tree",
+      "log": "/tmp/p13-10/dup-bin-names.log"
+    },
+    {
+      "name": "enrichment-manifest-compat",
+      "command": "python3 -I <scratchpad>/compat.py /tmp/p13-10/compat.json",
+      "rc": 0,
+      "last_line": "ENRICHMENT MANIFEST COMPAT OK: pack sha256 equal (golden), same first REFUSED line (SyntheticNotDeployable)",
+      "log": "/tmp/p13-10/enrichment-manifest-compat.log"
+    },
+    {
+      "name": "contract-census",
+      "command": "\"$PV\" census contracts --format json; cmp with contracts/census.json",
+      "rc": 0,
+      "last_line": "CENSUS EQUAL contracts/census.json",
+      "log": "/tmp/p13-10/contract-census.log"
+    },
+    {
+      "name": "contract-graph-clean-checkout",
+      "command": "\"$PV\" extract contracts --check (clean git worktree of HEAD)",
+      "rc": 0,
+      "last_line": "pv extract contracts --check in a clean worktree of HEAD: rc 0",
+      "log": "/tmp/p13-10/contract-graph-clean-checkout.log"
+    },
+    {
+      "name": "deploy-selftest",
+      "command": "LAYA_DEPLOY_SELFTEST_POSITIVE=0 just laya-deploy-selftest",
+      "rc": 0,
+      "last_line": "DEPLOY SELFTEST OK (positive dry run SKIPPED: disarmed by LAYA_DEPLOY_SELFTEST_POSITIVE=0)",
+      "log": "/tmp/p13-10-deploy-selftest.log"
+    },
+    {
+      "name": "gates-selftest",
+      "command": "lockf -k -t 3600 /tmp/aprender-laya-real-weights.lock just laya-gates-selftest",
+      "rc": 0,
+      "last_line": "LAYA GATES SELFTEST OK 44 rows (FULL-tier must-pass cases SKIPPED: upload-eligibility (the DRY_RUN upload of the deployed artifact (laya-verify, multi-GB)), pack (a real repack of the deployed run (multi-GB)), verify-suite (the armed laya-verify-suite (four real-weights legs, about 15 min)), resolver-proof (the real resolver proof (cargo-pmcp test in an SDK archive)), setfit-cell (the s64e1b16 cell (CPU SetFit training, about 30 min)); set LAYA_GATES_FULL=1)",
+      "log": "/tmp/p13-10-gates-selftest.log"
+    }
+  ],
+  "env_unset": [
+    "LAYA_SELFTEST_SERVER",
+    "LAYA_GATES_ONLY",
+    "PMCP_TARGET",
+    "PMCP_API_URL",
+    "AWS_PROFILE",
+    "AWS_REGION",
+    "AWS_DEFAULT_REGION"
+  ],
+  "manifest_compat": {
+    "pack_sha_equal": true,
+    "equals_golden": true,
+    "golden": "37d65159b2be0fa091aa840cd56c1a84b73c0bcd9e2df5906d1f8218f5448561",
+    "pack_sha256": "37d65159b2be0fa091aa840cd56c1a84b73c0bcd9e2df5906d1f8218f5448561",
+    "verify_refusal_equal": true,
+    "verify_rc": [
+      2,
+      2
+    ],
+    "refusal_line": "REFUSED SyntheticNotDeployable recipe variant \"synthetic-fixture\" is not deployable (nothing written)",
+    "train_py": "reads only named files (train.py:748), by code reading",
+    "closes": "13-INGEST-EVIDENCE.json open_items[0]"
+  },
+  "unchanged": [
+    {
+      "path": "crates/aprender-decide",
+      "since": "61586f888",
+      "unchanged": true
+    },
+    {
+      "path": "crates/aprender-mcp-decide",
+      "since": "61586f888",
+      "unchanged": true
+    },
+    {
+      "path": "crates/aprender-mcp-decide-lambda",
+      "since": "61586f888",
+      "unchanged": true
+    },
+    {
+      "path": "crates/aprender-mcp-decide-motivation-lambda",
+      "since": "61586f888",
+      "unchanged": true
+    },
+    {
+      "path": "contracts/laya-finetune-gate-v1.yaml",
+      "since": "61586f888",
+      "unchanged": true
+    },
+    {
+      "path": "contracts/decide-tool-boundary-v1.yaml",
+      "since": "61586f888",
+      "unchanged": true
+    },
+    {
+      "path": "contracts/decide-apr-v1.yaml",
+      "since": "61586f888",
+      "unchanged": true
+    },
+    {
+      "path": "scripts/laya_train/train.py",
+      "since": "61586f888",
+      "unchanged": true
+    },
+    {
+      "path": "scripts/laya_train/gate.py",
+      "since": "61586f888",
+      "unchanged": true
+    },
+    {
+      "path": "crates/aprender-core/tests/monorepo_invariants.rs",
+      "since": "61586f888",
+      "unchanged": true
+    },
+    {
+      "path": "scripts/duplicate_bin_names_allowlist.txt",
+      "since": "61586f888",
+      "unchanged": true
+    }
+  ],
+  "register": {
+    "monorepo_invariants_last_line": "test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.76s",
+    "dup_bin_rc": 0,
+    "note": "no new crate, no register growth (D-06)"
+  },
+  "contract_corpus": {
+    "census_equal": true,
+    "graph_check_clean_checkout": true,
+    "regenerated": false
+  },
+  "archive_manifest_ok": true,
+  "archive_manifest_sha256": "b01bc7216ddd1e349b079a2bf9aa314a2f8030a0730ed94233d348429a44ad90",
+  "archive_manifest_pin": "b01bc7216ddd1e349b079a2bf9aa314a2f8030a0730ed94233d348429a44ad90",
+  "ci_wiring": "local-only by the owner's decision of 2026-10-27, like every earlier laya selftest (no ci/explicit-test-commands.d fragment)",
+  "measured_on": "2026-10-28T07:49:20Z",
+  "commit": "c5cd2dba102a15d7da65824a820f75bb5bf99e9b",
+  "sweep": {
+    "files_scanned": 31,
+    "hits": 0,
+    "rules": [
+      "records: jwt, client_secret value, m2m path, unknown 12-digit, sentinel, raw probe error body",
+      "changed scripts/contracts: jwt, m2m path"
+    ],
+    "record_globs": [
+      "13-*-EVIDENCE.json",
+      "13-*-REPLY.json",
+      "13-ACCEPTANCE-REPLAY.json",
+      "13-HANDOFF.md",
+      "13-SELECTION-NOTE.md",
+      "13-*-SUMMARY.md"
+    ],
+    "limits": "pattern-based defence in depth: recognises the listed shapes and canaries; it cannot prove the absence of a non-JWT token or of arbitrary post text",
+    "files_scanned_records": 24,
+    "files_scanned_changed_scripts_contracts": 7
+  }
+}
