@@ -1043,3 +1043,22 @@ Plans:
 
 **Wave 7** *(blocked on Wave 6 completion)*
 - [x] 13-10-PLAN.md — hand-off to the owner and phase closure checks (D-08, D-04)
+
+### Phase 14: Laya training MCP server: S3 dataset in, .apr and reports out
+
+**Goal:** Stand up a thin training MCP server (one server per algorithm: `aprender-mcp-laya-train` plus its Lambda request function) that takes a dataset by S3 URI — a prefix in ONE server-owned bucket, read by the server's role, holding the trainer's existing generic data dir (`task.json`, `train.jsonl`, `eval.jsonl`, optional `shift.jsonl`) — runs the full `laya-finetune-gate-v1` lifecycle (three seeds 13/17/23, median-ECE selection, the float64 noise record, the optional shift probe) as a SageMaker Training Job on a container holding the pinned `scripts/laya_train` uv project (Python/torch, Phase 8 D-01) plus a prebuilt Rust packer, packs and Rust-verifies the `.apr` (`pack_laya pack`, then `verify`), and returns the FULL output to the caller as an MCP Task: the `.apr` (only on GATE PASS) plus every report the run writes (gate-report, variance-report, rescore-noise, recipe, eval / zero-shot / shift probabilities), readable on GATE FAIL too. Deployed to the dev environment, ze-kasher-dev. The request function, task store and finalizer reuse the SetFit training server scaffold (`crates/aprender-mcp-setfit-train`, `crates/aprender-setfit-train-lambda`, verified live 2026-09-04); a SageMaker dispatcher and a job-state finalizer replace its Lambda worker. No change to any decide server.
+
+Owner decisions already made (2026-10-28), to be recorded in this phase's CONTEXT:
+- Tenant/account: ze-kasher-dev first.
+- Compute: SageMaker Training Jobs first; switch to ECS only if SageMaker shows a limitation beyond a reasonable range on Rust tooling, x86_64, latency or cost (ECS's one real advantage: Graviton GPU hosts keep aarch64, where every Laya parity number was measured).
+- Dataset access: a single server-owned bucket read by role; upload-through-MCP (the SetFit server's presigned-PUT slot) is deferred, not rejected.
+- Output: full — the `.apr` and every report, readable and usable by the caller.
+- Training stays Python/torch on Laya's own code (Phase 8 D-01: "a Rust trainer is not planned"); this phase does not reopen that.
+
+Known constraints: Laya training does not fit Lambda (CPU, 900 s cap) — Phase 10's gate run took 16,822 s on Apple MPS for three seeds and Phase 12's pilot 752 s; SageMaker GPU instances are x86_64 + CUDA while every Laya parity and pack-tolerance number is aarch64 (`contracts/laya-parity-v1.yaml` A1; `--device cuda` exists and the noise record is written per run), so a one-cell probe comes before any gate run is trusted there; `pack_laya` is a cargo example, not a shipped binary, and no `apr decide` subcommand exists (Phase 8 D-02); the base snapshot (`convaiinnovations/laya` @ 55cf4c4e, 0.84 GB, sha-pinned) must reach the job from S3, never baked into the image; the Lambda crate's `bootstrap` bin needs a FALSIFY-MONO-011 allowlist entry (baseline 27); reading a prefix needs prefix-scoped `s3:ListBucket` or a missing key answers 403, not 404 (the SetFit server's lesson); CI never installs torch, so the container's lifecycle check is local-only like `laya-verify-suite`; no AWS call without the owner.
+**Requirements**: none mapped; the plans implement CONTEXT decisions
+**Depends on:** Phase 13
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 14 to break down)
