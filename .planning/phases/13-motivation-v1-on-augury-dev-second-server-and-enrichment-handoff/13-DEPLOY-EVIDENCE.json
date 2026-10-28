@@ -74,7 +74,23 @@
       "token_endpoint_source": "/.well-known/oauth-authorization-server (and openid-configuration; both 200 and agree)",
       "scopes_include_new_host_read_write": true
     },
-    "watchdog_outcome": "stopped after the refusal"
+    "watchdog_outcome": "stopped after the refusal",
+    "m2m_attempts": [
+      {
+        "attempt": 1,
+        "started_utc": "2026-10-28T05:15:27Z",
+        "ended_utc": "2026-10-28T05:15:49Z",
+        "command": "LAYA_M2M_FILE=<m2m-file> just laya-probe-auth augury-dev https://aprender-mcp-decide-motivation.eu-west.augury.pmcp.run/mcp --apr models/decide/laya-motivation-v1.apr --expect-sha256 d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd (LIVE env vars unset)",
+        "rc": 2,
+        "refusal_line": "REFUSED m2m-host: the token_url host counter-coach.eu-west.augury.pmcp.run is not the expected host aprender-mcp-decide-motivation.eu-west.augury.pmcp.run",
+        "refusal_rule": "m2m-host",
+        "token_host_expected": "aprender-mcp-decide-motivation.eu-west.augury.pmcp.run",
+        "token_host_expected_source": "endpoint host (no m2m-token-host note, LAYA_M2M_TOKEN_HOST unset)",
+        "token_url_host_in_file": "counter-coach.eu-west.augury.pmcp.run",
+        "network_requests": "none: m2m_token.py checks the token_url host before it builds an opener, so nothing was POSTed and no token was minted (no m2m-token ok line in the log)",
+        "negative_control": "not run: it would stop at the same local host refusal and prove nothing"
+      }
+    ]
   },
   "tier_mb": 10240,
   "artifact_path": "models/decide/laya-motivation-v1.apr",
@@ -313,6 +329,13 @@
       "effect": "Task 1's verify needs ze_kasher_before.identity_probe.identity_matches true and a three-state Lambda record; both wait on the owner",
       "resolution": "resolved 2026-10-28: the owner ran the three read-only reads (identity probe, get-function-configuration, get-function-concurrency) in their own terminal; the executor recorded the outputs and made no ze-kasher-dev AWS call. Baseline: identity_matches true, sha d202f495..., Lambda present, reserved concurrency none.",
       "resolved_by": "owner-run reads"
+    },
+    {
+      "id": "F-13-08-2",
+      "kind": "m2m-client-token-host",
+      "what": "the owner's M2M client file names a token_url on counter-coach.eu-west.augury.pmcp.run, not on the motivation endpoint host that the discovery documents name as the token endpoint (aprender-mcp-decide-motivation.eu-west.augury.pmcp.run/oauth2/token); laya-probe-auth refused it locally with REFUSED m2m-host before any request (RESEARCH A1: a client from the counter-coach pool may lack the new host's scopes)",
+      "effect": "Task 3's authenticated identity and the authenticated negative control wait on the owner; the executor did not write the m2m-token-host note (the owner named no token host) and did not work around the refusal",
+      "resolution": null
     }
   ],
   "measured_on": "2026-10-28",
