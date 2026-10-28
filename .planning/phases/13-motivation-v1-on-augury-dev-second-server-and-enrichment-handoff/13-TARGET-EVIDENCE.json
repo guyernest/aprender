@@ -1,0 +1,294 @@
+{
+  "schema": "laya-target-evidence-v1",
+  "phase": "13",
+  "plan": "13-04",
+  "triple": {
+    "pmcp_target": "augury-dev",
+    "aws_account": "783960389328",
+    "region": "eu-west-1",
+    "endpoint": null
+  },
+  "assumption_delta": {
+    "kind": "pluralization",
+    "term": "second",
+    "primary_noun": "the deployment triple (pmcp.run target, AWS account, region)",
+    "decision": "promote",
+    "rationale": "The 2026-10-25 augury deploy of aprender-mcp-decide-antisemite overwrote that id's ze-kasher-dev local record in models/decide/, so a server id alone cannot key two deployments of the same server.",
+    "invariant": "every AWS- or pmcp-touching laya recipe calls _laya-target-check before its first AWS call",
+    "invariant_check": "_laya-target-selftest WIRING"
+  },
+  "target_table": {
+    "ze-kasher-dev": {
+      "target": "dev",
+      "region": "us-east-1",
+      "host_suffix": ".us-east.true-mcp.com",
+      "account": "816069129666",
+      "state_dir": "models/decide"
+    },
+    "augury-dev": {
+      "target": "augury-dev",
+      "region": "eu-west-1",
+      "host_suffix": ".eu-west.augury.pmcp.run",
+      "account": "783960389328",
+      "state_dir": "models/decide/augury-dev"
+    }
+  },
+  "wired_recipes": [
+    "laya-deploy-config",
+    "laya-deploy",
+    "laya-upload",
+    "laya-grant",
+    "laya-deploy-verify",
+    "laya-teardown",
+    "laya-weights-bucket"
+  ],
+  "wiring": {
+    "ordered": true,
+    "rule": "target check < account check < first AWS line",
+    "order_lines": [
+      "WIRING order laya-deploy: target 49 < account 80 < aws 96",
+      "WIRING order laya-deploy-config: target 38 < account 40 < aws 50",
+      "WIRING order laya-deploy-verify: target 16 < account 18 < aws 63",
+      "WIRING order laya-grant: target 14 < account 16 < aws 19",
+      "WIRING order laya-teardown: target 14 < account 16 < aws 20",
+      "WIRING order laya-upload: target 20 < account 49 < aws 54",
+      "WIRING order laya-weights-bucket: target 17 < account 19 < aws 22"
+    ],
+    "extra_lines": [
+      "WIRING self _laya-account-check: target 2 < aws 10",
+      "WIRING laya-deploy export: export PMCP_TARGET 51, unset PMCP_API_URL 52 < contain() 112, first contain 145, cargo pmcp deploy 131",
+      "WIRING laya-deploy-verify endpoint: endpoint check 29 < cargo build 32",
+      "WIRING laya-deploy-config template: REFUSED template 20 < target 38, account 40",
+      "WIRING controls: 8 AWS-touching recipes; laya-deploy in the set, _laya-iam-check enumerated and outside it"
+    ]
+  },
+  "api_url_guard": {
+    "env_conflict_refused": true,
+    "shape_refused": true,
+    "exported": "unset PMCP_API_URL after the check, so cargo-pmcp injects the target's api_url",
+    "resolver_reference": "cargo-pmcp 0.28.1 resolver.rs:250-256 (PMCP_API_URL env first) and 378-382 (injected only when sourced from the target), RESEARCH Q2"
+  },
+  "account_check": {
+    "live": "aws sts get-caller-identity before the first mutation",
+    "dry_run": "no call unless LAYA_ACCOUNT_CHECK_FORCE=1",
+    "lines": [
+      "ACCOUNT accept: augury-dev, sts answers 783960389328 (target-account ok: profile augury-dev is account 783960389328, 1 sts call)",
+      "ACCOUNT accept: ze-kasher-dev, sts answers 816069129666 (target-account ok: profile ze-kasher-dev is account 816069129666, 1 sts call)",
+      "ACCOUNT refuse: augury-dev, sts answers ze-kasher-dev's account (exit 2, REFUSED target-account: profile augury-dev resolves to an account ending 9666, not the table's 783960389328)",
+      "ACCOUNT refuse: ze-kasher-dev, sts answers augury-dev's account (exit 2, REFUSED target-account: profile ze-kasher-dev resolves to an account ending 9328, not the table's 816069129666)",
+      "ACCOUNT refuse: augury-dev, sts exits 255 (exit 2, REFUSED target-account: cannot read the account for profile augury-dev)",
+      "ACCOUNT refuse: augury-dev, a non-numeric answer (exit 2, REFUSED target-account: profile augury-dev did not answer a 12-digit account id)",
+      "ACCOUNT accept: DRY_RUN=1 without LAYA_ACCOUNT_CHECK_FORCE -> not checked, 0 fake-aws calls"
+    ]
+  },
+  "teardown_reachable": {
+    "line": "TEARDOWN REACHABLE accept: PMCP_TARGET=augury-dev AWS_PROFILE=augury-dev AWS_REGION=eu-west-1 (laya-deploy's exports) -> CONTAINED: aprender-mcp-decide-antisemite reserved concurrency 0 (no invocation runs, warm, target and account checks passed",
+    "refused_twin": true,
+    "twin_line": "TEARDOWN REACHABLE refuse: the twin with AWS_REGION=us-east-1 is REFUSED target (exit 2), no put-function-concurrency call"
+  },
+  "augury_restore": {
+    "line": "AUGURY RESTORE OK"
+  },
+  "isolation": {
+    "cases": [
+      "ISOLATION 1",
+      "ISOLATION 2",
+      "ISOLATION 3"
+    ],
+    "lines": [
+      "ISOLATION 1 render: augury-dev wrote models/decide/augury-dev/deploy-config-aprender-mcp-decide-antisemite.toml; the default models/decide/deploy-config-aprender-mcp-decide-antisemite.toml sha256 unchanged (4e0f56db6342)",
+      "ISOLATION 2 no-augury-config: REFUSED config naming models/decide/augury-dev/deploy-config-aprender-mcp-decide-antisemite.toml although models/decide/deploy-config-aprender-mcp-decide-antisemite.toml exists (exit 2)",
+      "ISOLATION 3 augury-config: reached REFUSED eligibility: REFUSED SyntheticNotDeployable after target-check ok on models/decide/augury-dev/deploy-config-aprender-mcp-decide-antisemite.toml"
+    ],
+    "default_config_unchanged": true
+  },
+  "verify_state": {
+    "line": "VERIFY STATE augury-dev: the DRY_RUN plan names <endpoint from models/decide/augury-dev/deploy-aprender-mcp-decide-antisemite.state/deployment.toml> and wrote its plan files under models/decide/augury-dev/; the default plan files unchanged"
+  },
+  "default_profile_equivalence": {
+    "pre_commit": "bc52bf3d619845a2b3dc7f8af33ae8c13312d9d5",
+    "render": "RENDER pre rc=0 cur rc=0 equal=true sha256=4d0f540d1f007059",
+    "equal": true,
+    "nested_just_limitation": "nested `just` calls inside the pre-phase recipe resolve to the current justfile, so the comparison is the pre-phase outer recipe plus the current helpers",
+    "nested_helpers": {
+      "_laya-iam-check": true,
+      "_laya-server-check": true
+    },
+    "worktree_render_equal": null
+  },
+  "selftest": {
+    "last_line": "TARGET SELFTEST OK",
+    "aws_calls": 0,
+    "refuse_cases": 13,
+    "accept_cases": 4,
+    "case_lines": 58,
+    "stale_ambient_run": "Task 2 verify ran it under PMCP_TARGET=dev, PMCP_API_URL=<the us-east-1 control plane>, AWS_PROFILE=ze-kasher-dev, AWS_REGION=us-east-1, AWS_DEFAULT_REGION=us-east-1: OK"
+  },
+  "gates_rows": [
+    "target-check",
+    "account-check",
+    "state-dir",
+    "endpoint-check",
+    "target-selftest"
+  ],
+  "gates_sweep": [
+    "AWS CALLS: 0",
+    "AWS CALLS: 0",
+    "LAYA GATES ROWS OK 13 of 41 (LAYA_GATES_ONLY=target-check,account-check,state-dir,endpoint-check,target-selftest,region-selftest,weights-bucket-region,sha256-helper,deploy-refusals,upload-eligibility,grant-listing-failure,teardown-classify,deploy-verify; not a full sweep)",
+    "AWS CALLS: 0"
+  ],
+  "mutations": [
+    {
+      "id": "K1",
+      "edit": "remove the `just _laya-target-check` call from laya-deploy",
+      "expected_red_case": "WIRING order laya-deploy",
+      "red": true,
+      "exit": 1,
+      "red_line": "FAIL WIRING WIRING order laya-deploy: target None, account 79, first aws 95: the checks are missing or not before the first AWS line",
+      "other_fail_lines": [
+        "FAIL ISOLATION 3 augury-config: exit 1, expected REFUSED eligibility SyntheticNotDeployable after target-check ok (log: /Users/guy/Development/machine-learning/aprender/models/decide/selftest/target.p"
+      ],
+      "restored_line": "TARGET SELFTEST OK",
+      "restored_exit": 0,
+      "justfile_clean_after": true
+    },
+    {
+      "id": "K2",
+      "edit": "`_laya-state-dir` prints models/decide for every profile",
+      "expected_red_case": "STATE accept augury-dev and ISOLATION 1",
+      "red": true,
+      "exit": 1,
+      "red_line": "FAIL STATE accept 'augury-dev': exit 0, got 'models/decide'",
+      "other_fail_lines": [
+        "FAIL ISOLATION 1 render: exit 0, augury config present, default sha256 4e0f56db634293aef4376c4d7ae623695b44834a08e8778efded7f81538f69d9 -> e34caa3e77c26588cbf314b0855b0507d782ef16372c2ad42000c309c4028",
+        "FAIL ISOLATION 2 no-augury-config: exit 2, expected exit 2 REFUSED config: models/decide/deploy-config-aprender-mcp-decide-antisemite.toml does not exist (log: /Users/guy/Development/machine-learning/",
+        "FAIL VERIFY STATE augury-dev: exit 0, expected <endpoint from models/decide/deploy-aprender-mcp-decide-antisemite.state/deployment.toml>, plan files under models/decide/ and the default ones unchanged"
+      ],
+      "restored_line": "TARGET SELFTEST OK",
+      "restored_exit": 0,
+      "justfile_clean_after": true
+    },
+    {
+      "id": "K3",
+      "edit": "drop the AWS_REGION agreement from `_laya-target-check`",
+      "expected_red_case": "TARGET refuse augury-dev with AWS_REGION=us-east-1",
+      "red": true,
+      "exit": 1,
+      "red_line": "FAIL TARGET refuse augury-dev with AWS_REGION=us-east-1: exit 0, stdout 'augury-dev eu-west-1 .eu-west.augury.pmcp.run 783960389328' (stderr: target-check ok: profile augury-dev -> pmcp.run target augury-dev, region eu-west-1, account 783960389328, endpoints *.eu-west.augury.pmcp.run )",
+      "other_fail_lines": [
+        "FAIL TEARDOWN REACHABLE refuse: exit 0, expected exit 2 REFUSED target and no put-function-concurrency (log: /Users/guy/Development/machine-learning/aprender/models/decide/selftest/target.neo2rx/teard"
+      ],
+      "restored_line": "TARGET SELFTEST OK",
+      "restored_exit": 0,
+      "justfile_clean_after": true
+    },
+    {
+      "id": "K4",
+      "edit": "`_laya-endpoint-check` stops comparing the host suffix",
+      "expected_red_case": "ENDPOINT refuse us-east-for-augury and the suffix-spoof host",
+      "red": true,
+      "exit": 1,
+      "red_line": "FAIL ENDPOINT refuse https://aprender-mcp-decide-motivation.us-east.true-mcp.com/mcp for augury-dev: exit 0, got 'aprender-mcp-decide-motivation' (target-check ok: profile augury-dev -> pmcp.run target augury-dev, region eu-west-1, account 783960389328, endpoints *.eu-west.augury.pmcp.run)",
+      "other_fail_lines": [
+        "FAIL ENDPOINT refuse https://aprender-mcp-decide-motivation.eu-west.augury.pmcp.run/mcp for ze-kasher-dev: exit 0, got 'aprender-mcp-decide-motivation' (target-check ok: profile ze-kasher-dev -> pmcp.",
+        "FAIL ENDPOINT refuse https://aprender-mcp-decide-motivation.eu-west.augury.pmcp.run.evil.example/mcp for augury-dev: exit 0, got 'aprender-mcp-decide-motivation' (target-check ok: profile augury-dev -",
+        "FAIL ENDPOINT refuse https://x.evil.eu-west.augury.pmcp.run/mcp for augury-dev: exit 0, got 'x' (target-check ok: profile augury-dev -> pmcp.run target augury-dev, region eu-west-1, account 7839603893"
+      ],
+      "restored_line": "TARGET SELFTEST OK",
+      "restored_exit": 0,
+      "justfile_clean_after": true
+    },
+    {
+      "id": "K5",
+      "edit": "laya-deploy-verify's STATE back to models/decide/deploy-$SERVER.state/deployment.toml",
+      "expected_red_case": "VERIFY STATE augury-dev",
+      "red": true,
+      "exit": 1,
+      "red_line": "FAIL VERIFY STATE augury-dev: exit 0, expected <endpoint from models/decide/augury-dev/deploy-aprender-mcp-decide-antisemite.state/deployment.toml>, plan files under models/decide/augury-dev/ and the default ones unchanged (b2a5628682de4ca9cc9520860efd131a1a63bbf310b841906e54049dc36da252 68cdc457c40",
+      "other_fail_lines": [],
+      "restored_line": "TARGET SELFTEST OK",
+      "restored_exit": 0,
+      "justfile_clean_after": true
+    },
+    {
+      "id": "K6",
+      "edit": "laya-deploy loses its `export PMCP_TARGET` line",
+      "expected_red_case": "WIRING laya-deploy export",
+      "red": true,
+      "exit": 1,
+      "red_line": "FAIL WIRING WIRING laya-deploy export: export PMCP_TARGET None, unset PMCP_API_URL 51, contain() 111, first contain 144, cargo pmcp deploy 130",
+      "other_fail_lines": [],
+      "restored_line": "TARGET SELFTEST OK",
+      "restored_exit": 0,
+      "justfile_clean_after": true
+    },
+    {
+      "id": "K7",
+      "edit": "laya-upload's `just _laya-target-check` line moved after its first `aws` line",
+      "expected_red_case": "WIRING order laya-upload",
+      "red": true,
+      "exit": 1,
+      "red_line": "FAIL WIRING WIRING order laya-upload: target 54, account 48, first aws 53: the checks are missing or not before the first AWS line",
+      "other_fail_lines": [],
+      "restored_line": "TARGET SELFTEST OK",
+      "restored_exit": 0,
+      "justfile_clean_after": true
+    },
+    {
+      "id": "K8",
+      "edit": "`_laya-target-check` drops the PMCP_API_URL agreement",
+      "expected_red_case": "TARGET refuse augury-dev with PMCP_API_URL = the us-east-1 control plane",
+      "red": true,
+      "exit": 1,
+      "red_line": "FAIL TARGET refuse augury-dev with PMCP_API_URL = the us-east-1 control plane: exit 0, stdout 'augury-dev eu-west-1 .eu-west.augury.pmcp.run 783960389328' (stderr: target-check ok: profile augury-dev -> pmcp.run target augury-dev, region eu-west-1, account 783960389328, endpoints *.eu-west.augury.pm",
+      "other_fail_lines": [],
+      "restored_line": "TARGET SELFTEST OK",
+      "restored_exit": 0,
+      "justfile_clean_after": true
+    },
+    {
+      "id": "K9",
+      "edit": "`_laya-account-check` accepts any 12-digit account",
+      "expected_red_case": "ACCOUNT refuse (cross-account answers)",
+      "red": true,
+      "exit": 1,
+      "red_line": "FAIL ACCOUNT refuse augury-dev, sts answers ze-kasher-dev's account: exit 0, 1 sts call(s) (log: target-check ok: profile augury-dev -> pmcp.run target augury-dev, region eu-west-1, account 783960389328, endpoints *.eu-west.augury.pmcp.run target-account ok: profile augury-dev is account 78396038)",
+      "other_fail_lines": [
+        "FAIL ACCOUNT refuse ze-kasher-dev, sts answers augury-dev's account: exit 0, 1 sts call(s) (log: target-check ok: profile ze-kasher-dev -> pmcp.run target dev, region us-east-1, account 816069129666, "
+      ],
+      "restored_line": "TARGET SELFTEST OK",
+      "restored_exit": 0,
+      "justfile_clean_after": true
+    },
+    {
+      "id": "K10",
+      "edit": "laya-teardown passes the literal region us-east-1 to its target check",
+      "expected_red_case": "TEARDOWN REACHABLE accept",
+      "red": true,
+      "exit": 1,
+      "red_line": "FAIL TEARDOWN REACHABLE accept: exit 2, expected CONTAINED and no REFUSED with laya-deploy's exported environment (log: /Users/guy/Development/machine-learning/aprender/models/decide/selftest/target.hRaUhO/teardown-ok.log)",
+      "other_fail_lines": [],
+      "restored_line": "TARGET SELFTEST OK",
+      "restored_exit": 0,
+      "justfile_clean_after": true
+    },
+    {
+      "id": "R-AUG",
+      "edit": "`_laya-region-selftest` drops the models/decide/augury-dev/ path from its backup and restore",
+      "expected_red_case": "Task 1's planted-augury check (AUG block)",
+      "red": true,
+      "exit": 1,
+      "red_line": "the region selftest did not restore the models/decide/augury-dev/ config path",
+      "other_fail_lines": [],
+      "restored_line": "AUGURY RESTORE OK",
+      "restored_exit": 0,
+      "justfile_clean_after": true
+    }
+  ],
+  "never_run": [
+    "cargo pmcp configure use"
+  ],
+  "redaction": "12-digit numbers other than the two table accounts (a scripted fake aws's ids) are replaced by <fake-account>",
+  "measured_on": "2026-10-28T01:20Z",
+  "commit": "993f87da8eb7"
+}
