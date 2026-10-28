@@ -119,6 +119,7 @@ import math
 import re
 import sys
 import tempfile
+import unicodedata
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -768,6 +769,365 @@ def _enrichment_cases(tmp, good, base_files, case):
             ["--enrichment", str(tracer), "--out", str(DEFAULT_OUT) + "/."])
     refused("an --enrichment path under the repo: REFUSED enrichment-in-repo", "enrichment-in-repo",
             ["--enrichment", str(HERE / "data.py"), "--out", str(fresh())])
+
+    # ---------------------------------------------------------------------------------------- the whole rule set
+    _, _, ctx = _build_v1(good)
+    base_train_lines = base_files["train.jsonl"].count(b"\n")
+    named = lambda rs: [(t, LABELS[y]) for t, y in rs]  # noqa: E731
+
+    def merged(paths, extra=()):
+        """main() over the enrichment files -> (ok, manifest, train bytes, eval bytes, detail)."""
+        out = fresh()
+        argv = []
+        for p in paths:
+            argv += ["--enrichment", str(p)]
+        rc, o, e = run(argv + ["--out", str(out)] + list(extra))
+        mbody = (out / MANIFEST_NAME).read_text(encoding="utf-8") if (out / MANIFEST_NAME).is_file() else ""
+        ok = rc == 0 and "PREPARE OK" in o and SENTINEL not in o + e + mbody
+        read = lambda n: (out / n).read_bytes() if (out / n).is_file() else b""  # noqa: E731
+        return (ok, json.loads(mbody) if mbody else {"totals": {}}, read("train.jsonl"), read("eval.jsonl"),
+                "exit %s %s" % (rc, rule_of(e) or ""))
+
+    def totals_are(m, **want):
+        t = m.get("totals", {})
+        return all(t.get(k) == v for k, v in want.items())
+
+    def train_texts(tr):
+        return [json.loads(x)["text"] for x in tr.decode("utf-8").splitlines()]
+
+    def first(rows, c, skip=()):
+        return next(t for t, y in rows if y == c and not any(s in t for s in skip))
+
+    t_soc, t_con = first(ctx["train_rows"], 0), first(ctx["train_rows"], 1)
+    t_cafe = next(t for t, _ in ctx["train_rows"] if t.startswith("caf"))
+    e0, e1 = ctx["eval_rows"][0][0], ctx["eval_rows"][1][0]
+    new = lambda k: "made-up new enrichment text %d %s" % (k, SENTINEL)  # noqa: E731
+
+    print("enrichment D-11 (train only; dropped_eval_overlap):")
+    f = fx("d11", [{"text": e0, "label": LABELS[ctx["eval_rows"][0][1]], "evidence": "clear" if ctx["eval_rows"][0][1] < 2 else "none"},
+                   {"text": "  " + e1.replace(" ", " \t ") + "\n", "label": "conspiratorial", "evidence": "clear"},
+                   {"text": new(1)}])
+    ok, m, tr, ev, d = merged([f])
+    case("dropped_eval_overlap: an eval text (same label) and its whitespace variant (other label) are dropped, counted 2",
+         ok and totals_are(m, dropped_eval_overlap=2, rows_added=1), d + " " + json.dumps(m["totals"]))
+    case("dropped_eval_overlap: eval.jsonl stays the base build's bytes; neither eval text enters train",
+         ev == base_files["eval.jsonl"] and not ({normalized_sha256(e0), normalized_sha256(e1)}
+                                                 & {normalized_sha256(t) for t in train_texts(tr)}))
+
+    def reduced(train, ev_rows, mixed=()):
+        """A small synthetic context (made-up texts) whose base files are built exactly as the v1 build writes them."""
+        rctx = {"kept": train + ev_rows, "train_rows": train, "eval_rows": ev_rows,
+                "eval_hashes": {normalized_sha256(t) for t, _ in ev_rows}, "mixed_hashes": set(mixed),
+                "csv_sha256": "0" * 64}
+        return rctx, {"task.json": base_files["task.json"], "train.jsonl": jsonl_bytes(named(train)),
+                      "eval.jsonl": jsonl_bytes(named(ev_rows))}
+
+    small_train = ([("reduced made-up social %d %s" % (i, SENTINEL), 0) for i in range(3)]
+                   + [("reduced made-up conspiratorial %d %s" % (i, SENTINEL), 1) for i in range(6)]
+                   + [("reduced made-up other %d %s" % (i, SENTINEL), 2) for i in range(6)])
+    small_eval = [("café reduced eval %s" % SENTINEL, 2), ("reduced eval social %s" % SENTINEL, 0),
+                  ("reduced eval conspiratorial %s" % SENTINEL, 1)]
+    rctx, rbase = reduced(small_train, small_eval)
+    try:
+        src = read_enrichment(fx("d11-nfc", [{"text": "café reduced eval %s" % SENTINEL, "label": "social_affiliative",
+                                              "evidence": "clear"}]), "source-1")
+        _, rm = merge_enrichment(rctx, rbase, [src])
+        case("dropped_eval_overlap: an NFC variant (decomposed) of an eval text is dropped whatever its label",
+             rm["totals"]["dropped_eval_overlap"] == 1 and rm["totals"]["rows_added"] == 0, json.dumps(rm["totals"]))
+    except Exception as e:
+        case("dropped_eval_overlap: an NFC variant (decomposed) of an eval text is dropped whatever its label", False,
+             type(e).__name__)
+
+    print("enrichment D-12 (dropped_conflict_groups, no source precedence; collapsed_same_label):")
+    f = fx("d12-partner", [{"text": t_soc, "label": "conspiratorial", "evidence": "clear"}, {"text": new(2)}])
+    ok, m, tr, ev, d = merged([f])
+    case("dropped_conflict_groups: a partner train text under another mapped label drops the group, partner row included",
+         ok and totals_are(m, dropped_conflict_groups=1, dropped_conflict_rows_enriched=1)
+         and normalized_sha256(t_soc) not in {normalized_sha256(t) for t in train_texts(tr)}, d + " " + json.dumps(m["totals"]))
+    case("dropped_conflict_rows_partner 1 (partner-row drop manifest): train_sha256 differs from base_train_sha256 and "
+         "train rows = base - partner rows dropped + rows_added",
+         totals_are(m, dropped_conflict_rows_partner=1, rows_added=1)
+         and m.get("train_sha256") == sha256_bytes(tr) != m.get("base", {}).get("base_train_sha256")
+         and m.get("train_rows") == tr.count(b"\n") == base_train_lines - 1 + 1, json.dumps(m["totals"]))
+    f = fx("d12-mapped", [{"text": t_con, "label": "conspiratorial", "evidence": "weak"}])
+    ok, m, tr, ev, d = merged([f])
+    case("dropped_conflict_groups compares MAPPED labels: conspiratorial+weak (-> other) against a conspiratorial partner row",
+         ok and totals_are(m, dropped_conflict_groups=1, dropped_conflict_rows_partner=1, rows_added=0), d)
+    fa = fx("d12-two-a", [{"post_id": "same", "text": new(3), "label": "social_affiliative", "evidence": "clear"}])
+    fb = fx("d12-two-b", [{"post_id": "same", "text": new(3), "label": "other", "evidence": "none"}])
+    ok, m, tr, ev, d = merged([fa, fb])
+    ok2, m2, tr2, _, _ = merged([fb, fa])
+    case("dropped_conflict_groups: two enriched files, one text, two labels: both rows dropped, no partner row",
+         ok and totals_are(m, dropped_conflict_groups=1, dropped_conflict_rows_enriched=2, dropped_conflict_rows_partner=0,
+                           rows_added=0) and tr == base_files["train.jsonl"], d)
+    case("dropped_conflict_groups: no source precedence (the reversed file order gives the same train bytes and totals)",
+         ok2 and tr2 == tr and m2["totals"] == m["totals"])
+    f = fx("d12-collapse", [{"text": "  " + t_soc.replace(" ", "   ") + " ", "label": "social_affiliative", "evidence": "clear"},
+                            {"text": unicodedata.normalize("NFD", t_cafe), "label": "other", "evidence": "none"}])
+    ok, m, tr, ev, d = merged([f])
+    case("collapsed_same_label: whitespace and NFC variants of partner rows, same label, collapse into the partner's exact text",
+         ok and totals_are(m, collapsed_same_label=2, rows_added=0, dropped_conflict_groups=0)
+         and tr == base_files["train.jsonl"], d + " " + json.dumps(m["totals"]))
+    fa = fx("d12-same-a", [{"text": new(4), "label": "conspiratorial", "evidence": "clear"}])
+    fb = fx("d12-same-b", [{"text": " " + new(4) + "  ", "label": "conspiratorial", "evidence": "clear"}])
+    ok, m, tr, ev, d = merged([fa, fb])
+    case("collapsed_same_label: one new text in two files, same label, is one row with the first file's exact text",
+         ok and totals_are(m, collapsed_same_label=1, rows_added=1) and train_texts(tr)[-1] == new(4), d)
+
+    print("enrichment non-resurrection (dropped_partner_mixed_group):")
+    mix1, mix2 = "conflicting made-up text one " + SENTINEL, "conflicting made-up text two " + SENTINEL
+    f = fx("mixed", [{"text": mix1, "label": "social_affiliative", "evidence": "clear"},
+                     {"text": " " + mix2, "label": "other", "evidence": "none"}])
+    ok, m, tr, ev, d = merged([f])
+    case("dropped_partner_mixed_group: both synthetic-CSV mixed groups stay dropped, whatever the enriched label",
+         ok and totals_are(m, dropped_partner_mixed_group=2, rows_added=0)
+         and not ({normalized_sha256(mix1), normalized_sha256(mix2)} & {normalized_sha256(t) for t in train_texts(tr)}),
+         d + " " + json.dumps(m["totals"]))
+
+    print("enrichment D-15 (mapping; enrichment-label-evidence):")
+    served_cells = [(lab, ev) for (lab, ev), s in MAPPING.items() if s is not None]
+    f = fx("d15", [{"post_id": "cell-%d" % i, "text": new(100 + i), "label": lab, "evidence": ev}
+                   for i, (lab, ev) in enumerate(served_cells)])
+    ok, m, tr, ev, d = merged([f])
+    src = (m.get("sources") or [{}])[0]
+    tail = [json.loads(x)["label"] for x in tr.decode("utf-8").splitlines()[base_train_lines:]]
+    case("D-15: the 9 served cells map as declared (weak and mixed count as other)",
+         ok and tail == [MAPPING[c] for c in served_cells], str(tail))
+    case("D-15: every (label, evidence) cell is counted once in the manifest",
+         src.get("cells") == {_cell(*c): 1 for c in served_cells}, json.dumps(src.get("cells")))
+    case("D-15: per_label counts the EXPERT label, per_evidence the evidence",
+         src.get("per_label") == {"social_affiliative": 3, "conspiratorial": 3, "other": 3}
+         and src.get("per_evidence") == {"clear": 2, "weak": 3, "mixed": 3, "none": 1}
+         and m.get("train_counts", {}).get("other") == sum(1 for _, y in ctx["train_rows"] if y == 2) + 7)
+    for lab, ev in [(lab, ev) for (lab, ev), s in MAPPING.items() if s is None]:
+        refused("enrichment-label-evidence: %s+%s is refused naming the row and both fields" % (lab, ev), REFUSED_PAIR,
+                ["--enrichment", str(fx("pair-%s-%s" % (lab, ev), [{"text": new(5)}, {"text": new(6), "label": lab, "evidence": ev}])),
+                 "--out", str(fresh())], where=("source-1 row 2", "fields label and evidence"))
+
+    print("enrichment D-16 (annotation_mode recorded, never acted on):")
+    rows16 = [{"text": new(200 + i), "label": lab, "evidence": ev} for i, (lab, ev) in enumerate(served_cells)]
+    fa = fx("d16-shown", rows16, {"annotation_mode": "prediction_shown"})
+    fb = fx("d16-blind", rows16, {"annotation_mode": "blind"})
+    ok_a, ma, tra, _, da = merged([fa])
+    ok_b, mb, trb, _, db = merged([fb])
+    case("annotation_mode: prediction_shown and blind fixtures both succeed", ok_a and ok_b, da + " / " + db)
+    case("annotation_mode: the two fixtures give byte-identical train.jsonl", tra == trb and len(tra) > len(base_files["train.jsonl"]))
+
+    def semantic(mm):
+        s = json.loads(json.dumps(mm))
+        for src_ in s.get("sources", []):
+            src_.pop("sha256", None)
+            src_.pop("annotation_mode", None)
+        return s
+
+    sa, sb = (ma.get("sources") or [{}])[0], (mb.get("sources") or [{}])[0]
+    differ = sorted(k for k in set(sa) | set(sb) if sa.get(k) != sb.get(k))
+    case("annotation_mode: the manifests are equal on base, totals, train_sha256, train_counts and every source count",
+         semantic(ma) == semantic(mb) and all(ma.get(k) == mb.get(k) for k in ("base", "totals", "train_sha256", "train_counts")))
+    case("annotation_mode: only each source's sha256 and its annotation_mode count differ",
+         differ == ["annotation_mode", "sha256"] and sa.get("annotation_mode") == {"prediction_shown": 9, "blind": 0}
+         and sb.get("annotation_mode") == {"prediction_shown": 0, "blind": 9}, str(differ))
+
+    print("enrichment no text (file name, symlink, sha256 pin):")
+    fn = fx("file-name", [{"text": new(7)}])
+    fn2 = fx("file-name-second", [{"text": new(8)}])
+    ok, m, tr, ev, d = merged([fn, fn2])
+    case("file name: fixtures whose FILE NAME carries the sentinel succeed with it absent from stdout, stderr and manifest",
+         ok and SENTINEL in fn.name, d)
+    case("file name: the files are source-1 and source-2 in command-line order, identified by sha256 only",
+         [(s.get("id"), s.get("sha256")) for s in m.get("sources", [])] == [("source-1", sha256_file(fn)), ("source-2", sha256_file(fn2))]
+         and all(set(s) == {"id", "sha256"} | set(SOURCE_COUNT_KEYS) for s in m.get("sources", [])))
+    link = tmp / ("link-%s.jsonl" % SENTINEL)
+    link.symlink_to(HERE / "data.py")
+    refused("symlink: a symlink OUTSIDE the repo pointing at a file UNDER the repo is refused enrichment-in-repo",
+            "enrichment-in-repo", ["--enrichment", str(link), "--out", str(fresh())])
+    link2 = tmp / ("link-out-%s.jsonl" % SENTINEL)
+    link2.symlink_to(fn)
+    ok, m, _, _, d = merged([link2])
+    case("symlink: a symlink outside the repo pointing at a file outside it is read in place", ok, d)
+    refused("enrichment-sha256: a --enrichment-sha256 that differs is refused", "enrichment-sha256",
+            ["--enrichment", str(fn), "--enrichment-sha256", "0" * 64, "--out", str(fresh())])
+    ok, m, _, _, d = merged([fn], ["--enrichment-sha256", sha256_file(fn)])
+    case("enrichment-sha256: a matching pin is accepted", ok, d)
+    refused("enrichment-sha256: one pin for two files is refused", "enrichment-sha256",
+            ["--enrichment", str(fn), "--enrichment", str(fn2), "--enrichment-sha256", sha256_file(fn), "--out", str(fresh())])
+    out_v = fresh()
+    rc, o, e = run(["--enrichment", str(HERE / ".." / ".." / "contracts" / "motivation-enrichment-v1.yaml"), "--out", str(out_v)])
+    case("enrichment-in-repo: a path spelled through '..' is resolved before the check", rc == 2 and rule_of(e) == "enrichment-in-repo"
+         and not out_v.exists(), "exit %s" % rc)
+
+    print("enrichment pass-through (data.py's own refusals after the merge):")
+    try:
+        src = read_enrichment(fx("pass-ok", [{"text": new(9), "label": "other", "evidence": "none"}]), "source-1")
+        merge_enrichment(rctx, rbase, [src])
+        case("pass-through control: the reduced context merges cleanly with an unrelated row", True)
+    except Exception as e:
+        case("pass-through control: the reduced context merges cleanly with an unrelated row", False, type(e).__name__)
+    try:
+        src = read_enrichment(fx("pass-thin", [{"text": small_train[0][0], "label": "conspiratorial", "evidence": "clear"}]),
+                              "source-1")
+        merge_enrichment(rctx, rbase, [src])
+        case("pass-through: a conflict that thins a class below calibration_split's minimum surfaces its own data.py name",
+             False, "accepted")
+    except DataError as e:
+        case("pass-through: a conflict that thins a class below calibration_split's minimum surfaces its own data.py name",
+             e.rule == "train-class-too-small" and not e.rule.startswith("enrichment-") and SENTINEL not in str(e), e.rule)
+    except Exception as e:
+        case("pass-through: a conflict that thins a class below calibration_split's minimum surfaces its own data.py name",
+             False, type(e).__name__)
+
+    print("enrichment contract mirror (contracts/motivation-enrichment-v1.yaml):")
+    import yaml
+    c = yaml.safe_load(ENRICHMENT_CONTRACT.read_text(encoding="utf-8"))
+    fmt = c["formats"]["motivation-enrichment-v1"]
+    head_c, row_c = fmt["header"], fmt["row"]
+    contract_mapping = {(x["label"], x["evidence"]): x.get("served") for x in c["mapping"]["cells"]}
+    mirrors = [
+        ("refusal names (17, in order)", ENRICHMENT_REFUSALS, tuple(r["name"] for r in c["refusals"])),
+        ("header keys", HEADER_KEYS, tuple(head_c)),
+        ("row keys", ROW_KEYS_ENRICHMENT, tuple(row_c)),
+        ("format const", ENRICHMENT_FORMAT, head_c["format"]["const"]),
+        ("annotation_mode enum", ANNOTATION_MODES, tuple(head_c["annotation_mode"]["enum"])),
+        ("evidence enum", EVIDENCE, tuple(row_c["evidence"]["enum"])),
+        ("selection_slice enum", SLICES, tuple(row_c["selection_slice"]["enum"])),
+        ("label enum and served labels", (tuple(LABELS), tuple(LABELS)), (tuple(row_c["label"]["enum"]), tuple(c["served_task"]["labels"]))),
+        ("mapping (12 cells, served or refused)", MAPPING, contract_mapping),
+        ("refused cells name enrichment-label-evidence", {REFUSED_PAIR},
+         {x["refused"] for x in c["mapping"]["cells"] if "refused" in x}),
+        ("caps", CAPS, fmt["caps"]),
+        ("post_id pattern", POST_ID_PATTERN, row_c["post_id"]["pattern"]),
+        ("artifact_sha256 pattern", SHA256_PATTERN, head_c["artifact_sha256"]["pattern"]),
+        ("text character limits", (TEXT_MIN_CHARS, TEXT_MAX_CHARS, TEXT_MAX_CHARS),
+         (row_c["text"]["min_chars"], row_c["text"]["max_chars"], fmt["caps"]["text_chars"])),
+        ("guide character limits", (GUIDE_MIN_CHARS, GUIDE_MAX_CHARS), (head_c["guide"]["min_chars"], head_c["guide"]["max_chars"])),
+        ("unique keys", ["post_id"], fmt["unique"]),
+        ("merge rule names", MERGE_RULES, tuple(r["name"] for r in c["merge"]["rules"])),
+        ("v1 pins (task, base train, eval)", (V1_TASK_SHA256, V1_TRAIN_SHA256, V1_EVAL_SHA256),
+         (c["served_task"]["task_sha256"], c["merge"]["base_train_sha256"], c["merge"]["eval"]["sha256"])),
+        ("manifest filename and schema", (MANIFEST_NAME, MANIFEST_SCHEMA), (c["manifest"]["filename"], c["manifest"]["schema"])),
+    ]
+    for what, mine, theirs in mirrors:
+        case("contract mirror: %s" % what, mine == theirs)
+    case("contract mirror: every merge-rule counter is a manifest total", set(MERGE_RULES[1:]) <= set(TOTALS_KEYS))
+
+    print("enrichment boundary (limits read from the contract):")
+
+    def reads(name, rule, path):
+        try:
+            read_enrichment(path, "source-1")
+            case(name, rule is None, "accepted")
+        except DataError as e:
+            case(name, e.rule == rule, e.rule)
+        except Exception as e:
+            case(name, False, type(e).__name__)
+
+    pat = row_c["post_id"]["pattern"]
+    for pid, want in [("a", True), ("A" * 128, True), ("p13.x_y:z-9", True), ("A" * 129, False), ("-a", False),
+                      ("a b", False), ("", False), ("a\n", False), ("café", False)]:
+        tied = bool(re.fullmatch(pat, pid)) == want
+        reads("boundary post_id (%d characters) %s the contract pattern%s" % (len(pid), "passes" if want else "is refused by",
+                                                                            "" if tied else " [VECTOR DISAGREES]"),
+              None if want and tied else ("enrichment-field" if tied else "vector"),
+              fx("pid-%d-%d" % (len(pid), int(want)), [{"post_id": pid}]))
+    tmax = row_c["text"]["max_chars"]
+    at = ("x" * (tmax - len(SENTINEL) - 1)) + " " + SENTINEL
+    reads("boundary text of max_chars (%d) is accepted" % tmax, None, fx("text-at", [{"text": at}]))
+    reads("boundary text of max_chars + 1 (%d) is refused enrichment-field" % (tmax + 1), "enrichment-field",
+          fx("text-over", [{"text": "x" + at}]))
+    gmax = head_c["guide"]["max_chars"]
+    reads("boundary guide of max_chars (%d) is accepted" % gmax, None, fx("guide-at", [{}], {"guide": "g" * gmax}))
+    reads("boundary guide of max_chars + 1 (%d) is refused enrichment-header" % (gmax + 1), "enrichment-header",
+          fx("guide-over", [{}], {"guide": "g" * (gmax + 1)}))
+    rcap = fmt["caps"]["rows"]
+    many = [{"post_id": "r%d" % i, "text": "made-up row %d %s" % (i, SENTINEL)} for i in range(rcap + 1)]
+    p_at, p_over = fx("rows-at", many[:rcap]), fx("rows-over", many)
+    reads("boundary rows equal to caps.rows (%d) are accepted" % rcap, None, p_at)
+    reads("boundary rows of caps.rows + 1 (%d) are refused enrichment-size" % (rcap + 1), "enrichment-size", p_over)
+    p_at.unlink()
+    p_over.unlink()
+    bcap = fmt["caps"]["file_bytes"]
+    head_line = json.dumps({"format": ENRICHMENT_FORMAT, "annotation_mode": "blind", "artifact_sha256": FIXTURE_ARTIFACT_SHA256,
+                            "guide": GUIDE_DESIGNATION})
+    row_line = json.dumps({"post_id": "big", "text": "made-up big file " + SENTINEL, "label": "other", "evidence": "none",
+                           "selection_slice": "quota"})
+    pad = bcap - (len(head_line) + 1 + len(row_line) + 1)
+    b_at, b_over = tmp / "enr" / ("bytes-at-%s.jsonl" % SENTINEL), tmp / "enr" / ("bytes-over-%s.jsonl" % SENTINEL)
+    b_at.write_bytes((head_line + "\n" + row_line + " " * pad + "\n").encode("utf-8"))
+    b_over.write_bytes((head_line + "\n" + row_line + " " * (pad + 1) + "\n").encode("utf-8"))
+    reads("boundary file of exactly caps.file_bytes (%d bytes) is accepted" % b_at.stat().st_size, None, b_at)
+    reads("boundary file of caps.file_bytes + 1 (%d bytes) is refused enrichment-size" % b_over.stat().st_size, "enrichment-size", b_over)
+    b_at.unlink()
+
+    print("enrichment refusals through main (exit 2, row and field named, no sentinel):")
+    o_ = lambda: str(fresh())  # noqa: E731
+    E = lambda p: ["--enrichment", str(p), "--out", o_()]  # noqa: E731
+    refused("enrichment-missing: an absent path (the sentinel in its name)", "enrichment-missing", E(tmp / ("absent-%s.jsonl" % SENTINEL)))
+    refused("enrichment-missing: a directory is not a regular file", "enrichment-missing", E(tmp / "enr"))
+    refused("enrichment-size: a file of caps.file_bytes + 1 is refused before it is read", "enrichment-size", E(b_over))
+    b_over.unlink()
+    bad_utf8 = tmp / "enr" / ("bad-utf8-%s.jsonl" % SENTINEL)
+    bad_utf8.write_bytes(_synthetic_enrichment(tmp / "enr" / "tmp.jsonl", [{}]).read_bytes()
+                         + ('{"post_id": "u", "text": "made-up %s ' % SENTINEL).encode("utf-8") + b"\xff\xfe" + b'"}\n')
+    refused("enrichment-encoding: an invalid UTF-8 byte names row 2", "enrichment-encoding", E(bad_utf8), where=("source-1 row 2",))
+    e_ = refused("enrichment-encoding: a lone-surrogate text names row and field, never its code point", "enrichment-encoding",
+                 E(fx("surrogate", [{}, {"text": "made-up \ud800 " + SENTINEL}])), where=("source-1 row 2 field text",))
+    case("enrichment-encoding: the lone-surrogate refusal carries no code point and no data.py rule name",
+         "U+" not in e_ and "row-encoding" not in e_)
+    refused("enrichment-json: a post line that is not JSON", "enrichment-json",
+            E(fx("not-json", [{}, "not json at all " + SENTINEL])), where=("source-1 row 2",))
+    refused("enrichment-json: an object that repeats a key", "enrichment-json",
+            E(fx("dup-key", ['{"post_id": "a", "post_id": "b", "text": "made-up %s", "label": "other", "evidence": "none", '
+                             '"selection_slice": "control"}' % SENTINEL])), where=("source-1 row 1",))
+    refused("enrichment-json: a line holding a JSON array", "enrichment-json", E(fx("array", [json.dumps([SENTINEL])])),
+            where=("source-1 row 1",))
+    empty = tmp / "enr" / ("zero-bytes-%s.jsonl" % SENTINEL)
+    empty.write_bytes(b"")
+    refused("enrichment-header: a zero-byte file has no header (row 0)", "enrichment-header", E(empty), where=("source-1 row 0",))
+    refused("enrichment-header: the wrong format value", "enrichment-header", E(fx("h-format", [{}], {"format": SENTINEL})),
+            where=("row 0 field format",))
+    refused("enrichment-header: a missing header field", "enrichment-header", E(fx("h-missing", [{}], {"guide": _DROP})),
+            where=("source-1 row 0",))
+    refused("enrichment-header: an unknown header key (counted, never echoed)", "enrichment-header",
+            E(fx("h-unknown", [{}], {SENTINEL: 1})), where=("source-1 row 0", "1 unknown key"))
+    refused("enrichment-header: an artifact_sha256 off the pattern", "enrichment-header",
+            E(fx("h-art", [{}], {"artifact_sha256": SENTINEL})), where=("row 0 field artifact_sha256",))
+    refused("enrichment-annotation-mode: an undeclared annotation_mode (annotation_mode named, never echoed)",
+            "enrichment-annotation-mode", E(fx("h-mode", [{}], {"annotation_mode": SENTINEL})), where=("row 0 field annotation_mode",))
+    refused("enrichment-row: a post line missing a row field", "enrichment-row", E(fx("r-missing", [{}, {"evidence": _DROP}])),
+            where=("source-1 row 2",))
+    refused("enrichment-row: an unknown row key (counted, never echoed)", "enrichment-row",
+            E(fx("r-unknown", [{SENTINEL: "x"}])), where=("source-1 row 1", "1 unknown key"))
+    refused("enrichment-field: a post_id off the pattern", "enrichment-field", E(fx("f-pid", [{"post_id": SENTINEL + " x"}])),
+            where=("source-1 row 1 field post_id",))
+    refused("enrichment-field: a text that is not a string", "enrichment-field", E(fx("f-type", [{"text": [SENTINEL]}])),
+            where=("source-1 row 1 field text",))
+    refused("enrichment-field: a whitespace-only text", "enrichment-field", E(fx("f-blank", [{}, {"text": " \t　 "}])),
+            where=("source-1 row 2 field text",))
+    refused("enrichment-field: a text over max_chars, by count", "enrichment-field", E(fx("f-long", [{"text": "x" + at}])),
+            where=("source-1 row 1 field text", "%d characters" % (tmax + 1)))
+    refused("enrichment-label: a label outside the served labels", "enrichment-label", E(fx("l", [{"label": SENTINEL}])),
+            where=("source-1 row 1 field label", "%d characters" % len(SENTINEL)))
+    refused("enrichment-evidence: an evidence value outside the enum", "enrichment-evidence", E(fx("ev", [{"evidence": SENTINEL}])),
+            where=("source-1 row 1 field evidence",))
+    refused("enrichment-slice: a selection_slice outside the enum", "enrichment-slice",
+            E(fx("sl", [{"selection_slice": SENTINEL}])), where=("source-1 row 1 field selection_slice",))
+    refused("enrichment-duplicate-post-id: a post_id repeated in one file", "enrichment-duplicate-post-id",
+            E(fx("dup-pid", [{"post_id": "p"}, {"post_id": "q"}, {"post_id": "p"}])),
+            where=("source-1 row 3 field post_id", "row 1"))
+    refused("enrichment-empty: a header and no post rows", "enrichment-empty", E(fx("empty", [])))
+    refused("enrichment-out: --out spelled as another path to the v1 dir", "enrichment-out",
+            ["--enrichment", str(fn), "--out", str(DEFAULT_OUT.parent / ".." / "decide" / DEFAULT_OUT.name)])
+    refused("enrichment-sha256: --enrichment-sha256 without --enrichment", "enrichment-sha256",
+            ["--enrichment-sha256", "0" * 64, "--out", o_()])
+    probe_out, probe_err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(probe_out), contextlib.redirect_stderr(probe_err):
+        print(SENTINEL)
+        print(SENTINEL, file=sys.stderr)
+    case("enrichment control: the capture sees a sentinel on stdout and on stderr",
+         SENTINEL in probe_out.getvalue() and SENTINEL in probe_err.getvalue())
+    case("every refusal rule: the cases produced all 17 declared names (%d) and no other" % len(produced),
+         produced == set(ENRICHMENT_REFUSALS), "missing %s, outside %s"
+         % (sorted(set(ENRICHMENT_REFUSALS) - produced), sorted(produced - set(ENRICHMENT_REFUSALS))))
     return produced
 
 
