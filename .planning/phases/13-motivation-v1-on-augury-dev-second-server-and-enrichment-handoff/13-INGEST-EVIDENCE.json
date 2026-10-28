@@ -1,0 +1,143 @@
+{
+  "schema": "laya-ingest-evidence-v1",
+  "phase": "13",
+  "plan": "13-03",
+  "triple": {
+    "pmcp_target": "augury-dev",
+    "aws_account": "783960389328",
+    "region": "eu-west-1",
+    "endpoint": null
+  },
+  "v1_identity": {
+    "task": "f74a3ad3cfc00c160cc2959d95beb219aec859b394b883e87577a56dc14e7ea3",
+    "train": "f1d84f19ec38ed85356bcbcd1eae6ef8ad07fb97e014f61a17d37adc0d68d378",
+    "eval": "ee95d71fcb5d90d515b9fc6741e5df51087e763fa7f251ace83d9f11d5ccd575",
+    "lines": {
+      "task.json": 9,
+      "train.jsonl": 295,
+      "eval.jsonl": 100
+    },
+    "no_flag_status": "unchanged (byte-identical)",
+    "no_flag_line": "prepared data/decide/motivation-v1 (unchanged (byte-identical))",
+    "check": "check_v1_identity runs in every pinned run"
+  },
+  "selftest": {
+    "ok_cases": 147,
+    "fail_cases": 0,
+    "last_line": "PREPARE MOTIVATION SELFTEST OK",
+    "command": "uv run --project scripts/laya_train --frozen python -I scripts/laya_train/prepare_motivation.py --selftest",
+    "refusal_coverage": "all 17 declared enrichment-* names produced through main(), and no other name"
+  },
+  "fixture_merge": {
+    "csv": "the pinned partner CSV (sha256 bc61c76bd29bcdd4c6466266b4e1161841f2107a4f02f5ff4fd96f1b7a3a4ae7), read in place",
+    "fixture": "one synthetic motivation-enrichment-v1 file of 4 made-up rows, the planted sentinel in every text and in its file name",
+    "eval_byte_identical": true,
+    "task_byte_identical": true,
+    "base_train_prefix": true,
+    "rows_added": 4,
+    "train_counts": {
+      "conspiratorial": 42,
+      "other": 190,
+      "social_affiliative": 67
+    },
+    "sentinel_in_log_or_manifest": false
+  },
+  "proven_on": "synthetic fixtures only; no real enrichment file exists (D-09)",
+  "annotation_mode_policy": "recorded and counted, never acted on (D-16)",
+  "source_identity": "generated ids source-<k>; file names are never printed or written",
+  "transient_copies": "Task 1's verify writes the merged train.jsonl (v1's partner-derived rows plus synthetic rows) to a mktemp directory outside the repository and deletes it in the same command; nothing is copied into the repository",
+  "mutations": [
+    {
+      "id": "N1",
+      "edit": "split seed in the v1 build: RandomState(SPLIT_SEED) -> RandomState(SPLIT_SEED + 1)",
+      "check": "no-flag run on the pinned CSV with --out <tmp>: check_v1_identity",
+      "red": true,
+      "red_line": "PREPARE FAILED: the pinned CSV no longer builds v1's bytes (D-10): eval.jsonl (7191f414576a, not v1's ee95d71fcb5d); train.jsonl (8ed2a6e7a484, not v1's f1d84f19ec38)",
+      "restored": true,
+      "restored_line": "PREPARE MOTIVATION SELFTEST OK; no-flag run: prepared data/decide/motivation-v1 (unchanged (byte-identical))"
+    },
+    {
+      "id": "N2",
+      "edit": "skip the eval-overlap drop (`if h in ctx[\"eval_hashes\"]:` -> `if False:`)",
+      "check": "selftest D-11 case",
+      "red": true,
+      "red_line": "FAIL dropped_eval_overlap: an eval text (same label) and its whitespace variant (other label) are dropped, counted 2 exit 2 eval-train-overlap {}",
+      "restored": true,
+      "restored_line": "PREPARE MOTIVATION SELFTEST OK"
+    },
+    {
+      "id": "N3",
+      "edit": "resolve a conflict group by keeping the partner row (kept_partner = list(train_rows))",
+      "check": "selftest D-12 case",
+      "red": true,
+      "red_line": "FAIL dropped_conflict_groups: a partner train text under another mapped label drops the group, partner row included exit 0 {\"collapsed_same_label\": 0, \"dropped_conflict_groups\": 1, \"dropped_conflict_rows_enriched\": 1, \"dropped_conflict_rows_partner\": 0, \"dropped_eval_overlap\": 0, \"dropped_partner_mi",
+      "restored": true,
+      "restored_line": "PREPARE MOTIVATION SELFTEST OK"
+    },
+    {
+      "id": "N4",
+      "edit": "drop rows whose header annotation_mode is blind",
+      "check": "selftest D-16 identical-train case",
+      "red": true,
+      "red_line": "FAIL annotation_mode: the two fixtures give byte-identical train.jsonl",
+      "restored": true,
+      "restored_line": "PREPARE MOTIVATION SELFTEST OK"
+    },
+    {
+      "id": "N5",
+      "edit": "let a partner mixed-group match through (`elif h in ctx[\"mixed_hashes\"]:` -> `elif False:`)",
+      "check": "selftest non-resurrection case",
+      "red": true,
+      "red_line": "FAIL dropped_partner_mixed_group: both synthetic-CSV mixed groups stay dropped, whatever the enriched label exit 0 {\"collapsed_same_label\": 0, \"dropped_conflict_groups\": 0, \"dropped_conflict_rows_enriched\": 0, \"dropped_conflict_rows_partner\": 0, \"dropped_eval_overlap\": 0, \"dropped_partner_mixed_grou",
+      "restored": true,
+      "restored_line": "PREPARE MOTIVATION SELFTEST OK"
+    },
+    {
+      "id": "N6",
+      "edit": "remove enrichment-out from ENRICHMENT_REFUSALS",
+      "check": "selftest contract-mirror case",
+      "red": true,
+      "red_line": "FAIL contract mirror: refusal names (17, in order)",
+      "restored": true,
+      "restored_line": "PREPARE MOTIVATION SELFTEST OK"
+    },
+    {
+      "id": "N7",
+      "edit": "call data.refuse_unencodable unwrapped (its enrichment-row-encoding name escapes)",
+      "check": "selftest every-refusal-rule coverage case",
+      "red": true,
+      "red_line": "FAIL every refusal rule: the cases produced all 17 declared names (18) and no other missing [], outside ['enrichment-row-encoding']",
+      "restored": true,
+      "restored_line": "PREPARE MOTIVATION SELFTEST OK"
+    },
+    {
+      "id": "N8",
+      "edit": "print and record the file's basename instead of its source id",
+      "check": "selftest file-name sentinel case",
+      "red": true,
+      "red_line": "FAIL file name: fixtures whose FILE NAME carries the sentinel succeed with it absent from stdout, stderr and manifest exit 0",
+      "restored": true,
+      "restored_line": "PREPARE MOTIVATION SELFTEST OK"
+    },
+    {
+      "id": "N9",
+      "edit": "stop counting the partner rows a conflict drops (dropped_conflict_rows_partner stays 0)",
+      "check": "selftest D-12 partner-row drop manifest case",
+      "red": true,
+      "red_line": "FAIL dropped_conflict_rows_partner 1 (partner-row drop manifest): train_sha256 differs from base_train_sha256 and train rows = base - partner rows dropped + rows_added {\"collapsed_same_label\": 0, \"dropped_conflict_groups\": 1, \"dropped_conflict_rows_enriched\": 1, \"dropped_conflict_rows_partner\": 0, \"",
+      "restored": true,
+      "restored_line": "PREPARE MOTIVATION SELFTEST OK"
+    }
+  ],
+  "mutation_method": "exact-substring replacement asserted to match once; restored with git checkout -- scripts/laya_train/prepare_motivation.py in a finally block inside a bash EXIT trap; git diff --quiet asserted after every restore",
+  "partner_repo": {
+    "head": "d822f119c245067436767d18f2e1f3835423b2c4",
+    "status_unchanged": true,
+    "note": "HEAD and status --porcelain compared before and after Tasks 1 and 3 (equality, not cleanliness)"
+  },
+  "open_items": [
+    "enrichment-manifest.json in a data dir: train.py reads only named files (train.py:748); plan 13-10's bounded fixture suite enrichment-manifest-compat checks that laya-pack-fixture and laya-verify behave the same with the extra file present"
+  ],
+  "measured_on": "2026-10-28T00:16:34Z",
+  "commit": "ee9efcacd13a26b22a803b54b97bb6f2effc4515"
+}
