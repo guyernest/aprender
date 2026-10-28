@@ -4618,7 +4618,15 @@ _laya-auth-selftest:
         [ "$(grep -c '^POST initialize$' "$W/curl-calls" || true)" -eq 1 ] && [ "$(grep -c '^GET ' "$W/curl-calls" || true)" -eq 1 ] \
             || fail "REFUSAL accept: initialize and the oauth-protected-resource GET were not each sent once"
     fi
-    rcase accept "tools/list 200 then 401 within wait 30" 0 '^auth-refusal ok: tools/list 401, tools/call 401 after 2 poll\(s\)' "200 401" 401 "$EPU" 30 || true
+    if rcase accept "tools/list 200 then 401 within wait 30" 0 '^auth-refusal ok: tools/list 401, tools/call 401 after 2 poll\(s\)' "200 401" 401 "$EPU" 30; then
+        # The order of the JSON-RPC requests, not only the verdict: no tools/call while tools/list was open.
+        SEQ="$(grep -E '^POST tools/(list|call)$' "$W/curl-calls" | tr '\n' ',' || true)"
+        if [ "$SEQ" = "POST tools/list,POST tools/list,POST tools/call," ]; then
+            echo "REFUSAL accept: call count after polling -> tools/list, tools/list, then 1 tools/call (none while tools/list was open)"
+        else
+            fail "REFUSAL accept: call count after polling: the requests were '${SEQ:-none}', expected tools/list, tools/list, tools/call"
+        fi
+    fi
     if rcase refuse "tools/list 200 with wait 0" 1 '^REFUSED auth-open: unauthenticated tools/list answered HTTP 200' "200" 401 "$EPU" 0; then
         NC="$(grep -c '^POST tools/call$' "$W/curl-calls" || true)"
         if [ "$NC" -eq 0 ]; then
