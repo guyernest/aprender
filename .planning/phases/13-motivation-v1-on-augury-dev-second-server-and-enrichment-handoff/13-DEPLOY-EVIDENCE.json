@@ -72,7 +72,18 @@
       "token_endpoint_host": "aprender-mcp-decide-motivation.eu-west.augury.pmcp.run",
       "token_endpoint_path": "/oauth2/token",
       "token_endpoint_source": "/.well-known/oauth-authorization-server (and openid-configuration; both 200 and agree)",
-      "scopes_include_new_host_read_write": true
+      "scopes_include_new_host_read_write": true,
+      "shared_pool": {
+        "counter_coach_token_endpoint": "https://counter-coach.eu-west.augury.pmcp.run/oauth2/token",
+        "same_issuer_as_motivation_host": true,
+        "issuer_host": "cognito-idp.eu-west-1.amazonaws.com",
+        "token_endpoint_auth_methods_supported": [
+          "client_secret_basic",
+          "client_secret_post",
+          "none"
+        ],
+        "observed_utc": "2026-10-28T05:23:50Z"
+      }
     },
     "watchdog_outcome": "stopped after the refusal",
     "m2m_attempts": [
@@ -89,8 +100,76 @@
         "token_url_host_in_file": "counter-coach.eu-west.augury.pmcp.run",
         "network_requests": "none: m2m_token.py checks the token_url host before it builds an opener, so nothing was POSTed and no token was minted (no m2m-token ok line in the log)",
         "negative_control": "not run: it would stop at the same local host refusal and prove nothing"
+      },
+      {
+        "attempt": 2,
+        "started_utc": "2026-10-28T05:22:50Z",
+        "ended_utc": "2026-10-28T05:23:12Z",
+        "command": "LAYA_M2M_FILE=<m2m-file> just laya-probe-auth augury-dev https://aprender-mcp-decide-motivation.eu-west.augury.pmcp.run/mcp --apr models/decide/laya-motivation-v1.apr --expect-sha256 d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd (LIVE env vars unset)",
+        "token_host_expected": "counter-coach.eu-west.augury.pmcp.run",
+        "token_host_expected_source": "owner-named host, models/decide/augury-dev/m2m-token-host",
+        "rc": 2,
+        "refusal_line": "REFUSED m2m-http: transport failure reaching the token endpoint (URLError)",
+        "refusal_rule": "m2m-http",
+        "cause": "local: /usr/local/bin/python3 (python.org 3.14.6, OpenSSL 3.5.7) has no CA bundle (ssl.get_default_verify_paths().cafile is None), so every https request fails certificate verification (CERTIFICATE_VERIFY_FAILED, unable to get local issuer certificate); reproduced on a plain GET of /.well-known/openid-configuration of BOTH the counter-coach host and the motivation host, so it is not host-specific; curl reaches both hosts (200)",
+        "network_requests": "the TLS handshake failed, so no credentials were sent and no token was minted (no m2m-token ok line)",
+        "finding": "F-13-08-3"
+      },
+      {
+        "attempt": 3,
+        "started_utc": "2026-10-28T05:24:13Z",
+        "ended_utc": "2026-10-28T05:24:57Z",
+        "command": "LAYA_M2M_FILE=<m2m-file> SSL_CERT_FILE=/etc/ssl/cert.pem just laya-probe-auth augury-dev https://aprender-mcp-decide-motivation.eu-west.augury.pmcp.run/mcp --apr models/decide/laya-motivation-v1.apr --expect-sha256 d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd (LIVE env vars unset)",
+        "token_host_expected": "counter-coach.eu-west.augury.pmcp.run",
+        "token_host_expected_source": "owner-named host, models/decide/augury-dev/m2m-token-host",
+        "tls_trust": "SSL_CERT_FILE=/etc/ssl/cert.pem (the macOS system trust store; verification stays on, nothing is disabled)",
+        "rc": 0,
+        "mint_line": "m2m-token ok: host counter-coach.eu-west.augury.pmcp.run HTTP 200 expires_in 900 s (auth form)",
+        "outcome": "authenticated identity matches the pin"
       }
-    ]
+    ],
+    "authenticated_identity": {
+      "mint_line": "m2m-token ok: host counter-coach.eu-west.augury.pmcp.run HTTP 200 expires_in 900 s (auth form)",
+      "identity_line": {
+        "identity_matches": true,
+        "artifact_sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+        "description_has_labels_in_order": true,
+        "response_labels_match": true,
+        "one_tool_named_classify": true,
+        "load_header": "cold;load_ms=13769"
+      },
+      "elapsed_ms": [
+        16921,
+        268,
+        818
+      ],
+      "expected_labels": [
+        "social_affiliative",
+        "conspiratorial",
+        "other"
+      ],
+      "expected_labels_source": "key order of data/decide/motivation-v1/task.json criteria (the identity JSON carries no labels list: examples/probe.rs ~289)",
+      "token_host": "counter-coach.eu-west.augury.pmcp.run",
+      "token_host_source": "owner-named host, models/decide/augury-dev/m2m-token-host",
+      "token_host_note": "the shared counter-coach Cognito pool host, NOT the per-server host the motivation discovery documents advertise (aprender-mcp-decide-motivation.eu-west.augury.pmcp.run/oauth2/token); both hosts' openid-configuration name the same issuer (one Cognito pool, eu-west-1) and both list client_secret_post; the motivation server accepted the counter-coach-minted token",
+      "auth_method": "form",
+      "tls_trust": "SSL_CERT_FILE=/etc/ssl/cert.pem (F-13-08-3)",
+      "utc": "2026-10-28T05:24:57Z",
+      "log": "/tmp/p13-08-authid.log"
+    },
+    "negative_control": {
+      "artifact": "models/decide/laya-antisemitism-v1.apr",
+      "command": "LAYA_M2M_FILE=<m2m-file> SSL_CERT_FILE=/etc/ssl/cert.pem just laya-probe-auth augury-dev https://aprender-mcp-decide-motivation.eu-west.augury.pmcp.run/mcp --apr models/decide/laya-antisemitism-v1.apr (LIVE env vars unset)",
+      "mint_line": "m2m-token ok: host counter-coach.eu-west.augury.pmcp.run HTTP 200 expires_in 900 s (auth form)",
+      "identity_matches": false,
+      "description_has_labels_in_order": false,
+      "response_labels_match": false,
+      "served_artifact_sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+      "rc": 1,
+      "note": "minted and reached the server (no 401): refused on identity, the served sha is the motivation pin",
+      "utc": "2026-10-28T05:25:36Z",
+      "log": "/tmp/p13-08-negctl.log"
+    }
   },
   "tier_mb": 10240,
   "artifact_path": "models/decide/laya-motivation-v1.apr",
@@ -335,7 +414,18 @@
       "kind": "m2m-client-token-host",
       "what": "the owner's M2M client file names a token_url on counter-coach.eu-west.augury.pmcp.run, not on the motivation endpoint host that the discovery documents name as the token endpoint (aprender-mcp-decide-motivation.eu-west.augury.pmcp.run/oauth2/token); laya-probe-auth refused it locally with REFUSED m2m-host before any request (RESEARCH A1: a client from the counter-coach pool may lack the new host's scopes)",
       "effect": "Task 3's authenticated identity and the authenticated negative control wait on the owner; the executor did not write the m2m-token-host note (the owner named no token host) and did not work around the refusal",
-      "resolution": null
+      "resolution": "resolved 2026-10-28: the owner confirmed the augury-dev servers share one Cognito user pool named counter-coach and asked to use its token URL; the host was written to the gitignored note models/decide/augury-dev/m2m-token-host and laya-probe-auth minted there (attempt 3, auth form); the motivation server accepted the token. Deviation carried to the 13-10 hand-off: the token host is the shared pool's, not the per-server host discovery advertises",
+      "resolved_by": "owner-named token host",
+      "owner_reply_verbatim": "Some of the The servers on the augury-dev are sharing the same OAuth Cognito user pool. The counter-coach is the name of the user pool. Can't you use that token URL?",
+      "orchestrator_interpretation": "the owner chose option 2 and names token host counter-coach.eu-west.augury.pmcp.run (shared Cognito pool named counter-coach); same M2M file, unchanged, mode 600"
+    },
+    {
+      "id": "F-13-08-3",
+      "kind": "local-tls-trust-store",
+      "what": "the python.org Python 3.14.6 at /usr/local/bin/python3 that m2m_token.py runs under ships no CA bundle, so the helper cannot verify any https token endpoint (URLError CERTIFICATE_VERIFY_FAILED); 13-06 tested the helper on loopback http only, so this was its first real https mint on this box",
+      "effect": "attempt 2 refused locally before any credential was sent",
+      "resolution": "attempts 3 and the negative control ran with SSL_CERT_FILE=/etc/ssl/cert.pem (the macOS system trust store); certificate verification stays on. Not fixed in the helper (no install, no code change in this plan); plan 13-09's re-exec and any later laya-probe-auth on this box need the same variable, or the helper should fall back to the system bundle",
+      "resolved_by": "executor (environment only)"
     }
   ],
   "measured_on": "2026-10-28",

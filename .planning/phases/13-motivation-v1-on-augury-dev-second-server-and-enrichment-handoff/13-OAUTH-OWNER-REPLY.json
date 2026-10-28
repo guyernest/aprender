@@ -21,6 +21,17 @@
       "file_mode": "-rw------- (600), not a symlink",
       "token_host_named": null,
       "outcome": "refused locally (REFUSED m2m-host): the file's token_url is on counter-coach.eu-west.augury.pmcp.run; see 13-DEPLOY-EVIDENCE.json auth.m2m_attempts[0] and F-13-08-2"
+    },
+    {
+      "step": "m2m-ready",
+      "reply": "Some of the The servers on the augury-dev are sharing the same OAuth Cognito user pool. The counter-coach is the name of the user pool. Can't you use that token URL? (same file as before: <m2m-file>)",
+      "reply_note": "the owner's reply verbatim; the file is the one already named (path kept only in the gitignored note models/decide/augury-dev/m2m-file-path, replaced here by <m2m-file>)",
+      "orchestrator_interpretation": "option 2: use the shared counter-coach pool's token host counter-coach.eu-west.augury.pmcp.run",
+      "replied_on": "2026-10-28",
+      "file_outside_checkout": true,
+      "file_mode": "-rw------- (600), not a symlink, unchanged",
+      "token_host_named": "counter-coach.eu-west.augury.pmcp.run",
+      "outcome": "minted with form-body credentials on the counter-coach host; authenticated identity matches the pin; negative control refused on identity (13-DEPLOY-EVIDENCE.json auth.authenticated_identity, auth.negative_control)"
     }
   ]
 }
