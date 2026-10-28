@@ -7,14 +7,14 @@
     "pmcp_target": "augury-dev",
     "aws_account": "783960389328",
     "region": "eu-west-1",
-    "endpoint": null
+    "endpoint": "https://aprender-mcp-decide-motivation.eu-west.augury.pmcp.run/mcp"
   },
   "deployments": {
     "augury": {
       "pmcp_target": "augury-dev",
       "aws_account": "783960389328",
       "region": "eu-west-1",
-      "endpoint": null
+      "endpoint": "https://aprender-mcp-decide-motivation.eu-west.augury.pmcp.run/mcp"
     },
     "ze_kasher_dev": {
       "pmcp_target": "dev",
@@ -25,7 +25,22 @@
   },
   "profile": "augury-dev",
   "env": "dev",
-  "auth": "off at first publish; the owner enables OAuth right after (D-07)",
+  "auth": {
+    "posture_at_publish": "off (cargo pmcp deploy --no-oauth); the owner enables OAuth right after (D-07)",
+    "exposure_start_utc": "2026-10-28T04:49:48Z",
+    "exposure_start_basis": "DEPLOYING line",
+    "publish_done_utc": "2026-10-28T04:53:28Z",
+    "max_open_s": 1800,
+    "deadline_utc": "2026-10-28T05:19:48Z",
+    "watchdog": {
+      "pid": 31470,
+      "log": "/tmp/p13-08-watchdog.log",
+      "stop_file": "/tmp/p13-08-watchdog.stop",
+      "started_utc": "2026-10-28T04:53:43Z",
+      "started": true,
+      "start_line": "WATCHDOG STARTED pid 31470 deadline 2026-10-28T05:19:48Z"
+    }
+  },
   "tier_mb": 10240,
   "artifact_path": "models/decide/laya-motivation-v1.apr",
   "run_dir": "models/decide/laya-motivation-v1",
@@ -232,7 +247,29 @@
     "note": "observed read-only; not claimed"
   },
   "eligibility_logs_antisemite": "byte-equal to the plan-start backup after every selftest of this plan (cmp)",
-  "live_attempts": [],
+  "live_attempts": [
+    {
+      "attempt": 1,
+      "run_by": "executor",
+      "token_recheck_line": "pmcp.run token expires_at 2026-10-28T05:41:33.765569+00:00 (53 min left)",
+      "launch_utc": "2026-10-28T04:48:10Z",
+      "deploying_utc": "2026-10-28T04:49:48Z",
+      "deploying_line": "DEPLOYING aprender-mcp-decide-motivation (auth enabled=false)",
+      "ended": "2026-10-28T04:53:28Z",
+      "rc": 0,
+      "refusal": null,
+      "endpoint": "https://aprender-mcp-decide-motivation.eu-west.augury.pmcp.run/mcp",
+      "target_receipt": "TARGET RECEIPT: \u2192 Using target: augury-dev (pmcp-run)",
+      "health_get_line": "edge-health-get ok: HTTP 200 after 2 attempt(s) in 17 s",
+      "health_404_retries": 1,
+      "deployed_line": "DEPLOYED aprender-mcp-decide-motivation at https://aprender-mcp-decide-motivation.eu-west.augury.pmcp.run/mcp: compile log, edge health serverId and live identity (sha256 d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd) name the decide server",
+      "deploy_probe_identity": {
+        "identity_matches": true,
+        "artifact_sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd"
+      },
+      "command": "lockf -k -t 300 /tmp/aprender-laya-real-weights.lock python3 -I /tmp/p13-08-tswrap.py /tmp/p13-08-deploy.log /tmp/p13-08-deploy.ts -- just laya-deploy models/decide/laya-motivation-v1.apr models/decide/laya-motivation-v1 data/decide/motivation-v1 ~/.cache/huggingface/hub/models--convaiinnovations--laya/snapshots/55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851 aprender-mcp-decide-motivation dev augury-dev (prefixed with the LIVE env -u array; no tokens)"
+    }
+  ],
   "findings": [
     {
       "id": "F-13-07-1",
