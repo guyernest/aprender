@@ -733,5 +733,66 @@
     "manifest_ok": true,
     "manifest_sha256_equals_13_11_pin": true,
     "swap_backup_empty": true
+  },
+  "ze_kasher_after": {
+    "run_by": "owner",
+    "run_at": "2026-10-28, owner output files written 05:48Z (after the augury replay and the closing unauthenticated refusal)",
+    "triple": {
+      "pmcp_target": "dev",
+      "aws_account": "816069129666",
+      "region": "us-east-1",
+      "endpoint": "https://aprender-mcp-decide-motivation.us-east.true-mcp.com/mcp"
+    },
+    "identity_probe": {
+      "probe": "identity",
+      "probe_id": "probe-18e29b7058f96ed8-af37",
+      "one_tool_named_classify": true,
+      "description_has_labels_in_order": true,
+      "response_labels_match": true,
+      "identity_matches": true,
+      "artifact_sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+      "elapsed_ms": [
+        18138,
+        201,
+        1069
+      ],
+      "tokens_total": 105,
+      "shape": "identity",
+      "load_header": "cold;load_ms=15283"
+    },
+    "identity_probe_rc": {
+      "recorded_rc": 0,
+      "note": "the owner ran the reads with a single leading `!` (Claude Code shell escape), not shell negation, so the rc files are the true statuses this time (unlike 13-07's inverted rc)"
+    },
+    "lambda": {
+      "state": "present",
+      "keys": {
+        "LastModified": "2026-10-26T22:20:47.000+0000",
+        "CodeSha256": "9KJKCAWkS+Ss7x4xaf4hcpycyjm5QDxMe8Dsy/NTDPU=",
+        "MemorySize": 10240,
+        "State": "Active",
+        "Architectures": [
+          "arm64"
+        ],
+        "env_APRENDER_DECIDE_SHA256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+        "reserved_concurrency": null
+      },
+      "get_function_configuration_rc": 0,
+      "get_function_concurrency_rc": 0,
+      "reserved_concurrency_note": "get-function-concurrency returned rc 0 with empty output: no reserved concurrency configured"
+    },
+    "unchanged": true,
+    "unchanged_rule": "derived: true when before and after are both present with equal keys or both absent; false when both present and differ or one present and one absent; null (not proven) when either is unreadable",
+    "read_only_ops": [
+      "probe --url https://aprender-mcp-decide-motivation.us-east.true-mcp.com/mcp --apr models/decide/laya-motivation-v1.apr --expect-sha256 d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd (unauthenticated: that server stays auth off)",
+      "aws lambda get-function-configuration --profile ze-kasher-dev --region us-east-1 --function-name aprender-mcp-decide-motivation --query <the six configuration keys>",
+      "aws lambda get-function-concurrency --profile ze-kasher-dev --region us-east-1 --function-name aprender-mcp-decide-motivation"
+    ],
+    "executor_note": "the executor made no ze-kasher-dev call (F-13-07-1 and the dispatch's isolation rule); the owner ran the three reads and the executor recorded their output files",
+    "owner_rc_files": {
+      "identity_probe_rc": 0,
+      "get_function_configuration_rc": 0,
+      "get_function_concurrency_rc": 0
+    }
   }
 }
