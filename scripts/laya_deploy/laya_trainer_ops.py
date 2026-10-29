@@ -972,6 +972,30 @@ def fetch_json(ctx, profile, region, bucket, key):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+# The CUDA probe's pass rule (plan 14-12, owner decision amend-criterion, 2026-10-29). The tiny fixture is a 12-row random-weight
+# model: train.py ends it with exit 3 (GATE FAIL, margin 0.0 against 0.05) on EVERY device, cpu included (measured), so a clean
+# fixture run is rc 0 or rc 3. rc 2 is a refusal of its inputs and any other rc is a crash: both still fail. The device must be a
+# cuda one, since a fixture that fell back to cpu proves nothing about the GPU host.
+FIXTURE_OK_RCS = (0, 3)
+
+
+def probe_verdict(probe):
+    """('pass'|'fail', [reasons]) from probe.json's measurements alone; a missing probe.json is a fail."""
+    if not isinstance(probe, dict):
+        return "fail", ["probe.json absent"]
+    why = []
+    for key in ("torch_cuda_available", "matmul_ok", "base_load_ok", "train_step_ok"):
+        if probe.get(key) is not True:
+            why.append("%s is not true" % key)
+    rc = probe.get("tiny_fixture_rc")
+    if isinstance(rc, bool) or rc not in FIXTURE_OK_RCS:
+        why.append("tiny_fixture_rc %r is not in %s" % (rc, FIXTURE_OK_RCS))
+    dev = probe.get("tiny_fixture_device_used")
+    if not (isinstance(dev, str) and dev.startswith("cuda")):
+        why.append("tiny_fixture_device_used %r does not start with cuda" % (dev,))
+    return ("fail" if why else "pass"), why
+
+
 def cmd_probe(ctx, pos, opts):
     if len(pos) != 3:
         refuse("usage", "probe cuda|sigterm ENV PROFILE")
@@ -1061,6 +1085,8 @@ def cmd_probe(ctx, pos, opts):
     if mode == "cuda":
         probe = fetch_json(ctx, profile, region, bucket, prefix + "probe.json")
         rec["probe"] = probe
+        rec["verdict"], rec["fail_reasons"] = probe_verdict(probe)
+        ctx.say("probe verdict: %s%s" % (rec["verdict"], "" if rec["verdict"] == "pass" else " (%s)" % "; ".join(rec["fail_reasons"])))
         ctx.say("probe.json: %s" % ("downloaded (train_step_ok %s)" % probe.get("train_step_ok") if probe else "absent (the container wrote none)"))
     else:
         keys = []
@@ -2253,6 +2279,39 @@ def selftest():
          "a Completed cuda probe is polled every 30 s, recorded (mode 600) and ends %r" % r["out"].rstrip().splitlines()[-1])
     case("probe-train-step", all(pj.get(k) == sim.probe_json[k] for k in keys5) and pj == sim.probe_json,
          "probe-<id>.json carries probe.json's train_step_ok, train_step_peak_bytes, train_step_batch, train_step_tokens and host_rss_peak_bytes unchanged")
+
+    # ---- probe-verdict (owner decision amend-criterion): the fixture's rc is 0 or 3 on a cuda device; rc 2, a crash or a cpu device fails
+    base_pj = dict(sim.probe_json)
+    table = [("rc 0 on cuda", {"tiny_fixture_rc": 0, "tiny_fixture_device_used": "cuda:0"}, "pass"),
+             ("rc 3 on cuda:0 (GATE FAIL, the measured outcome)", {"tiny_fixture_rc": 3, "tiny_fixture_device_used": "cuda:0"}, "pass"),
+             ("rc 2 (refused) on cuda", {"tiny_fixture_rc": 2, "tiny_fixture_device_used": "cuda:0"}, "fail"),
+             ("rc 1 (crash) on cuda", {"tiny_fixture_rc": 1, "tiny_fixture_device_used": "cuda:0"}, "fail"),
+             ("rc 5 on cuda", {"tiny_fixture_rc": 5, "tiny_fixture_device_used": "cuda:0"}, "fail"),
+             ("rc 3 on cpu", {"tiny_fixture_rc": 3, "tiny_fixture_device_used": "cpu"}, "fail"),
+             ("rc 0 on cpu", {"tiny_fixture_rc": 0, "tiny_fixture_device_used": "cpu"}, "fail"),
+             ("rc 3 with no device", {"tiny_fixture_rc": 3, "tiny_fixture_device_used": None}, "fail"),
+             ("rc True", {"tiny_fixture_rc": True, "tiny_fixture_device_used": "cuda:0"}, "fail"),
+             ("rc None", {"tiny_fixture_rc": None, "tiny_fixture_device_used": "cuda:0"}, "fail"),
+             ("train step not ok", {"tiny_fixture_rc": 3, "tiny_fixture_device_used": "cuda:0", "train_step_ok": False}, "fail"),
+             ("base load not ok", {"tiny_fixture_rc": 0, "tiny_fixture_device_used": "cuda:0", "base_load_ok": False}, "fail"),
+             ("cuda unavailable", {"tiny_fixture_rc": 0, "tiny_fixture_device_used": "cuda:0", "torch_cuda_available": False}, "fail")]
+    got = [(name, probe_verdict(dict(base_pj, **chg))[0], want) for name, chg, want in table]
+    bad = [g for g in got if g[1] != g[2]]
+    case("probe-verdict-table", not bad and probe_verdict(None)[0] == "fail" and probe_verdict({})[0] == "fail",
+         "rc in {0,3} on a cuda device passes; rc 2, 1, 5, a bool or None rc, a cpu or absent device, a failed step and a missing probe.json fail (%d rows)%s"
+         % (len(table), "" if not bad else "; WRONG: %r" % bad))
+    sim3, sdir3 = world()
+    sim3.probe_json = dict(base_pj, tiny_fixture_rc=3, tiny_fixture_device_used="cuda:0")
+    r3 = go(sim3, sdir3, ["probe", "cuda", "dev", PROFILE], env_extra={"LAYA_TRAINER_APPROVED_SPEND": "probe-cuda"})
+    rec3 = json.loads((sdir3 / "probe-cuda-20261029123456.json").read_text())
+    sim2, sdir2 = world()
+    sim2.probe_json = dict(base_pj, tiny_fixture_rc=2, tiny_fixture_device_used="cuda:0")
+    r2 = go(sim2, sdir2, ["probe", "cuda", "dev", PROFILE], env_extra={"LAYA_TRAINER_APPROVED_SPEND": "probe-cuda"})
+    rec2 = json.loads((sdir2 / "probe-cuda-20261029123456.json").read_text())
+    case("probe-verdict-recorded", rec3.get("verdict") == "pass" and rec3.get("fail_reasons") == [] and rec2.get("verdict") == "fail"
+         and any("tiny_fixture_rc" in x for x in rec2.get("fail_reasons", [])) and r3["rc"] == 0 and r2["rc"] == 0
+         and r3["out"].rstrip().endswith("PROBE DONE cuda Completed") and r2["out"].rstrip().endswith("PROBE DONE cuda Completed"),
+         "a recorded cuda probe carries verdict and fail_reasons: rc 3 on cuda:0 passes, rc 2 fails; the last line stays PROBE DONE cuda Completed")
 
     # ---- probe-maxruntime
     sim, sdir = world()
