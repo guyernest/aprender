@@ -1398,6 +1398,33 @@ laya-trainer-synth env="dev" train_digest="" pack_digest="":
         "deploy-extensions/cdk.out/laya-trainer-images/aprender-laya-trainer-images-$ENV_NAME.template.json"
     echo "TRAINER SYNTH OK env=$ENV_NAME"
 
+# The owner-run AWS recipes of the Laya training server's first deployment (Phase 14, plan 14-09; D-01, D-02). Each is a thin
+# wrapper over scripts/laya_deploy/laya_trainer_ops.py, which owns every refusal: only profile ze-kasher-dev and env dev|prod,
+# `_laya-account-check` as the first command of a live run, `--state-dir DIR` anywhere (default models/laya-trainer, which is
+# gitignored), DRY_RUN=1 to print every command and execute none (`AWS CALLS: 0`). Nothing here runs by itself.
+#
+# `just laya-trainer-image train|pack ENV PROFILE`: zips the image's own context list from `git archive HEAD` (refused when a path
+# of that list has uncommitted changes), uploads it to the images stack's context bucket, starts the CodeBuild project, waits up to
+# 90 min and records {repo_uri, repo_name, digest, commit, build_id} in images-<env>.json. It outlasts the Bash tool's 10-minute
+# cap: run it in the background and judge it by its LAST line, `IMAGE OK <which> <digest>` or `IMAGE FAILED <which> <status>`.
+# Row trainer-image.
+[positional-arguments]
+laya-trainer-image *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec python3 -I scripts/laya_deploy/laya_trainer_ops.py image "$@"
+
+# `just laya-trainer-infra diff-images|deploy-images|outputs-images|diff|deploy|outputs ENV PROFILE`: the two CDK stacks. `deploy`
+# refuses unless images-<env>.json holds real digests for both images and runs `cdk diff` immediately before `cdk deploy
+# --require-approval never` in the same invocation (the deploy-training rationale). `outputs-images` reads the images stack alone
+# (the first-deployment bootstrap the image builds need); `outputs` writes outputs-<env>.json from both stacks and refuses before
+# the trainer stack exists. Row trainer-infra.
+[positional-arguments]
+laya-trainer-infra *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec python3 -I scripts/laya_deploy/laya_trainer_ops.py infra "$@"
+
 # Fine-tune Laya on <data> (task.json + train.jsonl + a REQUIRED eval.jsonl + an OPTIONAL shift.jsonl),
 # calibrate and gate into the run dir <out>. Exit 0 = GATE PASS, 3 = GATE FAIL, 2 = input refused.
 # Production (laya-finetune-gate-v1 1.4.0) trains the three gate seeds 13/17/23 and ships the MEDIAN-ECE
@@ -5777,6 +5804,47 @@ laya-gates-selftest:
         grep -q '^TRAINER STACK CHECK OK' "$(logof dev)" || red "dev: the synth did not print TRAINER STACK CHECK OK"
         grep -q 'PLACEHOLDER DIGESTS (synth only)' "$(logof dev)" || red "dev: the placeholder digests were not announced"
         must_pass selftest '^STACK CHECK SELFTEST OK$' python3 -I scripts/laya_deploy/laya_trainer_stack_check.py --selftest
+    }
+    row_trainer_image() {
+        # D-01 / D-02 (plan 14-09): a foreign profile or env is refused before any command; a dry run against placeholder state
+        # (never the real models/laya-trainer) prints the commands and reaches no aws.
+        local TS="$W/ops-state-image"
+        python3 -I scripts/laya_deploy/laya_trainer_ops.py --write-placeholder-state "$TS" > /dev/null || { red "the placeholder state could not be written"; return; }
+        must_fail foreign-profile '^REFUSED profile: ' just laya-trainer-image train dev augury-dev
+        [ "$RC" -eq 2 ] || red "foreign-profile: exit $RC, not 2"
+        must_fail staging-env '^REFUSED env: ' just laya-trainer-image train staging ze-kasher-dev
+        [ "$RC" -eq 2 ] || red "staging-env: exit $RC, not 2"
+        must_pass train-dry '^AWS CALLS: 0$' just laya-trainer-image train dev ze-kasher-dev --state-dir "$TS"
+        grep -q '^+ aws codebuild start-build .*name=DOCKERFILE,value=scripts/laya_train/container/Dockerfile.train' "$(logof train-dry)" || red "train-dry: no start-build with the train Dockerfile"
+        must_pass pack-dry '^AWS CALLS: 0$' just laya-trainer-image pack dev ze-kasher-dev --state-dir "$TS"
+        grep -q '^+ aws codebuild start-build .*name=DOCKERFILE,value=deploy-extensions/container/pack-arm64/Dockerfile' "$(logof pack-dry)" || red "pack-dry: no start-build with the pack Dockerfile"
+        [ "$(wc -l < "$REC" | tr -d ' ')" -eq 0 ] || red "the aws recorder was called by a dry run"
+        must_pass selftest '^LAYA TRAINER OPS SELFTEST OK$' just laya-trainer-image --selftest
+    }
+    row_trainer_infra() {
+        # D-01 / D-02 (plan 14-09): the stack recipes refuse a foreign profile and a deploy without built digests; a dry run prints
+        # `cdk diff` before `cdk deploy --require-approval never` and reaches no aws.
+        local TS="$W/ops-state-infra" TZ0="$W/ops-state-infra-zero"
+        python3 -I scripts/laya_deploy/laya_trainer_ops.py --write-placeholder-state "$TS" > /dev/null || { red "the placeholder state could not be written"; return; }
+        python3 -I scripts/laya_deploy/laya_trainer_ops.py --write-placeholder-state "$TZ0" > /dev/null || { red "the placeholder state could not be written"; return; }
+        python3 -I - "$TZ0/images-dev.json" <<'PYZ'
+    import json, sys
+    d = json.load(open(sys.argv[1]))
+    d["train"]["digest"] = "sha256:" + "0" * 64
+    json.dump(d, open(sys.argv[1], "w"))
+    PYZ
+        must_fail foreign-profile '^REFUSED profile: ' just laya-trainer-infra diff dev augury-dev
+        [ "$RC" -eq 2 ] || red "foreign-profile: exit $RC, not 2"
+        must_fail placeholder-digest '^REFUSED infra: no built image digests' just laya-trainer-infra deploy dev ze-kasher-dev --state-dir "$TZ0"
+        [ "$RC" -eq 2 ] || red "placeholder-digest: exit $RC, not 2"
+        must_pass deploy-dry '^AWS CALLS: 0$' just laya-trainer-infra deploy dev ze-kasher-dev --state-dir "$TS"
+        local DIFFN DEPN
+        DIFFN="$(grep -n '^+ npx cdk diff .*stack=laya-trainer ' "$(logof deploy-dry)" | head -n 1 | cut -d: -f1)"
+        DEPN="$(grep -n '^+ npx cdk deploy .*--require-approval never' "$(logof deploy-dry)" | head -n 1 | cut -d: -f1)"
+        { [ -n "$DIFFN" ] && [ -n "$DEPN" ] && [ "$DIFFN" -lt "$DEPN" ]; } || red "deploy-dry: cdk diff (line '$DIFFN') does not precede cdk deploy (line '$DEPN')"
+        must_pass outputs-images-dry '^AWS CALLS: 0$' just laya-trainer-infra outputs-images dev ze-kasher-dev --state-dir "$TS"
+        must_pass outputs-dry '^AWS CALLS: 0$' just laya-trainer-infra outputs dev ze-kasher-dev --state-dir "$TS"
+        [ "$(wc -l < "$REC" | tr -d ' ')" -eq 0 ] || red "the aws recorder was called by a dry run"
     }
     # The deployment triple (plan 13-04, D-06): the four pure helpers and their selftest.
     row_target_check() {
