@@ -144,5 +144,12 @@
     "total_ceiling_usd": "about 5.1 plus small storage, expected about 2-3 [ASSUMED]",
     "nothing_deployed_to_pmcp_run": true
   },
-  "owner_go": null
+  "owner_go": {
+    "reply": "go price $20",
+    "replied_on": "2026-10-29",
+    "price_usd_per_hour": 20,
+    "quota": 1,
+    "clarification": "Asked to disambiguate; the owner answered '$20 per hour, quota >= 1'. The orchestrator's own estimate was $1.41/h [ASSUMED]; the owner's figure is recorded as stated.",
+    "recorded_by": "orchestrator, from the owner's own messages in the session"
+  }
 }
