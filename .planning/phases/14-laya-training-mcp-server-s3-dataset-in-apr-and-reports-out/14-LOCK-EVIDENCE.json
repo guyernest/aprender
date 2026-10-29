@@ -307,6 +307,32 @@
     }
   ],
   "linux_import_proof": "14-06 Dockerfile.train import RUN at the 14-12 CodeBuild build (not provable on this Mac)",
-  "owner_verification": null,
+  "owner_verification": {
+    "reply": "lock-approved",
+    "replied_on": "2026-10-28",
+    "names_verified": [
+      "cuda-bindings",
+      "cuda-pathfinder",
+      "cuda-toolkit",
+      "nvidia-cublas",
+      "nvidia-cuda-cupti",
+      "nvidia-cuda-nvrtc",
+      "nvidia-cuda-runtime",
+      "nvidia-cudnn-cu13",
+      "nvidia-cufft",
+      "nvidia-cufile",
+      "nvidia-curand",
+      "nvidia-cusolver",
+      "nvidia-cusparse",
+      "nvidia-cusparselt-cu13",
+      "nvidia-nccl-cu13",
+      "nvidia-nvjitlink",
+      "nvidia-nvshmem-cu13",
+      "nvidia-nvtx",
+      "triton",
+      "aws-sdk-ecs"
+    ],
+    "recorded_by": "orchestrator, from the owner's own message in the session"
+  },
   "applied": false
 }
