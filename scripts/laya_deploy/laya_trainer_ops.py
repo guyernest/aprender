@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""The owner-run AWS recipes of the Laya training server's first deployment (plan 14-09; D-01, D-02, D-03, D-07, D-13, D-16).
+"""The owner-run AWS recipes of the Laya training server's first deployment (plans 14-09 and 14-10; D-01, D-02, D-03, D-07, D-10, D-13, D-16).
 
     python3 -I scripts/laya_deploy/laya_trainer_ops.py [--state-dir DIR] image  WHICH ENV PROFILE [--list-files]
     python3 -I scripts/laya_deploy/laya_trainer_ops.py [--state-dir DIR] infra  ACTION ENV PROFILE
     python3 -I scripts/laya_deploy/laya_trainer_ops.py [--state-dir DIR] stage  base ENV PROFILE [--tar FILE]
     python3 -I scripts/laya_deploy/laya_trainer_ops.py [--state-dir DIR] stage  dataset DIR PREFIX ENV PROFILE [--expect motivation-v1]
     python3 -I scripts/laya_deploy/laya_trainer_ops.py [--state-dir DIR] probe  cuda|sigterm ENV PROFILE
+    python3 -I scripts/laya_deploy/laya_trainer_ops.py [--state-dir DIR] config ENV PROFILE [--template FILE   (DRY_RUN=1 only)]
+    python3 -I scripts/laya_deploy/laya_trainer_ops.py [--state-dir DIR] deploy ENV PROFILE
     python3 -I scripts/laya_deploy/laya_trainer_ops.py --write-placeholder-state DIR [--env dev|prod]
     python3 -I scripts/laya_deploy/laya_trainer_ops.py --selftest
 
@@ -45,6 +47,17 @@ working tree: the paths are the image's own context list (train: scripts/laya_tr
 deploy-extensions/container/pack-arm64/context-paths.txt) plus the image's Dockerfile, which CodeBuild needs at the context
 root (`docker build -f $DOCKERFILE .`) and which the pack list does not name. The clean-tree check is scoped to exactly those
 paths, so a modified .planning/ file never refuses a build. Zip entries are sorted with fixed timestamps.
+
+Publishing the request function (plan 14-10, D-10). `config` fills the tracked deploy template's three placeholders from
+outputs-<env>.json into <state-dir>/deploy-config-<env>.toml (mode 600); the template declares NO [[iam.statements]] and
+`[auth] enabled = false`, and a template that declares IAM is refused. `deploy` first revokes any inline grant
+aprender-laya-train-<env> from the function's role, FAIL-CLOSED (a `--no-oauth` redeploy may reset OAuth): an absent
+function or policy proceeds, a found policy is deleted and must read back NoSuchEntity, and anything else refuses with
+`REFUSED deploy: cannot confirm the grant is absent`. It then runs `_laya-crates-root-swap crates <cfg> <snap> cargo pmcp
+deploy --manifest-path crates ... --no-oauth` (the shared crates root comes back byte-identical), requires the build log to
+name aprender-mcp-laya-train-lambda (`REFUSED deploy: wrong package`), parses the endpoint from the log, requires its host's
+first label to be aprender-mcp-laya-train and the tenant suffix of the profile, and writes <state-dir>/deploy-<env>.json
+{server_id, package, endpoint, deployed_at} (mode 600). A live deploy needs LAYA_TRAINER_APPROVED_DEPLOY=<env>.
 
 stdlib only. Every external command goes through ONE Runner (aws, npx cdk, git, just); --selftest replaces it with a
 simulated world and never reaches AWS, the network or the real account.
@@ -168,7 +181,11 @@ class Runner:
 
     def _exec(self, argv, env, cwd, stream, timeout):
         child = {k: v for k, v in os.environ.items() if k not in CRED_VARS}
-        child.update(env)
+        for k, v in env.items():
+            if v is None:
+                child.pop(k, None)
+            else:
+                child[k] = v
         if self.dry:
             child["DRY_RUN"] = "1"
         try:
@@ -208,6 +225,8 @@ class Ctx:
         self.file_exists = file_exists or os.path.isfile
         self.base_stage = str(self.repo_root / BASE_STAGE_JSON)
         self.state = None
+        self.target = ""
+        self.suffix = ""
 
     def say(self, line):
         print(redact(line), file=self.stdout, flush=True)
@@ -296,8 +315,8 @@ def passthrough_refusal(res, default_rule):
     refuse(default_rule, "the check exited %d without a REFUSED line" % res.rc)
 
 
-def connect(ctx, profile):
-    """The account gate: region from the target table, then `_laya-account-check` before any other AWS call."""
+def target_region(ctx, profile):
+    """The pure local half of the account gate: the region (and the tenant host suffix) of the profile's pmcp.run target."""
     root = str(ctx.repo_root)
     t = ctx.runner.run(["just", "_laya-target-check", profile, ""], local=True, cwd=root, quiet=True)
     if t.rc != 0:
@@ -305,10 +324,21 @@ def connect(ctx, profile):
     parts = t.out.split()
     if len(parts) < 2 or not REGION_RE.fullmatch(parts[1]):
         refuse("target", "the target check answered no region")
-    region = parts[1]
-    a = ctx.runner.run(["just", "_laya-account-check", profile, region], local=True, cwd=root)
+    ctx.target = parts[0]
+    ctx.suffix = parts[2] if len(parts) > 2 else ""
+    return parts[1]
+
+
+def account_gate(ctx, profile, region):
+    a = ctx.runner.run(["just", "_laya-account-check", profile, region], local=True, cwd=str(ctx.repo_root))
     if a.rc != 0:
         passthrough_refusal(a, "target-account")
+
+
+def connect(ctx, profile):
+    """The account gate: region from the target table, then `_laya-account-check` before any other AWS call."""
+    region = target_region(ctx, profile)
+    account_gate(ctx, profile, region)
     return region
 
 
@@ -1047,13 +1077,252 @@ def cmd_probe(ctx, pos, opts):
     return 0
 
 
+# ---- config and deploy (plan 14-10: D-10, D-01) ---------------------------------------------------------------
+
+SERVER_ID = "aprender-mcp-laya-train"
+PACKAGE = "aprender-mcp-laya-train-lambda"
+TEMPLATE = "crates/aprender-mcp-laya-train-lambda/.pmcp/deploy.toml.template"
+BOOTSTRAP_SRC = "crates/aprender-mcp-laya-train-lambda/src/bin/bootstrap.rs"
+UNSET = "UNSET-run-just-laya-trainer-config"
+CONFIG_ENV_KEYS = (("APRENDER_LAYA_TRAIN_TABLE", "TableName"), ("APRENDER_LAYA_TRAIN_BUCKET", "BucketName"),
+                   ("APRENDER_LAYA_TRAIN_STATE_MACHINE_ARN", "StateMachineArn"))
+TABLE_RE = re.compile(r"[A-Za-z0-9_.-]{3,255}")
+SFN_ARN_RE = re.compile(r"arn:aws:states:[a-z]{2}-[a-z]+-[0-9]:[0-9]{12}:stateMachine:[A-Za-z0-9_-]{1,80}")
+ROLE_RE = re.compile(r"[A-Za-z0-9+=,.@_-]{1,64}")
+POLICY_NAME = "aprender-laya-train-%s"
+ENDPOINT_RE = re.compile(r"https://([a-z][a-z0-9-]{0,62})((?:\.[a-z0-9-]+)+)/mcp")
+# The package-resolution check reads cargo's own `Compiling <crate> ` lines. The request function's one other deployable-looking
+# dependency is the SetFit training crate it reuses; any OTHER -lambda crate in the log means another server's binary was built.
+EXPECT_LAMBDA_CRATES = (PACKAGE, "aprender-setfit-train-lambda")
+
+
+def write_text(ctx, name, text):
+    path = ctx.state / name
+    tmp = ctx.state / (".%s.tmp-%d" % (name, os.getpid()))
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.replace(tmp, path)
+    os.chmod(path, 0o600)
+    return path
+
+
+def noncomment(lines):
+    return [(i, ln) for i, ln in enumerate(lines) if not ln.lstrip().startswith("#")]
+
+
+def check_no_iam(lines, what):
+    for _, ln in noncomment(lines):
+        if re.match(r"\s*\[+\s*iam\b", ln):
+            refuse("config", "%s declares IAM (%s): the request function is published with NO [[iam.statements]]; "
+                             "access comes only from `just laya-trainer-grant` after a 401 is observed (D-10)" % (what, ln.strip()[:40]))
+
+
+def parse_config_toml(text, what):
+    import tomllib
+    try:
+        doc = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        refuse("config", "%s is not valid TOML" % what)
+    if "iam" in doc:
+        refuse("config", "%s declares IAM: the request function is published with NO [[iam.statements]] (D-10)" % what)
+    if (doc.get("server") or {}).get("name") != SERVER_ID:
+        refuse("config", "%s names a server other than %s" % (what, SERVER_ID))
+    auth = doc.get("auth")
+    if not isinstance(auth, dict) or auth.get("enabled") is not False:
+        refuse("config", "%s does not declare [auth] enabled = false (cargo-pmcp cannot render OAuth for pmcp-run; D-10)" % what)
+    return doc
+
+
+def cmd_config(ctx, pos, opts):
+    if len(pos) != 2:
+        refuse("usage", "config ENV PROFILE")
+    env, profile = pos
+    check_profile_env(profile, env)
+    tpl = opts.get("template")
+    if tpl and not ctx.dry:
+        refuse("usage", "--template is honoured only under DRY_RUN=1 (the live template is the tracked file)")
+    state_dir(ctx, opts.get("state_dir"), create=True)
+    path = Path(tpl) if tpl else ctx.repo_root / TEMPLATE
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        refuse("config", "the template %s cannot be read" % (tpl or TEMPLATE))
+    lines = text.splitlines()
+    check_no_iam(lines, "the template")
+    unset = [i for i, ln in noncomment(lines) if UNSET in ln]
+    slots = {}
+    for key, _ in CONFIG_ENV_KEYS:
+        hit = [i for i, ln in noncomment(lines) if re.fullmatch(r'\s*%s\s*=\s*"%s"\s*(#.*)?' % (re.escape(key), re.escape(UNSET)), ln)]
+        if len(hit) != 1:
+            refuse("config", "the template must hold exactly one %s placeholder line, found %d" % (key, len(hit)))
+        slots[key] = hit[0]
+    if sorted(unset) != sorted(slots.values()):
+        refuse("config", "the template has %d placeholder lines for %d keys: every %s must belong to one of %s"
+               % (len(unset), len(slots), UNSET, ", ".join(k for k, _ in CONFIG_ENV_KEYS)))
+    out = read_outputs(ctx, env, profile, [name for _, name in CONFIG_ENV_KEYS])
+    vals = {}
+    for key, name in CONFIG_ENV_KEYS:
+        v = out[name]
+        ok = {"TableName": TABLE_RE, "BucketName": BUCKET_RE, "StateMachineArn": SFN_ARN_RE}[name].fullmatch(v)
+        if not ok:
+            refuse("state", "outputs-%s.json %s is not shaped like a %s" % (env, name, {"TableName": "table name", "BucketName": "bucket name",
+                                                                                         "StateMachineArn": "state machine ARN"}[name]))
+        vals[key] = v
+    for key, i in slots.items():
+        lines[i] = '%s = "%s"' % (key, vals[key])
+    rendered = "\n".join(lines) + "\n"
+    if UNSET in "\n".join(ln for _, ln in noncomment(rendered.splitlines())):
+        refuse("config", "a placeholder survived the render")
+    parse_config_toml(rendered, "the rendered config")
+    name = "deploy-config-%s.toml" % env
+    write_text(ctx, name, rendered)
+    ctx.say("wrote %s (mode 600): %s filled from outputs-%s.json" % (name, ", ".join(k for k, _ in CONFIG_ENV_KEYS), env))
+    if ctx.dry:
+        finish_dry(ctx, "config")
+    ctx.say("CONFIG OK %s" % name)
+    return 0
+
+
+def aws_error_code(err):
+    m = re.search(r"\(([A-Za-z]+)\)", err or "")
+    return m.group(1) if m else ""
+
+
+def revoke_grant(ctx, profile, region, env):
+    """Delete the function's inline grant before an OAuth-off redeploy, FAIL-CLOSED. An absent function or an absent
+    policy proceeds; a found policy is deleted and must then read back NoSuchEntity; ANY other answer (AccessDenied,
+    throttling, an unparseable reply) refuses, because "cannot see the grant" must never be read as "no grant"."""
+    pol = POLICY_NAME % env
+    cannot = "cannot confirm the grant is absent"
+
+    def refuse_deploy(why):
+        refuse("deploy", "%s: %s" % (cannot, why))
+
+    fn = aws(ctx, profile, region, "lambda", "get-function", "--function-name", SERVER_ID, "--query", "Configuration.Role", "--output", "text")
+    if ctx.dry:
+        ctx.say("+ aws iam get-role-policy --role-name <role of %s> --policy-name %s" % (SERVER_ID, pol))
+        ctx.say("DRY RUN: a live run deletes the inline policy %s first when it is found, and refuses when it cannot tell" % pol)
+        return
+    if fn.rc != 0:
+        if aws_error_code(fn.err) == "ResourceNotFoundException":
+            ctx.say("no function %s yet: nothing to revoke" % SERVER_ID)
+            return
+        refuse_deploy("get-function answered %s" % (aws_error_code(fn.err) or first_line(fn.err)))
+    role = fn.out.strip().rsplit("/", 1)[-1]
+    if not ROLE_RE.fullmatch(role):
+        refuse_deploy("get-function answered no role name")
+
+    def read():
+        return aws(ctx, profile, region, "iam", "get-role-policy", "--role-name", role, "--policy-name", pol, "--output", "json")
+
+    r = read()
+    if r.rc != 0:
+        if aws_error_code(r.err) == "NoSuchEntity":
+            ctx.say("no inline grant %s on the function's role: nothing to revoke" % pol)
+            return
+        refuse_deploy("get-role-policy answered %s" % (aws_error_code(r.err) or first_line(r.err)))
+    try:
+        found = isinstance(json.loads(r.out), dict)
+    except ValueError:
+        found = False
+    if not found:
+        refuse_deploy("get-role-policy answered an unparseable reply")
+    d = aws(ctx, profile, region, "iam", "delete-role-policy", "--role-name", role, "--policy-name", pol)
+    if d.rc != 0:
+        refuse_deploy("delete-role-policy answered %s" % (aws_error_code(d.err) or first_line(d.err)))
+    r2 = read()
+    if r2.rc == 0 or aws_error_code(r2.err) != "NoSuchEntity":
+        refuse_deploy("the policy still reads back after the delete" if r2.rc == 0
+                      else "the re-read after the delete answered %s" % (aws_error_code(r2.err) or first_line(r2.err)))
+    ctx.say("GRANT REVOKED for redeploy")
+
+
+def parse_endpoint(log):
+    for pat in (r'^\s*mcp_endpoint:\s*"(https://[^"\s]+)"', r"^\s*Server URL:\s*(https://\S+)", r"MCP Endpoint:\s*\n\s*URL:\s*(https://\S+)"):
+        m = re.search(pat, log, re.M)
+        if m:
+            return m.group(1)
+    return None
+
+
+def cmd_deploy(ctx, pos, opts):
+    if len(pos) != 2:
+        refuse("usage", "deploy ENV PROFILE")
+    env, profile = pos
+    check_profile_env(profile, env)
+    state_dir(ctx, opts.get("state_dir"), create=not ctx.dry)
+    cfg_name = "deploy-config-%s.toml" % env
+    cfg = ctx.state / cfg_name
+    if not cfg.is_file():
+        refuse("deploy", "%s is missing; run `just laya-trainer-config %s %s` first" % (cfg_name, env, profile))
+    try:
+        cfg_text = cfg.read_text(encoding="utf-8")
+    except OSError:
+        refuse("deploy", "%s cannot be read" % cfg_name)
+    check_no_iam(cfg_text.splitlines(), cfg_name)
+    parse_config_toml(cfg_text, cfg_name)
+    if any(UNSET in ln for _, ln in noncomment(cfg_text.splitlines())):
+        refuse("deploy", "%s still holds a placeholder; regenerate it with `just laya-trainer-config`" % cfg_name)
+    if not ctx.dry and ctx.env.get("LAYA_TRAINER_APPROVED_DEPLOY", "") != env:
+        refuse("approval", "a live deploy needs LAYA_TRAINER_APPROVED_DEPLOY=%s (the owner's explicit go)" % env)
+    region = target_region(ctx, profile)
+    account_gate(ctx, profile, region)
+    revoke_grant(ctx, profile, region, env)
+    snap = ctx.state / ("deploy-%s.state" % env)
+    cenv = child_env(profile, region)
+    cenv.update({"PMCP_TARGET": ctx.target, "PMCP_API_URL": None})
+    if not ctx.dry:
+        shutil.rmtree(str(snap), ignore_errors=True)
+        try:
+            import resource
+            soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+            resource.setrlimit(resource.RLIMIT_NOFILE, (min(65536, hard) if hard != resource.RLIM_INFINITY else 65536, hard))
+        except (ImportError, ValueError, OSError):
+            ctx.warn("WARNING: could not raise the fd limit; a link may fail with ProcessFdQuotaExceeded")
+        # The touch makes the request function's crate ALWAYS recompile, so its absence from the log means cargo-pmcp built
+        # something else (a cached build prints no Compiling line).
+        ctx.runner.run(["touch", str(ctx.repo_root / BOOTSTRAP_SRC)], cwd=str(ctx.repo_root))
+    argv = ["just", "_laya-crates-root-swap", "crates", str(cfg), str(snap), "cargo", "pmcp", "deploy", "--manifest-path", "crates",
+            "--regenerate-stack", "--no-post-deploy-test", "--no-oauth", "--no-color"]
+    res = ctx.runner.run(argv, env=cenv, cwd=str(ctx.repo_root), stream=True, local=False)
+    if ctx.dry:
+        finish_dry(ctx, "deploy")
+        return 0
+    log = res.out
+    write_text(ctx, "deploy-%s.log" % env, log)
+    if res.rc != 0:
+        raise Failure("the deploy exited %d (log: %s/deploy-%s.log)" % (res.rc, ctx.state, env), "DEPLOY FAILED rc=%d" % res.rc)
+    compiled = re.findall(r"Compiling ([A-Za-z0-9_-]+-lambda) ", log)
+    if PACKAGE not in compiled:
+        refuse("deploy", "wrong package: the build log does not name %s; nothing was recorded (the published function has no IAM, so it can reach nothing)" % PACKAGE)
+    other = sorted({c for c in compiled if c not in EXPECT_LAMBDA_CRATES})
+    if other:
+        refuse("deploy", "wrong package: the build log also builds %s; nothing was recorded" % ", ".join(other))
+    endpoint = parse_endpoint(log)
+    m = ENDPOINT_RE.fullmatch(endpoint) if endpoint else None
+    if not m:
+        refuse("deploy", "the deploy log names no https://<server>.<host>/mcp endpoint; nothing was recorded")
+    if m.group(1) != SERVER_ID:
+        refuse("deploy", "the deployed endpoint names server %s, not %s; nothing was recorded" % (m.group(1), SERVER_ID))
+    if ctx.suffix and m.group(2) != ctx.suffix:
+        refuse("deploy", "the deployed endpoint host is not under *%s, the tenant of profile %s; nothing was recorded" % (ctx.suffix, profile))
+    write_state(ctx, "deploy-%s.json" % env, {"schema": "laya-trainer-deploy-v1", "env": env, "server_id": SERVER_ID, "package": PACKAGE,
+                                              "endpoint": endpoint, "deployed_at": ctx.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")})
+    ctx.say("endpoint: %s" % endpoint)
+    ctx.say("recorded deploy-%s.json; next: the owner enables OAuth, then `just laya-trainer-grant %s %s`" % (env, env, profile))
+    ctx.say("DEPLOY OK %s" % SERVER_ID)
+    return 0
+
+
 # ---- dispatch ------------------------------------------------------------------------------------------------
 
-VALUE_OPTS = {"--state-dir": "state_dir", "--tar": "tar", "--expect": "expect", "--stage-json": "stage_json", "--env": "env"}
+VALUE_OPTS = {"--state-dir": "state_dir", "--tar": "tar", "--expect": "expect", "--stage-json": "stage_json", "--env": "env",
+              "--template": "template"}
 FLAG_OPTS = {"--list-files": "list_files"}
-COMMANDS = {"image": cmd_image, "infra": cmd_infra, "stage": cmd_stage, "probe": cmd_probe}
+COMMANDS = {"image": cmd_image, "infra": cmd_infra, "stage": cmd_stage, "probe": cmd_probe, "config": cmd_config, "deploy": cmd_deploy}
 SUBCOMMAND_OPTS = {"image": ("state_dir", "list_files"), "infra": ("state_dir",), "stage": ("state_dir", "tar", "expect", "stage_json"),
-                   "probe": ("state_dir",)}
+                   "probe": ("state_dir",), "config": ("state_dir", "template"), "deploy": ("state_dir",)}
 
 
 def parse_args(argv):
@@ -1092,7 +1361,7 @@ def main(argv, ctx=None):
             refuse("usage", "usage: laya_trainer_ops.py [--state-dir DIR] image|infra|stage|probe ... (see the module docstring)")
         cmd, rest = pos[0], pos[1:]
         if cmd not in COMMANDS:
-            refuse("usage", "unknown subcommand %r (image, infra, stage, probe)" % cmd[:40])
+            refuse("usage", "unknown subcommand %r (image, infra, stage, probe, config, deploy, grant)" % cmd[:40])
         allowed = SUBCOMMAND_OPTS[cmd]
         for k in opts:
             if k not in allowed:
@@ -1153,6 +1422,10 @@ class Sim:
         self.hb_max = 28
         self.ready_after = 200.0
         self.ready_never = False
+        self.swap_rc = 0
+        self.swap_out = ""
+        self.iam = {"function": True, "role": "deploy-role", "fn_err": None, "policy": False, "inspect_err": None, "delete_err": None,
+                    "sticky": False, "reread_err": None, "reads": 0, "put_err": None, "put_doc": None}
         self.probe_json = {"schema": "laya-train-probe-v1", "train_step_ok": True, "train_step_peak_bytes": 12345678901,
                            "train_step_batch": 4, "train_step_tokens": 1024, "host_rss_peak_bytes": 987654321,
                            "torch_cuda_available": True, "matmul_ok": True, "base_load_ok": True, "tiny_fixture_rc": 0,
@@ -1172,6 +1445,8 @@ class Sim:
             return self.git(argv, cwd)
         if exe == "aws":
             return self.aws(argv)
+        if exe == "touch":
+            return Result(0, "", "")
         if exe == "npx":
             rc = self.cdk_rc.get(argv[2], 0)
             return Result(rc, "cdk %s output\n" % argv[2], "")
@@ -1184,6 +1459,8 @@ class Sim:
             if self.account_refusal:
                 return Result(2, "", "REFUSED target-account: profile ze-kasher-dev resolves to an account ending 0001, not the table's\n")
             return Result(0, "", "target-account ok: fake\n")
+        if argv[1] == "_laya-crates-root-swap":
+            return Result(self.swap_rc, self.swap_out, "")
         return Result(127, "", "fake world: unexpected just recipe")
 
     def git(self, argv, cwd):
@@ -1241,10 +1518,42 @@ class Sim:
             return self.s3api(op, argv)
         if svc == "sagemaker":
             return self.sagemaker(op, argv)
+        if svc in ("lambda", "iam"):
+            return self.lambda_iam(svc, op, argv)
         h = self.extra.get((svc, op))
         if h:
             return h(argv)
         return Result(97, "", "fake aws: unexpected call: %s" % shlex.join(argv))
+
+    def lambda_iam(self, svc, op, argv):
+        st = self.iam
+        if (svc, op) == ("lambda", "get-function"):
+            if st["fn_err"]:
+                return Result(254, "", st["fn_err"])
+            if not st["function"]:
+                return Result(254, "", "An error occurred (ResourceNotFoundException) when calling the GetFunction operation: Function not found")
+            return Result(0, "arn:aws:iam::000000000001:role/service-role/%s\n" % st["role"], "")
+        if (svc, op) == ("iam", "get-role-policy"):
+            st["reads"] += 1
+            if st["inspect_err"]:
+                return Result(254, "", st["inspect_err"])
+            if st["policy"]:
+                return Result(0, json.dumps({"RoleName": st["role"], "PolicyName": self.opt(argv, "--policy-name"), "PolicyDocument": {}}), "")
+            if st["reread_err"] and st["reads"] > 1:
+                return Result(254, "", st["reread_err"])
+            return Result(254, "", "An error occurred (NoSuchEntity) when calling the GetRolePolicy operation: The role policy cannot be found.")
+        if (svc, op) == ("iam", "delete-role-policy"):
+            if st["delete_err"]:
+                return Result(254, "", st["delete_err"])
+            st["policy"] = st["sticky"]
+            return Result(0, "", "")
+        if (svc, op) == ("iam", "put-role-policy"):
+            if st["put_err"]:
+                return Result(254, "", st["put_err"])
+            st["put_doc"] = self.opt(argv, "--policy-document")
+            st["policy"] = True
+            return Result(0, "", "")
+        return Result(97, "", "fake aws: unexpected %s call: %s" % (svc, op))
 
     def probe_id(self):
         return self.job["req"]["Environment"]["LAYA_PROBE_ID"]
@@ -1861,6 +2170,177 @@ def selftest():
     case("probe-failures", r["rc"] == 1 and r["out"].rstrip().endswith("PROBE FAILED cuda CREATE") and r2["rc"] == 1
          and r2["out"].rstrip().endswith("PROBE FAILED cuda POLL_TIMEOUT") and any(c[:3] == ["aws", "sagemaker", "stop-training-job"] for c in sim2.calls)
          and not list(sdir2.glob("probe-*.json")), "a failed create and a job that outlasts the cap end PROBE FAILED (the latter stops the job); nothing is recorded as a result")
+
+    # ---- plan 14-10: config and deploy
+    CFGARGS = ["config", "dev", PROFILE]
+    DEPLOY_OK = {"LAYA_TRAINER_APPROVED_DEPLOY": "dev"}
+    GOOD_LOG = ("SWAPPED crates: decide config installed alone\n   Compiling aprender-setfit-train-lambda v0.69.3 (/x)\n"
+                "   Compiling aprender-mcp-laya-train-lambda v0.69.3 (/x)\n\U0001f680 Deploying to pmcp.run...\n"
+                "   Server URL: https://aprender-mcp-laya-train.us-east.true-mcp.com/mcp\n"
+                "      mcp_endpoint: \"https://aprender-mcp-laya-train.us-east.true-mcp.com/mcp\"\n"
+                "RESTORED crates byte-identical (exit 0)\n")
+
+    def with_config(dry=False):
+        sim, sdir = world()
+        rc = go(sim, sdir, CFGARGS)
+        return sim, sdir, rc
+
+    def swaps(sim):
+        return [c for c in sim.calls if c[:2] == ["just", "_laya-crates-root-swap"]]
+
+    def iam_calls(sim):
+        return [c[2] for c in sim.calls if c[0] == "aws" and c[1] in ("iam", "lambda")]
+
+    # config-render: the REAL template, filled from the placeholder outputs, written once at mode 600, no command run
+    sim, sdir = world()
+    r = go(sim, sdir, CFGARGS)
+    cfgp = sdir / "deploy-config-dev.toml"
+    txt = cfgp.read_text() if cfgp.exists() else ""
+    out_dev = json.loads((sdir / "outputs-dev.json").read_text())["trainer"]
+    import tomllib as _tl
+    doc = _tl.loads(txt) if txt else {}
+    envd = doc.get("environment", {})
+    case("config-render", r["rc"] == 0 and r["out"].rstrip().endswith("CONFIG OK deploy-config-dev.toml") and not sim.calls
+         and stat.S_IMODE(cfgp.stat().st_mode) == 0o600 and envd.get("APRENDER_LAYA_TRAIN_TABLE") == out_dev["TableName"]
+         and envd.get("APRENDER_LAYA_TRAIN_BUCKET") == out_dev["BucketName"]
+         and envd.get("APRENDER_LAYA_TRAIN_STATE_MACHINE_ARN") == out_dev["StateMachineArn"] and UNSET not in txt
+         and doc["server"]["name"] == SERVER_ID and doc["auth"]["enabled"] is False and "iam" not in doc and not ACCT_RE.search(r["out"]),
+         "the tracked template filled from outputs-dev.json: three values, mode 600, auth off, no IAM table, no command, no account id printed")
+    simd, sdird = world()
+    rd = go(simd, sdird, CFGARGS, dry=True)
+    case("config-render-dry", rd["rc"] == 0 and rd["out"].rstrip().endswith("CONFIG OK deploy-config-dev.toml") and "AWS CALLS: 0" in rd["out"]
+         and not simd.calls, "a dry run renders the same file and reports AWS CALLS: 0")
+
+    # config-iam-refused: a template copy holding an IAM table on a non-comment line, a changed placeholder count, --template outside a dry run
+    tpl_text = (REPO_ROOT / TEMPLATE).read_text()
+    iamdir = fresh("tpl")
+    (iamdir / "iam.template").write_text(tpl_text + '\n[[iam.statements]]\neffect = "Allow"\nactions = ["s3:GetObject"]\nresources = ["*"]\n')
+    (iamdir / "two.template").write_text(tpl_text.replace('APRENDER_LAYA_TRAIN_TABLE = "%s"\n' % UNSET, ""))
+    (iamdir / "dup.template").write_text(tpl_text.replace('APRENDER_LAYA_TRAIN_TABLE = "%s"\n' % UNSET, 'APRENDER_LAYA_TRAIN_TABLE = "%s"\nAPRENDER_LAYA_TRAIN_TABLE = "%s"\n' % (UNSET, UNSET)))
+    (iamdir / "extra.template").write_text(tpl_text.replace('RUST_LOG = "info"', 'RUST_LOG = "%s"' % UNSET))
+    (iamdir / "authon.template").write_text(tpl_text.replace("[auth]\nenabled = false", "[auth]\nenabled = true"))
+    sim, sdir = world()
+    r1 = go(sim, sdir, CFGARGS + ["--template", str(iamdir / "iam.template")], dry=True)
+    r2 = go(sim, sdir, CFGARGS + ["--template", str(iamdir / "two.template")], dry=True)
+    r3 = go(sim, sdir, CFGARGS + ["--template", str(iamdir / "extra.template")], dry=True)
+    r4 = go(sim, sdir, CFGARGS + ["--template", str(iamdir / "authon.template")], dry=True)
+    r5 = go(sim, sdir, CFGARGS + ["--template", str(iamdir / "iam.template")])
+    r6 = go(sim, sdir, CFGARGS + ["--template", str(iamdir / "dup.template")], dry=True)
+    case("config-iam-refused", r1["rc"] == 2 and "REFUSED config: the template declares IAM" in r1["err"] and r2["rc"] == 2
+         and "REFUSED config: the template must hold exactly one APRENDER_LAYA_TRAIN_TABLE" in r2["err"] and r3["rc"] == 2
+         and "REFUSED config: " in r3["err"] and r4["rc"] == 2 and "enabled = false" in r4["err"] and r5["rc"] == 2 and "--template is honoured only under DRY_RUN=1" in r5["err"]
+         and r6["rc"] == 2 and "exactly one APRENDER_LAYA_TRAIN_TABLE placeholder line, found 2" in r6["err"]
+         and not (sdir / "deploy-config-dev.toml").exists(), "IAM on a non-comment line, a missing or extra placeholder, auth on, and --template outside a dry run each refuse; no file written")
+    rp = go(world()[0], world()[1], ["config", "dev", "augury-dev"], dry=True)
+    rp2 = go(world()[0], world()[1], ["config", "staging", PROFILE], dry=True)
+    case("config-profile", rp["rc"] == 2 and "REFUSED profile:" in rp["err"] and rp2["rc"] == 2 and "REFUSED env:" in rp2["err"], "config refuses a foreign profile and env")
+
+    # deploy-dry-run
+    sim, sdir, _ = with_config()
+    r = go(sim, sdir, ["deploy", "dev", PROFILE], dry=True)
+    cmds = [ln for ln in r["out"].splitlines() if ln.startswith("+ ")]
+    case("deploy-dry-run", r["rc"] == 0 and r["out"].rstrip().endswith("AWS CALLS: 0") and not aws_calls(sim) and not swaps(sim)
+         and any(re.match(r"\+ just _laya-crates-root-swap crates \S+deploy-config-dev\.toml \S+deploy-dev\.state cargo pmcp deploy --manifest-path crates "
+                          r"--regenerate-stack --no-post-deploy-test --no-oauth --no-color$", ln) for ln in cmds)
+         and any(ln.startswith("+ aws lambda get-function --function-name aprender-mcp-laya-train ") for ln in cmds)
+         and not any(c[0] == "touch" for c in sim.calls),
+         "the swap and the cargo pmcp line are printed, never run; the revoke inspection is printed; AWS CALLS: 0")
+    sim, sdir = world()
+    r = go(sim, sdir, ["deploy", "dev", PROFILE], dry=True)
+    rl = go(sim, sdir, ["deploy", "dev", "augury-dev"], dry=True)
+    sim2, sdir2, _ = with_config()
+    r_na = go(sim2, sdir2, ["deploy", "dev", PROFILE])
+    case("deploy-refusals", r["rc"] == 2 and "REFUSED deploy: deploy-config-dev.toml is missing" in r["err"] and rl["rc"] == 2 and "REFUSED profile:" in rl["err"]
+         and r_na["rc"] == 2 and "REFUSED approval: a live deploy needs LAYA_TRAINER_APPROVED_DEPLOY=dev" in r_na["err"] and not sim2.calls,
+         "no config, a foreign profile and an unapproved live deploy each refuse before any command")
+
+    # the revoke cases (live, simulated world)
+    def live_deploy(setup=None, log=GOOD_LOG, swap_rc=0):
+        sim, sdir, _ = with_config()
+        sim.swap_out = log
+        sim.swap_rc = swap_rc
+        if setup:
+            setup(sim.iam)
+        r = go(sim, sdir, ["deploy", "dev", PROFILE], env_extra=DEPLOY_OK)
+        return sim, sdir, r
+
+    def names(sim):
+        out = []
+        for c in sim.calls:
+            if c[0] == "aws":
+                out.append(c[2])
+            elif c[:2] == ["just", "_laya-crates-root-swap"]:
+                out.append("SWAP")
+            elif c[0] == "touch":
+                out.append("touch")
+        return out
+
+    sim, sdir, r = live_deploy(lambda st: st.update(policy=True))
+    seq = names(sim)
+    case("deploy-revoke-grant", r["rc"] == 0 and "GRANT REVOKED for redeploy" in r["out"]
+         and seq == ["get-function", "get-role-policy", "delete-role-policy", "get-role-policy", "touch", "SWAP"] and sim.iam["policy"] is False,
+         "found -> deleted -> NoSuchEntity on the re-read -> GRANT REVOKED for redeploy, all before the swap (%s)" % ",".join(seq))
+    sim, sdir, r = live_deploy()
+    seq = names(sim)
+    case("deploy-revoke-absent", r["rc"] == 0 and seq == ["get-function", "get-role-policy", "touch", "SWAP"] and "GRANT REVOKED" not in r["out"]
+         and "nothing to revoke" in r["out"], "NoSuchEntity -> proceed with no delete (%s)" % ",".join(seq))
+    sim, sdir, r = live_deploy(lambda st: st.update(function=False))
+    seq = names(sim)
+    case("deploy-revoke-no-function", r["rc"] == 0 and seq == ["get-function", "touch", "SWAP"] and "nothing to revoke" in r["out"],
+         "ResourceNotFoundException -> proceed (%s)" % ",".join(seq))
+    REF = "REFUSED deploy: cannot confirm the grant is absent"
+    sim, sdir, r = live_deploy(lambda st: st.update(inspect_err="An error occurred (AccessDenied) when calling the GetRolePolicy operation: no"))
+    simf, sdirf, rf = live_deploy(lambda st: st.update(fn_err="An error occurred (AccessDenied) when calling the GetFunction operation: no"))
+    simg, sdirg, rg = live_deploy(lambda st: st.update(inspect_err="Throttling"))
+    case("deploy-revoke-inspect-error", r["rc"] == 2 and REF in r["err"] and "SWAP" not in names(sim) and "touch" not in names(sim)
+         and not (sdir / "deploy-dev.json").exists() and rf["rc"] == 2 and REF in rf["err"] and "SWAP" not in names(simf)
+         and rg["rc"] == 2 and REF in rg["err"] and "SWAP" not in names(simg),
+         "AccessDenied on get-role-policy, AccessDenied on get-function and an unclassified reply each refuse: no cargo pmcp call, no state")
+    sim, sdir, r = live_deploy(lambda st: st.update(policy=True, delete_err="An error occurred (AccessDenied) when calling the DeleteRolePolicy operation: no"))
+    case("deploy-revoke-delete-error", r["rc"] == 2 and REF in r["err"] and "delete-role-policy answered AccessDenied" in r["err"] and "SWAP" not in names(sim)
+         and sim.iam["policy"] is True,
+         "a delete that fails refuses with the same line; no cargo pmcp call")
+    sim, sdir, r = live_deploy(lambda st: st.update(policy=True, sticky=True))
+    sim2, sdir2, r2 = live_deploy(lambda st: st.update(policy=True, reread_err="An error occurred (AccessDenied) when calling the GetRolePolicy operation"))
+    case("deploy-revoke-reread", r["rc"] == 2 and REF in r["err"] and "still reads back" in r["err"] and "SWAP" not in names(sim)
+         and r2["rc"] == 2 and REF in r2["err"] and "SWAP" not in names(sim2),
+         "a delete that does not take, and a re-read that cannot answer NoSuchEntity, both refuse")
+
+    # deploy-wrong-package
+    bad_log = GOOD_LOG.replace("   Compiling aprender-mcp-laya-train-lambda v0.69.3 (/x)\n", "   Compiling aprender-mcp-setfit-lambda v0.69.3 (/x)\n")
+    sim, sdir, r = live_deploy(log=bad_log)
+    extra_log = GOOD_LOG.replace("   Compiling aprender-setfit-train-lambda", "   Compiling aprender-mcp-chronos-lambda")
+    sim2, sdir2, r2 = live_deploy(log=extra_log)
+    cached_log = GOOD_LOG.replace("   Compiling aprender-setfit-train-lambda v0.69.3 (/x)\n", "").replace("   Compiling aprender-mcp-laya-train-lambda v0.69.3 (/x)\n", "")
+    sim3, sdir3, r3 = live_deploy(log=cached_log)
+    case("deploy-wrong-package", r["rc"] == 2 and "REFUSED deploy: wrong package" in r["err"] and not (sdir / "deploy-dev.json").exists()
+         and r3["rc"] == 2 and "REFUSED deploy: wrong package: the build log does not name aprender-mcp-laya-train-lambda" in r3["err"]
+         and not (sdir3 / "deploy-dev.json").exists()
+         and r2["rc"] == 2 and "REFUSED deploy: wrong package" in r2["err"] and "aprender-mcp-chronos-lambda" in r2["err"] and not (sdir2 / "deploy-dev.json").exists(),
+         "a log that does not name the package, and one that also builds another -lambda crate, refuse and record nothing")
+
+    # deploy-state
+    sim, sdir, r = live_deploy()
+    dj = sdir / "deploy-dev.json"
+    rec = json.loads(dj.read_text()) if dj.exists() else {}
+    bad_label = GOOD_LOG.replace("aprender-mcp-laya-train.us-east", "aprender-mcp-decide.us-east")
+    sim2, sdir2, r2 = live_deploy(log=bad_label)
+    off = GOOD_LOG.replace("us-east.true-mcp.com", "eu-west.augury.pmcp.run")
+    sim3, sdir3, r3 = live_deploy(log=off)
+    nolog = "   Compiling aprender-mcp-laya-train-lambda v0.69.3 (/x)\nno endpoint here\n"
+    sim4, sdir4, r4 = live_deploy(log=nolog)
+    fail_sim, fail_sdir, fr = live_deploy(swap_rc=1)
+    case("deploy-state", r["rc"] == 0 and stat.S_IMODE(dj.stat().st_mode) == 0o600
+         and rec == {"schema": "laya-trainer-deploy-v1", "env": "dev", "server_id": SERVER_ID, "package": PACKAGE,
+                     "endpoint": "https://aprender-mcp-laya-train.us-east.true-mcp.com/mcp", "deployed_at": "2026-10-29T12:34:56Z"}
+         and "endpoint: https://aprender-mcp-laya-train.us-east.true-mcp.com/mcp" in r["out"] and r["out"].rstrip().endswith("DEPLOY OK aprender-mcp-laya-train")
+         and (sdir / "deploy-dev.log").exists() and stat.S_IMODE((sdir / "deploy-dev.log").stat().st_mode) == 0o600
+         and r2["rc"] == 2 and "names server aprender-mcp-decide" in r2["err"] and not (sdir2 / "deploy-dev.json").exists()
+         and r3["rc"] == 2 and "not under *.us-east.true-mcp.com" in r3["err"] and not (sdir3 / "deploy-dev.json").exists()
+         and r4["rc"] == 2 and "no https://<server>.<host>/mcp endpoint" in r4["err"]
+         and fr["rc"] == 1 and "DEPLOY FAILED rc=1" in fr["out"] and not (fail_sdir / "deploy-dev.json").exists(),
+         "the endpoint parsed from the log, its host label and tenant checked, deploy-dev.json (mode 600) written; a wrong label, a foreign tenant, "
+         "no endpoint and a failed deploy record nothing")
 
     # ---- placeholder state
     sim, sdir = world(stateless=True)

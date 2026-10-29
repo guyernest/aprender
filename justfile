@@ -1448,6 +1448,32 @@ laya-trainer-probe *args:
     set -euo pipefail
     exec python3 -I scripts/laya_deploy/laya_trainer_ops.py probe "$@"
 
+# The owner-run PUBLISH of the Laya training server's request function (Phase 14, plan 14-10; D-10, D-01). Both recipes are thin
+# wrappers over scripts/laya_deploy/laya_trainer_ops.py (profile ze-kasher-dev only, DRY_RUN=1 prints every command and executes no aws).
+#
+# `just laya-trainer-config ENV PROFILE` fills the tracked template crates/aprender-mcp-laya-train-lambda/.pmcp/deploy.toml.template from
+# <state-dir>/outputs-<env>.json (each of its three placeholders exactly once) into <state-dir>/deploy-config-<env>.toml, mode 600. The
+# template carries NO [[iam.statements]] and `[auth] enabled = false` (cargo-pmcp cannot render OAuth for pmcp-run); a template that
+# declares IAM is refused. Row trainer-config.
+[positional-arguments]
+laya-trainer-config *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec python3 -I scripts/laya_deploy/laya_trainer_ops.py config "$@"
+
+# `just laya-trainer-deploy ENV PROFILE` publishes the request function through the shared crates root: `_laya-crates-root-swap crates
+# <config> <snap> cargo pmcp deploy --manifest-path crates ... --no-oauth` (crates/.pmcp and crates/deploy come back byte-identical), and
+# refuses to record a deployment whose build log does not name aprender-mcp-laya-train-lambda (`REFUSED deploy: wrong package`). Because a
+# `--no-oauth` redeploy may reset OAuth, it first deletes an existing inline grant aprender-laya-train-<env> from the function's role,
+# FAIL-CLOSED (an absent function or policy proceeds; any answer it cannot classify is `REFUSED deploy: cannot confirm the grant is
+# absent`). It writes <state-dir>/deploy-<env>.json {server_id, package, endpoint, deployed_at}. A live run needs
+# LAYA_TRAINER_APPROVED_DEPLOY=<env> and runs `_laya-account-check` first. Row trainer-deploy.
+[positional-arguments]
+laya-trainer-deploy *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec python3 -I scripts/laya_deploy/laya_trainer_ops.py deploy "$@"
+
 # Fine-tune Laya on <data> (task.json + train.jsonl + a REQUIRED eval.jsonl + an OPTIONAL shift.jsonl),
 # calibrate and gate into the run dir <out>. Exit 0 = GATE PASS, 3 = GATE FAIL, 2 = input refused.
 # Production (laya-finetune-gate-v1 1.4.0) trains the three gate seeds 13/17/23 and ships the MEDIAN-ECE
@@ -5916,6 +5942,49 @@ laya-gates-selftest:
         must_pass sigterm-dry '^AWS CALLS: 0$' just laya-trainer-probe sigterm dev ze-kasher-dev --state-dir "$TS"
         grep -q '"LAYA_STEP": "probe-sigterm"' "$(logof sigterm-dry)" || red "sigterm-dry: the request does not carry LAYA_STEP probe-sigterm"
         [ "$(wc -l < "$REC" | tr -d ' ')" -eq 0 ] || red "the aws recorder was called"
+    }
+    row_trainer_config() {
+        # D-10 (plan 14-10): a template declaring IAM and a foreign profile are refused; a dry run renders the tracked template from
+        # placeholder outputs (never the real models/laya-trainer) at mode 600 and reaches no aws.
+        local TS="$W/ops-state-config" BADT="$W/ops-iam.template"
+        python3 -I scripts/laya_deploy/laya_trainer_ops.py --write-placeholder-state "$TS" > /dev/null || { red "the placeholder state could not be written"; return; }
+        cp crates/aprender-mcp-laya-train-lambda/.pmcp/deploy.toml.template "$BADT"
+        printf '\n[[iam.statements]]\neffect = "Allow"\nactions = ["s3:GetObject"]\nresources = ["*"]\n' >> "$BADT"
+        must_fail template-iam '^REFUSED config: the template declares IAM' just laya-trainer-config dev ze-kasher-dev --template "$BADT" --state-dir "$TS"
+        [ "$RC" -eq 2 ] || red "template-iam: exit $RC, not 2"
+        [ ! -e "$TS/deploy-config-dev.toml" ] || red "template-iam: a config was written from a template declaring IAM"
+        must_fail foreign-profile '^REFUSED profile: ' just laya-trainer-config dev augury-dev --state-dir "$TS"
+        [ "$RC" -eq 2 ] || red "foreign-profile: exit $RC, not 2"
+        must_pass render '^CONFIG OK deploy-config-dev.toml$' just laya-trainer-config dev ze-kasher-dev --state-dir "$TS"
+        grep -qx 'AWS CALLS: 0' "$(logof render)" || red "render: the dry run did not report AWS CALLS: 0"
+        [ "$(stat -f %Lp "$TS/deploy-config-dev.toml" 2> /dev/null || stat -c %a "$TS/deploy-config-dev.toml")" = "600" ] || red "render: the config is not mode 600"
+        if grep -q 'UNSET-run-just-laya-trainer-config' "$TS/deploy-config-dev.toml" || grep -v '^[[:space:]]*#' "$TS/deploy-config-dev.toml" | grep -q 'iam'; then
+            red "render: a placeholder survived or the config names iam"
+        fi
+        grep -q '^APRENDER_LAYA_TRAIN_BUCKET = "aprender-laya-train-dev-' "$TS/deploy-config-dev.toml" || red "render: the bucket value was not filled"
+        [ "$(wc -l < "$REC" | tr -d ' ')" -eq 0 ] || red "the aws recorder was called"
+    }
+    row_trainer_deploy() {
+        # D-10 / Pitfall 9 (plan 14-10): a foreign profile, a missing config and an unapproved live deploy are refused before any command;
+        # a dry run prints the swap and the cargo pmcp line, reaches no aws, and leaves crates/.pmcp and crates/deploy byte-identical.
+        local TS="$W/ops-state-deploy" B0="$W/pmcp-before.txt" B1="$W/pmcp-after.txt" TSE="$W/ops-state-deploy-empty"
+        python3 -I scripts/laya_deploy/laya_trainer_ops.py --write-placeholder-state "$TS" > /dev/null || { red "the placeholder state could not be written"; return; }
+        python3 -I scripts/laya_deploy/laya_trainer_ops.py --write-placeholder-state "$TSE" > /dev/null || { red "the placeholder state could not be written"; return; }
+        just laya-trainer-config dev ze-kasher-dev --state-dir "$TS" > /dev/null 2>&1 || { red "the config could not be rendered for the deploy cases"; return; }
+        find crates/.pmcp crates/deploy -type f -print0 2> /dev/null | LC_ALL=C sort -z | xargs -0 shasum -a 256 > "$B0"
+        must_fail foreign-profile '^REFUSED profile: ' just laya-trainer-deploy dev augury-dev --state-dir "$TS"
+        [ "$RC" -eq 2 ] || red "foreign-profile: exit $RC, not 2"
+        must_fail no-config '^REFUSED deploy: deploy-config-dev.toml is missing' just laya-trainer-deploy dev ze-kasher-dev --state-dir "$TSE"
+        [ "$RC" -eq 2 ] || red "no-config: exit $RC, not 2"
+        must_fail unapproved-live '^REFUSED approval: ' env -u LAYA_TRAINER_APPROVED_DEPLOY DRY_RUN=0 just laya-trainer-deploy dev ze-kasher-dev --state-dir "$TS"
+        [ "$RC" -eq 2 ] || red "unapproved-live: exit $RC, not 2"
+        must_pass dry '^AWS CALLS: 0$' just laya-trainer-deploy dev ze-kasher-dev --state-dir "$TS"
+        grep -Eq '^\+ just _laya-crates-root-swap crates .*deploy-config-dev\.toml .*deploy-dev\.state cargo pmcp deploy --manifest-path crates --regenerate-stack --no-post-deploy-test --no-oauth --no-color$' "$(logof dry)" \
+            || red "dry: the swap and cargo pmcp line were not printed"
+        [ "$(wc -l < "$REC" | tr -d ' ')" -eq 0 ] || red "the aws recorder was called by a dry run"
+        find crates/.pmcp crates/deploy -type f -print0 2> /dev/null | LC_ALL=C sort -z | xargs -0 shasum -a 256 > "$B1"
+        cmp -s "$B0" "$B1" || red "crates/.pmcp or crates/deploy changed"
+        must_pass selftest '^LAYA TRAINER OPS SELFTEST OK$' just laya-trainer-deploy --selftest
     }
     # The deployment triple (plan 13-04, D-06): the four pure helpers and their selftest.
     row_target_check() {

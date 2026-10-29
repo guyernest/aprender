@@ -1,0 +1,79 @@
+# TEMPLATE for the Laya TRAINING MCP server's pmcp.run deploy config (Phase 14 plan 14-10; D-10, D-01).
+#
+# This file is tracked. `just laya-trainer-config ENV PROFILE` GENERATES
+# `models/laya-trainer/deploy-config-<env>.toml` from it (gitignored: the bucket name and the state
+# machine ARN embed the AWS account id). `just laya-trainer-deploy ENV PROFILE` installs that file at
+# the shared crates root for the duration of the deploy and removes it again.
+#
+# THE PACKAGE-RESOLUTION TRAP. cargo-pmcp picks the package to build in `find_lambda_package_dir`:
+# first `<deploy-root>/{server_name}-lambda`, then the FIRST `*-lambda` workspace package with a
+# `bootstrap` binary. With a per-crate deploy root the first branch cannot match and the fallback
+# would build and ship ANOTHER server's binary under this name without a warning. So the deploy
+# root is the SHARED crates root (`--manifest-path crates`) and the SERVER ID below is the crate's
+# name minus `-lambda`: the resolver's first branch finds `crates/aprender-mcp-laya-train-lambda`
+# by construction. `crates/.pmcp/` and `crates/deploy/` belong to the SetFit training server, so
+# the deploy recipe swaps them out and restores them byte-identically (`_laya-crates-root-swap`),
+# and it refuses to record a deployment whose build log does not name
+# `aprender-mcp-laya-train-lambda` (`REFUSED deploy: wrong package`).
+#
+# THE ORDER IS A SECURITY PROPERTY (D-10): publish, OAuth on, a 401 observed, THEN the grant.
+#
+#   1. just laya-trainer-config dev ze-kasher-dev      # fills [environment] from outputs-dev.json
+#   2. just laya-trainer-deploy dev ze-kasher-dev      # publishes with NO IAM and auth off
+#   3. the owner enables OAuth for the deployment on pmcp.run
+#   4. just laya-trainer-grant dev ze-kasher-dev       # refuses unless it observes the 401 itself
+#
+# This config declares NO IAM statements, so the freshly published function can reach no table, no
+# state machine and no bucket: every `train` before the grant compensates to failed with
+# AccessDenied and nothing is spent. `just laya-trainer-grant` is the only thing that gives it
+# access, and only after `_laya-auth-refusal-check` has seen an unauthenticated tools/list AND a
+# tools/call answered 401 on THIS function's own endpoint, in the same invocation, immediately
+# before the put-role-policy.
+#
+# WHY `[auth] enabled = false`. cargo-pmcp cannot render OAuth for pmcp-run, so the first publish
+# is necessarily open (the deploy recipe passes --no-oauth); the open window is harmless because
+# of the empty IAM above. The owner enables OAuth after the publish. If cargo-pmcp ever renders auth
+# on for pmcp-run, the open window disappears; the revoke-before-redeploy rule stays correct
+# either way: a `--no-oauth` redeploy may reset OAuth (Phase 13 RESEARCH A3), so
+# `just laya-trainer-deploy` deletes an existing inline grant FIRST, fail-closed, and access
+# returns only through a new grant after a new 401 check.
+#
+# The three [environment] values are the names the request function reads at start (the
+# bootstrap's `Env`): its DynamoDB table, its S3 bucket and its Step Functions state machine. They
+# are placeholders here because the bucket name carries the account id, so it cannot be written
+# down ahead of the stacks. The function is NOT sized here: it holds only a capped dataset
+# (MAX_FILE_BYTES / MAX_TOTAL_BYTES in the server crate) and trains nothing.
+
+[target]
+type = "pmcp-run"
+version = "1.0.0"
+
+[aws]
+region = "us-east-1"
+
+[server]
+# The pmcp.run server id. It must equal the crate `aprender-mcp-laya-train-lambda` minus `-lambda`
+# (the trap above) and the Lambda function name the grant recipe grants to.
+name = "aprender-mcp-laya-train"
+
+[environment]
+RUST_LOG = "info"
+APRENDER_LAYA_TRAIN_TABLE = "UNSET-run-just-laya-trainer-config"
+APRENDER_LAYA_TRAIN_BUCKET = "UNSET-run-just-laya-trainer-config"
+APRENDER_LAYA_TRAIN_STATE_MACHINE_ARN = "UNSET-run-just-laya-trainer-config"
+
+[secrets]
+
+# OFF at publish; see above. The owner enables OAuth after the publish, before the grant.
+[auth]
+enabled = false
+provider = "none"
+callback_urls = []
+
+[observability]
+log_retention_days = 30
+
+[composition]
+tier = "foundation"
+allow_composition = true
+internal_only = false
