@@ -986,6 +986,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "aprender-mcp-laya-train"
+version = "0.69.3"
+dependencies = [
+ "aprender-decide",
+ "aprender-mcp-setfit-train",
+ "pmcp",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "aprender-mcp-setfit"
 version = "0.69.3"
 dependencies = [

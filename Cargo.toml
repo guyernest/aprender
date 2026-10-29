@@ -62,6 +62,8 @@ members = [
     "crates/aprender-mcp-setfit-train",
     # Its AWS deployment: the request function and the training worker
     "crates/aprender-setfit-train-lambda",
+    # Phase 14: the Laya training MCP server's library (tools, MCP Tasks, single-flight, finalize decision); lib only, no bin (D-22)
+    "crates/aprender-mcp-laya-train",
     # Phase 6: pure-Rust forecasting library + two thin stateless forecast MCP servers
     "crates/aprender-forecast",
     "crates/aprender-mcp-forecast",

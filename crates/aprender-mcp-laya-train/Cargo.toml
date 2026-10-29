@@ -1,0 +1,46 @@
+[package]
+name = "aprender-mcp-laya-train"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Laya training MCP server library: validate_dataset, train and train_status as MCP Tasks, single-flight lease and the finalize decision"
+keywords = ["mcp", "laya", "training", "aprender", "pmcp"]
+categories = ["science", "web-programming"]
+readme = "README.md"
+# A deployment unit's library, not a published crate (same policy as the SetFit
+# training crates it builds on).
+publish = false
+
+# Library only. There is deliberately NO [[bin]] and no src/main.rs (D-22): the
+# request function, the finalizer and both containers live in their own crates
+# and consume this one. FALSIFY-MONO-011 allows binaries only on listed crates.
+[lib]
+name = "aprender_mcp_laya_train"
+path = "src/lib.rs"
+
+[dependencies]
+# Same pin and same reasons as aprender-mcp-setfit-train (MCP Tasks matured at
+# 2.19; `streamable-http` is required, not optional; `schema-generation` drives
+# the typed tools' input schemas).
+pmcp = { version = "2.19", features = ["streamable-http", "schema-generation"] }
+schemars = "1.0"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+# The embedded gate contract is read through serde_yaml (the epoch numbers, the
+# calibration constants) and hashed with sha2 so every run records which
+# contract bytes judged it. Declared here so plan 14-02 edits no manifest.
+serde_yaml = { workspace = true }
+sha2 = { workspace = true }
+# Reuse, never copy (OPS-03): the task store, the in-memory backend, the mint id
+# and the cancel sink are the SetFit training server's; the task.json parser and
+# the dataset normalization are the decide crate's.
+aprender-mcp-setfit-train = { path = "../aprender-mcp-setfit-train" }
+aprender-decide = { path = "../aprender-decide", version = "0.69.3" }
+
+[lints]
+workspace = true
