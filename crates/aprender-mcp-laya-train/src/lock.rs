@@ -189,8 +189,9 @@ pub async fn peek(backend: &dyn TaskBackend) -> Option<String> {
 
 /// Take the lock for `holder_task_id`, or say who holds it.
 ///
-/// Empty -> `put_new`; released, past its lease or held by a terminal task ->
-/// compare-and-swap takeover; otherwise [`AcquireError::Held`]. A lost race
+/// Empty -> `put_new`; released, past its lease or whose holder's task record is gone ->
+/// compare-and-swap takeover; otherwise [`AcquireError::Held`] (a holder whose task is
+/// terminal but whose lock is not yet released is still live: see the module doc). A lost race
 /// re-reads and decides again, so of two racing acquires exactly one wins.
 ///
 /// # Errors

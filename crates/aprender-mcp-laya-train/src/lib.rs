@@ -222,7 +222,10 @@ pub(crate) mod args {
         let segments = path.strip_prefix(DATASETS_PREFIX).ok_or_else(refuse)?;
         let segments = segments.strip_suffix('/').unwrap_or(segments);
         let parts: Vec<&str> = segments.split('/').collect();
-        if parts.is_empty() || parts.len() > 4 || !parts.iter().all(|p| crate::layout::segment_ok(p)) {
+        if parts.is_empty()
+            || parts.len() > 4
+            || !parts.iter().all(|p| crate::layout::segment_ok(p))
+        {
             return Err(refuse());
         }
         Ok(format!("{DATASETS_PREFIX}{}/", parts.join("/")))

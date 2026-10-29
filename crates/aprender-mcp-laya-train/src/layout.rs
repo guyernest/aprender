@@ -208,7 +208,7 @@ pub fn segment_ok(seg: &str) -> bool {
 pub enum ExitClass {
     /// The trainer exited 0: the gate passed.
     Pass,
-    /// The trainer finished and the gate failed (exit 1).
+    /// The trainer finished and the gate failed (exit 3; `train.py` `EXIT_GATE_FAIL`).
     GateFail,
     /// The trainer refused its inputs before training (a `REFUSED` line).
     Refused,

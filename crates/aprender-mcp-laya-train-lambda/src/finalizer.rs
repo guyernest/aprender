@@ -1138,6 +1138,11 @@ fn execution_name(arn: &str) -> Option<&str> {
 /// has run.
 pub async fn reconcile(ctx: &FinalizerCtx) -> Result<ReconcileReport, FinalizerError> {
     let mut report = ReconcileReport::default();
+    // The RUNNING list is taken BEFORE the lock is read. `train` takes the lock, then
+    // starts the execution, so every execution in this snapshot already had its lock
+    // taken before the read below and is named by it (or has since finished). Reading
+    // the lock first would let a `train` that starts between the two calls look rogue.
+    let running = ctx.executions.list_running(&ctx.state_machine_arn).await;
     let lock_state = lock::read(ctx.backend.as_ref())
         .await
         .filter(|state| !state.released);
@@ -1151,7 +1156,7 @@ pub async fn reconcile(ctx: &FinalizerCtx) -> Result<ReconcileReport, FinalizerE
 
     // Rogue executions: RUNNING, and not the lock holder's.
     let mut stop_errors: Vec<String> = Vec::new();
-    match ctx.executions.list_running(&ctx.state_machine_arn).await {
+    match running {
         Ok(running) => {
             let holder_name = report
                 .holder

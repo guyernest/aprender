@@ -114,11 +114,11 @@ SMI_SAMPLE_CMD = ["nvidia-smi", "--query-gpu=memory.used,utilization.gpu", "--fo
 DRIVER_RE = re.compile(r"\b(\d{3,4}\.\d+(?:\.\d+)?)\b")
 
 DEVICE_RE = re.compile(r"^DEVICE seed=\d+ requested=(\S+) used=(\S+) torch=")
-NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
-TASK_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,63}$")
-BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
-DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
-HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}\Z")
+TASK_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,63}\Z")
+BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]\Z")
+DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}\Z")
+HEX64_RE = re.compile(r"^[0-9a-f]{64}\Z")
 
 QUIET = False
 DEFAULT_RUNNER_CALLS = 0                              # the selftest asserts it stays 0 (no network)
