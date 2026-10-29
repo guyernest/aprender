@@ -186,6 +186,20 @@ pub fn is_hex64(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
+/// One path segment: `^[a-z0-9][a-z0-9._-]{0,63}$`. A leading dot (so `.` and `..`)
+/// cannot match, so a segment cannot climb out of its prefix.
+#[must_use]
+pub fn segment_ok(seg: &str) -> bool {
+    let bytes = seg.as_bytes();
+    bytes
+        .first()
+        .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        && bytes.len() <= 64
+        && bytes.iter().skip(1).all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(*b, b'.' | b'_' | b'-')
+        })
+}
+
 // ------------------------------------------------- files the jobs write
 
 /// How a training job ended, as the container classifies it.

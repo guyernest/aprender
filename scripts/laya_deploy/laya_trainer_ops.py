@@ -1802,11 +1802,11 @@ def selftest():
         d.mkdir(parents=True)
         return d
 
-    def world(dry=False, env=None, real_git=False, tree=None, stateless=False):
+    def world(real_git=False, stateless=False):
         d = fresh("w")
         sim = Sim(d)
         sim.real_git = real_git
-        sim.tree = list(tree if tree is not None else DEFAULT_TREE)
+        sim.tree = list(DEFAULT_TREE)
         sdir = d / "state"
         sdir.mkdir(mode=0o700)
         if not stateless:
@@ -2303,7 +2303,7 @@ def selftest():
                 "      mcp_endpoint: \"https://aprender-mcp-laya-train.us-east.true-mcp.com/mcp\"\n"
                 "RESTORED crates byte-identical (exit 0)\n")
 
-    def with_config(dry=False):
+    def with_config():
         sim, sdir = world()
         rc = go(sim, sdir, CFGARGS)
         return sim, sdir, rc

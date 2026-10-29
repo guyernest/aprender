@@ -478,7 +478,7 @@ def selftest():
         parent = os.path.dirname(dest)
         return [x for x in os.listdir(parent) if x.startswith(".") and ".fetch-" in x]
 
-    def go(runner, args=None, dest=None, base_dir=None, name=NAME, task=TASK, bucket=BUCKET, profile=None, preexisting=None):
+    def go(runner, dest=None, base_dir=None, name=NAME, task=TASK, bucket=BUCKET, profile=None, preexisting=None):
         counter["n"] += 1
         d = dest or os.path.join(work, "out%d" % counter["n"], "dest")
         if preexisting is not None:

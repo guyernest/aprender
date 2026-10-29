@@ -34,9 +34,9 @@ use aprender_mcp_laya_train::finalize::{
     FinalizeInput,
 };
 use aprender_mcp_laya_train::layout::{
-    self, Contracts, ExecutionInput, Images, Manifest, ManifestEntry, Outcome, PackOutcome, Phase,
-    StatusPayload, TrainingManifest, RETENTION_EXPIRE, RETENTION_KEEP, SCHEMA_EXECUTION_INPUT,
-    SCHEMA_MANIFEST, TASK_TTL_MS,
+    self, segment_ok, Contracts, ExecutionInput, Images, Manifest, ManifestEntry, Outcome,
+    PackOutcome, Phase, StatusPayload, TrainingManifest, RETENTION_EXPIRE, RETENTION_KEEP,
+    SCHEMA_EXECUTION_INPUT, SCHEMA_MANIFEST, TASK_TTL_MS,
 };
 use aprender_mcp_laya_train::lock;
 use aprender_mcp_laya_train::{AprenderTaskStore, StoredTask, TaskBackend};
@@ -304,7 +304,10 @@ impl FinalizerInput {
                         raw.detail_type
                     )));
                 }
-                if !matches!(raw.detail.status.as_str(), "ABORTED" | "TIMED_OUT" | "FAILED") {
+                if !matches!(
+                    raw.detail.status.as_str(),
+                    "ABORTED" | "TIMED_OUT" | "FAILED"
+                ) {
                     return Err(refused(format!(
                         "status {} is not finalized by an event",
                         raw.detail.status
@@ -316,7 +319,9 @@ impl FinalizerInput {
                     status: raw.detail.status,
                 }))
             }
-            _ => Err(refused("the input is not a Finalize payload, a status event or a reconcile")),
+            _ => Err(refused(
+                "the input is not a Finalize payload, a status event or a reconcile",
+            )),
         }
     }
 }
@@ -459,12 +464,16 @@ async fn read_json<T: serde::de::DeserializeOwned>(
         Ok(Some(bytes)) => match serde_json::from_slice::<T>(&bytes) {
             Ok(value) => Ok(Some(value)),
             Err(_) => {
-                tracing::warn!("laya finalizer: {key} is not the expected JSON; treated as missing");
+                tracing::warn!(
+                    "laya finalizer: {key} is not the expected JSON; treated as missing"
+                );
                 Ok(None)
             }
         },
         Err(ObjectError::Oversize) => {
-            tracing::warn!("laya finalizer: {key} exceeds {MAX_JSON_BYTES} bytes; treated as missing");
+            tracing::warn!(
+                "laya finalizer: {key} exceeds {MAX_JSON_BYTES} bytes; treated as missing"
+            );
             Ok(None)
         }
         Err(ObjectError::Failed(message)) => Err(store_err(format!("reading {key}: {message}"))),
@@ -489,7 +498,8 @@ async fn read_run_objects(
     let outcome: Option<Outcome> = read_json(ctx, &key(layout::OUTCOME))
         .await?
         .filter(|o: &Outcome| own(&o.task_id, layout::OUTCOME));
-    let gate_report = read_json(ctx, &format!("{prefix}{}gate-report.json", layout::RUN_DIR)).await?;
+    let gate_report =
+        read_json(ctx, &format!("{prefix}{}gate-report.json", layout::RUN_DIR)).await?;
     let pack_outcome: Option<PackOutcome> = read_json(ctx, &key(layout::PACK_OUTCOME))
         .await?
         .filter(|p: &PackOutcome| own(&p.task_id, layout::PACK_OUTCOME));
@@ -531,18 +541,6 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
-}
-
-/// `^[a-z0-9][a-z0-9._-]{0,63}$`: one path segment that cannot climb.
-fn segment_ok(segment: &str) -> bool {
-    let bytes = segment.as_bytes();
-    bytes
-        .first()
-        .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-        && bytes.len() <= 64
-        && bytes.iter().skip(1).all(|b| {
-            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(*b, b'.' | b'_' | b'-')
-        })
 }
 
 fn result_text(result: &CallToolResult) -> Option<&str> {
@@ -868,7 +866,11 @@ async fn publish(
 
     // (5) retention tags, each read back (D-19).
     let keep = winner.keep();
-    let want = if keep { RETENTION_KEEP } else { RETENTION_EXPIRE };
+    let want = if keep {
+        RETENTION_KEEP
+    } else {
+        RETENTION_EXPIRE
+    };
     let mut targets: Vec<String> = manifest
         .entries
         .iter()
@@ -1084,11 +1086,12 @@ pub async fn handle(
                 .map_err(FinalizerError::Compute)?
                 .ok_or_else(|| refused("the event names an execution that does not exist"))?;
             if !info.is_terminal() {
-                return Err(refused("the event names an execution that is still running"));
+                return Err(refused(
+                    "the event names an execution that is still running",
+                ));
             }
-            let exec: ExecutionInput = parse_execution_input(&serde_json::Value::String(
-                info.input.clone(),
-            ))?;
+            let exec: ExecutionInput =
+                parse_execution_input(&serde_json::Value::String(info.input.clone()))?;
             check_execution(ctx, &exec, &event.execution_arn)?;
             let subject = subject_from(&exec, info.start_secs)?;
             finalize_task(
@@ -1392,10 +1395,11 @@ mod tests {
                 }));
             }
             if is_record && self.cancel_race.swap(false, Ordering::SeqCst) {
-                let store = AprenderTaskStore::new(
-                    Arc::clone(&self.inner) as Arc<dyn TaskBackend>
-                );
-                store.cancel(task_id, owner_id).await.expect("client cancel");
+                let store = AprenderTaskStore::new(Arc::clone(&self.inner) as Arc<dyn TaskBackend>);
+                store
+                    .cancel(task_id, owner_id)
+                    .await
+                    .expect("client cancel");
             }
             let done = self
                 .inner
@@ -1633,7 +1637,10 @@ mod tests {
             .flatten()
             .flat_map(entry_paths)
             .collect();
-            for rel in listed.into_iter().chain(files.extra_objects.iter().cloned()) {
+            for rel in listed
+                .into_iter()
+                .chain(files.extra_objects.iter().cloned())
+            {
                 if !seeded.contains(&rel) {
                     self.objects.seed(&Self::key(&rel), b"object bytes");
                     seeded.insert(rel);
@@ -1689,8 +1696,13 @@ mod tests {
         }
 
         fn manifest(&self) -> Manifest {
-            serde_json::from_slice(&self.objects.bytes(&Self::key("manifest.json")).expect("manifest"))
-                .expect("manifest json")
+            serde_json::from_slice(
+                &self
+                    .objects
+                    .bytes(&Self::key("manifest.json"))
+                    .expect("manifest"),
+            )
+            .expect("manifest json")
         }
 
         /// Every object manifest.json names, plus manifest.json itself.
@@ -1797,7 +1809,9 @@ mod tests {
         // verdict.json is the stored payload, byte for byte.
         let stored_text = result_text(rec.result.as_ref().expect("result")).expect("text");
         assert_eq!(
-            rig.objects.bytes(&Rig::key("verdict.json")).expect("verdict"),
+            rig.objects
+                .bytes(&Rig::key("verdict.json"))
+                .expect("verdict"),
             stored_text.as_bytes()
         );
 
@@ -1814,12 +1828,24 @@ mod tests {
             manifest.contracts.pack_parity,
             Some(po.parity_contract_sha256)
         );
-        assert_eq!(manifest.contracts.prefilter_gate, Some(sha("prefilter-gate")));
+        assert_eq!(
+            manifest.contracts.prefilter_gate,
+            Some(sha("prefilter-gate"))
+        );
         assert_eq!(manifest.unlisted, 0);
-        assert_eq!(manifest.entries.len(), 12, "11 writer entries and verdict.json");
-        assert!(manifest.entries.iter().any(|e| e.path == "verdict.json"
-            && e.sha256 == sha256_hex(stored_text.as_bytes())));
-        assert!(manifest.entries.iter().any(|e| e.path == "fixture-model.apr"));
+        assert_eq!(
+            manifest.entries.len(),
+            12,
+            "11 writer entries and verdict.json"
+        );
+        assert!(manifest
+            .entries
+            .iter()
+            .any(|e| e.path == "verdict.json" && e.sha256 == sha256_hex(stored_text.as_bytes())));
+        assert!(manifest
+            .entries
+            .iter()
+            .any(|e| e.path == "fixture-model.apr"));
 
         // D-19: every manifest entry plus both files read back keep.
         rig.assert_all_tagged(RETENTION_KEEP);
@@ -1835,12 +1861,22 @@ mod tests {
                 .position(|l| l.contains(needle))
                 .unwrap_or_else(|| panic!("{needle} missing from {log:?}"))
         };
-        let last_tag = log.iter().rposition(|l| l.starts_with("tag:")).expect("tags");
-        assert!(at("record") < at("put:runs/fixture-model/00000000-0000-4000-8000-000000000001/verdict.json"));
+        let last_tag = log
+            .iter()
+            .rposition(|l| l.starts_with("tag:"))
+            .expect("tags");
         assert!(
-            at("verdict.json") < at("put:runs/fixture-model/00000000-0000-4000-8000-000000000001/manifest.json")
+            at("record")
+                < at("put:runs/fixture-model/00000000-0000-4000-8000-000000000001/verdict.json")
         );
-        assert!(at("put:runs/fixture-model/00000000-0000-4000-8000-000000000001/manifest.json") < at("tag:"));
+        assert!(
+            at("verdict.json")
+                < at("put:runs/fixture-model/00000000-0000-4000-8000-000000000001/manifest.json")
+        );
+        assert!(
+            at("put:runs/fixture-model/00000000-0000-4000-8000-000000000001/manifest.json")
+                < at("tag:")
+        );
         assert!(last_tag < at("release"));
         assert_eq!(at("release"), log.len() - 1, "the release is the last step");
     }
@@ -1849,7 +1885,10 @@ mod tests {
 
     #[test]
     fn fin_time_parsing() {
-        assert_eq!(parse_rfc3339_secs("2026-10-28T10:00:00Z"), Some(1_793_181_600));
+        assert_eq!(
+            parse_rfc3339_secs("2026-10-28T10:00:00Z"),
+            Some(1_793_181_600)
+        );
         assert_eq!(
             parse_rfc3339_secs("2026-10-28T10:00:00.123Z"),
             Some(1_793_181_600)
@@ -1861,7 +1900,10 @@ mod tests {
         assert_eq!(parse_rfc3339_secs("1970-01-01T00:00:00Z"), Some(0));
         assert_eq!(parse_rfc3339_secs("not a time"), None);
         assert_eq!(parse_time_secs(&json!(1_793_181_600)), Some(1_793_181_600));
-        assert_eq!(parse_time_secs(&json!(1_793_181_600.75)), Some(1_793_181_600));
+        assert_eq!(
+            parse_time_secs(&json!(1_793_181_600.75)),
+            Some(1_793_181_600)
+        );
         assert_eq!(parse_time_secs(&json!(null)), None);
     }
 
@@ -1882,7 +1924,10 @@ mod tests {
         ];
         for value in bad {
             let err = FinalizerInput::parse(&value).expect_err("refused");
-            assert!(matches!(err, FinalizerError::Refused(_)), "{value}: {err:?}");
+            assert!(
+                matches!(err, FinalizerError::Refused(_)),
+                "{value}: {err:?}"
+            );
         }
         assert_eq!(
             FinalizerInput::parse(&json!({"source": "reconcile"})).expect("sweep"),
@@ -1946,7 +1991,11 @@ mod tests {
         assert!(!rec.result.as_ref().expect("result").is_error);
         assert!(!report.keep);
         rig.assert_all_tagged(RETENTION_EXPIRE);
-        assert!(rig.objects.snapshot().values().all(|(_, t)| t.as_deref() != Some("keep")));
+        assert!(rig
+            .objects
+            .snapshot()
+            .values()
+            .all(|(_, t)| t.as_deref() != Some("keep")));
         assert!(rig.lock_released().await);
     }
 
@@ -1965,7 +2014,11 @@ mod tests {
         let verdict = payload.verdict.expect("verdict");
         assert_eq!(verdict.waived.as_deref(), Some("W-1"));
         assert!(!verdict.pass);
-        assert!(rig.manifest().entries.iter().any(|e| e.path == "fixture-model.apr"));
+        assert!(rig
+            .manifest()
+            .entries
+            .iter()
+            .any(|e| e.path == "fixture-model.apr"));
         assert!(!report.keep, "D-19 keeps GATE PASS only");
         rig.assert_all_tagged(RETENTION_EXPIRE);
         assert!(rig.lock_released().await);
@@ -1993,7 +2046,10 @@ mod tests {
             !manifest.entries.iter().any(|e| e.path.ends_with(".apr")),
             "a refused pack never lists a model"
         );
-        assert!(manifest.entries.iter().any(|e| e.path == "run/gate-report.json"));
+        assert!(manifest
+            .entries
+            .iter()
+            .any(|e| e.path == "run/gate-report.json"));
         assert!(manifest.entries.iter().any(|e| e.path == "verify.log"));
         rig.assert_all_tagged(RETENTION_EXPIRE);
         assert!(rig.lock_released().await);
@@ -2039,11 +2095,22 @@ mod tests {
         rig.jobs.set(&training_job_name(TASK_ID), "Stopped");
         let report = rig.event("ABORTED").await.expect("finalized");
         assert_eq!(report.phase, Some(Phase::Cancelled));
-        assert!(*rig.executions.describes.lock().expect("lock") >= 1, "DescribeExecution read");
+        assert!(
+            *rig.executions.describes.lock().expect("lock") >= 1,
+            "DescribeExecution read"
+        );
         let rec = rig.record().await;
-        assert_eq!(rec.task.status, TaskStatus::Cancelled, "readers see cancelled");
+        assert_eq!(
+            rec.task.status,
+            TaskStatus::Cancelled,
+            "readers see cancelled"
+        );
         assert_eq!(phase_of(&rec), Phase::Cancelled);
-        assert!(rig.manifest().entries.iter().all(|e| !e.path.ends_with(".apr")));
+        assert!(rig
+            .manifest()
+            .entries
+            .iter()
+            .all(|e| !e.path.ends_with(".apr")));
         assert!(!report.keep);
         assert!(rig.lock_released().await);
     }
@@ -2076,26 +2143,40 @@ mod tests {
     async fn fin_duplicate() {
         let rig = ready(&passing()).await;
         let first = rig.payload(None).await.expect("first");
-        let verdict = rig.objects.bytes(&Rig::key("verdict.json")).expect("verdict");
-        let manifest = rig.objects.bytes(&Rig::key("manifest.json")).expect("manifest");
+        let verdict = rig
+            .objects
+            .bytes(&Rig::key("verdict.json"))
+            .expect("verdict");
+        let manifest = rig
+            .objects
+            .bytes(&Rig::key("manifest.json"))
+            .expect("manifest");
         let stored = rig.record().await.result.expect("result");
         let writes = rig.s3_writes();
         let second = rig.payload(None).await.expect("second");
         assert_eq!(first.phase, Some(Phase::Completed));
         assert_eq!(second.phase, Some(Phase::Completed));
         assert_eq!(
-            rig.objects.bytes(&Rig::key("verdict.json")).expect("verdict"),
+            rig.objects
+                .bytes(&Rig::key("verdict.json"))
+                .expect("verdict"),
             verdict
         );
         assert_eq!(
-            rig.objects.bytes(&Rig::key("manifest.json")).expect("manifest"),
+            rig.objects
+                .bytes(&Rig::key("manifest.json"))
+                .expect("manifest"),
             manifest
         );
         assert_eq!(
             result_text(&rig.record().await.result.expect("result")),
             result_text(&stored)
         );
-        assert_eq!(rig.s3_writes(), writes, "a duplicate invocation writes nothing");
+        assert_eq!(
+            rig.s3_writes(),
+            writes,
+            "a duplicate invocation writes nothing"
+        );
         rig.assert_all_tagged(RETENTION_KEEP);
     }
 
@@ -2103,7 +2184,10 @@ mod tests {
     async fn fin_first_writer_wins() {
         let rig = ready(&passing()).await;
         rig.payload(None).await.expect("completed first");
-        let verdict = rig.objects.bytes(&Rig::key("verdict.json")).expect("verdict");
+        let verdict = rig
+            .objects
+            .bytes(&Rig::key("verdict.json"))
+            .expect("verdict");
         let stored = rig.record().await.result.expect("result");
 
         // A late FAILED event, with outputs that would now decide `failed`, and a
@@ -2118,9 +2202,15 @@ mod tests {
         rig.set_execution("FAILED");
         let report = rig.event("FAILED").await.expect("reused");
 
-        assert_eq!(report.phase, Some(Phase::Completed), "the stored phase wins");
         assert_eq!(
-            rig.objects.bytes(&Rig::key("verdict.json")).expect("verdict"),
+            report.phase,
+            Some(Phase::Completed),
+            "the stored phase wins"
+        );
+        assert_eq!(
+            rig.objects
+                .bytes(&Rig::key("verdict.json"))
+                .expect("verdict"),
             verdict,
             "verdict.json is not rewritten with `failed`"
         );
@@ -2139,7 +2229,11 @@ mod tests {
         let err = rig.payload(None).await.expect_err("tagging failed");
         assert!(matches!(err, FinalizerError::Store(_)), "{err:?}");
         assert!(!rig.lock_released().await, "the lock is still held");
-        assert_eq!(rig.record().await.task.status, TaskStatus::Completed, "the record is durable");
+        assert_eq!(
+            rig.record().await.task.status,
+            TaskStatus::Completed,
+            "the record is durable"
+        );
         let report = rig.payload(None).await.expect("resumed");
         assert!(report.keep);
         rig.assert_all_tagged(RETENTION_KEEP);
@@ -2164,7 +2258,12 @@ mod tests {
         assert!(rig.objects.bytes(&Rig::key("verdict.json")).is_some());
         assert!(rig.objects.bytes(&Rig::key("manifest.json")).is_some());
         assert!(rig.lock_released().await);
-        assert!(rig.backend.get(OWNER, TASK_ID).await.expect("get").is_none());
+        assert!(rig
+            .backend
+            .get(OWNER, TASK_ID)
+            .await
+            .expect("get")
+            .is_none());
     }
 
     #[tokio::test]
@@ -2209,8 +2308,17 @@ mod tests {
         let rec = rig.record().await;
         assert_eq!(rec.version, version, "T's record is untouched");
         assert_eq!(rec.task.status, TaskStatus::Working);
-        let decoy = rig.backend.get("bob", TASK_ID).await.expect("get").expect("decoy");
-        assert_eq!(decoy.task.status, TaskStatus::Working, "the other owner's record is untouched");
+        let decoy = rig
+            .backend
+            .get("bob", TASK_ID)
+            .await
+            .expect("get")
+            .expect("decoy");
+        assert_eq!(
+            decoy.task.status,
+            TaskStatus::Working,
+            "the other owner's record is untouched"
+        );
         assert!(decoy.result.is_none());
     }
 
@@ -2262,7 +2370,13 @@ mod tests {
         paths.sort_unstable();
         assert_eq!(
             paths,
-            ["data/task.json", "data/train.jsonl", "outcome.json", "train.log", "verdict.json"]
+            [
+                "data/task.json",
+                "data/train.jsonl",
+                "outcome.json",
+                "train.log",
+                "verdict.json"
+            ]
         );
         assert_eq!(manifest.unlisted, 2, "two objects no writer manifest lists");
         assert!(rig.stored_payload().await.manifest_partial);
@@ -2361,7 +2475,11 @@ mod tests {
         assert_eq!(report.phase, Some(Phase::Cancelled));
         assert_eq!(report.record, "attached");
         let rec = rig.record().await;
-        assert_eq!(rec.task.status, TaskStatus::Cancelled, "the status is unchanged");
+        assert_eq!(
+            rec.task.status,
+            TaskStatus::Cancelled,
+            "the status is unchanged"
+        );
 
         // tasks/result: the store's own get_result.
         let stored = rig
@@ -2383,9 +2501,12 @@ mod tests {
         assert_eq!(served["task_id"], TASK_ID);
 
         // verdict.json says cancelled and expires; the lock is free.
-        let verdict: Value =
-            serde_json::from_slice(&rig.objects.bytes(&Rig::key("verdict.json")).expect("verdict"))
-                .expect("json");
+        let verdict: Value = serde_json::from_slice(
+            &rig.objects
+                .bytes(&Rig::key("verdict.json"))
+                .expect("verdict"),
+        )
+        .expect("json");
         assert_eq!(verdict["phase"], "cancelled");
         assert_eq!(
             rig.objects.tag(&Rig::key("verdict.json")).as_deref(),
@@ -2397,8 +2518,15 @@ mod tests {
         let before = result_text(&rec.result.expect("result")).map(str::to_string);
         rig.event("ABORTED").await.expect("duplicate");
         let after = rig.record().await.result;
-        assert_eq!(result_text(&after.expect("result")).map(str::to_string), before);
-        assert!(rig.objects.snapshot().values().all(|(_, t)| t.as_deref() != Some("keep")));
+        assert_eq!(
+            result_text(&after.expect("result")).map(str::to_string),
+            before
+        );
+        assert!(rig
+            .objects
+            .snapshot()
+            .values()
+            .all(|(_, t)| t.as_deref() != Some("keep")));
     }
 
     #[tokio::test]
@@ -2411,8 +2539,16 @@ mod tests {
         let rec = rig.record().await;
         assert_eq!(rec.task.status, TaskStatus::Cancelled);
         assert_eq!(phase_of(&rec), Phase::Cancelled);
-        assert!(rig.manifest().entries.iter().all(|e| !e.path.ends_with(".apr")));
-        assert!(rig.objects.snapshot().values().all(|(_, t)| t.as_deref() != Some("keep")));
+        assert!(rig
+            .manifest()
+            .entries
+            .iter()
+            .all(|e| !e.path.ends_with(".apr")));
+        assert!(rig
+            .objects
+            .snapshot()
+            .values()
+            .all(|(_, t)| t.as_deref() != Some("keep")));
         assert!(!report.keep);
         assert!(rig.lock_released().await);
     }
@@ -2433,11 +2569,18 @@ mod tests {
             .filter(|l| l.ends_with("/verdict.json") && l.starts_with("put:"))
             .count();
         assert_eq!(verdict_puts, 1, "verdict.json is written once");
-        let verdict: Value =
-            serde_json::from_slice(&rig.objects.bytes(&Rig::key("verdict.json")).expect("verdict"))
-                .expect("json");
+        let verdict: Value = serde_json::from_slice(
+            &rig.objects
+                .bytes(&Rig::key("verdict.json"))
+                .expect("verdict"),
+        )
+        .expect("json");
         assert_eq!(verdict["phase"], "cancelled");
-        assert!(rig.objects.snapshot().values().all(|(_, t)| t.as_deref() != Some("keep")));
+        assert!(rig
+            .objects
+            .snapshot()
+            .values()
+            .all(|(_, t)| t.as_deref() != Some("keep")));
         assert!(rig.lock_released().await);
     }
 
@@ -2467,10 +2610,18 @@ mod tests {
         rig.packs.add(TASK_ID, "arn:task/1", "RUNNING");
         rig.packs.add("another-task", "arn:task/2", "RUNNING");
         let state = compute_terminal(&rig.ctx, TASK_ID).await.expect("state");
-        assert!(!state.terminal, "a live pack task of the run blocks the release");
+        assert!(
+            !state.terminal,
+            "a live pack task of the run blocks the release"
+        );
         assert_eq!(state.pack_task_arns, ["arn:task/1"]);
         rig.packs.set_status("arn:task/1", "STOPPED");
-        assert!(compute_terminal(&rig.ctx, TASK_ID).await.expect("state").terminal);
+        assert!(
+            compute_terminal(&rig.ctx, TASK_ID)
+                .await
+                .expect("state")
+                .terminal
+        );
     }
 
     #[tokio::test]
@@ -2481,7 +2632,11 @@ mod tests {
         let report = rig.event("ABORTED").await.expect("awaiting");
         assert!(report.awaiting_compute);
         assert!(report.stopped_training_job);
-        assert_eq!(rig.jobs.stops(), [training_job_name(TASK_ID)], "stopped once");
+        assert_eq!(
+            rig.jobs.stops(),
+            [training_job_name(TASK_ID)],
+            "stopped once"
+        );
         assert!(rig.s3_writes().is_empty(), "nothing written to S3");
         assert!(!rig.lock_released().await, "the lock is still held");
         assert_eq!(
@@ -2515,7 +2670,11 @@ mod tests {
         let pack_arn = "arn:aws:ecs:us-east-1:123456789012:task/cluster/abc";
         rig.packs.add(TASK_ID, pack_arn, "RUNNING");
         rig.cancel_through_store().await;
-        rig.executions.running.lock().expect("lock").push(Rig::arn());
+        rig.executions
+            .running
+            .lock()
+            .expect("lock")
+            .push(Rig::arn());
 
         let first = rig.sweep().await.expect("sweep");
         assert_eq!(first.action, "cancel-retry");
@@ -2553,7 +2712,11 @@ mod tests {
     async fn fin_cancel_retry() {
         let rig = ready(&passing()).await;
         rig.cancel_through_store().await;
-        rig.executions.running.lock().expect("lock").push(Rig::arn());
+        rig.executions
+            .running
+            .lock()
+            .expect("lock")
+            .push(Rig::arn());
         for round in 1..=3 {
             let swept = rig.sweep().await.expect("sweep");
             assert_eq!(swept.action, "cancel-retry");
@@ -2564,7 +2727,11 @@ mod tests {
         rig.executions.running.lock().expect("lock").clear();
         let done = rig.sweep().await.expect("sweep");
         assert_eq!(done.action, "finalized");
-        assert_eq!(rig.executions.stops().len(), 3, "no more stops once it is terminal");
+        assert_eq!(
+            rig.executions.stops().len(),
+            3,
+            "no more stops once it is terminal"
+        );
         assert!(rig.lock_released().await);
     }
 
@@ -2611,7 +2778,11 @@ mod tests {
     #[tokio::test]
     async fn fin_reconcile_running() {
         let rig = ready(&passing()).await;
-        rig.executions.running.lock().expect("lock").push(Rig::arn());
+        rig.executions
+            .running
+            .lock()
+            .expect("lock")
+            .push(Rig::arn());
         let swept = rig.sweep().await.expect("sweep");
         assert_eq!(swept.action, "running");
         assert!(rig.s3_writes().is_empty());
@@ -2708,7 +2879,11 @@ mod tests {
         let swept = rig.sweep().await.expect("the sweep resumes it");
         assert_eq!(swept.action, "finalized");
         assert!(rig.lock_released().await);
-        assert_eq!(rig.objects.snapshot(), reference.objects, "objects and tags");
+        assert_eq!(
+            rig.objects.snapshot(),
+            reference.objects,
+            "objects and tags"
+        );
         let rec = rig.record().await;
         assert_eq!(rec.task.status, reference.status);
         assert_eq!(

@@ -1304,7 +1304,7 @@ def new_pack_outcome(cfg, gate_sha, parity_sha, **kv):
     return out
 
 
-def publish_pack(cfg, work, up, outcome, knobs):
+def publish_pack(work, up, outcome, knobs):
     """pack-manifest.json (a JSON array of {path,size,sha256}: everything uploaded so far plus pack-outcome.json),
     then pack-outcome.json LAST. Returns True when both uploads returned success."""
     out_path = Path(work) / "pack-outcome.json"
@@ -1369,7 +1369,7 @@ def run_pack(cfg, runner, knobs):
     if skipped is not None:
         say("pack skipped: the run ended %s" % skipped)
         rec = new_pack_outcome(cfg, gate_sha, parity_sha, skipped=skipped)
-        return 0 if publish_pack(cfg, work, up, rec, knobs) else 1
+        return 0 if publish_pack(work, up, rec, knobs) else 1
 
     # ---- the inputs: exactly the manifest's run/ and data/ entries, each re-hashed
     got = s3_get(runner, cfg.bucket, cfg.run_prefix + "training-manifest.json", work / "dl" / "training-manifest.json", knobs)
@@ -1444,7 +1444,7 @@ def run_pack(cfg, runner, knobs):
         verify_line=verify_line[:LINE_CLIP] if verify_line else None,
         deploy_eligible=eligible and verify_rc == 0,
         pack_seconds=round(pack_s, 2), verify_seconds=round(verify_s, 2) if verify_s is not None else None)
-    published = publish_pack(cfg, work, up, rec, knobs)
+    published = publish_pack(work, up, rec, knobs)
     failed = dict(up.failed)
     if failed:
         say("upload failures: %s" % ", ".join("%s (%s)" % (p, e) for p, e in sorted(failed.items())))
@@ -1723,7 +1723,7 @@ def selftest():
         return {"env": env, "paths": paths, "knobs": knobs, "runner": runner, "bucket": bucket / "b",
                 "marks": marks, "chan": chan, "dir": d, "mode": mode, "trainer": trainer}
 
-    def run_case(c, quiet_err=True):
+    def run_case(c):
         err = io.StringIO()
         with Env(FAKE_MODE=c["mode"], FAKE_MARK=str(c["marks"])), contextlib.redirect_stderr(err):
             t0 = time.monotonic()
@@ -1992,7 +1992,7 @@ def selftest():
         print("sigterm:")
         import signal as _signal
 
-        def sigterm_run(name, deadline, grace, reserve, delay=0.0, fail=None, wait_after=0.0):
+        def sigterm_run(name, deadline, grace, reserve, delay=0.0, fail=None):
             c = make_case(tmp, name, "sigterm")
             log = c["dir"] / "calls.jsonl"
             spec = {"kind": "train", "env": c["env"], "chan": str(c["chan"]), "work": str(c["paths"].work),

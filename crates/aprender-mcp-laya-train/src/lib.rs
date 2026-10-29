@@ -197,19 +197,6 @@ pub(crate) mod args {
         }
     }
 
-    /// One path segment: `^[a-z0-9][a-z0-9._-]{0,63}$`. A leading dot (so `.` and
-    /// `..`) cannot match.
-    fn segment_ok(seg: &str) -> bool {
-        let bytes = seg.as_bytes();
-        bytes
-            .first()
-            .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-            && bytes.len() <= 64
-            && bytes.iter().skip(1).all(|b| {
-                b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(*b, b'.' | b'_' | b'-')
-            })
-    }
-
     /// The normalized prefix `datasets/<segs>/` for `uri`, which must be
     /// `s3://<bucket>/datasets/<seg>[/<seg>]{0,3}[/]` (D-07, T-14-02): the server's
     /// own bucket, the one datasets prefix, 1 to 4 well-formed segments, and no `%`.
@@ -235,7 +222,7 @@ pub(crate) mod args {
         let segments = path.strip_prefix(DATASETS_PREFIX).ok_or_else(refuse)?;
         let segments = segments.strip_suffix('/').unwrap_or(segments);
         let parts: Vec<&str> = segments.split('/').collect();
-        if parts.is_empty() || parts.len() > 4 || !parts.iter().all(|p| segment_ok(p)) {
+        if parts.is_empty() || parts.len() > 4 || !parts.iter().all(|p| crate::layout::segment_ok(p)) {
             return Err(refuse());
         }
         Ok(format!("{DATASETS_PREFIX}{}/", parts.join("/")))

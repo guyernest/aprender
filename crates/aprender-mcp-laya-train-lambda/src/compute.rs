@@ -288,7 +288,10 @@ impl EcsPackTasks {
     }
 
     /// `ListTasks` for one desired status, across all pages.
-    async fn list(&self, desired: aws_sdk_ecs::types::DesiredStatus) -> Result<Vec<String>, String> {
+    async fn list(
+        &self,
+        desired: aws_sdk_ecs::types::DesiredStatus,
+    ) -> Result<Vec<String>, String> {
         let mut arns = Vec::new();
         let mut token: Option<String> = None;
         loop {
@@ -320,8 +323,13 @@ impl PackTasks for EcsPackTasks {
     async fn live_for(&self, task_id: &str) -> Result<Vec<PackTask>, String> {
         // A task being stopped has desiredStatus STOPPED while its lastStatus is not
         // yet STOPPED, so both listings are needed.
-        let mut arns = self.list(aws_sdk_ecs::types::DesiredStatus::Running).await?;
-        for arn in self.list(aws_sdk_ecs::types::DesiredStatus::Stopped).await? {
+        let mut arns = self
+            .list(aws_sdk_ecs::types::DesiredStatus::Running)
+            .await?;
+        for arn in self
+            .list(aws_sdk_ecs::types::DesiredStatus::Stopped)
+            .await?
+        {
             if !arns.contains(&arn) {
                 arns.push(arn);
             }
@@ -341,9 +349,9 @@ impl PackTasks for EcsPackTasks {
                 let last_status = task.last_status().unwrap_or("UNKNOWN");
                 let ours = task.overrides().is_some_and(|o| {
                     o.container_overrides().iter().any(|c| {
-                        c.environment()
-                            .iter()
-                            .any(|kv| kv.name() == Some(PACK_TASK_ENV) && kv.value() == Some(task_id))
+                        c.environment().iter().any(|kv| {
+                            kv.name() == Some(PACK_TASK_ENV) && kv.value() == Some(task_id)
+                        })
                     })
                 });
                 if ours && last_status != "STOPPED" {
@@ -394,10 +402,7 @@ pub struct ComputeState {
 ///
 /// The seam's message when either read fails: with no answer the gate cannot
 /// call compute terminal, so the caller must not release anything.
-pub async fn compute_terminal(
-    ctx: &FinalizerCtx,
-    task_id: &str,
-) -> Result<ComputeState, String> {
+pub async fn compute_terminal(ctx: &FinalizerCtx, task_id: &str) -> Result<ComputeState, String> {
     let training = ctx
         .training_jobs
         .status(&training_job_name(task_id))
