@@ -1071,9 +1071,9 @@ Plans:
 - [ ] 14-06-PLAN.md — GPU training container: run_step.py train/probe modes, deterministic base staging, Dockerfile.train (wave 2)
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 14-05-PLAN.md — the finalizer bin: verdict.json, manifest.json, retention tags, lock release on every path (wave 3)
-- [ ] 14-07-PLAN.md — arm64 pack-and-verify step and image with a native local smoke (wave 3)
-- [ ] 14-11-PLAN.md — D-20 laya-fetch recipe with sha256 verification (wave 3)
+- [ ] 14-05-PLAN.md — the finalizer bin: verdict.json, manifest.json, retention tags, compute-terminal lock release, scheduled reconcile sweep (wave 3)
+- [ ] 14-07-PLAN.md — arm64 pack-and-verify step (pilot-waiver claims packed) and image with a native local smoke (wave 3)
+- [ ] 14-11-PLAN.md — D-20 laya-fetch recipe with sha256 verification, and the pure D-16 reproduction evaluator (wave 3)
 
 **Wave 4** *(blocked on Wave 3 completion)*
 - [ ] 14-08-PLAN.md — CDK images and trainer stacks with template assertions (D-12, D-13, D-14, D-19, least privilege) (wave 4)
@@ -1089,7 +1089,7 @@ Plans:
 - [ ] 14-13-PLAN.md — live: publish on pmcp.run, OAuth, 401, grant, free live checks (owner-gated) (wave 7)
 
 **Wave 8** *(blocked on Wave 7 completion)*
-- [ ] 14-14-PLAN.md — live: end-to-end smoke, cancel test, D-16 band and retry declaration (owner-gated) (wave 8)
+- [ ] 14-14-PLAN.md — live: end-to-end smoke, cancel tests (training and packing), D-16 band and retry declaration (owner-gated) (wave 8)
 
 **Wave 9** *(blocked on Wave 8 completion)*
 - [ ] 14-15-PLAN.md — live: D-16 motivation-v1 reproduction on SageMaker and its verdict (owner-gated) (wave 9)
