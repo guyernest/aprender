@@ -1,0 +1,61 @@
+{
+  "schema": "laya-probe-evidence-v1",
+  "plan": "14-12",
+  "cuda": {
+    "job_name": "laya-probe-cuda-20261029173229",
+    "final_status": "Completed",
+    "failure_reason": null,
+    "billable_seconds": 180,
+    "driver": "595.91.07",
+    "compat_used": false,
+    "torch_cuda_available": true,
+    "torch_version_cuda": "13.0",
+    "device_name": "NVIDIA A10G",
+    "matmul_ok": true,
+    "base_load_ok": false,
+    "base_forward_seconds": null,
+    "max_memory_allocated_bytes": null,
+    "train_step_ok": false,
+    "train_step_peak_bytes": null,
+    "train_step_batch": null,
+    "train_step_tokens": null,
+    "host_rss_peak_bytes": null,
+    "tiny_fixture_rc": 1,
+    "tiny_fixture_device_used": null,
+    "nvidia_smi_cuda_version": "13.2",
+    "job_timeline_seconds": {
+      "pending_preparing_instances": 496,
+      "downloading_image": 137,
+      "training": 35
+    },
+    "root_cause_observed": "RuntimeError: Failed to find C compiler. Please specify via CC environment variable or set triton.knobs.build.impl. Raised by triton (torch/_native/ops/bmm_outer_product/triton_kernels.py -> triton/backends/nvidia/driver.py CudaUtils compile of driver.c) on the first CUDA forward through the ModernBERT encoder, in the probe helper's base load AND in the tiny fixture's train.py run (same traceback). The image's base is nvidia/cuda:13.0.3-base-ubuntu24.04 and the apt line installs only ca-certificates curl unzip git: no gcc/cc is present.",
+    "logs": "runs/probe/cuda-<id>/{helper.log,tiny-fixture.log,probe.json,nvidia-smi.txt} in the trainer bucket (fetched to the gitignored scratchpad, not committed)",
+    "what_this_is_not": "not a driver or CUDA-13 compat failure: driver 595.91.07 >= 580 so no compat libraries were used, torch.cuda.is_available() is true, the 4096x4096 matmul ran on the A10G, and the tiny fixture's DEVICE line printed requested=cuda used=cuda:0 torch=2.14.0+cu130"
+  },
+  "sigterm": {
+    "job_name": "laya-probe-sigterm-20261029174509",
+    "final_status": "Stopped",
+    "billable_seconds": 280,
+    "grace_seconds": 118,
+    "heartbeats": 60,
+    "stop_requested_after_in_progress_seconds": 219,
+    "container_ready": true,
+    "failure_reason": null,
+    "finding": null,
+    "note": "grace 118 s (lower bound, 60 heartbeats at 2 s) is well above run_step's 25 s SHUTDOWN_DEADLINE_S; RESEARCH A6 holds"
+  },
+  "verdict": "fail",
+  "fail_reasons": [
+    "base_load_ok false: triton could not find a C compiler in the train image",
+    "train_step_ok false: not reached (the helper stops at the base load)",
+    "tiny_fixture_rc 1 with no device_used: same missing-compiler traceback in train.py's first CUDA forward"
+  ],
+  "spend": {
+    "probe_jobs": 2,
+    "billable_seconds_total": 460,
+    "codebuild_builds": 2,
+    "no_probe_job_left_inprogress": true,
+    "checked": "describe-training-job on both (Completed, Stopped) and list-training-jobs InProgress = 0"
+  },
+  "owner_decision": null
+}
