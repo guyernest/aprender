@@ -55,6 +55,13 @@ region = "us-east-1"
 # The pmcp.run server id. It must equal the crate `aprender-mcp-laya-train-lambda` minus `-lambda`
 # (the trap above) and the Lambda function name the grant recipe grants to.
 name = "aprender-mcp-laya-train"
+# cargo-pmcp 0.28.1's DeployDescriptor requires both (found live at plan 14-13's second publish
+# attempt: "missing field `timeout_seconds` in `server`"). Same values as the SetFit training
+# request function: 1024 MB is for the pmcp server's cold start and a capped dataset read, not for
+# work (training runs on SageMaker), and 30 s is the API Gateway HTTP API's own integration
+# timeout, which cannot be raised.
+memory_mb = 1024
+timeout_seconds = 30
 
 [environment]
 RUST_LOG = "info"
@@ -70,8 +77,28 @@ enabled = false
 provider = "none"
 callback_urls = []
 
+# The remaining tables mirror crates/.pmcp/deploy.toml.template, the shape cargo-pmcp 0.28.1's
+# pmcp-cfn-renderer deserializes: an [observability] without `enable_xray` fails the parse
+# ("missing field `enable_xray`") and the deploy then falls back to a `cdk synth` that cannot run
+# (found live at plan 14-13's first publish attempt, before anything was created).
+[auth.dcr]
+enabled = true
+public_client_patterns = ["claude", "desktop", "cursor", "mcp-inspector", "chatgpt"]
+default_scopes = ["openid", "email", "mcp/read"]
+allowed_scopes = ["openid", "email", "profile", "mcp/read", "mcp/write"]
+
+[auth.scopes.custom]
+
 [observability]
 log_retention_days = 30
+enable_xray = true
+create_dashboard = true
+
+[observability.alarms]
+error_threshold = 10
+# The request path is milliseconds (a dataset read and one StartExecution); anything near the
+# gateway's own ceiling is already a failure the client saw.
+latency_threshold_ms = 5000
 
 [composition]
 tier = "foundation"
