@@ -2443,7 +2443,316 @@ mod tests {
 
     // ---------------------------------------------------------------- compute gate
 
+    #[tokio::test]
+    async fn fin_compute_gate_table() {
+        let rig = Rig::new();
+        let table = [
+            (None, true),
+            (Some("Completed"), true),
+            (Some("Failed"), true),
+            (Some("Stopped"), true),
+            (Some("InProgress"), false),
+            (Some("Stopping"), false),
+            (Some("SomethingNew"), false),
+        ];
+        for (status, terminal) in table {
+            rig.jobs.status.lock().expect("lock").clear();
+            if let Some(status) = status {
+                rig.jobs.set(&training_job_name(TASK_ID), status);
+            }
+            let state = compute_terminal(&rig.ctx, TASK_ID).await.expect("state");
+            assert_eq!(state.terminal, terminal, "{status:?}");
+        }
+        rig.jobs.set(&training_job_name(TASK_ID), "Completed");
+        rig.packs.add(TASK_ID, "arn:task/1", "RUNNING");
+        rig.packs.add("another-task", "arn:task/2", "RUNNING");
+        let state = compute_terminal(&rig.ctx, TASK_ID).await.expect("state");
+        assert!(!state.terminal, "a live pack task of the run blocks the release");
+        assert_eq!(state.pack_task_arns, ["arn:task/1"]);
+        rig.packs.set_status("arn:task/1", "STOPPED");
+        assert!(compute_terminal(&rig.ctx, TASK_ID).await.expect("state").terminal);
+    }
+
+    #[tokio::test]
+    async fn fin_awaiting_training() {
+        let rig = ready(&passing()).await;
+        rig.set_execution("ABORTED");
+        rig.jobs.set(&training_job_name(TASK_ID), "InProgress");
+        let report = rig.event("ABORTED").await.expect("awaiting");
+        assert!(report.awaiting_compute);
+        assert!(report.stopped_training_job);
+        assert_eq!(rig.jobs.stops(), [training_job_name(TASK_ID)], "stopped once");
+        assert!(rig.s3_writes().is_empty(), "nothing written to S3");
+        assert!(!rig.lock_released().await, "the lock is still held");
+        assert_eq!(
+            rig.record().await.task.status,
+            TaskStatus::Cancelled,
+            "readers see cancelled at once"
+        );
+
+        // The job is Stopping: no second stop, still awaiting.
+        rig.jobs.set(&training_job_name(TASK_ID), "Stopping");
+        let again = rig.sweep().await.expect("sweep");
+        assert_eq!(again.action, "awaiting-compute");
+        assert_eq!(rig.jobs.stops().len(), 1, "never stopped twice");
+        assert!(!rig.lock_released().await);
+
+        // The job is Stopped: the sweep finalizes.
+        rig.jobs.set(&training_job_name(TASK_ID), "Stopped");
+        let done = rig.sweep().await.expect("sweep");
+        assert_eq!(done.action, "finalized");
+        let rec = rig.record().await;
+        assert_eq!(rec.task.status, TaskStatus::Cancelled);
+        assert_eq!(phase_of(&rec), Phase::Cancelled);
+        assert!(rig.objects.bytes(&Rig::key("verdict.json")).is_some());
+        assert!(rig.objects.bytes(&Rig::key("manifest.json")).is_some());
+        assert!(rig.lock_released().await);
+    }
+
+    #[tokio::test]
+    async fn fin_cancel_packing() {
+        let rig = ready(&passing()).await;
+        let pack_arn = "arn:aws:ecs:us-east-1:123456789012:task/cluster/abc";
+        rig.packs.add(TASK_ID, pack_arn, "RUNNING");
+        rig.cancel_through_store().await;
+        rig.executions.running.lock().expect("lock").push(Rig::arn());
+
+        let first = rig.sweep().await.expect("sweep");
+        assert_eq!(first.action, "cancel-retry");
+        assert!(first.stopped_execution);
+        assert_eq!(rig.executions.stops(), [Rig::arn()], "StopExecution once");
+        assert_eq!(rig.packs.stops(), [pack_arn.to_string()], "StopTask once");
+        assert!(rig.s3_writes().is_empty());
+        assert!(!rig.lock_released().await);
+
+        // A replacement `train` is refused single-flight while the lock is held.
+        assert_eq!(
+            lock::peek(rig.backend.as_ref()).await.as_deref(),
+            Some(TASK_ID)
+        );
+        let refused = lock::acquire(rig.backend.as_ref(), "replacement", "carol", T0 + 60).await;
+        assert!(
+            matches!(refused, Err(lock::AcquireError::Held(ref h)) if h.holder == TASK_ID),
+            "{refused:?}"
+        );
+
+        // The execution is ABORTED and the pack task STOPPED: finalized cancelled.
+        rig.set_execution("ABORTED");
+        rig.executions.running.lock().expect("lock").clear();
+        rig.packs.set_status(pack_arn, "STOPPED");
+        let second = rig.sweep().await.expect("sweep");
+        assert_eq!(second.action, "finalized");
+        assert_eq!(phase_of(&rig.record().await), Phase::Cancelled);
+        assert!(rig.lock_released().await);
+        lock::acquire(rig.backend.as_ref(), "replacement", "carol", T0 + 120)
+            .await
+            .expect("the lock is free after the release");
+    }
+
+    #[tokio::test]
+    async fn fin_cancel_retry() {
+        let rig = ready(&passing()).await;
+        rig.cancel_through_store().await;
+        rig.executions.running.lock().expect("lock").push(Rig::arn());
+        for round in 1..=3 {
+            let swept = rig.sweep().await.expect("sweep");
+            assert_eq!(swept.action, "cancel-retry");
+            assert_eq!(rig.executions.stops().len(), round, "re-issued every sweep");
+            assert!(!rig.lock_released().await, "held throughout");
+        }
+        rig.set_execution("ABORTED");
+        rig.executions.running.lock().expect("lock").clear();
+        let done = rig.sweep().await.expect("sweep");
+        assert_eq!(done.action, "finalized");
+        assert_eq!(rig.executions.stops().len(), 3, "no more stops once it is terminal");
+        assert!(rig.lock_released().await);
+    }
+
     // ------------------------------------------------------------------- reconcile
 
+    #[tokio::test]
+    async fn fin_reconcile_lost_event() {
+        let mut files = passing();
+        files.outcome.as_mut().expect("outcome")["exit_class"] = json!("crash");
+        let rig = ready(&files).await;
+        rig.set_execution("FAILED");
+        // No event was ever delivered; the record is still Working.
+        assert_eq!(rig.record().await.task.status, TaskStatus::Working);
+        let swept = rig.sweep().await.expect("sweep");
+        assert_eq!(swept.action, "finalized");
+        let finalized = swept.finalized.expect("finalized");
+        assert_eq!(finalized.phase, Some(Phase::Failed));
+        assert_eq!(rig.record().await.task.status, TaskStatus::Failed);
+        assert!(rig.lock_released().await);
+    }
+
+    #[tokio::test]
+    async fn fin_reconcile_free() {
+        let rig = Rig::new();
+        let swept = rig.sweep().await.expect("sweep");
+        assert_eq!(swept.action, "lock-free");
+        assert!(rig.s3_writes().is_empty());
+        assert!(rig.executions.stops().is_empty());
+        assert!(rig.jobs.stops().is_empty());
+        assert!(rig.packs.stops().is_empty());
+        assert!(rig.log().is_empty(), "no backend write either");
+
+        // A released lock is free too.
+        let held = Rig::new();
+        held.start().await;
+        assert!(lock::release(held.backend.as_ref(), TASK_ID).await);
+        held.log.lock().expect("lock").clear();
+        let swept = held.sweep().await.expect("sweep");
+        assert_eq!(swept.action, "lock-free");
+        assert!(held.log().is_empty());
+        assert!(held.executions.stops().is_empty());
+    }
+
+    #[tokio::test]
+    async fn fin_reconcile_running() {
+        let rig = ready(&passing()).await;
+        rig.executions.running.lock().expect("lock").push(Rig::arn());
+        let swept = rig.sweep().await.expect("sweep");
+        assert_eq!(swept.action, "running");
+        assert!(rig.s3_writes().is_empty());
+        assert!(rig.executions.stops().is_empty());
+        assert!(rig.jobs.stops().is_empty());
+        assert!(rig.packs.stops().is_empty());
+        assert!(!rig.lock_released().await);
+        assert_eq!(rig.record().await.task.status, TaskStatus::Working);
+    }
+
+    #[tokio::test]
+    async fn fin_reconcile_orphan() {
+        // 901 s after the lock was taken, no execution exists.
+        let rig = Rig::new();
+        rig.start().await;
+        rig.clock.store(T0 + 901, Ordering::SeqCst);
+        let swept = rig.sweep().await.expect("sweep");
+        assert_eq!(swept.action, "dispatch-unconfirmed");
+        let rec = rig.record().await;
+        assert_eq!(rec.task.status, TaskStatus::Failed);
+        assert!(rig
+            .stored_payload()
+            .await
+            .error
+            .expect("error")
+            .contains("dispatch-unconfirmed"));
+        assert!(rig.objects.bytes(&Rig::key("verdict.json")).is_some());
+        assert!(rig.lock_released().await);
+
+        // 899 s after: still inside the grace.
+        let early = Rig::new();
+        early.start().await;
+        early.clock.store(T0 + 899, Ordering::SeqCst);
+        let swept = early.sweep().await.expect("sweep");
+        assert_eq!(swept.action, "dispatch-grace");
+        assert!(early.s3_writes().is_empty());
+        assert_eq!(early.record().await.task.status, TaskStatus::Working);
+        assert!(!early.lock_released().await);
+    }
+
+    #[tokio::test]
+    async fn fin_reconcile_rogue() {
+        let rig = ready(&passing()).await;
+        let rogue = "arn:aws:states:us-east-1:123456789012:execution:laya-train-dev:laya-X";
+        {
+            let mut running = rig.executions.running.lock().expect("lock");
+            running.push(rogue.to_string());
+            running.push(Rig::arn());
+        }
+        let swept = rig.sweep().await.expect("sweep");
+        assert_eq!(swept.action, "running");
+        assert_eq!(rig.executions.stops(), [rogue.to_string()], "stopped once");
+        assert_eq!(swept.rogue_stopped, [rogue.to_string()]);
+        assert!(!rig.lock_released().await, "the holder's run is untouched");
+        assert_eq!(rig.record().await.task.status, TaskStatus::Working);
+    }
+
     // ---------------------------------------------------------------- crash resume
+
+    /// The state an uninterrupted run ends in.
+    struct Reference {
+        objects: BTreeMap<String, (Vec<u8>, Option<String>)>,
+        result_text: String,
+        status: TaskStatus,
+        tagged: usize,
+    }
+
+    async fn reference() -> Reference {
+        let rig = ready(&passing()).await;
+        rig.set_execution("SUCCEEDED");
+        let report = rig.payload(None).await.expect("uninterrupted");
+        assert!(rig.lock_released().await);
+        let rec = rig.record().await;
+        Reference {
+            objects: rig.objects.snapshot(),
+            result_text: result_text(rec.result.as_ref().expect("result"))
+                .expect("text")
+                .to_string(),
+            status: rec.task.status,
+            tagged: report.tagged,
+        }
+    }
+
+    /// Run a completed run's finalization with one injected failure, then let the
+    /// sweep resume it, and compare the end state with an uninterrupted run's.
+    async fn crash_then_resume(inject: impl FnOnce(&Rig, &Reference), reference: &Reference) {
+        let rig = ready(&passing()).await;
+        rig.set_execution("SUCCEEDED");
+        inject(&rig, reference);
+        let err = rig.payload(None).await.expect_err("the injected failure");
+        assert!(matches!(err, FinalizerError::Store(_)), "{err:?}");
+        assert!(!rig.lock_released().await, "the lock is held after a crash");
+
+        let swept = rig.sweep().await.expect("the sweep resumes it");
+        assert_eq!(swept.action, "finalized");
+        assert!(rig.lock_released().await);
+        assert_eq!(rig.objects.snapshot(), reference.objects, "objects and tags");
+        let rec = rig.record().await;
+        assert_eq!(rec.task.status, reference.status);
+        assert_eq!(
+            result_text(rec.result.as_ref().expect("result")),
+            Some(reference.result_text.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn fin_crash_resume_after_record() {
+        let reference = reference().await;
+        crash_then_resume(|rig, _| rig.objects.fail_nth(Op::Put, 1), &reference).await;
+    }
+
+    #[tokio::test]
+    async fn fin_crash_resume_after_verdict() {
+        let reference = reference().await;
+        crash_then_resume(|rig, _| rig.objects.fail_nth(Op::Put, 2), &reference).await;
+    }
+
+    #[tokio::test]
+    async fn fin_crash_resume_after_manifest() {
+        let reference = reference().await;
+        crash_then_resume(|rig, _| rig.objects.fail_nth(Op::PutTag, 1), &reference).await;
+    }
+
+    #[tokio::test]
+    async fn fin_crash_resume_after_tag() {
+        let reference = reference().await;
+        // The first read-back follows the pre-read pass over every target.
+        crash_then_resume(
+            |rig, r| rig.objects.fail_nth(Op::GetTag, r.tagged + 1),
+            &reference,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn fin_crash_resume_after_readback() {
+        let reference = reference().await;
+        crash_then_resume(
+            |rig, _| rig.backend.fail_release.store(true, Ordering::SeqCst),
+            &reference,
+        )
+        .await;
+    }
 }

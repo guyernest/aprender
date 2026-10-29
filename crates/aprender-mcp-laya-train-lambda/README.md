@@ -17,7 +17,7 @@ else:
 | `TaskBackend` | `DynamoDbTaskBackend` (from `aprender-setfit-train-lambda`, bound to this server's table) |
 | `Dispatcher` | `SfnDispatcher`: one Step Functions execution per run, named `laya-<task_id>` |
 | `DatasetSource` | `S3DatasetSource` over the server bucket's `datasets/` prefix, with size caps |
-| terminal write | the finalizer (plan 14-05), not this crate's request function |
+| terminal write | the finalizer bin (plan 14-05): `FinalizerCtx`, `handle`, `reconcile` over the `ObjectStore`, `ExecutionReader`, `TrainingJobs` and `PackTasks` seams |
 | links | presigned GETs minted by `train_status` on read, only for keys inside the run's own prefix |
 | cancel | `SfnCancelSink`: a best-effort `StopExecution` |
 
@@ -30,7 +30,33 @@ handler binary to be named `bootstrap`, and `cargo pmcp deploy` finds the
 deployable by that name, so only the request function carries it.
 
 `aprender-laya-train-finalizer` (plan 14-05, renamed `bootstrap` by the CDK asset
-build) writes the terminal result and reconciles stuck runs.
+build) is the ONE writer of a run's terminal record, `verdict.json`,
+`manifest.json`, retention tags and lock release. It accepts exactly three
+inputs and refuses anything else:
+
+| Input | From |
+|-------|------|
+| `{"source":"state-machine","execution_arn","start_time","input",["error"]}` | the state machine's `Finalize` state (normal end and `Catch` end) |
+| an EventBridge `Step Functions Execution Status Change` event, `ABORTED \| TIMED_OUT \| FAILED` | a rule on the one configured state machine (best effort, may repeat) |
+| `{"source":"reconcile"}` | a schedule, every 10 minutes |
+
+One finalization is ordered: compute is terminal (the SageMaker job and every ECS
+pack task of the run), then the DynamoDB record (the arbiter, first writer wins),
+`verdict.json`, `manifest.json`, the retention tags read back, and the lock
+release LAST. A failure at any step after the record returns `Err` with the lock
+held; the next event or the sweep resumes from the stored record. While compute is
+still live the finalizer stops it (`StopTrainingJob`, ECS `StopTask`), writes
+nothing and keeps the lock. The sweep also re-issues a lost `StopExecution` for a
+cancelled run, resolves a dispatch that never confirmed after 900 s, and stops any
+RUNNING execution that is not the lock holder's.
+
+It reads `APRENDER_LAYA_TRAIN_TABLE`, `_BUCKET`, `_STATE_MACHINE_ARN`,
+`_CLUSTER_ARN` and `_PACK_FAMILY`, and refuses to start when one is unset. Its role
+needs: S3 `Get/Put/PutObjectTagging/GetObjectTagging/ListBucket` on `runs/*`;
+`states:DescribeExecution`/`StopExecution` on the machine's executions and
+`states:ListExecutions` on the machine; `sagemaker:DescribeTrainingJob`/
+`StopTrainingJob` on `training-job/laya-*`; `ecs:ListTasks`/`DescribeTasks`/
+`StopTask` conditioned on the cluster; the DynamoDB item actions on the table.
 
 ## No AWS permission of its own
 
@@ -47,5 +73,7 @@ finalizer's reconcile sweep re-issues the stop every sweep.
 
 ## Testing
 
-Every test is offline. Fakes stand in for S3 and Step Functions; the one test
-that uses a real SDK client points it at a closed loopback port.
+Every test is offline. Fakes stand in for S3 (which can fail the n-th call of an
+operation), Step Functions, SageMaker and ECS; the one test that uses a real SDK
+client points it at a closed loopback port. The finalizer's tests (`fin_*`) run the
+real store, lock and decision over the in-memory backend.
