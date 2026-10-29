@@ -1847,13 +1847,599 @@ mod tests {
 
     // ------------------------------------------------------------ input shapes
 
+    #[test]
+    fn fin_time_parsing() {
+        assert_eq!(parse_rfc3339_secs("2026-10-28T10:00:00Z"), Some(1_793_181_600));
+        assert_eq!(
+            parse_rfc3339_secs("2026-10-28T10:00:00.123Z"),
+            Some(1_793_181_600)
+        );
+        assert_eq!(
+            parse_rfc3339_secs("2026-10-28T12:00:00+02:00"),
+            Some(1_793_181_600)
+        );
+        assert_eq!(parse_rfc3339_secs("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(parse_rfc3339_secs("not a time"), None);
+        assert_eq!(parse_time_secs(&json!(1_793_181_600)), Some(1_793_181_600));
+        assert_eq!(parse_time_secs(&json!(1_793_181_600.75)), Some(1_793_181_600));
+        assert_eq!(parse_time_secs(&json!(null)), None);
+    }
+
+    #[tokio::test]
+    async fn fin_bad_shape() {
+        let rig = ready(&passing()).await;
+        let bad = [
+            json!({"hello": 1}),
+            json!([1, 2]),
+            json!({"source": "reconcile", "extra": 1}),
+            json!({"source": "state-machine"}),
+            json!({"source": "state-machine", "execution_arn": "x", "start_time": 1,
+                   "input": rig.exec_input(), "surprise": true}),
+            json!({"source": "aws.states", "detail-type": "EC2 Instance State-change Notification",
+                   "detail": {"executionArn": "x", "stateMachineArn": MACHINE, "status": "FAILED"}}),
+            event_json("SUCCEEDED", MACHINE),
+            event_json("RUNNING", MACHINE),
+        ];
+        for value in bad {
+            let err = FinalizerInput::parse(&value).expect_err("refused");
+            assert!(matches!(err, FinalizerError::Refused(_)), "{value}: {err:?}");
+        }
+        assert_eq!(
+            FinalizerInput::parse(&json!({"source": "reconcile"})).expect("sweep"),
+            FinalizerInput::Reconcile
+        );
+        assert!(rig.s3_writes().is_empty(), "nothing written");
+        assert!(!rig.lock_released().await);
+    }
+
+    #[tokio::test]
+    async fn fin_foreign_machine() {
+        let rig = ready(&passing()).await;
+        rig.set_execution("ABORTED");
+        let other = "arn:aws:states:us-east-1:123456789012:stateMachine:somebody-else";
+        let err = handle(
+            &rig.ctx,
+            FinalizerInput::parse(&event_json("ABORTED", other)).expect("shape"),
+        )
+        .await
+        .expect_err("refused");
+        assert!(matches!(err, FinalizerError::Refused(_)), "{err:?}");
+        assert!(rig.s3_writes().is_empty());
+        assert!(!rig.lock_released().await, "the lock is unchanged");
+        assert_eq!(rig.record().await.task.status, TaskStatus::Working);
+        assert!(rig.executions.stops().is_empty());
+    }
+
+    #[tokio::test]
+    async fn fin_wrong_prefix() {
+        let rig = ready(&passing()).await;
+        let mut input = rig.exec_input();
+        input.run_prefix = format!("runs/other-model/{TASK_ID}/");
+        let value = json!({"source": "state-machine", "execution_arn": Rig::arn(),
+                           "start_time": T0, "input": input});
+        let err = handle(&rig.ctx, FinalizerInput::parse(&value).expect("shape"))
+            .await
+            .expect_err("refused");
+        assert!(matches!(err, FinalizerError::Refused(_)), "{err:?}");
+        let mut climbing = rig.exec_input();
+        climbing.name = "..".to_string();
+        climbing.run_prefix = layout::run_prefix("..", TASK_ID);
+        let value = json!({"source": "state-machine", "execution_arn": Rig::arn(),
+                           "start_time": T0, "input": climbing});
+        let err = handle(&rig.ctx, FinalizerInput::parse(&value).expect("shape"))
+            .await
+            .expect_err("refused");
+        assert!(matches!(err, FinalizerError::Refused(_)), "{err:?}");
+        assert!(rig.s3_writes().is_empty());
+        assert!(!rig.lock_released().await);
+    }
+
     // ------------------------------------------------------ every way a run ends
+
+    #[tokio::test]
+    async fn fin_gate_fail() {
+        let rig = ready(&gate_failed()).await;
+        let report = rig.payload(None).await.expect("finalized");
+        assert_eq!(report.phase, Some(Phase::GateFailed));
+        let rec = rig.record().await;
+        assert_eq!(rec.task.status, TaskStatus::Completed);
+        assert!(!rec.result.as_ref().expect("result").is_error);
+        assert!(!report.keep);
+        rig.assert_all_tagged(RETENTION_EXPIRE);
+        assert!(rig.objects.snapshot().values().all(|(_, t)| t.as_deref() != Some("keep")));
+        assert!(rig.lock_released().await);
+    }
+
+    #[tokio::test]
+    async fn fin_waived() {
+        let mut files = gate_failed();
+        files.gate_report.as_mut().expect("report")["pilot_waiver"] =
+            json!({"id": "W-1", "waives": "ece_post"});
+        files.pack_outcome = Some(parse(PACK_OUTCOME));
+        files.pack_outcome.as_mut().expect("pack")["waived"] = json!("W-1");
+        files.pack_manifest = Some(pack_manifest_json());
+        let rig = ready(&files).await;
+        let report = rig.payload(None).await.expect("finalized");
+        assert_eq!(report.phase, Some(Phase::Completed));
+        let payload = rig.stored_payload().await;
+        let verdict = payload.verdict.expect("verdict");
+        assert_eq!(verdict.waived.as_deref(), Some("W-1"));
+        assert!(!verdict.pass);
+        assert!(rig.manifest().entries.iter().any(|e| e.path == "fixture-model.apr"));
+        assert!(!report.keep, "D-19 keeps GATE PASS only");
+        rig.assert_all_tagged(RETENTION_EXPIRE);
+        assert!(rig.lock_released().await);
+    }
+
+    #[tokio::test]
+    async fn fin_pack_refused() {
+        let mut files = passing();
+        {
+            let pack = files.pack_outcome.as_mut().expect("pack");
+            pack["accepted"] = json!(false);
+            pack["apr_sha256"] = Value::Null;
+            pack["exit_code"] = json!(3);
+            pack["deploy_eligible"] = json!(false);
+            pack["verify_line"] = Value::Null;
+        }
+        let rig = ready(&files).await;
+        let report = rig.payload(None).await.expect("finalized");
+        assert_eq!(report.phase, Some(Phase::Failed));
+        let rec = rig.record().await;
+        assert_eq!(rec.task.status, TaskStatus::Failed);
+        assert!(rec.result.as_ref().expect("result").is_error);
+        let manifest = rig.manifest();
+        assert!(
+            !manifest.entries.iter().any(|e| e.path.ends_with(".apr")),
+            "a refused pack never lists a model"
+        );
+        assert!(manifest.entries.iter().any(|e| e.path == "run/gate-report.json"));
+        assert!(manifest.entries.iter().any(|e| e.path == "verify.log"));
+        rig.assert_all_tagged(RETENTION_EXPIRE);
+        assert!(rig.lock_released().await);
+    }
+
+    #[tokio::test]
+    async fn fin_catch_error() {
+        let rig = ready(&Files {
+            outcome: None,
+            gate_report: None,
+            training_manifest: None,
+            partial_manifest: None,
+            pack_outcome: None,
+            pack_manifest: None,
+            extra_objects: Vec::new(),
+        })
+        .await;
+        let cause = "x".repeat(5_000);
+        let error = json!({"Error": "States.TaskFailed", "Cause": cause});
+        if let FinalizerInput::StateMachine(p) = FinalizerInput::parse(&json!({
+            "source": "state-machine", "execution_arn": Rig::arn(), "start_time": T0,
+            "input": rig.exec_input(), "error": error
+        }))
+        .expect("shape")
+        {
+            assert!(p.error.expect("error").chars().count() <= 2_048);
+        } else {
+            panic!("not a state-machine payload");
+        }
+        let report = rig.payload(Some(error)).await.expect("finalized");
+        assert_eq!(report.phase, Some(Phase::Failed));
+        let payload = rig.stored_payload().await;
+        let text = payload.error.expect("error text");
+        assert!(text.starts_with("States.TaskFailed"), "{text}");
+        assert!(rig.record().await.result.expect("result").is_error);
+        assert!(rig.lock_released().await);
+    }
+
+    #[tokio::test]
+    async fn fin_abort_event() {
+        let rig = ready(&passing()).await;
+        rig.set_execution("ABORTED");
+        rig.jobs.set(&training_job_name(TASK_ID), "Stopped");
+        let report = rig.event("ABORTED").await.expect("finalized");
+        assert_eq!(report.phase, Some(Phase::Cancelled));
+        assert!(*rig.executions.describes.lock().expect("lock") >= 1, "DescribeExecution read");
+        let rec = rig.record().await;
+        assert_eq!(rec.task.status, TaskStatus::Cancelled, "readers see cancelled");
+        assert_eq!(phase_of(&rec), Phase::Cancelled);
+        assert!(rig.manifest().entries.iter().all(|e| !e.path.ends_with(".apr")));
+        assert!(!report.keep);
+        assert!(rig.lock_released().await);
+    }
+
+    #[tokio::test]
+    async fn fin_timeout_event() {
+        let mut files = passing();
+        files.outcome.as_mut().expect("outcome")["exit_class"] = json!("timeout");
+        files.gate_report = None;
+        files.pack_outcome = None;
+        files.pack_manifest = None;
+        let rig = ready(&files).await;
+        rig.set_execution("TIMED_OUT");
+        rig.jobs.set(&training_job_name(TASK_ID), "Stopped");
+        let report = rig.event("TIMED_OUT").await.expect("finalized");
+        assert_eq!(report.phase, Some(Phase::Failed));
+        assert_eq!(rig.record().await.task.status, TaskStatus::Failed);
+        assert!(rig
+            .stored_payload()
+            .await
+            .error
+            .expect("error")
+            .contains("runtime cap"));
+        assert!(rig.lock_released().await);
+    }
 
     // ------------------------------------------------- duplicates and first writer
 
+    #[tokio::test]
+    async fn fin_duplicate() {
+        let rig = ready(&passing()).await;
+        let first = rig.payload(None).await.expect("first");
+        let verdict = rig.objects.bytes(&Rig::key("verdict.json")).expect("verdict");
+        let manifest = rig.objects.bytes(&Rig::key("manifest.json")).expect("manifest");
+        let stored = rig.record().await.result.expect("result");
+        let writes = rig.s3_writes();
+        let second = rig.payload(None).await.expect("second");
+        assert_eq!(first.phase, Some(Phase::Completed));
+        assert_eq!(second.phase, Some(Phase::Completed));
+        assert_eq!(
+            rig.objects.bytes(&Rig::key("verdict.json")).expect("verdict"),
+            verdict
+        );
+        assert_eq!(
+            rig.objects.bytes(&Rig::key("manifest.json")).expect("manifest"),
+            manifest
+        );
+        assert_eq!(
+            result_text(&rig.record().await.result.expect("result")),
+            result_text(&stored)
+        );
+        assert_eq!(rig.s3_writes(), writes, "a duplicate invocation writes nothing");
+        rig.assert_all_tagged(RETENTION_KEEP);
+    }
+
+    #[tokio::test]
+    async fn fin_first_writer_wins() {
+        let rig = ready(&passing()).await;
+        rig.payload(None).await.expect("completed first");
+        let verdict = rig.objects.bytes(&Rig::key("verdict.json")).expect("verdict");
+        let stored = rig.record().await.result.expect("result");
+
+        // A late FAILED event, with outputs that would now decide `failed`, and a
+        // keep tag that was lost in the meantime.
+        let mut crashed = passing();
+        crashed.outcome.as_mut().expect("outcome")["exit_class"] = json!("crash");
+        rig.seed(&crashed);
+        rig.objects
+            .put_tag(&Rig::key("fixture-model.apr"), "expire")
+            .await
+            .expect("lose a tag");
+        rig.set_execution("FAILED");
+        let report = rig.event("FAILED").await.expect("reused");
+
+        assert_eq!(report.phase, Some(Phase::Completed), "the stored phase wins");
+        assert_eq!(
+            rig.objects.bytes(&Rig::key("verdict.json")).expect("verdict"),
+            verdict,
+            "verdict.json is not rewritten with `failed`"
+        );
+        assert_eq!(
+            result_text(&rig.record().await.result.expect("result")),
+            result_text(&stored)
+        );
+        rig.assert_all_tagged(RETENTION_KEEP);
+        assert!(rig.lock_released().await);
+    }
+
+    #[tokio::test]
+    async fn fin_tag_failure() {
+        let rig = ready(&passing()).await;
+        rig.objects.fail_nth(Op::PutTag, 1);
+        let err = rig.payload(None).await.expect_err("tagging failed");
+        assert!(matches!(err, FinalizerError::Store(_)), "{err:?}");
+        assert!(!rig.lock_released().await, "the lock is still held");
+        assert_eq!(rig.record().await.task.status, TaskStatus::Completed, "the record is durable");
+        let report = rig.payload(None).await.expect("resumed");
+        assert!(report.keep);
+        rig.assert_all_tagged(RETENTION_KEEP);
+        assert!(rig.lock_released().await);
+    }
+
     // -------------------------------------------------------- NotFound and integrity
 
+    #[tokio::test]
+    async fn fin_record_expired() {
+        let rig = Rig::new();
+        // The lock is held by T, but its task record is long gone.
+        lock::acquire(rig.backend.as_ref(), TASK_ID, OWNER, T0)
+            .await
+            .expect("lock");
+        rig.seed(&passing());
+        rig.jobs.set(&training_job_name(TASK_ID), "Completed");
+        rig.clock.store(T0 + TTL_SECS + 100, Ordering::SeqCst);
+        let report = rig.payload(None).await.expect("finalized");
+        assert_eq!(report.record, "record_missing");
+        assert_eq!(report.phase, Some(Phase::Completed));
+        assert!(rig.objects.bytes(&Rig::key("verdict.json")).is_some());
+        assert!(rig.objects.bytes(&Rig::key("manifest.json")).is_some());
+        assert!(rig.lock_released().await);
+        assert!(rig.backend.get(OWNER, TASK_ID).await.expect("get").is_none());
+    }
+
+    #[tokio::test]
+    async fn fin_record_missing_within_ttl() {
+        let rig = Rig::new();
+        lock::acquire(rig.backend.as_ref(), TASK_ID, OWNER, T0)
+            .await
+            .expect("lock");
+        rig.seed(&passing());
+        rig.jobs.set(&training_job_name(TASK_ID), "Completed");
+        rig.clock.store(T0 + TTL_SECS - 100, Ordering::SeqCst);
+        let err = rig.payload(None).await.expect_err("integrity");
+        assert!(matches!(err, FinalizerError::Integrity(_)), "{err:?}");
+        assert!(rig.s3_writes().is_empty(), "nothing written to S3");
+        assert!(!rig.lock_released().await, "the lock is left held");
+    }
+
+    #[tokio::test]
+    async fn fin_owner_mismatch() {
+        let rig = ready(&passing()).await;
+        let version = rig.record().await.version;
+        // A record for the same task id also exists under the owner the input
+        // names, so only the owner check (not a missing record) can stop the run.
+        let decoy = StoredTask {
+            task: Task::new(TASK_ID, TaskStatus::Working),
+            result: None,
+            envelope: None,
+            version: 1,
+            expires_at_secs: Some(lock::now_secs() + TTL_SECS),
+        };
+        rig.backend.put_new("bob", decoy).await.expect("decoy");
+        let mut input = rig.exec_input();
+        input.owner = "bob".to_string();
+        let value = json!({"source": "state-machine", "execution_arn": Rig::arn(),
+                           "start_time": T0, "input": input});
+        let err = handle(&rig.ctx, FinalizerInput::parse(&value).expect("shape"))
+            .await
+            .expect_err("integrity");
+        assert!(matches!(err, FinalizerError::Integrity(_)), "{err:?}");
+        assert!(rig.s3_writes().is_empty());
+        assert!(!rig.lock_released().await);
+        let rec = rig.record().await;
+        assert_eq!(rec.version, version, "T's record is untouched");
+        assert_eq!(rec.task.status, TaskStatus::Working);
+        let decoy = rig.backend.get("bob", TASK_ID).await.expect("get").expect("decoy");
+        assert_eq!(decoy.task.status, TaskStatus::Working, "the other owner's record is untouched");
+        assert!(decoy.result.is_none());
+    }
+
+    #[tokio::test]
+    async fn fin_terminal_no_result() {
+        let rig = Rig::new();
+        let record = StoredTask {
+            task: Task::new(TASK_ID, TaskStatus::Failed),
+            result: None,
+            envelope: None,
+            version: 1,
+            expires_at_secs: Some(lock::now_secs() + TTL_SECS),
+        };
+        rig.backend.put_new(OWNER, record).await.expect("record");
+        lock::acquire(rig.backend.as_ref(), TASK_ID, OWNER, T0)
+            .await
+            .expect("lock");
+        rig.seed(&passing());
+        rig.jobs.set(&training_job_name(TASK_ID), "Completed");
+        let err = rig.payload(None).await.expect_err("integrity");
+        assert!(matches!(err, FinalizerError::Integrity(_)), "{err:?}");
+        assert!(rig.s3_writes().is_empty());
+        assert!(!rig.lock_released().await);
+    }
+
+    #[tokio::test]
+    async fn fin_partial_inventory() {
+        let mut files = passing();
+        files.outcome.as_mut().expect("outcome")["exit_class"] = json!("timeout");
+        files.gate_report = None;
+        files.pack_outcome = None;
+        files.pack_manifest = None;
+        let mut partial = parse(TRAINING_MANIFEST);
+        partial["complete"] = json!(false);
+        partial["entries"] = json!([
+            {"path": "outcome.json", "size": 312, "sha256": sha("outcome")},
+            {"path": "train.log", "size": 100, "sha256": sha("train-log")},
+            {"path": "data/task.json", "size": 275, "sha256": sha("data-task")},
+            {"path": "data/train.jsonl", "size": 9_216, "sha256": sha("data-train")},
+        ]);
+        files.training_manifest = None;
+        files.partial_manifest = Some(partial);
+        files.extra_objects = vec!["data/eval.jsonl".to_string(), "run/stray.bin".to_string()];
+        let rig = ready(&files).await;
+        let report = rig.payload(None).await.expect("finalized");
+        assert_eq!(report.phase, Some(Phase::Failed));
+        let manifest = rig.manifest();
+        let mut paths: Vec<&str> = manifest.entries.iter().map(|e| e.path.as_str()).collect();
+        paths.sort_unstable();
+        assert_eq!(
+            paths,
+            ["data/task.json", "data/train.jsonl", "outcome.json", "train.log", "verdict.json"]
+        );
+        assert_eq!(manifest.unlisted, 2, "two objects no writer manifest lists");
+        assert!(rig.stored_payload().await.manifest_partial);
+        assert!(rig.lock_released().await);
+    }
+
     // ---------------------------------------------------------------- client cancel
+
+    /// A server over the SAME backend, answering `train_status` over loopback HTTP
+    /// for the unauthenticated owner.
+    async fn train_status_over_http(backend: Arc<dyn TaskBackend>) -> Value {
+        use crate::dataset::fakes::FakeReader;
+        use crate::sfn::fakes::{FakeExecutions, FakePresign};
+        use crate::{S3DatasetSource, SfnDispatcher};
+
+        let dispatcher = Arc::new(SfnDispatcher::new(
+            Arc::new(FakeExecutions::default()),
+            Arc::new(FakePresign),
+            BUCKET,
+            MACHINE,
+        ));
+        let ctx = aprender_mcp_laya_train::ServerCtx::new(
+            backend,
+            dispatcher as Arc<dyn aprender_mcp_laya_train::Dispatcher>,
+            Arc::new(S3DatasetSource::new(FakeReader::default(), BUCKET)),
+            None,
+        );
+        let server = aprender_mcp_laya_train::build_server(ctx, "0.0.0").expect("server");
+        let http_server = pmcp::server::streamable_http_server::StreamableHttpServer::with_config(
+            "127.0.0.1:0".parse().expect("addr"),
+            Arc::new(tokio::sync::Mutex::new(server)),
+            crate::server_config(),
+        );
+        let (bound, _handle) = http_server.start().await.expect("binds");
+        let url = format!("http://{bound}");
+        let http = reqwest::Client::new();
+        let rpc = |id: u64, method: &str, params: Value| {
+            let http = http.clone();
+            let url = url.clone();
+            let body = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+            async move {
+                let text = http
+                    .post(url)
+                    .header("content-type", "application/json")
+                    .header("accept", "application/json, text/event-stream")
+                    .body(body.to_string())
+                    .send()
+                    .await
+                    .expect("transport")
+                    .text()
+                    .await
+                    .expect("body");
+                let payload = text
+                    .lines()
+                    .find_map(|line| line.strip_prefix("data: "))
+                    .unwrap_or(&text)
+                    .to_string();
+                serde_json::from_str::<Value>(&payload).expect("json body")
+            }
+        };
+        let init = rpc(
+            1,
+            "initialize",
+            json!({"protocolVersion": "2025-06-18", "capabilities": {},
+                   "clientInfo": {"name": "fin", "version": "0"}}),
+        )
+        .await;
+        assert!(init["error"].is_null(), "{init}");
+        let answer = rpc(
+            2,
+            "tools/call",
+            json!({"name": "train_status", "arguments": {"task_id": TASK_ID}}),
+        )
+        .await;
+        let text = answer["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("a text answer: {answer}"));
+        serde_json::from_str(text).expect("payload json")
+    }
+
+    #[tokio::test]
+    async fn fin_cancel_first() {
+        // The unauthenticated owner, so the loopback server reads the same task.
+        let rig = Rig::with_owner("local");
+        rig.start().await;
+        rig.seed(&passing());
+        rig.jobs.set(&training_job_name(TASK_ID), "Stopped");
+        rig.set_execution("ABORTED");
+        let sink = rig.cancel_through_store().await;
+        assert_eq!(*sink.seen.lock().expect("lock"), [TASK_ID.to_string()]);
+        let cancelled = rig.record().await;
+        assert_eq!(cancelled.task.status, TaskStatus::Cancelled);
+        assert!(cancelled.result.is_none(), "the cancel leaves no result");
+
+        let report = rig.event("ABORTED").await.expect("finalized");
+        assert_eq!(report.phase, Some(Phase::Cancelled));
+        assert_eq!(report.record, "attached");
+        let rec = rig.record().await;
+        assert_eq!(rec.task.status, TaskStatus::Cancelled, "the status is unchanged");
+
+        // tasks/result: the store's own get_result.
+        let stored = rig
+            .ctx
+            .store
+            .get_result(TASK_ID, "local")
+            .await
+            .expect("a stored result");
+        let payload: StatusPayload =
+            serde_json::from_str(result_text(&stored).expect("text")).expect("payload");
+        assert_eq!(payload.schema, layout::SCHEMA_STATUS);
+        assert_eq!(payload.phase, Phase::Cancelled);
+        assert!(payload.manifest.iter().all(|l| l.url.is_none()));
+
+        // train_status: the library's handler serves that stored payload.
+        let served = train_status_over_http(Arc::clone(&rig.backend) as Arc<dyn TaskBackend>).await;
+        assert_eq!(served["phase"], "cancelled", "{served}");
+        assert_eq!(served["schema"], layout::SCHEMA_STATUS);
+        assert_eq!(served["task_id"], TASK_ID);
+
+        // verdict.json says cancelled and expires; the lock is free.
+        let verdict: Value =
+            serde_json::from_slice(&rig.objects.bytes(&Rig::key("verdict.json")).expect("verdict"))
+                .expect("json");
+        assert_eq!(verdict["phase"], "cancelled");
+        assert_eq!(
+            rig.objects.tag(&Rig::key("verdict.json")).as_deref(),
+            Some(RETENTION_EXPIRE)
+        );
+        assert!(rig.lock_released().await);
+
+        // A duplicate ABORTED event leaves the stored result byte-identical.
+        let before = result_text(&rec.result.expect("result")).map(str::to_string);
+        rig.event("ABORTED").await.expect("duplicate");
+        let after = rig.record().await.result;
+        assert_eq!(result_text(&after.expect("result")).map(str::to_string), before);
+        assert!(rig.objects.snapshot().values().all(|(_, t)| t.as_deref() != Some("keep")));
+    }
+
+    #[tokio::test]
+    async fn fin_cancel_late() {
+        let rig = ready(&passing()).await;
+        rig.cancel_through_store().await;
+        // The execution was not stopped: its Finalize payload carries a completed run.
+        let report = rig.payload(None).await.expect("finalized");
+        assert_eq!(report.phase, Some(Phase::Cancelled));
+        let rec = rig.record().await;
+        assert_eq!(rec.task.status, TaskStatus::Cancelled);
+        assert_eq!(phase_of(&rec), Phase::Cancelled);
+        assert!(rig.manifest().entries.iter().all(|e| !e.path.ends_with(".apr")));
+        assert!(rig.objects.snapshot().values().all(|(_, t)| t.as_deref() != Some("keep")));
+        assert!(!report.keep);
+        assert!(rig.lock_released().await);
+    }
+
+    #[tokio::test]
+    async fn fin_cancel_race() {
+        let rig = ready(&passing()).await;
+        // The client's cancel lands just before the finalizer's finish applies.
+        rig.backend.cancel_race.store(true, Ordering::SeqCst);
+        let report = rig.payload(None).await.expect("finalized");
+        assert_eq!(report.phase, Some(Phase::Cancelled), "never completed");
+        let rec = rig.record().await;
+        assert_eq!(rec.task.status, TaskStatus::Cancelled);
+        assert_eq!(phase_of(&rec), Phase::Cancelled);
+        let verdict_puts = rig
+            .s3_writes()
+            .iter()
+            .filter(|l| l.ends_with("/verdict.json") && l.starts_with("put:"))
+            .count();
+        assert_eq!(verdict_puts, 1, "verdict.json is written once");
+        let verdict: Value =
+            serde_json::from_slice(&rig.objects.bytes(&Rig::key("verdict.json")).expect("verdict"))
+                .expect("json");
+        assert_eq!(verdict["phase"], "cancelled");
+        assert!(rig.objects.snapshot().values().all(|(_, t)| t.as_deref() != Some("keep")));
+        assert!(rig.lock_released().await);
+    }
 
     // ---------------------------------------------------------------- compute gate
 
