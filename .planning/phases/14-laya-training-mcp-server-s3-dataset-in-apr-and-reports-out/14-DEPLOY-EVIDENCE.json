@@ -88,5 +88,166 @@
   "pre_grant": {
     "authenticated": true,
     "rule": "dataset-access"
+  },
+  "post_grant": {
+    "grant_run_by": "the owner's own shell (the executor's attempt was denied by the permission system and not retried); not run by an executor",
+    "grant_line": "GRANT OK role pmcp-f458f4a8-aprender-mcp-laya-train-ExecutionRole-V73EG6IAJ0QK",
+    "grant_policy": "aprender-laya-train-dev",
+    "grant_pre_check": "the recipe's own in-invocation check printed: OAuth confirmed on aprender-mcp-laya-train: unauthenticated tools/list and a train_status tools/call both answered 401",
+    "list_bucket_condition": "StringLikeIfExists s3:prefix datasets/* (read back with iam get-role-policy)",
+    "granted_actions": [
+      "dynamodb:GetItem/PutItem/UpdateItem/DeleteItem/Query",
+      "states:StartExecution",
+      "states:DescribeExecution/StopExecution",
+      "s3:GetObject",
+      "s3:ListBucket"
+    ],
+    "role_inline_policies_after": [
+      "aprender-laya-train-dev",
+      "pmcp-declared",
+      "PmcpCompositionPolicy"
+    ],
+    "simulation": {
+      "states:StartExecution": "allowed",
+      "dynamodb:PutItem": "allowed",
+      "s3:GetObject": "allowed"
+    },
+    "role_max_session_seconds": 3600,
+    "validations": {
+      "motivation-v1": {
+        "valid": true,
+        "labels": [
+          "social_affiliative",
+          "conspiratorial",
+          "other"
+        ],
+        "class_counts": {
+          "conspiratorial": 41,
+          "other": 188,
+          "social_affiliative": 66
+        },
+        "shots_per_class": 188,
+        "rows": {
+          "train": 295,
+          "eval": 100,
+          "shift": null
+        },
+        "shift_present": false,
+        "epochs_required": true,
+        "epochs_range": [
+          4,
+          12
+        ],
+        "epochs_fixed": null,
+        "inputs_sha256": {
+          "eval.jsonl": "ee95d71fcb5d90d515b9fc6741e5df51087e763fa7f251ace83d9f11d5ccd575",
+          "task.json": "f74a3ad3cfc00c160cc2959d95beb219aec859b394b883e87577a56dc14e7ea3",
+          "train.jsonl": "f1d84f19ec38ed85356bcbcd1eae6ef8ad07fb97e014f61a17d37adc0d68d378"
+        },
+        "deferred_rules": []
+      },
+      "tweet-stance-64": {
+        "valid": true,
+        "labels": [
+          "none",
+          "against",
+          "favor"
+        ],
+        "class_counts": {
+          "against": 64,
+          "favor": 64,
+          "none": 64
+        },
+        "shots_per_class": 64,
+        "rows": {
+          "train": 192,
+          "eval": 459,
+          "shift": 280
+        },
+        "shift_present": true,
+        "epochs_required": true,
+        "epochs_range": [
+          4,
+          12
+        ],
+        "epochs_fixed": null,
+        "inputs_sha256": {
+          "eval.jsonl": "5250218f30686fe47482dbc1d2785d8eaa0a388a3aaf43ecc2c43b03f790e3bb",
+          "shift.jsonl": "e326952585d57b14ecc45f817efbb6994d6464ae07ec9190e0782547b5b20288",
+          "task.json": "041c4e38aadae98e3e62ecf77c7ace23616449cbab45439a4cf10cbb4a956b94",
+          "train.jsonl": "12a4301e5f0fcd50415e8eb237cbf2e5090f9e01f1edfa591dd5270f6df63351"
+        },
+        "deferred_rules": []
+      },
+      "tweet-stance-16": {
+        "valid": true,
+        "labels": [
+          "none",
+          "against",
+          "favor"
+        ],
+        "class_counts": {
+          "against": 16,
+          "favor": 16,
+          "none": 16
+        },
+        "shots_per_class": 16,
+        "rows": {
+          "train": 48,
+          "eval": 280,
+          "shift": null
+        },
+        "shift_present": false,
+        "epochs_required": false,
+        "epochs_range": null,
+        "epochs_fixed": 12,
+        "inputs_sha256": {
+          "eval.jsonl": "e326952585d57b14ecc45f817efbb6994d6464ae07ec9190e0782547b5b20288",
+          "task.json": "041c4e38aadae98e3e62ecf77c7ace23616449cbab45439a4cf10cbb4a956b94",
+          "train.jsonl": "c665236066e0501f71f402a5c6c05a2124cf649963bce353043ff66a4b171a87"
+        },
+        "deferred_rules": []
+      },
+      "no-such-prefix": {
+        "valid": false,
+        "rule": "task-missing",
+        "message": "Validation error: REFUSED task-missing: task.json does not exist (it is required)"
+      },
+      "other-bucket": {
+        "valid": false,
+        "rule": "dataset-uri",
+        "message": "Validation error: REFUSED dataset-uri: dataset_uri must be s3://aprender-laya-train-dev-<acct>/datasets/<name>[/<name>...]/ with 1 to 4 segments of [a-z0-9._-], each starting with a letter or digit and at most 64 characters"
+      }
+    },
+    "absent_prefix_observation": "the absent prefix answered task-missing (task.json does not exist), not an access denial: with the StringLikeIfExists ListBucket condition a missing key answers 404 live, the first live 404-vs-403 observation",
+    "refusals": {
+      "unknown-arg": {
+        "refused": true,
+        "rule": null,
+        "message": "Validation error: Invalid arguments for tool 'train': unknown field `seeds`, expected one of `dataset_uri`, `name`, `epochs`"
+      },
+      "bad-name": {
+        "refused": true,
+        "rule": "name",
+        "message": "Validation error: REFUSED name: name must match ^[a-z0-9][a-z0-9-]{0,47}$: lower-case letters, digits and hyphens, 1 to 48 characters, not starting with a hyphen"
+      },
+      "epochs-3": {
+        "refused": true,
+        "rule": "epochs",
+        "message": "Validation error: REFUSED epochs: epochs 3 is outside [4, 12] at 188 shots/class"
+      },
+      "no-epochs": {
+        "refused": true,
+        "rule": "epochs",
+        "message": "Validation error: REFUSED epochs: above 16 shots/class (188) epochs is required, in [4, 12]"
+      }
+    },
+    "table_count_before": 0,
+    "table_count_after": 0,
+    "lock_record_before": "absent",
+    "lock_record_after": "absent",
+    "lock_unchanged": true,
+    "executions_after": 0,
+    "unexpected": []
   }
 }
