@@ -65,5 +65,28 @@
     "max_session_seconds": 3600
   },
   "no_unauthenticated_train_call": true,
-  "owner_replies": []
+  "owner_replies": [
+    {
+      "reply": "oauth-on m2m-ready <m2m-file>. The token URL is part of the json.",
+      "replied_on": "2026-10-29",
+      "note": "the M2M file was moved by the owner from the repository root to a mode-600 path outside the checkout; verified outside the repo, mode 600, holding client_id/client_secret/token_url; token host is the function's own host"
+    }
+  ],
+  "auth": {
+    "first_401_utc": "2026-10-29T21:53:18Z",
+    "polls": 1,
+    "auth_window_s": 10114,
+    "refusal_line": "auth-refusal ok: tools/list 401, tools/call 401 after 1 poll(s) (1 s); first_401_utc 2026-10-29T21:53:18Z; initialize 200 (observed, not asserted); oauth-protected-resource 200 (observed)",
+    "mint_line_suffix": "(auth form)",
+    "window_note": "the window is long because OAuth was enabled by the owner hours after the publish; the open function held no right to spend (pre_grant_role simulation) and the unauthenticated validate was refused dataset-access, so nothing could be minted. The 1-poll answer means OAuth was already on when the check ran; the true enable time is not observed",
+    "authenticated_tools": [
+      "train",
+      "train_status",
+      "validate_dataset"
+    ]
+  },
+  "pre_grant": {
+    "authenticated": true,
+    "rule": "dataset-access"
+  }
 }
