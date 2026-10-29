@@ -831,15 +831,19 @@ mod tests {
     pub(crate) struct Harness {
         pub ctx: Arc<ServerCtx>,
         pub dispatcher: Arc<FakeDispatcher>,
-        pub backend: Arc<InMemoryTaskBackend>,
+        pub backend: Arc<dyn TaskBackend>,
         pub files: DatasetFiles,
         _root: TempRoot,
     }
 
     impl Harness {
         /// A 3-class dataset with `per_class` train rows per class written under
-        /// `<tmp>/datasets/tracer/`.
+        /// `<tmp>/datasets/tracer/`, over a fresh in-memory backend.
         pub fn new(per_class: usize) -> Self {
+            Self::with_backend(per_class, Arc::new(InMemoryTaskBackend::new()))
+        }
+
+        pub fn with_backend(per_class: usize, backend: Arc<dyn TaskBackend>) -> Self {
             let root = std::env::temp_dir().join(format!("laya-train-test-{}", mint_id()));
             let dir = root.join("datasets").join("tracer");
             std::fs::create_dir_all(&dir).expect("mkdir");
@@ -857,9 +861,8 @@ mod tests {
             std::fs::write(dir.join("eval.jsonl"), files.eval.as_deref().expect("eval"))
                 .expect("write");
             let dispatcher = FakeDispatcher::new();
-            let backend = Arc::new(InMemoryTaskBackend::new());
             let ctx = ServerCtx::new(
-                Arc::clone(&backend) as Arc<dyn TaskBackend>,
+                Arc::clone(&backend),
                 Arc::clone(&dispatcher) as Arc<dyn Dispatcher>,
                 Arc::new(LocalDatasetSource::new(&root)),
                 None,
@@ -1174,5 +1177,618 @@ mod tests {
     fn tracer_server_builds() {
         let h = Harness::new(5);
         build_server(Arc::clone(&h.ctx), "0.0.0-test").expect("the server builds");
+    }
+
+    // ------------------------------------------------------------------
+    // Task 2: the argument refusals and the single-flight lease
+    // ------------------------------------------------------------------
+
+    fn rule() -> EpochRule {
+        ValidationPolicy::from_contract()
+            .expect("the embedded contract parses")
+            .epoch_rule
+    }
+
+    #[test]
+    fn args_refuse_unknown_keys() {
+        for key in ["seeds", "stopping", "device", "config", "bars"] {
+            let mut doc = serde_json::json!({ "dataset_uri": "s3://b/datasets/x/", "name": "m" });
+            doc[key] = serde_json::json!(1);
+            let err = serde_json::from_value::<TrainArgs>(doc).expect_err("unknown key refused");
+            assert!(err.to_string().contains(key), "{err}");
+        }
+        serde_json::from_value::<TrainArgs>(serde_json::json!({
+            "dataset_uri": "s3://b/datasets/x/", "name": "m", "epochs": 4
+        }))
+        .expect("the three knobs parse");
+    }
+
+    #[test]
+    fn args_require_name_and_dataset() {
+        serde_json::from_value::<TrainArgs>(
+            serde_json::json!({ "dataset_uri": "s3://b/datasets/x/" }),
+        )
+        .expect_err("name is required");
+        serde_json::from_value::<TrainArgs>(serde_json::json!({ "name": "m" }))
+            .expect_err("dataset_uri is required");
+        let plain: TrainArgs = serde_json::from_value(
+            serde_json::json!({ "dataset_uri": "s3://b/datasets/x/", "name": "m" }),
+        )
+        .expect("epochs is optional");
+        assert!(plain.epochs.is_none());
+    }
+
+    #[test]
+    fn args_validate_and_status_are_closed() {
+        serde_json::from_value::<ValidateArgs>(
+            serde_json::json!({ "dataset_uri": "s3://b/datasets/x/" }),
+        )
+        .expect("dataset only");
+        serde_json::from_value::<ValidateArgs>(
+            serde_json::json!({ "dataset_uri": "s3://b/datasets/x/", "epochs": 4 }),
+        )
+        .expect_err("validate_dataset has no epochs argument (D-21)");
+        serde_json::from_value::<StatusArgs>(serde_json::json!({}))
+            .expect_err("task_id is required");
+        serde_json::from_value::<StatusArgs>(serde_json::json!({ "task_id": "t", "x": 1 }))
+            .expect_err("unknown key refused");
+    }
+
+    #[test]
+    fn args_epoch_numbers_come_from_the_contract() {
+        let contract: serde_yaml::Value =
+            serde_yaml::from_str(validate::GATE_CONTRACT_YAML).expect("contract parses");
+        let recipe = &contract["recipe"];
+        let read = |key: &str| {
+            u32::try_from(
+                recipe[key]
+                    .as_u64()
+                    .unwrap_or_else(|| panic!("recipe.{key} missing")),
+            )
+            .expect("fits u32")
+        };
+        let rule = rule();
+        assert_eq!(rule.fixed, read("epochs_at_most_16_per_class"));
+        assert_eq!(rule.lo, read("epochs_above_16_min"));
+        assert_eq!(rule.hi, read("epochs_above_16_max"));
+        assert_eq!((rule.fixed, rule.lo, rule.hi), (12, 4, 12));
+    }
+
+    #[test]
+    fn args_epochs_above_16() {
+        let rule = rule();
+        for bad in [0, 3, 13, 100] {
+            let err = args::resolve_epochs(20, Some(bad), &rule).expect_err("outside the range");
+            assert_eq!(err.rule, "epochs", "{err}");
+            assert!(err.detail.contains("[4, 12]"), "{err}");
+        }
+        for ok in [4, 8, 12] {
+            assert_eq!(args::resolve_epochs(20, Some(ok), &rule), Ok(Some(ok)));
+        }
+        let err = args::resolve_epochs(20, None, &rule).expect_err("required above 16");
+        assert_eq!(err.rule, "epochs");
+        assert!(err.detail.contains("[4, 12]"), "{err}");
+        assert_eq!(
+            args::resolve_epochs(17, Some(4), &rule),
+            Ok(Some(4)),
+            "17 is above 16"
+        );
+    }
+
+    #[test]
+    fn args_epochs_at_or_below_16_are_fixed_not_ignored() {
+        let rule = rule();
+        let err = args::resolve_epochs(16, Some(12), &rule).expect_err("fixed, not ignored");
+        assert_eq!(err.rule, "epochs");
+        assert!(err.detail.contains("fixes epochs to 12"), "{err}");
+        assert_eq!(args::resolve_epochs(16, None, &rule), Ok(None));
+        assert_eq!(args::resolve_epochs(1, None, &rule), Ok(None));
+        assert!(args::resolve_epochs(1, Some(4), &rule).is_err());
+    }
+
+    #[test]
+    fn name_accepts_the_slug_grammar() {
+        let longest = "a".repeat(48);
+        for ok in ["a", "0", "motivation-v1", "a-b-c", longest.as_str()] {
+            assert!(args::check_name(ok).is_ok(), "{ok}");
+        }
+    }
+
+    #[test]
+    fn name_refuses_everything_else() {
+        let too_long = "a".repeat(49);
+        for bad in [
+            "",
+            "A",
+            "-x",
+            "a_b",
+            "a/b",
+            "a..b",
+            "a.b",
+            "a b",
+            "ab\n",
+            "naïve",
+            "名前",
+            too_long.as_str(),
+        ] {
+            let err = args::check_name(bad).expect_err(bad);
+            assert_eq!(err.rule, "name", "{bad}");
+        }
+    }
+
+    #[test]
+    fn uri_accepts_the_datasets_grammar() {
+        assert_eq!(
+            args::parse_dataset_uri("s3://b/datasets/x/", "b").as_deref(),
+            Ok("datasets/x/")
+        );
+        assert_eq!(
+            args::parse_dataset_uri("s3://b/datasets/x", "b").as_deref(),
+            Ok("datasets/x/")
+        );
+        assert_eq!(
+            args::parse_dataset_uri("s3://b/datasets/a/b/c/d/", "b").as_deref(),
+            Ok("datasets/a/b/c/d/")
+        );
+        assert_eq!(
+            args::parse_dataset_uri("s3://b/datasets/v1.2_x-y/", "b").as_deref(),
+            Ok("datasets/v1.2_x-y/")
+        );
+    }
+
+    #[test]
+    fn uri_refuses_everything_else() {
+        let long_seg = format!("s3://b/datasets/{}/", "a".repeat(65));
+        for bad in [
+            "s3://other/datasets/x/",
+            "s3://bb/datasets/x/",
+            "s3://b",
+            "s3://b/",
+            "s3://b/runs/x/",
+            "s3://b/datasets/",
+            "s3://b/datasets//x/",
+            "s3://b/datasets/x//",
+            "s3://b/datasets/../x/",
+            "s3://b/datasets/./x/",
+            "s3://b/datasets/%2e%2e/",
+            "s3://b/datasets/x%2fy/",
+            "s3://b/datasets/a/b/c/d/e/",
+            "s3://b/datasets/Upper/",
+            "s3://b/datasets/.hidden/",
+            "s3://b/datasets/x y/",
+            "s3://b/datasets/x?versionId=1",
+            "s3://b/datasets/x#frag",
+            "http://b/datasets/x/",
+            "b/datasets/x/",
+            "",
+            long_seg.as_str(),
+        ] {
+            let err = args::parse_dataset_uri(bad, "b").expect_err(bad);
+            assert_eq!(err.rule, "dataset-uri", "{bad}");
+            assert!(
+                err.detail.contains("s3://b/datasets/"),
+                "names the server bucket: {err}"
+            );
+        }
+    }
+
+    async fn task_count(h: &Harness, owner: &str) -> usize {
+        h.backend.list(owner, None).await.expect("list").0.len()
+    }
+
+    async fn only_task(h: &Harness, owner: &str) -> StoredTask {
+        let (mut records, _) = h.backend.list(owner, None).await.expect("list");
+        assert_eq!(records.len(), 1, "exactly one task for {owner}");
+        records.remove(0)
+    }
+
+    fn stored_phase(record: &StoredTask) -> String {
+        let Some(result) = record.result.as_ref() else {
+            return "no result".to_string();
+        };
+        let Some(Content::Text { text }) = result.content.first() else {
+            return "no text".to_string();
+        };
+        let payload: serde_json::Value = serde_json::from_str(text).expect("json");
+        payload["phase"].as_str().unwrap_or("?").to_string()
+    }
+
+    #[tokio::test]
+    async fn submit_single_flight_refuses_naming_the_holder_and_mints_nothing() {
+        let h = Harness::new(20);
+        let first = h
+            .train("alice", "first-model", Some(4))
+            .await
+            .expect("accepted");
+        let holder = first["taskId"].as_str().expect("taskId").to_string();
+        let before = (task_count(&h, "alice").await, task_count(&h, "bob").await);
+        let err = h
+            .train("bob", "second-model", Some(4))
+            .await
+            .expect_err("refused");
+        let text = message(&err);
+        assert!(
+            text.starts_with(&format!(
+                "REFUSED single-flight: task {holder} is running on this deployment"
+            )),
+            "{text}"
+        );
+        assert_eq!(
+            before,
+            (task_count(&h, "alice").await, task_count(&h, "bob").await),
+            "the pre-check mints nothing"
+        );
+        assert_eq!(h.dispatcher.recorded().len(), 1, "nothing was dispatched");
+        assert_eq!(
+            lock::peek(h.backend.as_ref()).await.as_deref(),
+            Some(holder.as_str())
+        );
+    }
+
+    /// A backend whose FIRST read of the lock record answers "absent" while a rival
+    /// takes the lock behind it: the pre-check passes and the acquire then loses.
+    struct RacyBackend {
+        inner: Arc<InMemoryTaskBackend>,
+        fired: std::sync::atomic::AtomicBool,
+    }
+
+    #[pmcp::async_trait]
+    impl TaskBackend for RacyBackend {
+        async fn put_new(&self, owner_id: &str, record: StoredTask) -> Result<(), BackendError> {
+            self.inner.put_new(owner_id, record).await
+        }
+
+        async fn get(
+            &self,
+            owner_id: &str,
+            task_id: &str,
+        ) -> Result<Option<StoredTask>, BackendError> {
+            if owner_id == LOCK_OWNER && !self.fired.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                lock::acquire(
+                    self.inner.as_ref(),
+                    "RIVAL",
+                    "rival-owner",
+                    lock::now_secs(),
+                )
+                .await
+                .expect("the rival takes the lock");
+                return Ok(None);
+            }
+            self.inner.get(owner_id, task_id).await
+        }
+
+        async fn cas(
+            &self,
+            owner_id: &str,
+            task_id: &str,
+            expected_version: u64,
+            record: StoredTask,
+        ) -> Result<(), BackendError> {
+            self.inner
+                .cas(owner_id, task_id, expected_version, record)
+                .await
+        }
+
+        async fn list(
+            &self,
+            owner_id: &str,
+            cursor: Option<&str>,
+        ) -> Result<(Vec<StoredTask>, Option<String>), BackendError> {
+            self.inner.list(owner_id, cursor).await
+        }
+
+        async fn sweep_expired(&self) -> Result<usize, BackendError> {
+            self.inner.sweep_expired().await
+        }
+    }
+
+    #[tokio::test]
+    async fn submit_single_flight_lost_race_leaves_the_minted_task_failed() {
+        let inner = Arc::new(InMemoryTaskBackend::new());
+        // The rival's own task record, live, so its lock is live.
+        inner
+            .put_new(
+                "rival-owner",
+                StoredTask {
+                    task: pmcp::types::tasks::Task::new("RIVAL", TaskStatus::Working),
+                    result: None,
+                    envelope: None,
+                    version: 1,
+                    expires_at_secs: None,
+                },
+            )
+            .await
+            .expect("rival task");
+        let racy = Arc::new(RacyBackend {
+            inner: Arc::clone(&inner),
+            fired: std::sync::atomic::AtomicBool::new(false),
+        });
+        let h = Harness::with_backend(20, racy);
+        let err = h
+            .train("alice", "loser", Some(4))
+            .await
+            .expect_err("lost the race");
+        assert!(
+            message(&err).starts_with("REFUSED single-flight: task RIVAL "),
+            "{}",
+            message(&err)
+        );
+        let minted = only_task(&h, "alice").await;
+        assert_eq!(
+            minted.task.status,
+            TaskStatus::Failed,
+            "failed, not working"
+        );
+        assert_eq!(stored_phase(&minted), "failed");
+        assert!(h.dispatcher.recorded().is_empty(), "nothing was dispatched");
+        let state = lock::read(inner.as_ref()).await.expect("lock state");
+        assert_eq!(
+            state.holder, "RIVAL",
+            "the loser must not release the winner's lock"
+        );
+        assert!(!state.released);
+    }
+
+    #[tokio::test]
+    async fn submit_epochs_enforced() {
+        let h = Harness::new(20);
+        let err = h
+            .train("alice", "m", None)
+            .await
+            .expect_err("epochs required above 16");
+        let text = message(&err);
+        assert!(text.starts_with("REFUSED epochs:"), "{text}");
+        assert!(text.contains("[4, 12]"), "{text}");
+        assert_eq!(task_count(&h, "alice").await, 0, "nothing minted");
+        assert!(
+            lock::read(h.backend.as_ref()).await.is_none(),
+            "no lock taken"
+        );
+        assert!(h.dispatcher.recorded().is_empty());
+        h.train("alice", "m", Some(4))
+            .await
+            .expect("accepted with epochs 4");
+    }
+
+    #[tokio::test]
+    async fn submit_epochs_refused_at_16_shots() {
+        let h = Harness::new(16);
+        let err = h
+            .train("alice", "m", Some(12))
+            .await
+            .expect_err("fixed at 16");
+        assert!(
+            message(&err).starts_with("REFUSED epochs:"),
+            "{}",
+            message(&err)
+        );
+        let ok = h
+            .train("alice", "m", None)
+            .await
+            .expect("fixed epochs need none");
+        assert_eq!(ok["status"], "working");
+        assert_eq!(h.dispatcher.recorded()[0].epochs, None);
+    }
+
+    #[tokio::test]
+    async fn submit_bad_arguments_mint_nothing() {
+        let h = Harness::new(20);
+        let err = h
+            .train("alice", "Bad_Name", Some(4))
+            .await
+            .expect_err("name");
+        assert!(
+            message(&err).starts_with("REFUSED name:"),
+            "{}",
+            message(&err)
+        );
+        let err = submit(
+            &h.ctx,
+            &extra("alice"),
+            TrainArgs {
+                dataset_uri: "s3://other/datasets/tracer/".to_string(),
+                name: "m".to_string(),
+                epochs: Some(4),
+            },
+        )
+        .await
+        .expect_err("uri");
+        assert!(
+            message(&err).starts_with("REFUSED dataset-uri:"),
+            "{}",
+            message(&err)
+        );
+        let err = submit(
+            &h.ctx,
+            &extra("alice"),
+            TrainArgs {
+                dataset_uri: format!("s3://{BUCKET}/datasets/absent/"),
+                name: "m".to_string(),
+                epochs: Some(4),
+            },
+        )
+        .await
+        .expect_err("no such dataset");
+        assert!(
+            message(&err).starts_with("REFUSED task-missing:"),
+            "{}",
+            message(&err)
+        );
+        assert_eq!(task_count(&h, "alice").await, 0);
+        assert!(lock::read(h.backend.as_ref()).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn lock_owner_reserved() {
+        let h = Harness::new(20);
+        let err = h
+            .train(LOCK_OWNER, "m", Some(4))
+            .await
+            .expect_err("the reserved owner is refused");
+        assert!(
+            message(&err).starts_with("REFUSED owner:"),
+            "{}",
+            message(&err)
+        );
+        assert_eq!(
+            task_count(&h, LOCK_OWNER).await,
+            0,
+            "nothing minted, no lock written"
+        );
+        assert!(lock::read(h.backend.as_ref()).await.is_none());
+        assert!(h.dispatcher.recorded().is_empty());
+    }
+
+    #[tokio::test]
+    async fn lock_holder_owner_after_submit() {
+        let h = Harness::new(20);
+        let answer = h.train("alice", "m", Some(4)).await.expect("accepted");
+        let state = lock::read(h.backend.as_ref()).await.expect("lock state");
+        assert_eq!(state.holder, answer["taskId"].as_str().expect("taskId"));
+        assert_eq!(state.holder_owner, "alice");
+        assert!(!state.released);
+    }
+
+    #[tokio::test]
+    async fn submit_dispatch_rejected() {
+        let h = Harness::new(20);
+        h.dispatcher
+            .dispatch_script
+            .lock()
+            .expect("lock")
+            .push_back(Err(DispatchError::Rejected("start refused".to_string())));
+        let err = h.train("alice", "m", Some(4)).await.expect_err("rejected");
+        assert!(message(&err).contains("start refused"), "{}", message(&err));
+        assert_eq!(lock::peek(h.backend.as_ref()).await, None, "lock released");
+        assert!(
+            lock::read(h.backend.as_ref())
+                .await
+                .expect("state")
+                .released
+        );
+        let minted = only_task(&h, "alice").await;
+        assert_eq!(minted.task.status, TaskStatus::Failed);
+        assert_eq!(stored_phase(&minted), "failed");
+        // The deployment is free again.
+        h.train("alice", "m", Some(4))
+            .await
+            .expect("a later submit is accepted");
+    }
+
+    #[tokio::test]
+    async fn submit_dispatch_ambiguous_started() {
+        let h = Harness::new(20);
+        h.dispatcher
+            .dispatch_script
+            .lock()
+            .expect("lock")
+            .push_back(Err(DispatchError::Ambiguous("gateway timeout".to_string())));
+        h.dispatcher
+            .confirm_script
+            .lock()
+            .expect("lock")
+            .push_back(Ok(Confirm::Started));
+        let answer = h
+            .train("alice", "m", Some(4))
+            .await
+            .expect("started after all");
+        let id = answer["taskId"].as_str().expect("taskId");
+        assert_eq!(answer["status"], "working");
+        assert_eq!(lock::peek(h.backend.as_ref()).await.as_deref(), Some(id));
+        assert_eq!(
+            only_task(&h, "alice").await.task.status,
+            TaskStatus::Working
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_dispatch_ambiguous_not_started() {
+        let h = Harness::new(20);
+        h.dispatcher
+            .dispatch_script
+            .lock()
+            .expect("lock")
+            .push_back(Err(DispatchError::Ambiguous("gateway timeout".to_string())));
+        h.dispatcher
+            .confirm_script
+            .lock()
+            .expect("lock")
+            .push_back(Ok(Confirm::NotStarted));
+        let err = h
+            .train("alice", "m", Some(4))
+            .await
+            .expect_err("not started");
+        assert!(
+            message(&err).contains("gateway timeout"),
+            "{}",
+            message(&err)
+        );
+        assert_eq!(
+            lock::peek(h.backend.as_ref()).await,
+            None,
+            "released only after NotStarted"
+        );
+        assert_eq!(only_task(&h, "alice").await.task.status, TaskStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn submit_dispatch_unconfirmed() {
+        let h = Harness::new(20);
+        h.dispatcher
+            .dispatch_script
+            .lock()
+            .expect("lock")
+            .push_back(Err(DispatchError::Ambiguous(
+                "connection reset".to_string(),
+            )));
+        h.dispatcher
+            .confirm_script
+            .lock()
+            .expect("lock")
+            .push_back(Err("describe failed".to_string()));
+        let answer = h
+            .train("alice", "m", Some(4))
+            .await
+            .expect("answers working");
+        let id = answer["taskId"].as_str().expect("taskId").to_string();
+        assert_eq!(answer["status"], "working");
+        assert_eq!(
+            only_task(&h, "alice").await.task.status,
+            TaskStatus::Working
+        );
+        assert_eq!(
+            lock::peek(h.backend.as_ref()).await.as_deref(),
+            Some(id.as_str())
+        );
+        let err = h
+            .train("alice", "other", Some(4))
+            .await
+            .expect_err("single flight");
+        assert!(
+            message(&err).starts_with(&format!("REFUSED single-flight: task {id} ")),
+            "{}",
+            message(&err)
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_reports_epochs_above_16_through_the_tool() {
+        let h = Harness::new(20);
+        let args = || ValidateArgs {
+            dataset_uri: format!("s3://{BUCKET}/datasets/tracer/"),
+        };
+        let above = validate_dataset(&h.ctx, args()).await.expect("valid");
+        assert_eq!(above["valid"], true);
+        assert_eq!(above["shots_per_class"], 20);
+        assert_eq!(above["epochs_required"], true);
+        assert_eq!(above["epochs_range"], serde_json::json!([4, 12]));
+        assert!(above["epochs_fixed"].is_null());
+        assert_eq!(task_count(&h, "alice").await, 0, "inspection mints nothing");
+        let at = Harness::new(16);
+        let at = validate_dataset(&at.ctx, args()).await.expect("valid");
+        assert_eq!(at["epochs_required"], false);
+        assert_eq!(at["epochs_fixed"], 12);
+        assert!(at["epochs_range"].is_null());
     }
 }
