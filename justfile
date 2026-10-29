@@ -5589,7 +5589,7 @@ laya-gates-selftest:
             || ! (cd crates/facades && cargo metadata --no-deps --format-version 1) > "$W/facades-md.json" 2> /dev/null; then
             red "cargo metadata failed: the guard's engine has nothing to scan"
         else
-            must_fail no-bootstrap-line 'D  `bootstrap` is declared by 5 packages' \
+            must_fail no-bootstrap-line 'D  `bootstrap` is declared by 6 packages' \
                 python3 scripts/lib/bin_names.py "$W/allow-no-bootstrap.txt" "root=$W/root-md.json" "facades=$W/facades-md.json"
         fi
         must_pass guard '^PASS  every duplicated bin name is declared intentional' bash scripts/check_duplicate_bin_names.sh

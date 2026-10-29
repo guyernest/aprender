@@ -320,6 +320,7 @@ fn test_no_unauthorized_binaries() {
         "aprender-mcp-decide",          // Laya decision server (Phase 8 D-15)
         "aprender-mcp-decide-antisemite-lambda", // server id `aprender-mcp-decide-antisemite`: the decide runtime's Lambda bootstrap (Phase 10 D-19)
         "aprender-mcp-decide-motivation-lambda", // server id `aprender-mcp-decide-motivation`: the decide runtime's Lambda bootstrap for the motivation-v1 pilot (Phase 12 D-02)
+        "aprender-mcp-laya-train-lambda", // server id `aprender-mcp-laya-train`: the Laya training server's request-function bootstrap and finalizer (Phase 14 D-22)
     ]
     .into();
 
@@ -445,7 +446,10 @@ fn test_no_unauthorized_binaries() {
     // needs a recorded CONTEXT decision with a blocking-human checkpoint.
     // 9 -> 10: GROWN (Phase 12 D-02, the owner's 2026-10-26 decision recorded in 12-CONTEXT.md):
     // aprender-mcp-decide-motivation-lambda, the second served decide model's thin crate.
-    const DEPLOYMENT_UNIT_BASELINE: usize = 10;
+    // 10 -> 11: GROWN (Phase 14 D-22, the owner's 2026-10-28 decision recorded in 14-CONTEXT.md):
+    // aprender-mcp-laya-train-lambda, the Laya training server's deployment unit; the server crate
+    // aprender-mcp-laya-train is a library with no bin.
+    const DEPLOYMENT_UNIT_BASELINE: usize = 11;
     assert!(
         deployment_unit_bins.len() <= DEPLOYMENT_UNIT_BASELINE,
         "FALSIFY-MONO-011: the thin-MCP deployment-unit register grew to {} \

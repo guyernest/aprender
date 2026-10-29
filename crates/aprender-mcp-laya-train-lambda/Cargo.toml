@@ -14,9 +14,18 @@ publish = false
 # to the crate `<server>-lambda`, so the request function lives here and the
 # server crate `aprender-mcp-laya-train` stays a library with no bin.
 #
-# The `bootstrap` [[bin]] is added in the same commit as its FALSIFY-MONO-011
+# The `bootstrap` [[bin]] landed in the same commit as its FALSIFY-MONO-011
 # register entry (deployment_unit_bins, DEPLOYMENT_UNIT_BASELINE 11) and the
-# duplicate-bin-name allowlist line; this crate is lib-only until then.
+# duplicate-bin-name allowlist line, so neither guard was ever red between commits.
+
+# AWS Lambda's Custom Runtime API requires the handler binary to be named
+# `bootstrap` exactly: a platform constant, not a choice. `cargo pmcp deploy` also
+# finds the deployable by this name, which is why ONLY the request function may
+# carry it. The finalizer (plan 14-05) keeps a descriptive bin name and the CDK
+# asset build renames it, so cargo-pmcp never mistakes it for a second deployable.
+[[bin]]
+name = "bootstrap"
+path = "src/bin/bootstrap.rs"
 
 [lib]
 name = "aprender_mcp_laya_train_lambda"
