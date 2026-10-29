@@ -1,0 +1,6 @@
+scripts/laya_train/
+contracts/laya-finetune-gate-v1.yaml
+contracts/decide-apr-v1.yaml
+contracts/laya-parity-v1.yaml
+crates/aprender-decide/tests/fixtures/laya_tiny/
+crates/aprender-mcp-laya-train/fixtures/
