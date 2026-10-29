@@ -53,8 +53,9 @@ Not in this phase:
   reopen that.
 
 ### Caller surface
-- **D-06:** The `train` tool takes **the dataset URI and a model name only**. Seeds (13/17/23, median-ECE
-  selection), the stopping rule, epochs and the gate bars all come from `contracts/laya-finetune-gate-v1.yaml` at
+- **D-06:** The `train` tool takes **the dataset URI, a model name and an optional `epochs`** (amended
+  2026-10-28 by D-21). Seeds (13/17/23, median-ECE
+  selection), the stopping rule, the epochs rule and the gate bars all come from `contracts/laya-finetune-gate-v1.yaml` at
   run time. Every run is a declared gate run, comparable with Phases 10 and 12. The shift probe runs when the
   prefix holds `shift.jsonl`, exactly as the CLI does today. Unknown arguments are refused, not ignored.
 - **D-07:** Dataset shape: **a prepared data dir only**. That is an S3 prefix holding `task.json`, `train.jsonl`
@@ -112,9 +113,25 @@ Not in this phase:
   `models/decide/<name>/` and verifies every sha256 against the manifest. The existing owner-run `laya-deploy` path
   can then use it unchanged. No decide server changes.
 
+### Amendments from research (owner, 2026-10-28)
+- **D-21:** **`train` takes an optional `epochs`**, amending D-06. The trainer's `contract.resolve_epochs`
+  (`scripts/laya_train/contract.py:223-248`) refuses `--epochs` at 16 or fewer shots per class and requires a
+  value in [4,12] above 16, with no default, so a two-argument tool could not run an above-16 dataset. The
+  server accepts `epochs` only in [4,12] and only above 16 shots per class, refusing it otherwise with a typed
+  error. An above-16 dataset sent without `epochs` is refused too, never defaulted. `validate_dataset` reports
+  `shots_per_class` so the caller knows whether `epochs` is required. The D-16 reproduction passes `epochs` 12,
+  as Phase 12 did. Every other knob stays contract-owned.
+- **D-22:** **The FALSIFY-MONO-011 deployment-unit register grows from 10 to 11.** The Lambda crate's
+  `bootstrap` bin is a deployment unit, so it goes in `deployment_unit_bins`
+  (`DEPLOYMENT_UNIT_BASELINE` 10 to 11, `crates/aprender-core/tests/monorepo_invariants.rs`), not the
+  shrink-only `allowed_bins` debt list (27) that the discretion note below first named. `aprender-mcp-laya-train`
+  stays a library with no bin, so there is exactly one new entry. The same PR updates
+  `scripts/duplicate_bin_names_allowlist.txt` and the `laya-gates-selftest` duplicate-bin-names row (5 to 6
+  `bootstrap` claimants).
+
 ### Claude's Discretion
 - The server id and crate names. One server per algorithm: proposed `aprender-mcp-laya-train` plus its Lambda
-  crate. Its `bootstrap` bin adds one FALSIFY-MONO-011 allowlist entry (baseline 27), with the Lambda-ABI rationale
+  crate. Its `bootstrap` bin adds one FALSIFY-MONO-011 deployment-unit entry (register 10 to 11, D-22; not the 27-entry `allowed_bins` list), with the Lambda-ABI rationale
   the register already carries.
 - How the base snapshot (`convaiinnovations/laya` @ 55cf4c4e, 0.84 GB, sha-pinned) reaches the job: an S3 input
   channel, never baked into the image (spike finding: baking weights in costs Lambda 800 s, Fargate 4×). The sha256
