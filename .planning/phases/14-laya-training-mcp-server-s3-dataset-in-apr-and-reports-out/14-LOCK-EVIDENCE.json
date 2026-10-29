@@ -1,0 +1,312 @@
+{
+  "schema": "laya-lock-evidence-v1",
+  "plan": "14-03",
+  "uv_version": "uv 0.9.5 (d5f39331a 2025-10-21)",
+  "old_lock_sha256": "5dc92a617bab645ccbbd90c436b2096b9f5c6fe4112dfd68e542e599ff1c1cce",
+  "candidate_lock_sha256": "06905c4ef710d83081433ebe0edeacbdf6e255e213a0619e3214a8dc41f8c952",
+  "candidate_lock_path": ".planning/phases/14-laya-training-mcp-server-s3-dataset-in-apr-and-reports-out/14-LOCK-CANDIDATE.uv.lock",
+  "candidate_check_rc": 0,
+  "darwin_unchanged": {
+    "packages_compared": 36,
+    "wheels_compared": 70,
+    "missing": []
+  },
+  "pinned_versions": {
+    "torch": "2.14.0",
+    "transformers": "5.17.0",
+    "numpy": "2.5.3",
+    "safetensors": "0.8.0",
+    "huggingface-hub": "1.32.0",
+    "laya": "git+https://github.com/NandhaKishorM/laya?rev=4066d5d5fbf08b66c6757ddeedbd797bd7655bc0#4066d5d5fbf08b66c6757ddeedbd797bd7655bc0"
+  },
+  "new_packages": [
+    {
+      "name": "cuda-bindings",
+      "version": "13.4.4",
+      "source": {
+        "registry": "https://pypi.org/simple"
+      },
+      "wheel_count": 1,
+      "linux_x86_64_wheel_count": 1,
+      "linux_x86_64_wheel_bytes": 6929120,
+      "has_sdist": false,
+      "markers": [
+        "platform_machine == 'x86_64' and sys_platform == 'linux' <- torch"
+      ]
+    },
+    {
+      "name": "cuda-pathfinder",
+      "version": "1.8.4",
+      "source": {
+        "registry": "https://pypi.org/simple"
+      },
+      "wheel_count": 1,
+      "linux_x86_64_wheel_count": 0,
+      "linux_x86_64_wheel_bytes": 0,
+      "has_sdist": false,
+      "markers": [
+        "platform_machine == 'x86_64' and sys_platform == 'linux' <- cuda-bindings"
+      ]
+    },
+    {
+      "name": "cuda-toolkit",
+      "version": "13.0.3.0",
+      "source": {
+        "registry": "https://pypi.org/simple"
+      },
+      "wheel_count": 1,
+      "linux_x86_64_wheel_count": 0,
+      "linux_x86_64_wheel_bytes": 0,
+      "has_sdist": false,
+      "markers": [
+        "platform_machine == 'x86_64' and sys_platform == 'linux' <- torch"
+      ]
+    },
+    {
+      "name": "nvidia-cublas",
+      "version": "13.1.1.3",
+      "source": {
+        "registry": "https://pypi.org/simple"
+      },
+      "wheel_count": 1,
+      "linux_x86_64_wheel_count": 1,
+      "linux_x86_64_wheel_bytes": 423138758,
+      "has_sdist": false,
+      "markers": [
+        "platform_machine == 'x86_64' and sys_platform == 'linux' <- cuda-toolkit",
+        "platform_machine == 'x86_64' and sys_platform == 'linux' <- nvidia-cudnn-cu13",
+        "platform_machine == 'x86_64' and sys_platform == 'linux' <- nvidia-cusolver"
+      ]
+    },
+    {
+      "name": "nvidia-cuda-cupti",
+      "version": "13.0.85",
+      "source": {
+        "registry": "https://pypi.org/simple"
+      },
+      "wheel_count": 1,
+      "linux_x86_64_wheel_count": 1,
+      "linux_x86_64_wheel_bytes": 10715597,
+      "has_sdist": false,
+      "markers": [
+        "platform_machine == 'x86_64' and sys_platform == 'linux' <- cuda-toolkit"
+      ]
+    },
+    {
+      "name": "nvidia-cuda-nvrtc",
+      "version": "13.0.88",
+      "source": {
+        "registry": "https://pypi.org/simple"
+      },
+      "wheel_count": 1,
+      "linux_x86_64_wheel_count": 1,
+      "linux_x86_64_wheel_bytes": 90215200,
+      "has_sdist": false,
+      "markers": [
+        "platform_machine == 'x86_64' and sys_platform == 'linux' <- cuda-toolkit",
+        "platform_machine == 'x86_64' and sys_platform == 'linux' <- nvidia-cublas"
+      ]
+    },
+    {
+      "name": "nvidia-cuda-runtime",
+      "version": "13.0.96",
+      "source": {
+        "registry": "https://pypi.org/simple"
+      },
+      "wheel_count": 1,
+      "linux_x86_64_wheel_count": 1,
+      "linux_x86_64_wheel_bytes": 2243632,
+      "has_sdist": false,
+      "markers": [
+        "platform_machine == 'x86_64' and sys_platform == 'linux' <- cuda-toolkit"
+      ]
+    },
+    {
+      "name": "nvidia-cudnn-cu13",
+      "version": "9.24.0.43",
+      "source": {
+        "registry": "https://pypi.org/simple"
+      },
+      "wheel_count": 1,
+      "linux_x86_64_wheel_count": 1,
+      "linux_x86_64_wheel_bytes": 553099438,
+      "has_sdist": false,
+      "markers": [
+        "platform_machine == 'x86_64' and sys_platform == 'linux' <- torch"
+      ]
+    },
+    {
+      "name": "nvidia-cufft",
+      "version": "12.0.0.61",
+      "source": {
+        "registry": "https://pypi.org/simple"
+      },
+      "wheel_count": 1,
+      "linux_x86_64_wheel_count": 1,
+      "linux_x86_64_wheel_bytes": 214085489,
+      "has_sdist": false,
+      "markers": [
+        "platform_machine == 'x86_64' and sys_platform == 'linux' <- cuda-toolkit"
+      ]
+    },
+    {
+      "name": "nvidia-cufile",
+      "version": "1.15.1.6",
+      "source": {
+        "registry": "https://pypi.org/simple"
+      },
+      "wheel_count": 1,
+      "linux_x86_64_wheel_count": 1,
+      "linux_x86_64_wheel_bytes": 1223672,
+      "has_sdist": false,
+      "markers": [
+        "platform_machine == 'x86_64' and sys_platform == 'linux' <- cuda-toolkit"
+      ]
+    },
+    {
+      "name": "nvidia-curand",
+      "version": "10.4.0.35",
+      "source": {
+        "registry": "https://pypi.org/simple"
+      },
+      "wheel_count": 1,
+      "linux_x86_64_wheel_count": 1,
+      "linux_x86_64_wheel_bytes": 59544258,
+      "has_sdist": false,
+      "markers": [
+        "platform_machine == 'x86_64' and sys_platform == 'linux' <- cuda-toolkit"
+      ]
+    },
+    {
+      "name": "nvidia-cusolver",
+      "version": "12.0.4.66",
+      "source": {
+        "registry": "https://pypi.org/simple"
+      },
+      "wheel_count": 1,
+      "linux_x86_64_wheel_count": 1,
+      "linux_x86_64_wheel_bytes": 200941980,
+      "has_sdist": false,
+      "markers": [
+        "platform_machine == 'x86_64' and sys_platform == 'linux' <- cuda-toolkit"
+      ]
+    },
+    {
+      "name": "nvidia-cusparse",
+      "version": "12.6.3.3",
+      "source": {
+        "registry": "https://pypi.org/simple"
+      },
+      "wheel_count": 1,
+      "linux_x86_64_wheel_count": 1,
+      "linux_x86_64_wheel_bytes": 145942937,
+      "has_sdist": false,
+      "markers": [
+        "platform_machine == 'x86_64' and sys_platform == 'linux' <- cuda-toolkit",
+        "platform_machine == 'x86_64' and sys_platform == 'linux' <- nvidia-cusolver"
+      ]
+    },
+    {
+      "name": "nvidia-cusparselt-cu13",
+      "version": "0.8.1",
+      "source": {
+        "registry": "https://pypi.org/simple"
+      },
+      "wheel_count": 1,
+      "linux_x86_64_wheel_count": 1,
+      "linux_x86_64_wheel_bytes": 170148586,
+      "has_sdist": false,
+      "markers": [
+        "platform_machine == 'x86_64' and sys_platform == 'linux' <- torch"
+      ]
+    },
+    {
+      "name": "nvidia-nccl-cu13",
+      "version": "2.30.7",
+      "source": {
+        "registry": "https://pypi.org/simple"
+      },
+      "wheel_count": 1,
+      "linux_x86_64_wheel_count": 1,
+      "linux_x86_64_wheel_bytes": 215965170,
+      "has_sdist": false,
+      "markers": [
+        "platform_machine == 'x86_64' and sys_platform == 'linux' <- torch"
+      ]
+    },
+    {
+      "name": "nvidia-nvjitlink",
+      "version": "13.4.92",
+      "source": {
+        "registry": "https://pypi.org/simple"
+      },
+      "wheel_count": 1,
+      "linux_x86_64_wheel_count": 1,
+      "linux_x86_64_wheel_bytes": 42452378,
+      "has_sdist": false,
+      "markers": [
+        "platform_machine == 'x86_64' and sys_platform == 'linux' <- cuda-toolkit",
+        "platform_machine == 'x86_64' and sys_platform == 'linux' <- nvidia-cufft",
+        "platform_machine == 'x86_64' and sys_platform == 'linux' <- nvidia-cusolver",
+        "platform_machine == 'x86_64' and sys_platform == 'linux' <- nvidia-cusparse"
+      ]
+    },
+    {
+      "name": "nvidia-nvshmem-cu13",
+      "version": "3.4.5",
+      "source": {
+        "registry": "https://pypi.org/simple"
+      },
+      "wheel_count": 1,
+      "linux_x86_64_wheel_count": 1,
+      "linux_x86_64_wheel_bytes": 60412546,
+      "has_sdist": false,
+      "markers": [
+        "platform_machine == 'x86_64' and sys_platform == 'linux' <- torch"
+      ]
+    },
+    {
+      "name": "nvidia-nvtx",
+      "version": "13.0.85",
+      "source": {
+        "registry": "https://pypi.org/simple"
+      },
+      "wheel_count": 1,
+      "linux_x86_64_wheel_count": 1,
+      "linux_x86_64_wheel_bytes": 148047,
+      "has_sdist": false,
+      "markers": [
+        "platform_machine == 'x86_64' and sys_platform == 'linux' <- cuda-toolkit"
+      ]
+    },
+    {
+      "name": "triton",
+      "version": "3.8.0",
+      "source": {
+        "registry": "https://pypi.org/simple"
+      },
+      "wheel_count": 1,
+      "linux_x86_64_wheel_count": 1,
+      "linux_x86_64_wheel_bytes": 247975122,
+      "has_sdist": false,
+      "markers": [
+        "platform_machine == 'x86_64' and sys_platform == 'linux' <- torch"
+      ]
+    }
+  ],
+  "new_packages_wheel_bytes": 2445181930,
+  "new_packages_all_wheel_bytes": 2445247036,
+  "new_packages_note": "All 19 new packages resolve only under platform_machine == 'x86_64' and sys_platform == 'linux'. new_packages_wheel_bytes sums Linux x86_64-tagged wheels (manylinux/linux_x86_64); cuda-pathfinder and cuda-toolkit ship py3-none-any wheels, counted in new_packages_all_wheel_bytes.",
+  "cuda13_risk": "D-02/RESEARCH Pitfall 2: torch 2.14.0 on Linux x86_64 pulls the cu13 wheel set; whether the ml.g5 host driver runs it is decided by the probe job (14-12); any torch pin change is an owner decision.",
+  "cargo_packages": [
+    {
+      "name": "aws-sdk-ecs",
+      "registry": "crates.io",
+      "source": "github.com/awslabs/aws-sdk-rust",
+      "needed_by": "14-05"
+    }
+  ],
+  "linux_import_proof": "14-06 Dockerfile.train import RUN at the 14-12 CodeBuild build (not provable on this Mac)",
+  "owner_verification": null,
+  "applied": false
+}
