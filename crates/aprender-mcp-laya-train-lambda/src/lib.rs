@@ -16,7 +16,8 @@ mod sfn;
 pub use dataset::{ObjectReader, ReadError, S3DatasetSource, S3ObjectReader};
 pub use sfn::{
     classify_start_error, execution_arn, guard_link_key, Executions, Presign, S3Presign,
-    SfnDispatcher, SfnExecutions, StartError, StartErrorKind, EXECUTION_NAME_PREFIX,
+    SfnCancelSink, SfnDispatcher, SfnExecutions, StartError, StartErrorKind, CANCEL_JOIN_BOUND,
+    EXECUTION_NAME_PREFIX,
 };
 
 /// The DynamoDB table holding task records and the single-flight lock.
