@@ -151,5 +151,67 @@
     "quota": 1,
     "clarification": "Asked to disambiguate; the owner answered '$20 per hour, quota >= 1'. The orchestrator's own estimate was $1.41/h [ASSUMED]; the owner's figure is recorded as stated.",
     "recorded_by": "orchestrator, from the owner's own messages in the session"
-  }
+  },
+  "images": {
+    "train": {
+      "repo_name": "aprender-laya-train-dev",
+      "digest": "sha256:3e2933cb962e4aaca3b8e7d8af689b1a50776d8d86acb7a1a960b65f6bcb1797",
+      "commit": "69af6631267ce931b186b4626eebc3f86ad7588e",
+      "build_id": "aprender-laya-train-image-dev:d4379807-f032-494d-a07c-ca6645f1d8b5"
+    },
+    "pack": {
+      "repo_name": "aprender-laya-pack-dev",
+      "digest": "sha256:504084d0c254af66e01b40f9f4679ba48fc09c4bf80386cc458a9388ae3090f3",
+      "commit": "69af6631267ce931b186b4626eebc3f86ad7588e",
+      "build_id": "aprender-laya-pack-image-dev:d67cc99d-4f5d-4224-b559-e6bc803c949e"
+    }
+  },
+  "image_bytes": {
+    "train": 6441317765,
+    "pack": 119253572
+  },
+  "stacks": {
+    "images_stack": "aprender-laya-trainer-images-dev",
+    "trainer_stack": "aprender-laya-trainer-dev",
+    "deployed_at": "2026-10-29T17:32:02Z",
+    "diff_ran": true,
+    "note": "cdk diff ran immediately before cdk deploy in the same invocation (both stacks); trainer stack deployed with exactly the two digests above; no pmcp.run deploy"
+  },
+  "staged": {
+    "base": {
+      "key": "base/laya-55cf4c4e/laya-base.tar",
+      "bytes": 846223360,
+      "sha256": "15600ec3a8565ee7046909fdc644f56779823fc27e7d54938d2a9184eb244dfc"
+    },
+    "datasets": {
+      "motivation-v1": {
+        "files": {
+          "eval.jsonl": "ee95d71fcb5d90d515b9fc6741e5df51087e763fa7f251ace83d9f11d5ccd575",
+          "task.json": "f74a3ad3cfc00c160cc2959d95beb219aec859b394b883e87577a56dc14e7ea3",
+          "train.jsonl": "f1d84f19ec38ed85356bcbcd1eae6ef8ad07fb97e014f61a17d37adc0d68d378"
+        },
+        "prefix": "datasets/motivation-v1/"
+      },
+      "tweet-stance-16": {
+        "files": {
+          "eval.jsonl": "e326952585d57b14ecc45f817efbb6994d6464ae07ec9190e0782547b5b20288",
+          "task.json": "041c4e38aadae98e3e62ecf77c7ace23616449cbab45439a4cf10cbb4a956b94",
+          "train.jsonl": "c665236066e0501f71f402a5c6c05a2124cf649963bce353043ff66a4b171a87"
+        },
+        "prefix": "datasets/tweet-stance-16/"
+      },
+      "tweet-stance-64": {
+        "files": {
+          "eval.jsonl": "5250218f30686fe47482dbc1d2785d8eaa0a388a3aaf43ecc2c43b03f790e3bb",
+          "shift.jsonl": "e326952585d57b14ecc45f817efbb6994d6464ae07ec9190e0782547b5b20288",
+          "task.json": "041c4e38aadae98e3e62ecf77c7ace23616449cbab45439a4cf10cbb4a956b94",
+          "train.jsonl": "12a4301e5f0fcd50415e8eb237cbf2e5090f9e01f1edfa591dd5270f6df63351"
+        },
+        "prefix": "datasets/tweet-stance-64/"
+      }
+    }
+  },
+  "live_observations": [
+    "Every dataset prefix list-objects-v2 returned empty before staging (the stage recipe refuses otherwise); ran as the owner's IAM user, so the role-conditioned s3:ListBucket 403-vs-404 question from /code-review (laya-trainer-stack.ts s3:prefix condition) was NOT exercised by any step so far"
+  ]
 }
