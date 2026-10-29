@@ -1341,6 +1341,18 @@ laya-prepare-motivation *args:
     set -euo pipefail
     uv run --project scripts/laya_train --frozen python -I scripts/laya_train/prepare_motivation.py "$@"
 
+# Pull ONE finished training run out of S3 (plan 14-11, D-20): `just laya-fetch NAME TASK_ID BUCKET [--dest DIR]
+# [--profile ze-kasher-dev]` reads runs/<NAME>/<TASK_ID>/manifest.json, verifies EVERY entry's sha256 and size in a
+# staging directory, and only then renames it to DIR (default models/decide/<NAME>/): manifest.json, verdict.json and
+# <NAME>.apr at its root, run/ and data/ as the trainer wrote them, the top-level logs under logs/. An existing
+# non-empty DIR is refused, never merged. It prints the owner's next commands (`just laya-verify`, `just laya-deploy`)
+# and never runs them; no decide server is touched. A thin wrapper: the script owns every refusal. Row fetch.
+[positional-arguments]
+laya-fetch *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec python3 -I scripts/laya_deploy/laya_fetch.py "$@"
+
 # Fine-tune Laya on <data> (task.json + train.jsonl + a REQUIRED eval.jsonl + an OPTIONAL shift.jsonl),
 # calibrate and gate into the run dir <out>. Exit 0 = GATE PASS, 3 = GATE FAIL, 2 = input refused.
 # Production (laya-finetune-gate-v1 1.4.0) trains the three gate seeds 13/17/23 and ships the MEDIAN-ECE
@@ -5654,6 +5666,61 @@ laya-gates-selftest:
         must_fail spaced-csv 'REFUSED csv-missing' just laya-prepare-motivation --csv "$W/pm/no such dir/a b.csv" --out "$W/pm/o"
         if grep -q 'unrecognized arguments' "$(logof spaced-csv)"; then red "spaced-csv: the spaced path was word-split (unrecognized arguments)"; fi
         must_pass selftest '^PREPARE MOTIVATION SELFTEST OK' just laya-prepare-motivation --selftest
+    }
+    row_fetch() {
+        # D-20 (plan 14-11): a fake aws serves a run whose gate-report.json carries one flipped byte; the real recipe refuses it.
+        local FR="$W/fetchrun" FA="$W/fetchaws" TID="00000000-0000-4000-8000-0000000000f1" FD="$W/fetchdest"
+        mkdir -p "$FA" "$FR"
+        python3 -I - "$FR" "$TID" <<'PYF'
+    import hashlib, json, os, sys
+    root, tid = sys.argv[1:3]
+    files = {"verdict.json": b'{"phase":"gate_failed"}\n', "outcome.json": b'{"exit_class":"gate_fail"}\n',
+             "train.log": b"epoch 1\n", "run/gate-report.json": b'{"pass":false,"margin":0.01}\n',
+             "data/task.json": b'{"task":"x"}\n'}
+    entries = [{"path": p, "size": len(b), "sha256": hashlib.sha256(b).hexdigest()} for p, b in sorted(files.items())]
+    man = {"schema": "laya-train-manifest-v1", "task_id": tid, "name": "fixture-run", "images": {}, "contracts": {}, "entries": entries, "unlisted": 0}
+    files["manifest.json"] = json.dumps(man).encode()
+    for p, b in files.items():
+        fp = os.path.join(root, p)
+        os.makedirs(os.path.dirname(fp), exist_ok=True)
+        open(fp, "wb").write(b)
+    # the served copy of gate-report.json has one flipped byte (the manifest keeps the original hash)
+    g = os.path.join(root, "run", "gate-report.json")
+    b = bytearray(open(g, "rb").read())
+    b[2] ^= 1
+    open(g + ".tampered", "wb").write(bytes(b))
+    PYF
+        cat > "$FA/aws" <<'SH'
+    #!/usr/bin/env bash
+    # fake `aws s3api get-object --profile P --bucket B --key K FILE`: serves $FETCH_RUN/<key minus runs/NAME/TASK/>
+    printf '%s\n' "$*" >> "${FAKE_AWS_LOG:-/dev/null}"
+    [ "$1 $2" = "s3api get-object" ] || { echo "fake aws: unexpected call: $*" >&2; exit 97; }
+    key=""; out=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --key) key="$2"; shift 2 ;;
+            --profile|--bucket) shift 2 ;;
+            s3api|get-object) shift ;;
+            *) out="$1"; shift ;;
+        esac
+    done
+    rel="${key#runs/fixture-run/*/}"
+    src="$FETCH_RUN/$rel"
+    [ -n "${FETCH_TAMPER:-}" ] && [ -f "$src.tampered" ] && src="$src.tampered"
+    [ -f "$src" ] || { echo "An error occurred (NoSuchKey) when calling the GetObject operation" >&2; exit 254; }
+    cp "$src" "$out"
+    SH
+        chmod +x "$FA/aws"
+        must_fail tampered 'REFUSED fetch-sha256' env PATH="$FA:$PATH" FETCH_RUN="$FR" FETCH_TAMPER=1 \
+            just laya-fetch fixture-run "$TID" fixture-bucket --dest "$FD"
+        [ "$RC" -eq 2 ] || red "tampered: exit $RC, not 2"
+        [ ! -e "$FD" ] || red "tampered: the destination exists after a refused fetch"
+        ls -d "$W"/.fixture-run.fetch-* > /dev/null 2>&1 && red "tampered: a staging directory was left behind"
+        must_pass untampered '^FETCH OK phase gate_failed apr none$' env PATH="$FA:$PATH" FETCH_RUN="$FR" just laya-fetch fixture-run "$TID" fixture-bucket --dest "$FD"
+        [ -f "$FD/run/gate-report.json" ] && [ -f "$FD/verdict.json" ] && [ -f "$FD/logs/train.log" ] || red "untampered: the destination layout is incomplete"
+        must_fail refetch-over 'REFUSED fetch-dest' env PATH="$FA:$PATH" FETCH_RUN="$FR" just laya-fetch fixture-run "$TID" fixture-bucket --dest "$FD"
+        must_fail wrong-profile 'REFUSED fetch-profile' env PATH="$FA:$PATH" FETCH_RUN="$FR" just laya-fetch fixture-run "$TID" fixture-bucket --dest "$W/fetchdest2" --profile augury-dev
+        must_pass selftest '^LAYA FETCH SELFTEST OK' just laya-fetch --selftest
     }
     # The deployment triple (plan 13-04, D-06): the four pure helpers and their selftest.
     row_target_check() {
