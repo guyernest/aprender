@@ -1,0 +1,165 @@
+{
+ "schema": "laya-trainer-smoke-evidence-v1",
+ "plan": "14-14",
+ "status": "HALTED at the tracer gate: the unchanged local laya-verify refused the fetched artifact (RescoreDrift); Task 2 (paid cancel tests) and Task 3 were NOT run; the Task 1 verify script is expected to fail on local_verify.deploy_eligible",
+ "owner_reply": "smoke-go (recorded in 14-DEPLOY-EVIDENCE.json owner_replies)",
+ "smoke": {
+  "task_id": "3e964ab5-a1ca-458b-bcec-22e094f2f2a6",
+  "name": "smoke-stance-64",
+  "phase": "completed",
+  "verdict": {
+   "pass": true,
+   "waived": null,
+   "margin": 0.315828019529616,
+   "ece_post": 0.06310529497194395,
+   "zero_shot_macro_f1": 0.40915946798299735,
+   "ft_macro_f1": 0.7249874875126133,
+   "shipped_seed": 23,
+   "per_seed": [
+    {
+     "seed": 13,
+     "macro_f1": 0.7255306640484026,
+     "ece_post": 0.0791329673952007,
+     "margin": 0.31637119606540526,
+     "pass": true
+    },
+    {
+     "seed": 17,
+     "macro_f1": 0.6762044376299498,
+     "ece_post": 0.05179216094266355,
+     "margin": 0.2670449696469524,
+     "pass": true
+    },
+    {
+     "seed": 23,
+     "macro_f1": 0.7249874875126133,
+     "ece_post": 0.06310529497194395,
+     "margin": 0.315828019529616,
+     "pass": true
+    }
+   ],
+   "device_used": "cuda:0",
+   "torch_version": "2.14.0+cu130",
+   "recipe_id": "6cf3cc5ca777bc9a60acba89bdcd7183fc3427e019b2583671ef04974b495147",
+   "shift_probe": {
+    "gate_clause": false,
+    "n": 280,
+    "zero_shot": {
+     "macro_f1": 0.34021730836081837,
+     "f_avg": 0.3470606564187786,
+     "ece": 0.2689495673137052
+    },
+    "fine_tuned": {
+     "macro_f1": 0.5465002228558847,
+     "f_avg": 0.5901207046541974,
+     "ece_post": 0.20035842465502873
+    },
+    "margin": 0.20628291449506636,
+    "probs_sha256": "3874c0997b1f5eaf5f6e5307f19b6647da10b4d0fc3282d7168886ff12892739",
+    "zero_shot_probs_sha256": "ffb4598f51d65f80c29f1d39057adad9f919de89532fe05fdb890bed2dc25a3e"
+   },
+   "apr_sha256": "31ace8ea95ca0c750b6d007d0f4c68e4322d20363117f837673a936d6f696c85",
+   "pack": {
+    "accepted": true,
+    "line": "{\"argmax\":\"459/459\",\"artifact_sha256\":\"31ace8ea95ca0c750b6d007d0f4c68e4322d20363117f837673a936d6f696c85\",\"deploy_eligible\":true,\"noise\":8.147599085628343e-6,\"recomputed\":{\"ece_post\":0.06310529497194395,\"ft_macro_f1\":0.7249874875126133,\"margin\":0.315828019529616,\"zs_macro_f1\":0.40915946798299735},\"rescore_bound\":0.00003259039634251337,\"rescore_max_abs\":0.000027477741241455078,\"shipped_seed\":23,\"waived\":null,\"zs_noise\":4.70304053501458e-6,\"zs_rescore_bound\":0.00001881216214005832,\"zs_rescore_max_abs\":0.000015079975128173828}"
+   }
+  },
+  "manifest_entries": 30,
+  "all_entries_linked": true,
+  "link_check": {
+   "path": "run/gate-report.json",
+   "http": 200,
+   "sha_match": true,
+   "size_match": true
+  },
+  "result_has_no_urls": true,
+  "result_same_verdict_and_manifest": true,
+  "training_seconds": 3058,
+  "billable_seconds": 3058,
+  "train_py_seconds": 2882.9,
+  "executions_seen": 1,
+  "execution": {
+   "status": "SUCCEEDED",
+   "started": "2026-10-29T22:03:25Z",
+   "stopped": "2026-10-29T23:10:47Z"
+  },
+  "tags": {
+   "run/gate-report.json": "keep",
+   "smoke-stance-64.apr": "keep",
+   "verdict.json": "keep",
+   "manifest.json": "keep"
+  },
+  "images": {
+   "train": "sha256:b49b3fe902c49801e1d3eea8e4be37a73d3e59c483bbb42735180a35c2e6f11f",
+   "pack": "sha256:504084d0c254af66e01b40f9f4679ba48fc09c4bf80386cc458a9388ae3090f3"
+  },
+  "contracts": {
+   "prefilter_gate": "4f6ba791b5c4a2f3f380de8f967e2263543285b01f71d4708509da528f5fe474",
+   "train_gate": "4f6ba791b5c4a2f3f380de8f967e2263543285b01f71d4708509da528f5fe474",
+   "pack_gate": "4f6ba791b5c4a2f3f380de8f967e2263543285b01f71d4708509da528f5fe474",
+   "pack_parity": "7c646b74835f8d0d5bf0916056aae1eb909cfa6770d58e17bf65c4069b267878"
+  },
+  "pack_path_observed": true,
+  "keep_tag_observed": true,
+  "pack_seconds": 320.93,
+  "verify_seconds": 315.02,
+  "gpu_peak_mib": 9503,
+  "gpu_total_mib_note": "A10G 24 GB class (23,686,938,624 bytes in 14-PROBE-EVIDENCE.json); the real run's peak is 9,503 MiB, about 40 percent, against the probe's 96.7 percent at batch 8 x 1024 tokens",
+  "poll_note": "the background poll's phase parser failed on terminal output (its own display scrub rewrote digit runs inside floats and broke the JSON), so it kept logging ERR after the phase became completed; it was stopped by hand and the terminal payload read with an unscrubbed call. The execution ended SUCCEEDED at 2026-10-29T23:10:47Z, well inside the 36000 s + 15 min cap"
+ },
+ "memory_headroom_check": {
+  "question": "14-12 open item: the probe step peaked at 96.7 percent of the A10G at batch 8 x 1024 tokens",
+  "production_recipe": {
+   "batch_size": 8,
+   "source": "contracts/laya-finetune-gate-v1.yaml recipe.batch_size, read by scripts/laya_train/train.py rn('batch_size')",
+   "max_len": 512,
+   "max_len_source": "rl_agent_config.json of the pinned base snapshot 55cf4c4e (Laya's max_len governs the built sequence)"
+  },
+  "measured_probe": {
+   "batch": 8,
+   "tokens": 1024,
+   "peak_bytes": 22908016640
+  },
+  "verdict": "production settings (batch 8, at most 512 tokens) do not exceed what was measured (batch 8 x 1024 tokens); proceeded",
+  "observed_in_real_run": {
+   "gpu_peak_mib": 9503,
+   "samples": 96,
+   "interval_s": 30
+  }
+ },
+ "single_flight": {
+  "refusal_line": "REFUSED single-flight: task 3e964ab5-a1ca-458b-bcec-22e094f2f2a6 is running on this deployment; one job at a time (D-11)",
+  "second_execution_created": false
+ },
+ "fetch": {
+  "line": "FETCH OK phase completed apr 31ace8ea95ca0c750b6d007d0f4c68e4322d20363117f837673a936d6f696c85",
+  "dest": "models/decide/smoke-stance-64/ (gitignored)"
+ },
+ "local_verify": {
+  "deploy_eligible": false,
+  "line": "REFUSED RescoreDrift which=fine_tuned row=199 max_abs=0.00003439188003540039 bound=0.00003259039634251337 (nothing written)",
+  "exit_code": 2,
+  "repeats": "3 runs on this Mac (Apple M4 Pro, arm64), identical refusal and identical max_abs (deterministic)",
+  "same_artifact_on_the_pack_task": {
+   "platform": "ECS Fargate ARM64 (the pack image)",
+   "accepted": true,
+   "fine_tuned_rescore_max_abs": 2.7477741241455078e-05,
+   "zero_shot_rescore_max_abs": 1.5079975128173828e-05,
+   "bound": 3.259039634251337e-05,
+   "noise_on_a10g": 8.147599085628343e-06
+  },
+  "reading": "the same bytes re-score 25 percent further from the recorded probabilities on the Mac than on Graviton (3.439e-5 vs 2.748e-5), and the Mac figure crosses the 4 x noise bound (3.259e-5) by 5.5 percent. Both are aarch64; the noise reference (8.1e-6) was measured on the A10G, not on either aarch64 CPU. No contract was amended (D-15, owner only)."
+ },
+ "spend_so_far": {
+  "sagemaker": "1 training job, ml.g5.xlarge, 3058 billable seconds",
+  "ecs": "1 Fargate pack task, about 640 s of pack plus verify work",
+  "codebuild_builds": 0,
+  "cancel_runs_started": 0
+ },
+ "resources_left_running": {
+  "executions": 0,
+  "training_jobs_inprogress": 0,
+  "ecs_tasks": 0,
+  "lock": "released (record status completed, holder = the smoke task)"
+ }
+}
