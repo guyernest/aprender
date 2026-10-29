@@ -59,10 +59,11 @@
     "checked": "describe-training-job on both (Completed, Stopped) and list-training-jobs InProgress = 0"
   },
   "owner_decision": {
-    "reply": "rebuild-compat",
+    "reply": "deploy-go",
     "replied_on": "2026-10-29",
-    "recorded_by": "orchestrator, from the owner's own message in the session",
-    "scope": "Add a C toolchain (gcc, libc6-dev) to the train image, rebuild it once, redeploy the trainer stack with the new digest, re-run the CUDA probe once. IAM was not part of this approval."
+    "pmcp_run_login_confirmed": true,
+    "recorded_by": "orchestrator, from the owner's own answer in the session ('deploy-go, logged in')",
+    "scope": "Publish the request function to pmcp.run (ze-kasher-dev) per plan 14-13: no IAM, OAuth enabled by the owner, 401 observed, then the grant. No training job is started by this approval."
   },
   "reprobe_1": {
     "after": "rebuild-compat (owner, 2026-10-29): train image rebuilt with gcc and libc6-dev, trainer stack redeployed with the new digest, CUDA probe re-run ONCE",
@@ -146,5 +147,19 @@
   },
   "deciding_probe": "reprobe_1",
   "fail_reasons": [],
-  "verdict_basis": "recomputed 2026-10-29 from the recorded measurements of reprobe_1.cuda (job laya-probe-cuda-20261029181151) with probe_verdict() in scripts/laya_deploy/laya_trainer_ops.py, the amended rule (owner decision amend-criterion): torch_cuda_available, matmul_ok, base_load_ok and train_step_ok all true, tiny_fixture_rc 3 in {0,3}, tiny_fixture_device_used cuda:0. No new probe was run. The first attempt (cuda) stays fail: no C compiler in the image."
+  "verdict_basis": "recomputed 2026-10-29 from the recorded measurements of reprobe_1.cuda (job laya-probe-cuda-20261029181151) with probe_verdict() in scripts/laya_deploy/laya_trainer_ops.py, the amended rule (owner decision amend-criterion): torch_cuda_available, matmul_ok, base_load_ok and train_step_ok all true, tiny_fixture_rc 3 in {0,3}, tiny_fixture_device_used cuda:0. No new probe was run. The first attempt (cuda) stays fail: no C compiler in the image.",
+  "owner_decision_history": [
+    {
+      "reply": "rebuild-compat",
+      "replied_on": "2026-10-29",
+      "recorded_by": "orchestrator, from the owner's own message in the session",
+      "scope": "Add a C toolchain (gcc, libc6-dev) to the train image, rebuild it once, redeploy the trainer stack with the new digest, re-run the CUDA probe once. IAM was not part of this approval."
+    },
+    {
+      "reply": "amend-criterion",
+      "replied_on": "2026-10-29",
+      "recorded_by": "orchestrator, from the owner's own message in the session",
+      "scope": "The CUDA pass rule becomes tiny_fixture_rc in {0,3} with tiny_fixture_device_used starting with cuda; rc 2 (a refusal) stays a failure. IAM and the S3 ListBucket condition were not part of this approval."
+    }
+  ]
 }
