@@ -1,0 +1,13 @@
+{
+  "schema": "laya-base-stage-v1",
+  "repo": "convaiinnovations/laya",
+  "revision": "55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851",
+  "tar_name": "laya-base.tar",
+  "tar_sha256": "15600ec3a8565ee7046909fdc644f56779823fc27e7d54938d2a9184eb244dfc",
+  "tar_bytes": 846223360,
+  "model_safetensors_sha256": "891102d372688fc2a094dac56a384bc537b87c63f21f9f3dac0be2b7cbc8d86c",
+  "excluded": [
+    "typed-decisions/"
+  ],
+  "entries": 18
+}

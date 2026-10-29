@@ -342,6 +342,24 @@ def with_compat(env, compat_used):
     return env
 
 
+def stage_channel_base(base_tar, pin_path, hf_home):
+    """The `base` channel's laya-base.tar -> HF_HOME/hub. Its sha256 must equal base-stage.json's pin BEFORE anything is
+    extracted (T-14-21), then stage_base.safe_extract refuses absolute names, `..` members, hardlinks and links that
+    resolve outside the destination. Offline from here on (HF_HUB_OFFLINE=1 in the child's env): a missing cache can
+    never silently download the base. Raises on any failure; returns hf_home."""
+    sys.path.insert(0, str(HERE))
+    import stage_base
+    pin = json.loads(Path(pin_path).read_text(encoding="utf-8"))
+    if pin.get("schema") != "laya-base-stage-v1" or not HEX64_RE.match(str(pin.get("tar_sha256", ""))):
+        raise RuntimeError("base-stage.json is not a laya-base-stage-v1 pin")
+    got = sha256_file(base_tar)
+    if got != pin["tar_sha256"]:
+        raise RuntimeError("the base channel tar's sha256 does not match base-stage.json (refusing to extract)")
+    n = stage_base.safe_extract(base_tar, Path(hf_home) / "hub")
+    say("base staged: %d entries under %s" % (n, Path(hf_home) / "hub"))
+    return Path(hf_home)
+
+
 # ------------------------------------------------------------------------------------------ S3 transfer
 
 def aws_runner(argv, timeout):
@@ -1650,6 +1668,51 @@ def selftest():
         case("no-determinism: neither appears in Dockerfile.train when it exists",
              not d_img.exists() or not any(b in d_img.read_text() for b in banned))
 
+        print("base channel:")
+        sys.path.insert(0, str(HERE))
+        import stage_base as sb
+        bcache, brev = sb._synthetic_cache(Path(tmp) / "bc")
+        btar = Path(tmp) / "laya-base.tar"
+        info = sb.build(bcache, btar, brev, expected_model_sha256=None)
+        pin = Path(tmp) / "base-stage.json"
+        pin.write_text(json.dumps({"schema": "laya-base-stage-v1", "tar_sha256": info["sha256"]}))
+        hf = Path(tmp) / "hf-ok"
+        got_hf = stage_channel_base(btar, pin, hf)
+        case("base: a tar whose sha256 equals the pin is extracted into HF_HOME/hub",
+             got_hf == hf and (hf / "hub" / sb.CACHE_DIR_NAME / "snapshots" / brev / "model.safetensors").read_bytes() == b"MODEL-BYTES" * 100)
+        flipped = Path(tmp) / "flipped.tar"
+        raw = bytearray(btar.read_bytes())
+        raw[len(raw) // 2] ^= 0xFF
+        flipped.write_bytes(bytes(raw))
+        hf2 = Path(tmp) / "hf-flipped"
+        try:
+            stage_channel_base(flipped, pin, hf2)
+            refused_flip = False
+        except RuntimeError as e:
+            refused_flip = "sha256" in str(e)
+        case("base: one flipped byte -> refused on the pin BEFORE anything is extracted", refused_flip and not hf2.exists())
+        evil = Path(tmp) / "evil.tar"
+        sb._tar_with(evil, [("../escape", "file", b"x")])
+        evil_pin = Path(tmp) / "evil-pin.json"
+        evil_pin.write_text(json.dumps({"schema": "laya-base-stage-v1", "tar_sha256": sha256_file(evil)}))
+        try:
+            stage_channel_base(evil, evil_pin, Path(tmp) / "hf-evil")
+            refused_evil = False
+        except sb.StageError:
+            refused_evil = not (Path(tmp) / "escape").exists()
+        case("base: a tar with the RIGHT sha256 but a `..` member is still refused by safe_extract", refused_evil)
+        c = make_case(tmp, "base-fail", "pass", knob_kw={"prepare_base": lambda: stage_channel_base(flipped, pin, Path(tmp) / "hf3")})
+        rc = run_case(c)
+        out = json.loads(bucket_file(c, "outcome.json").read_text())
+        case("base: a failed staging is a crash outcome with the trainer never started and the reason in train.log",
+             rc == 1 and out["exit_class"] == "crash" and not (c["marks"] / "trainer.started").exists()
+             and "BASE STAGING FAILED" in bucket_file(c, "train.log").read_text())
+        c = make_case(tmp, "base-ok", "pass", knob_kw={"prepare_base": lambda: stage_channel_base(btar, pin, Path(tmp) / "hf4")})
+        rc = run_case(c)
+        env_seen = json.loads(bucket_file(c, "run/env.json").read_text())
+        case("base: after staging the trainer runs with HF_HOME at the staged home and HF_HUB_OFFLINE=1",
+             rc == 0 and env_seen["HF_HOME"] == str(Path(tmp) / "hf4") and env_seen["HF_HUB_OFFLINE"] == "1")
+
         print("no network:")
         case("the default aws Runner was never called", DEFAULT_RUNNER_CALLS == 0, "calls=%d" % DEFAULT_RUNNER_CALLS)
 
@@ -1671,13 +1734,14 @@ def main(argv):
         print("usage: run_step.py train | --selftest", file=sys.stderr)
         return 2
     step = os.environ.get("LAYA_STEP", "") or "train"
-    knobs = Knobs()
+    paths = Paths()
+    knobs = Knobs(prepare_base=lambda: stage_channel_base(paths.base_tar, HERE / "base-stage.json", paths.hf_home))
     if step == "train":
-        return entry_train(os.environ, Paths(), aws_runner, knobs)
+        return entry_train(os.environ, paths, aws_runner, knobs)
     if step == "probe":
-        return entry_probe(os.environ, Paths(), aws_runner, knobs)
+        return entry_probe(os.environ, paths, aws_runner, knobs)
     if step == "probe-sigterm":
-        return entry_probe_sigterm(os.environ, Paths(), aws_runner, knobs)
+        return entry_probe_sigterm(os.environ, paths, aws_runner, knobs)
     print("REFUSED env: LAYA_STEP %r is not a mode of this image" % step, file=sys.stderr, flush=True)
     return 2
 
