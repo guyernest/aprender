@@ -1353,6 +1353,51 @@ laya-fetch *args:
     set -euo pipefail
     exec python3 -I scripts/laya_deploy/laya_fetch.py "$@"
 
+# Synthesize the Laya training server's two CDK stacks OFFLINE and assert their shape (Phase 14, plan 14-08; D-01, D-02,
+# D-12, D-13, D-14, D-19). Cross-builds the finalizer for aarch64 (glibc floor <= 2.34), installs it as the Lambda asset
+# deploy-extensions/assets/laya-finalizer/bootstrap, synthesizes the images stack and the trainer stack with no
+# credentials, no profile and no notices (so no account is ever contacted and the templates do not depend on whose
+# machine ran them), runs scripts/laya_deploy/laya_trainer_stack_check.py on both templates and prints TRAINER SYNTH OK.
+# env is dev or prod only. With no digests, all-zero placeholders are used and said so: that is for a synth only, never a
+# deploy (14-09 passes the real digests the CodeBuild builds printed). Creates nothing, deploys nothing. Row trainer-synth.
+laya-trainer-synth env="dev" train_digest="" pack_digest="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    refuse() { echo "REFUSED $1: $2" >&2; exit 2; }
+    ENV_NAME="{{ trim_start_match(env, "env=") }}"
+    case "$ENV_NAME" in dev|prod) ;; *) refuse env "environment must be dev or prod, got '$ENV_NAME'" ;; esac
+    TRAIN_D="{{ trim_start_match(train_digest, "train_digest=") }}"
+    PACK_D="{{ trim_start_match(pack_digest, "pack_digest=") }}"
+    if [ -z "$TRAIN_D" ] && [ -z "$PACK_D" ]; then
+        ZERO="sha256:$(printf '0%.0s' $(seq 64))"
+        TRAIN_D="$ZERO"; PACK_D="$ZERO"
+        echo "PLACEHOLDER DIGESTS (synth only): both images are the all-zero digest; a deploy refuses them"
+    fi
+    for D in "$TRAIN_D" "$PACK_D"; do
+        echo "$D" | grep -Eq '^sha256:[0-9a-f]{64}$' || refuse digest "an image digest is sha256:<64 hex> (both digests or neither), got '$D'"
+    done
+    command -v cargo-zigbuild >/dev/null || refuse tool "cargo-zigbuild is not installed (cargo install cargo-zigbuild)"
+    cargo zigbuild --release --target {{target}} -p aprender-mcp-laya-train-lambda --bin aprender-laya-train-finalizer
+    BIN="target/{{target}}/release/aprender-laya-train-finalizer"
+    file "$BIN" | grep -q 'ARM aarch64' || { echo "ERROR: the finalizer is not an aarch64 binary"; exit 1; }
+    python3 -I scripts/embed_endpoint/glibc_floor.py 34 "$BIN"
+    ASSET="deploy-extensions/assets/laya-finalizer"
+    mkdir -p "$ASSET"
+    cp "$BIN" "$ASSET/bootstrap"
+    chmod 0755 "$ASSET/bootstrap"
+    OFFLINE_ENV="AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null AWS_EC2_METADATA_DISABLED=true"
+    synth() {
+        (cd deploy-extensions && env -u AWS_PROFILE -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN -u AWS_REGION -u AWS_DEFAULT_REGION \
+            $OFFLINE_ENV npx cdk synth --no-notices --no-version-reporting --context=env="$ENV_NAME" --context=stack="$1" \
+            --context=trainImageDigest="$TRAIN_D" --context=packImageDigest="$PACK_D" --output "cdk.out/$1" --quiet)
+    }
+    synth laya-trainer-images
+    synth laya-trainer
+    python3 -I scripts/laya_deploy/laya_trainer_stack_check.py \
+        "deploy-extensions/cdk.out/laya-trainer/aprender-laya-trainer-$ENV_NAME.template.json" \
+        "deploy-extensions/cdk.out/laya-trainer-images/aprender-laya-trainer-images-$ENV_NAME.template.json"
+    echo "TRAINER SYNTH OK env=$ENV_NAME"
+
 # Fine-tune Laya on <data> (task.json + train.jsonl + a REQUIRED eval.jsonl + an OPTIONAL shift.jsonl),
 # calibrate and gate into the run dir <out>. Exit 0 = GATE PASS, 3 = GATE FAIL, 2 = input refused.
 # Production (laya-finetune-gate-v1 1.4.0) trains the three gate seeds 13/17/23 and ships the MEDIAN-ECE
@@ -5721,6 +5766,17 @@ laya-gates-selftest:
         must_fail refetch-over 'REFUSED fetch-dest' env PATH="$FA:$PATH" FETCH_RUN="$FR" just laya-fetch fixture-run "$TID" fixture-bucket --dest "$FD"
         must_fail wrong-profile 'REFUSED fetch-profile' env PATH="$FA:$PATH" FETCH_RUN="$FR" just laya-fetch fixture-run "$TID" fixture-bucket --dest "$W/fetchdest2" --profile augury-dev
         must_pass selftest '^LAYA FETCH SELFTEST OK' just laya-fetch --selftest
+    }
+    row_trainer_synth() {
+        # D-01 / D-12 (plan 14-08): an unknown env is refused before any build; the real synth and the offline template check pass.
+        must_fail staging-refused 'REFUSED env' just laya-trainer-synth staging
+        [ "$RC" -eq 2 ] || red "staging-refused: exit $RC, not 2"
+        must_fail one-digest-refused 'REFUSED digest' just laya-trainer-synth dev "sha256:$(printf '1%.0s' $(seq 64))"
+        [ "$RC" -eq 2 ] || red "one-digest-refused: exit $RC, not 2"
+        must_pass dev '^TRAINER SYNTH OK env=dev$' just laya-trainer-synth dev
+        grep -q '^TRAINER STACK CHECK OK' "$(logof dev)" || red "dev: the synth did not print TRAINER STACK CHECK OK"
+        grep -q 'PLACEHOLDER DIGESTS (synth only)' "$(logof dev)" || red "dev: the placeholder digests were not announced"
+        must_pass selftest '^STACK CHECK SELFTEST OK$' python3 -I scripts/laya_deploy/laya_trainer_stack_check.py --selftest
     }
     # The deployment triple (plan 13-04, D-06): the four pure helpers and their selftest.
     row_target_check() {

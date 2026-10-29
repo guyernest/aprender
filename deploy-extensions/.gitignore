@@ -5,3 +5,5 @@ cdk.out/
 # The worker package is BUILT (a 147 MB binary + encoder + dataset), never
 # committed: `just build-trainer-asset` produces it.
 assets/
+# CDK's context cache embeds the AWS account id (an availability-zone lookup writes it).
+cdk.context.json

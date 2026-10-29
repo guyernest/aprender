@@ -4,6 +4,8 @@ import * as fs from 'fs';
 import * as cdk from 'aws-cdk-lib';
 import { SetFitTrainingStack } from '../lib/setfit-training-stack';
 import { EmbedEndpointStack, EmbedVariant } from '../lib/embed-endpoint-stack';
+import { LayaTrainerStack } from '../lib/laya-trainer-stack';
+import { LayaTrainerImagesStack } from '../lib/laya-trainer-images-stack';
 
 const app = new cdk.App();
 
@@ -28,17 +30,66 @@ if (!['dev', 'prod'].includes(environment)) {
  * Which stack this app synthesizes. `training` is the DEFAULT, so every existing
  * recipe (synth-training, diff-training, deploy-training) synthesizes exactly what
  * it did before. `embed` is the Phase 11 endpoint; `embed-probe` is the Graviton
- * measurement harness of plan 11-01. One stack per synth, so a probe synth never
+ * measurement harness of plan 11-01. `laya-trainer` and `laya-trainer-images` are the
+ * Phase 14 Laya training server (plan 14-08). One stack per synth, so a probe synth never
  * demands the trainer package.
  */
 const stack = String(app.node.tryGetContext('stack') ?? 'training');
-if (!['training', 'embed', 'embed-probe'].includes(stack)) {
+if (
+  !['training', 'embed', 'embed-probe', 'laya-trainer', 'laya-trainer-images'].includes(stack)
+) {
   throw new Error(
-    `--context stack=${stack} is not a known stack (expected training, embed or embed-probe)`,
+    `--context stack=${stack} is not a known stack (expected training, embed, embed-probe, ` +
+      `laya-trainer or laya-trainer-images)`,
   );
 }
 
-if (stack === 'training') {
+const stackEnv = {
+  account: process.env.CDK_DEFAULT_ACCOUNT,
+  region: process.env.AWS_REGION ?? process.env.CDK_DEFAULT_REGION ?? 'us-east-1',
+};
+
+if (stack === 'laya-trainer-images') {
+  new LayaTrainerImagesStack(app, `aprender-laya-trainer-images-${environment}`, {
+    env: stackEnv,
+    environment,
+    description: `Laya training images (${environment}): ECR repositories and the CodeBuild projects that fill them`,
+  });
+} else if (stack === 'laya-trainer') {
+  /**
+   * Both image digests are REQUIRED and must be a real sha256: the state machine and the
+   * pack task pin their images by digest, so a tag or a blank here would deploy a floating
+   * image (T-14-31, T-14-34). `just laya-trainer-synth` passes all-zero placeholders, and
+   * says so, for an offline synth only.
+   */
+  const digestOf = (key: string): string => {
+    const value = String(app.node.tryGetContext(key) ?? '');
+    if (!/^sha256:[0-9a-f]{64}$/.test(value)) {
+      throw new Error(
+        `--context ${key}=${value || '<unset>'} is not an image digest (expected sha256:<64 hex>).\n` +
+          `The digests are printed by the image builds: see deploy-extensions/README.md`,
+      );
+    }
+    return value;
+  };
+  const trainImageDigest = digestOf('trainImageDigest');
+  const packImageDigest = digestOf('packImageDigest');
+  const finalizerAssetPath = path.resolve(__dirname, '..', 'assets', 'laya-finalizer');
+  if (!fs.existsSync(path.join(finalizerAssetPath, 'bootstrap'))) {
+    throw new Error(
+      `no finalizer package at ${finalizerAssetPath} (expected a 'bootstrap' binary).\n` +
+        `Build it first:  just laya-trainer-synth`,
+    );
+  }
+  new LayaTrainerStack(app, `aprender-laya-trainer-${environment}`, {
+    env: stackEnv,
+    environment,
+    finalizerAssetPath,
+    trainImageDigest,
+    packImageDigest,
+    description: `Laya training server (${environment}): run bucket, task table, Train -> PackVerify -> Finalize machine, finalizer`,
+  });
+} else if (stack === 'training') {
   /**
    * The worker package. `cdk synth` must FAIL when it is missing rather than
    * deploy a Lambda with no code — the asset is built by
