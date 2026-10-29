@@ -39,8 +39,12 @@ dependencies = [
 ]
 
 [tool.uv]
-# The approved lock is macOS-arm64 only (the laptop back office, plan 08-02 Task 1). CI
-# never installs this project, so a Linux/x86 split would be an unverified resolution.
-environments = ["sys_platform == 'darwin' and platform_machine == 'arm64'"]
+# The lock carries two resolutions: macOS arm64 for the laptop back office (plan 08-02 Task 1)
+# and Linux x86_64 for the SageMaker training container (plan 14-03, new packages verified by
+# the owner). CI never installs this project.
+environments = [
+    "sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
 # This is a script collection, not a distributable package.
 package = false

@@ -334,5 +334,10 @@
     ],
     "recorded_by": "orchestrator, from the owner's own message in the session"
   },
-  "applied": false
+  "applied": true,
+  "new_lock_sha256": "06905c4ef710d83081433ebe0edeacbdf6e255e213a0619e3214a8dc41f8c952",
+  "freeze_before_sha256": "ba2fbaf5606305d8c29b3244b4fbc46501375efe1622be224d900d302c218204",
+  "freeze_after_sha256": "ba2fbaf5606305d8c29b3244b4fbc46501375efe1622be224d900d302c218204",
+  "freeze_equal": true,
+  "uv_version_apply": "uv 0.9.5 (d5f39331a 2025-10-21)"
 }

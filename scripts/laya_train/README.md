@@ -44,8 +44,10 @@ Every package was verified by a human (plan 08-02 Task 1, package-legitimacy che
 | laya | `git+https://github.com/NandhaKishorM/laya@4066d5d5fbf08b66c6757ddeedbd797bd7655bc0` (not on PyPI) |
 | base weights (plan 08-08) | `convaiinnovations/laya@55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851` |
 
-The lock is resolved for **macOS arm64 only** (`[tool.uv] environments`): this is the laptop back
-office, and a Linux/x86 split would be a resolution nobody verified.
+The lock carries two resolutions (`[tool.uv] environments`): **macOS arm64** for the laptop back
+office, and **Linux x86_64**, added in plan 14-03 for the SageMaker training container only; its new
+packages were verified by the owner on 2026-10-28. Its numerics on CUDA are measured by the phase's
+probe and reproduction runs, not assumed equal to MPS.
 
 To change a pin: edit `pyproject.toml`, get the new package verified the same way, `uv lock`, and
 re-run `just laya-fixtures` — every committed fixture is a numerical artifact of these versions.
