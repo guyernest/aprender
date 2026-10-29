@@ -1474,6 +1474,76 @@ laya-trainer-deploy *args:
     set -euo pipefail
     exec python3 -I scripts/laya_deploy/laya_trainer_ops.py deploy "$@"
 
+# `just laya-trainer-grant ENV PROFILE` attaches the stack's RequestLambdaPolicy to the published function's role (inline policy
+# aprender-laya-train-<env>), and ONLY after it has seen OAuth itself. It takes NO url: the endpoint is read from the verified deploy
+# state <state-dir>/deploy-<env>.json, its host's first label must be the server id aprender-mcp-laya-train and GET /health on it must
+# answer 200 naming that server (`REFUSED grant: endpoint not bound to aprender-mcp-laya-train`); then, in this same invocation and
+# immediately before the IAM call, `_laya-auth-refusal-check <that endpoint> 0 train_status` must see an unauthenticated tools/list and
+# a train_status tools/call refused with 401 (`REFUSED grant: OAuth not confirmed (tools/list answered <code>)`, or `REFUSED grant:
+# endpoint unreachable (transport error; retry)` when curl could not connect). A 401 seen on an unrelated endpoint can never authorize
+# this function's grant. A live grant needs LAYA_TRAINER_APPROVED_GRANT=<env>. DRY_RUN=1 still makes the two read-only HTTP probes
+# (run it only against a deployed endpoint, or with a curl shim as the gate row does) and prints the IAM commands without running them.
+# Row trainer-grant.
+[positional-arguments]
+laya-trainer-grant *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec python3 -I scripts/laya_deploy/laya_trainer_ops.py grant "$@"
+
+# `just laya-trainer-call PROFILE URL list-tools|validate URI|train URI NAME [EPOCHS]|status TASK_ID|result TASK_ID|cancel TASK_ID|
+# call-tool TOOL JSON_ARGS` calls the Laya training server with an M2M bearer (plan 14-10; the live checks of 14-13). The token is
+# minted by scripts/laya_deploy/m2m_token.py from the mode-600 client file LAYA_M2M_FILE (outside the checkout) and reaches
+# scripts/laya_deploy/train_call.py only in APRENDER_DECIDE_PROBE_TOKEN, never on argv and never printed; each answer is ONE JSON line
+# (exit 0 only when ok), `call-tool` sends exactly the given argument object, and the client refuses every redirect (a bearer must never
+# follow a 3xx to another host). Refused (`REFUSED call:`, exit 2, nothing run) when the profile is not ze-kasher-dev, LAYA_M2M_FILE is
+# unset, APRENDER_DECIDE_PROBE_TOKEN is already set, an argument starts with --bearer / --url, or the URL is not
+# https://aprender-mcp-laya-train<tenant suffix>/mcp (loopback http://127.0.0.1:<port>/mcp only under DRY_RUN=1, for the offline chain).
+# The token host comes from the helper's --token-host mode: LAYA_M2M_TOKEN_HOST, else <state dir>/m2m-token-host (models/laya-trainer),
+# else the URL's host. LAYA_M2M_MIN_EXPIRES (300..86400, default 900) is the expires_in floor. Needs SSL_CERT_FILE=/etc/ssl/cert.pem on a
+# python.org build with no CA bundle (the client falls back to it). Row trainer-call.
+[positional-arguments]
+laya-trainer-call profile url *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    P="$1"
+    URL="$2"
+    shift 2
+    refuse() { echo "REFUSED call: $1" >&2; exit 2; }
+    [ "$P" = "ze-kasher-dev" ] || refuse "profile $P is not allowed in this phase (only ze-kasher-dev)"
+    [ -n "${LAYA_M2M_FILE:-}" ] || refuse "LAYA_M2M_FILE is not set: name the mode-600 M2M client file (outside the checkout)"
+    [ -z "${APRENDER_DECIDE_PROBE_TOKEN+x}" ] \
+        || refuse "APRENDER_DECIDE_PROBE_TOKEN is already set in the caller's environment; unset it (the token is minted from LAYA_M2M_FILE)"
+    for a in "$@"; do
+        case "$a" in
+            --bearer*) refuse "an argument starts with --bearer; the token comes only from LAYA_M2M_FILE (the argument is not echoed)" ;;
+            --url*|--allow-loopback-http*) refuse "an argument starts with --url or --allow-loopback-http; the URL is this recipe's second argument" ;;
+        esac
+    done
+    MIN="${LAYA_M2M_MIN_EXPIRES:-900}"
+    case "$MIN" in ''|*[!0-9]*) refuse "config: LAYA_M2M_MIN_EXPIRES is not a whole number of seconds" ;; esac
+    if [ "${#MIN}" -gt 5 ] || [ "$((10#$MIN))" -lt 300 ] || [ "$((10#$MIN))" -gt 86400 ]; then
+        refuse "config: LAYA_M2M_MIN_EXPIRES must be in 300..86400"
+    fi
+    # The endpoint under this profile's tenant and naming THIS server (pure checks: no AWS call is made by a call).
+    TLINE="$(just _laya-target-check "$P" "")"
+    read -r T_TARGET T_REGION _ _ <<< "$TLINE"
+    export PMCP_TARGET="$T_TARGET" AWS_PROFILE="$P" AWS_REGION="$T_REGION"
+    unset PMCP_API_URL AWS_DEFAULT_REGION
+    G="$(just _laya-endpoint-check "$URL" "$P")"
+    if [ "$G" != "loopback" ] && [ "$G" != "aprender-mcp-laya-train" ]; then
+        refuse "the endpoint names server $G, not aprender-mcp-laya-train"
+    fi
+    UH="${URL#*://}"
+    UH="${UH%%/*}"
+    UH="${UH%%:*}"
+    TH="$(python3 -I scripts/laya_deploy/m2m_token.py --token-host --state-dir models/laya-trainer --endpoint-host "$UH")"
+    FLAGS=(--file "$LAYA_M2M_FILE" --expect-host "$TH" --min-expires "$((10#$MIN))")
+    CALLFLAGS=()
+    if [ "$G" = "loopback" ]; then FLAGS+=(--allow-loopback-http); CALLFLAGS+=(--allow-loopback-http); fi
+    if [ "${LAYA_M2M_ALLOW_BASIC:-0}" = "1" ]; then FLAGS+=(--allow-basic); fi
+    set +x
+    exec python3 -I scripts/laya_deploy/m2m_token.py "${FLAGS[@]}" -- python3 -I scripts/laya_deploy/train_call.py --url "$URL" ${CALLFLAGS[@]+"${CALLFLAGS[@]}"} "$@"
+
 # Fine-tune Laya on <data> (task.json + train.jsonl + a REQUIRED eval.jsonl + an OPTIONAL shift.jsonl),
 # calibrate and gate into the run dir <out>. Exit 0 = GATE PASS, 3 = GATE FAIL, 2 = input refused.
 # Production (laya-finetune-gate-v1 1.4.0) trains the three gate seeds 13/17/23 and ships the MEDIAN-ECE
@@ -4467,13 +4537,15 @@ laya-probe-auth profile url *args:
 # (observed, not asserted); oauth-protected-resource <code> (observed)`, whose first_401_utc plan 13-08
 # records as the auth window. `REFUSED auth-open:` (exit 1) when tools/list stays open past the wait or
 # tools/call is not 401, `REFUSED auth-check: transport` (exit 1) on a curl failure, `REFUSED
-# auth-check: config` (exit 2) on a malformed argument. Row auth-refusal-check.
+# auth-check: config` (exit 2) on a malformed argument. An optional third argument <tool> (classify, the default, or train_status)
+# selects the tools/call payload (plan 14-10: `just laya-trainer-grant` uses train_status). Row auth-refusal-check.
 [positional-arguments]
-_laya-auth-refusal-check url wait_s:
+_laya-auth-refusal-check url wait_s tool="classify":
     #!/usr/bin/env bash
     set -euo pipefail
     URL="$1"
     WAIT="$2"
+    TOOL="$3"
     config() { echo "REFUSED auth-check: config $1" >&2; exit 2; }
     python3 -I -c 'import re, sys; sys.exit(0 if re.fullmatch(r"https://[a-z0-9-]+(\.[a-z0-9-]+)+/mcp", sys.argv[1]) else 1)' "$URL" \
         || config "the URL (${#URL} characters) is not https://<host>/mcp"
@@ -4493,7 +4565,13 @@ _laya-auth-refusal-check url wait_s:
             -H 'accept: application/json, text/event-stream' -d "$1"
     }
     LIST='{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
-    CALL='{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"classify","arguments":{"texts":["auth refusal probe"]}}}'
+    # The CALL payload per tool. classify (the default, every decide caller) is one synthetic text; train_status (the Laya training
+    # server, plan 14-10) reads one task id that cannot exist, a call that could never start a job even on an open server.
+    case "$TOOL" in
+        classify) CALL='{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"classify","arguments":{"texts":["auth refusal probe"]}}}' ;;
+        train_status) CALL='{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"train_status","arguments":{"task_id":"auth-refusal-probe"}}}' ;;
+        *) config "the tool (${#TOOL} characters) is not classify or train_status" ;;
+    esac
     INIT='{"jsonrpc":"2.0","id":3,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"laya-auth-refusal-check","version":"1"}}}'
     START=$SECONDS
     k=0
@@ -4561,6 +4639,7 @@ _laya-auth-curl-shim out:
         esac
     done
     if [ "${CURL_MODE:-}" = "transport" ]; then echo "$method transport-error" >> "$CURL_CALLS"; exit 7; fi
+    if [ -n "${CURL_BODIES:-}" ] && [ -n "$data" ]; then printf '%s\n' "$data" >> "$CURL_BODIES"; fi
     rpc="$(printf '%s' "$data" | sed -n 's/.*"method":"\([a-z/]*\)".*/\1/p')"
     case "$rpc" in
         tools/list)
@@ -4573,6 +4652,14 @@ _laya-auth-curl-shim out:
     esac
     if [ -n "$rpc" ]; then echo "$method $rpc" >> "$CURL_CALLS"; else echo "$method $url" >> "$CURL_CALLS"; fi
     if [ -n "$out" ]; then printf '{"error":"invalid_request","error_description":"No Bearer token provided"}' > "$out"; fi
+    # A GET of an edge /health (plan 14-10, the grant recipe's binding check): $CURL_HEALTH is the body, $CURL_HEALTH_CODE the status.
+    case "$url" in
+        */health)
+            if [ -n "${CURL_HEALTH:-}" ]; then
+                if [ -n "$out" ]; then printf '%s' "$CURL_HEALTH" > "$out"; fi
+                code="${CURL_HEALTH_CODE:-200}"
+            fi ;;
+    esac
     printf '%s' "$code"
     SH
     chmod +x "$1"
@@ -6037,6 +6124,138 @@ laya-gates-selftest:
         printf '401\n' > "$S"; : > "$L"
         must_pass refused '^auth-refusal ok: tools/list 401, tools/call 401 after 1 poll\(s\)' \
             env PATH="$C:$PATH" CURL_LIST="$S" CURL_CALLS="$L" CURL_CALL=401 CURL_INIT=200 CURL_PRM=200 LAYA_AUTH_POLL_SLEEP=0 just _laya-auth-refusal-check "$U" 0
+        # Plan 14-10: the optional third argument selects the tools/call payload. train_status sends the one task id that cannot exist;
+        # with no third argument the payload is still classify (every decide caller is unchanged); an unknown tool is a config refusal.
+        local BD="$W/authcurl-bodies" UT="https://aprender-mcp-laya-train.us-east.true-mcp.com/mcp"
+        : > "$BD"; : > "$L"
+        must_pass auth-tool '^auth-refusal ok: tools/list 401, tools/call 401 after 1 poll\(s\)' \
+            env PATH="$C:$PATH" CURL_LIST="$S" CURL_CALLS="$L" CURL_BODIES="$BD" CURL_CALL=401 CURL_INIT=200 CURL_PRM=200 LAYA_AUTH_POLL_SLEEP=0 just _laya-auth-refusal-check "$UT" 0 train_status
+        grep -q '"method":"tools/call","params":{"name":"train_status","arguments":{"task_id":"auth-refusal-probe"}}' "$BD" || red "auth-tool: the tools/call body is not the train_status payload"
+        if grep -q 'classify' "$BD"; then red "auth-tool: a classify payload was sent for train_status"; fi
+        : > "$BD"; : > "$L"
+        must_pass auth-default '^auth-refusal ok: tools/list 401, tools/call 401 after 1 poll\(s\)' \
+            env PATH="$C:$PATH" CURL_LIST="$S" CURL_CALLS="$L" CURL_BODIES="$BD" CURL_CALL=401 CURL_INIT=200 CURL_PRM=200 LAYA_AUTH_POLL_SLEEP=0 just _laya-auth-refusal-check "$U" 0
+        grep -q '"params":{"name":"classify","arguments":{"texts":\["auth refusal probe"\]}}' "$BD" || red "auth-default: the default payload is no longer classify"
+        if grep -q 'train_status' "$BD"; then red "auth-default: a train_status payload was sent with no third argument"; fi
+        : > "$L"
+        must_fail auth-tool-unknown '^REFUSED auth-check: config the tool' \
+            env PATH="$C:$PATH" CURL_LIST="$S" CURL_CALLS="$L" CURL_CALL=401 CURL_INIT=200 CURL_PRM=200 LAYA_AUTH_POLL_SLEEP=0 just _laya-auth-refusal-check "$U" 0 bogus
+        [ "$RC" -eq 2 ] || red "auth-tool-unknown: exit $RC, not 2"
+        [ ! -s "$L" ] || red "auth-tool-unknown: a request was sent before the tool was refused"
+    }
+    row_trainer_grant() {
+        # D-10 / T-14-71 (plan 14-10): the grant takes no URL, binds the endpoint to the function from the deploy state and its /health,
+        # and runs the 401 check itself immediately before the IAM call. A scripted curl (first on PATH) answers every request; the aws
+        # recorder must stay unused (a dry run prints the IAM commands and runs none).
+        local TS="$W/ops-state-grant" TSE="$W/ops-state-grant-empty" TSB="$W/ops-state-grant-other" C="$W/grantcurl" S="$W/grantcurl-list" L="$W/grantcurl-calls" BD="$W/grantcurl-bodies"
+        local EP="https://aprender-mcp-laya-train.us-east.true-mcp.com/mcp" HOK='{"status":"healthy","serverId":"aprender-mcp-laya-train"}'
+        local HBAD='{"status":"healthy","serverId":"aprender-mcp-decide-motivation"}'
+        mkdir -p "$C"
+        just _laya-auth-curl-shim "$C/curl"
+        local d
+        for d in "$TS" "$TSE" "$TSB"; do
+            python3 -I scripts/laya_deploy/laya_trainer_ops.py --write-placeholder-state "$d" > /dev/null || { red "the placeholder state could not be written"; return; }
+        done
+        python3 -I - "$TS/deploy-dev.json" "$EP" aprender-mcp-laya-train <<'PYG'
+    import json, sys
+    json.dump({"schema": "laya-trainer-deploy-v1", "env": "dev", "server_id": sys.argv[3], "package": "aprender-mcp-laya-train-lambda", "endpoint": sys.argv[2],
+               "deployed_at": "2026-10-29T12:34:56Z"}, open(sys.argv[1], "w"))
+    PYG
+        cp "$TS/deploy-dev.json" "$TSB/deploy-dev.json"
+        sed -i.bak 's#aprender-mcp-laya-train\.us-east#aprender-mcp-decide-motivation.us-east#' "$TSB/deploy-dev.json"; rm -f "$TSB/deploy-dev.json.bak"
+        printf '401\n' > "$S"
+        local CE=(env PATH="$C:$PATH" CURL_LIST="$S" CURL_CALLS="$L" CURL_BODIES="$BD" CURL_CALL=401 CURL_INIT=200 CURL_PRM=200 LAYA_AUTH_POLL_SLEEP=0)
+        : > "$L"; : > "$BD"
+        must_fail url-argument '^REFUSED usage: grant takes exactly ENV PROFILE: unknown argument' "${CE[@]}" CURL_HEALTH="$HOK" just laya-trainer-grant dev ze-kasher-dev "$EP" --state-dir "$TS"
+        [ "$RC" -eq 2 ] || red "url-argument: exit $RC, not 2"
+        [ ! -s "$L" ] || red "url-argument: a request was sent although the URL argument was refused"
+        must_fail foreign-profile '^REFUSED profile: ' "${CE[@]}" CURL_HEALTH="$HOK" just laya-trainer-grant dev augury-dev --state-dir "$TS"
+        [ "$RC" -eq 2 ] || red "foreign-profile: exit $RC, not 2"
+        must_fail no-deploy-state '^REFUSED grant: endpoint not bound to aprender-mcp-laya-train' "${CE[@]}" CURL_HEALTH="$HOK" just laya-trainer-grant dev ze-kasher-dev --state-dir "$TSE"
+        [ "$RC" -eq 2 ] || red "no-deploy-state: exit $RC, not 2"
+        must_fail foreign-label '^REFUSED grant: endpoint not bound to aprender-mcp-laya-train' "${CE[@]}" CURL_HEALTH="$HOK" just laya-trainer-grant dev ze-kasher-dev --state-dir "$TSB"
+        [ "$RC" -eq 2 ] || red "foreign-label: exit $RC, not 2"
+        must_fail health-names-other '^REFUSED grant: endpoint not bound to aprender-mcp-laya-train' "${CE[@]}" CURL_HEALTH="$HBAD" just laya-trainer-grant dev ze-kasher-dev --state-dir "$TS"
+        [ "$RC" -eq 2 ] || red "health-names-other: exit $RC, not 2"
+        if grep -q '^POST tools/' "$L"; then red "an unbound endpoint reached the 401 check"; fi
+        printf '200\n' > "$S"; : > "$L"
+        must_fail oauth-open '^REFUSED grant: OAuth not confirmed \(tools/list answered 200\)' "${CE[@]}" CURL_HEALTH="$HOK" just laya-trainer-grant dev ze-kasher-dev --state-dir "$TS"
+        [ "$RC" -eq 2 ] || red "oauth-open: exit $RC, not 2"
+        if grep -q '^POST tools/call$' "$L"; then red "oauth-open: tools/call was sent while tools/list answered 200"; fi
+        printf '401\n' > "$S"; : > "$L"
+        must_fail unreachable '^REFUSED grant: endpoint unreachable \(transport error; retry\)' "${CE[@]}" CURL_MODE=transport CURL_HEALTH="$HOK" just laya-trainer-grant dev ze-kasher-dev --state-dir "$TS"
+        [ "$RC" -eq 2 ] || red "unreachable: exit $RC, not 2"
+        : > "$L"; : > "$BD"
+        must_pass dry '^AWS CALLS: 0$' "${CE[@]}" CURL_HEALTH="$HOK" just laya-trainer-grant dev ze-kasher-dev --state-dir "$TS"
+        local HN AN FN PN
+        HN="$(grep -n '^+ curl ' "$(logof dry)" | head -n 1 | cut -d: -f1)"
+        AN="$(grep -n "^+ just _laya-auth-refusal-check $EP 0 train_status\$" "$(logof dry)" | head -n 1 | cut -d: -f1)"
+        FN="$(grep -n '^+ aws lambda get-function --function-name aprender-mcp-laya-train ' "$(logof dry)" | head -n 1 | cut -d: -f1)"
+        PN="$(grep -n '^+ aws iam put-role-policy .*--policy-name aprender-laya-train-dev ' "$(logof dry)" | head -n 1 | cut -d: -f1)"
+        { [ -n "$HN" ] && [ -n "$AN" ] && [ -n "$FN" ] && [ -n "$PN" ] && [ "$HN" -lt "$AN" ] && [ "$AN" -lt "$FN" ] && [ "$FN" -lt "$PN" ]; } \
+            || red "dry: the health, auth-check, get-function and put-role-policy lines are missing or out of order ($HN $AN $FN $PN)"
+        grep -q '"params":{"name":"train_status","arguments":{"task_id":"auth-refusal-probe"}}' "$BD" || red "dry: the 401 check did not send the train_status payload"
+        [ "$(wc -l < "$REC" | tr -d ' ')" -eq 0 ] || red "the aws recorder was called"
+    }
+    row_trainer_call() {
+        # D-10 / T-14-41 (plan 14-10): the recipe refuses before any run (no M2M file, a preset token, a foreign profile, another server's
+        # endpoint); the client's selftest runs against a local HTTP fake; and one chain case sends the minted bearer, through the recipe and
+        # m2m_token.py, to the loopback stub, with the token and secret absent from the recipe's output.
+        local EP="https://aprender-mcp-laya-train.us-east.true-mcp.com/mcp" OTHER="https://aprender-mcp-decide-motivation.us-east.true-mcp.com/mcp"
+        must_fail no-m2m-file '^REFUSED call: LAYA_M2M_FILE is not set' env -u LAYA_M2M_FILE just laya-trainer-call ze-kasher-dev "$EP" list-tools
+        [ "$RC" -eq 2 ] || red "no-m2m-file: exit $RC, not 2"
+        must_fail token-preset '^REFUSED call: APRENDER_DECIDE_PROBE_TOKEN is already set' env LAYA_M2M_FILE="$W/none.json" APRENDER_DECIDE_PROBE_TOKEN=preset just laya-trainer-call ze-kasher-dev "$EP" list-tools
+        [ "$RC" -eq 2 ] || red "token-preset: exit $RC, not 2"
+        must_fail foreign-profile '^REFUSED call: profile augury-dev is not allowed' env LAYA_M2M_FILE="$W/none.json" just laya-trainer-call augury-dev "$EP" list-tools
+        [ "$RC" -eq 2 ] || red "foreign-profile: exit $RC, not 2"
+        must_fail other-server '^REFUSED call: the endpoint names server aprender-mcp-decide-motivation' env LAYA_M2M_FILE="$W/none.json" just laya-trainer-call ze-kasher-dev "$OTHER" list-tools
+        [ "$RC" -eq 2 ] || red "other-server: exit $RC, not 2"
+        must_fail bearer-arg '^REFUSED call: an argument starts with --bearer' env LAYA_M2M_FILE="$W/none.json" just laya-trainer-call ze-kasher-dev "$EP" list-tools --bearer=x
+        [ "$RC" -eq 2 ] || red "bearer-arg: exit $RC, not 2"
+        must_pass selftest '^TRAIN CALL SELFTEST OK$' python3 -I scripts/laya_deploy/train_call.py --selftest
+        # ---- chain: file -> m2m_token.py -> train_call.py -> the loopback stub (its /mcp answers 401 and logs whether the bearer matched)
+        local SD="$W/call-stub" STUBPID=""
+        mkdir -p "$SD"
+        python3 -I - "$SD/client.json" <<'PYC'
+    import json, os, secrets, sys
+    fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        json.dump({"client_id": "selftest-client-" + secrets.token_hex(4), "client_secret": "selftest-secret-" + secrets.token_urlsafe(18)}, fh)
+    PYC
+        python3 -I scripts/laya_deploy/m2m_token.py --stub-server "$SD" > "$W/call-stub.log" 2>&1 &
+        STUBPID=$!
+        local _i
+        for _i in $(seq 1 100); do
+            [ -s "$SD/port" ] && break
+            sleep 0.1
+        done
+        if [ -s "$SD/port" ]; then
+            local PORT TOK SEC LINE
+            PORT="$(cat "$SD/port")"
+            python3 -I - "$SD/client.json" "$PORT" "$W/call-m2m-client.json" <<'PYD'
+    import json, os, sys
+    c = json.load(open(sys.argv[1]))
+    fd = os.open(sys.argv[3], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        json.dump({**c, "token_url": f"http://127.0.0.1:{int(sys.argv[2])}/oauth2/token"}, fh)
+    PYD
+            run chain env -u LAYA_M2M_TOKEN_HOST -u APRENDER_DECIDE_PROBE_TOKEN LAYA_M2M_FILE="$W/call-m2m-client.json" just laya-trainer-call ze-kasher-dev "http://127.0.0.1:$PORT/mcp" list-tools
+            touch "$SD/stop"
+            wait "$STUBPID" || true
+            TOK="$(cat "$SD/token" 2> /dev/null || true)"
+            SEC="$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["client_secret"])' "$SD/client.json")"
+            LINE="$(head -n 1 "$SD/mcp.log" 2> /dev/null || true)"
+            if [ -z "$TOK" ] || grep -qF -- "$TOK" "$(logof chain)"; then red "chain: the token is absent from the stub or present in the recipe output"; fi
+            if grep -qF -- "$SEC" "$(logof chain)"; then red "chain: the client secret is present in the recipe output"; fi
+            [ "$LINE" = "authorization_bearer_matches=true" ] || red "chain: the stub saw '${LINE:-<none>}', not authorization_bearer_matches=true"
+            grep -q '^m2m-token ok: host 127.0.0.1 HTTP 200 ' "$(logof chain)" || red "chain: no m2m-token ok line"
+            grep -q '"ok":false,"error":{"http_status":401' "$(logof chain)" || red "chain: the client did not report the stub's 401 as one error line"
+            [ "$RC" -eq 1 ] || red "chain: exit $RC, not 1 (a 401 is exit 1)"
+            echo "  chain: the minted bearer reached the stub (authorization_bearer_matches=true); the 401 came back as one error line; token and secret absent from the output"
+        else
+            kill "$STUBPID" 2> /dev/null || true
+            red "chain: the stub did not write its port within 10 s (log $W/call-stub.log)"
+        fi
     }
     row_probe_auth() {
         must_fail no-m2m-file '^REFUSED probe-auth: LAYA_M2M_FILE is not set' \

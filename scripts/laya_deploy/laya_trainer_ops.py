@@ -8,6 +8,7 @@
     python3 -I scripts/laya_deploy/laya_trainer_ops.py [--state-dir DIR] probe  cuda|sigterm ENV PROFILE
     python3 -I scripts/laya_deploy/laya_trainer_ops.py [--state-dir DIR] config ENV PROFILE [--template FILE   (DRY_RUN=1 only)]
     python3 -I scripts/laya_deploy/laya_trainer_ops.py [--state-dir DIR] deploy ENV PROFILE
+    python3 -I scripts/laya_deploy/laya_trainer_ops.py [--state-dir DIR] grant  ENV PROFILE        (no URL, by design)
     python3 -I scripts/laya_deploy/laya_trainer_ops.py --write-placeholder-state DIR [--env dev|prod]
     python3 -I scripts/laya_deploy/laya_trainer_ops.py --selftest
 
@@ -58,6 +59,16 @@ deploy --manifest-path crates ... --no-oauth` (the shared crates root comes back
 name aprender-mcp-laya-train-lambda (`REFUSED deploy: wrong package`), parses the endpoint from the log, requires its host's
 first label to be aprender-mcp-laya-train and the tenant suffix of the profile, and writes <state-dir>/deploy-<env>.json
 {server_id, package, endpoint, deployed_at} (mode 600). A live deploy needs LAYA_TRAINER_APPROVED_DEPLOY=<env>.
+
+`grant` attaches the stack's RequestLambdaPolicy as the inline policy aprender-laya-train-<env> on the role of function
+aprender-mcp-laya-train, and only after it has OBSERVED OAuth itself, in the same invocation, on an endpoint bound to that
+function: it takes NO URL (an extra argument is refused as unknown); the endpoint comes from the verified deploy state
+<state-dir>/deploy-<env>.json, its host's first label must be the server id and GET /health on it must answer 200 naming
+aprender-mcp-laya-train (`REFUSED grant: endpoint not bound to aprender-mcp-laya-train`); then `just _laya-auth-refusal-check
+<endpoint> 0 train_status` must see tools/list AND a train_status tools/call refused with 401 (`REFUSED grant: OAuth not
+confirmed (tools/list answered <code>)`, or `REFUSED grant: endpoint unreachable (transport error; retry)` when curl could not
+connect), and only then `_laya-account-check`, the role lookup and the put-role-policy run. A live grant needs
+LAYA_TRAINER_APPROVED_GRANT=<env>. A 401 seen on an unrelated endpoint can therefore never authorize this function's grant.
 
 stdlib only. Every external command goes through ONE Runner (aws, npx cdk, git, just); --selftest replaces it with a
 simulated world and never reaches AWS, the network or the real account.
@@ -1315,14 +1326,115 @@ def cmd_deploy(ctx, pos, opts):
     return 0
 
 
+# ---- grant (plan 14-10: D-10, T-14-71) --------------------------------------------------------------------------------
+
+def bound_endpoint(ctx, env):
+    """The endpoint the grant may be decided on: read ONLY from the deploy state the `deploy` subcommand wrote from the log that
+    named the package, and bound to the function being granted to by the server id in its host and in its own /health."""
+    not_bound = lambda why: refuse("grant", "endpoint not bound to %s (%s)" % (SERVER_ID, why))
+    rec = read_state_optional(ctx, "deploy-%s.json" % env)
+    if rec is None:
+        not_bound("deploy-%s.json is missing; run `just laya-trainer-deploy %s %s`" % (env, env, PROFILE))
+    ep = rec.get("endpoint")
+    m = ENDPOINT_RE.fullmatch(ep) if isinstance(ep, str) else None
+    if not m or rec.get("server_id") != SERVER_ID or rec.get("package") != PACKAGE:
+        not_bound("deploy-%s.json does not record a deployment of %s" % (env, PACKAGE))
+    if m.group(1) != SERVER_ID:
+        not_bound("the endpoint's host label is %s" % m.group(1))
+    if ctx.suffix and m.group(2) != ctx.suffix:
+        not_bound("the endpoint host is not under *%s" % ctx.suffix)
+    return ep
+
+
+def health_names_server(ctx, endpoint):
+    base = endpoint[:-len("/mcp")]
+    with tempfile.TemporaryDirectory(prefix="laya-grant-health-") as td:
+        body_path = os.path.join(td, "health.json")
+        r = ctx.runner.run(["curl", "-sS", "-m", "30", "-o", body_path, "-w", "%{http_code}", base + "/health"], local=True)
+        if r.rc != 0:
+            refuse("grant", "endpoint unreachable (transport error; retry)")
+        code = r.out.strip()[-3:]
+        if code != "200":
+            refuse("grant", "endpoint not bound to %s (GET /health answered %s)" % (SERVER_ID, code if code.isdigit() else "no status"))
+        try:
+            with open(body_path, "r", encoding="utf-8", errors="replace") as fh:
+                body = json.loads(fh.read(65536))
+        except (OSError, ValueError):
+            body = None
+    if not isinstance(body, dict) or body.get("serverId") != SERVER_ID:
+        refuse("grant", "endpoint not bound to %s (its /health names another server)" % SERVER_ID)
+
+
+def classify_auth_refusal(res):
+    text = res.err + "\n" + res.out
+    if "REFUSED auth-check: transport" in text:
+        refuse("grant", "endpoint unreachable (transport error; retry)")
+    m = re.search(r"REFUSED auth-open: unauthenticated tools/list answered HTTP ([0-9]{3})", text)
+    if m:
+        refuse("grant", "OAuth not confirmed (tools/list answered %s)" % m.group(1))
+    m = re.search(r"REFUSED auth-open: tools/call answered HTTP ([0-9]{3})", text)
+    if m:
+        refuse("grant", "OAuth not confirmed (tools/call answered %s)" % m.group(1))
+    refuse("grant", "OAuth not confirmed (the auth check exited %d without a verdict)" % res.rc)
+
+
+def cmd_grant(ctx, pos, opts):
+    if len(pos) != 2:
+        refuse("usage", "grant takes exactly ENV PROFILE: unknown argument %r (the endpoint is read from the verified deploy state, "
+                        "never from the command line)" % (pos[2][:40] if len(pos) > 2 else ""))
+    env, profile = pos
+    check_profile_env(profile, env)
+    state_dir(ctx, opts.get("state_dir"), create=False)
+    if not ctx.dry and ctx.env.get("LAYA_TRAINER_APPROVED_GRANT", "") != env:
+        refuse("approval", "a live grant needs LAYA_TRAINER_APPROVED_GRANT=%s (the owner's explicit go, after enabling OAuth)" % env)
+    out = read_state(ctx, "outputs-%s.json" % env, "run `just laya-trainer-infra outputs %s %s` first" % (env, profile))
+    policy = (out.get("trainer") or {}).get("RequestLambdaPolicy")
+    try:
+        doc = json.loads(policy) if isinstance(policy, str) else None
+    except ValueError:
+        doc = None
+    if not isinstance(doc, dict):
+        refuse("state", "outputs-%s.json holds no RequestLambdaPolicy document" % env)
+    if not ctx.dry and not (isinstance(doc.get("Statement"), list) and doc["Statement"]):
+        refuse("state", "outputs-%s.json RequestLambdaPolicy has no Statement (a placeholder, not the stack's policy)" % env)
+    region = target_region(ctx, profile)
+    endpoint = bound_endpoint(ctx, env)
+    health_names_server(ctx, endpoint)
+    # THE ORDER: the 401 is observed here, on the endpoint just bound to this function, immediately before the IAM call.
+    auth = ctx.runner.run(["just", "_laya-auth-refusal-check", endpoint, "0", "train_status"], local=True, cwd=str(ctx.repo_root))
+    if auth.rc != 0:
+        classify_auth_refusal(auth)
+    ctx.say("OAuth confirmed on %s: unauthenticated tools/list and a train_status tools/call both answered 401" % SERVER_ID)
+    account_gate(ctx, profile, region)
+    fn = aws(ctx, profile, region, "lambda", "get-function", "--function-name", SERVER_ID, "--query", "Configuration.Role", "--output", "text")
+    role = "<role of %s>" % SERVER_ID
+    if not ctx.dry:
+        if fn.rc != 0:
+            refuse("grant", "cannot read the role of function %s (%s); publish it first: just laya-trainer-deploy %s %s"
+                   % (SERVER_ID, aws_error_code(fn.err) or first_line(fn.err), env, profile))
+        role = fn.out.strip().rsplit("/", 1)[-1]
+        if not ROLE_RE.fullmatch(role):
+            refuse("grant", "get-function answered no role name")
+    put = aws(ctx, profile, region, "iam", "put-role-policy", "--role-name", role, "--policy-name", POLICY_NAME % env, "--policy-document", policy)
+    if ctx.dry:
+        finish_dry(ctx, "grant")
+        return 0
+    if put.rc != 0:
+        raise Failure("put-role-policy failed: %s" % (aws_error_code(put.err) or first_line(put.err)), "GRANT FAILED")
+    ctx.say("policy: %s" % (POLICY_NAME % env))
+    ctx.say("GRANT OK role %s" % role)
+    return 0
+
+
 # ---- dispatch ------------------------------------------------------------------------------------------------
 
 VALUE_OPTS = {"--state-dir": "state_dir", "--tar": "tar", "--expect": "expect", "--stage-json": "stage_json", "--env": "env",
               "--template": "template"}
 FLAG_OPTS = {"--list-files": "list_files"}
-COMMANDS = {"image": cmd_image, "infra": cmd_infra, "stage": cmd_stage, "probe": cmd_probe, "config": cmd_config, "deploy": cmd_deploy}
+COMMANDS = {"image": cmd_image, "infra": cmd_infra, "stage": cmd_stage, "probe": cmd_probe, "config": cmd_config, "deploy": cmd_deploy,
+            "grant": cmd_grant}
 SUBCOMMAND_OPTS = {"image": ("state_dir", "list_files"), "infra": ("state_dir",), "stage": ("state_dir", "tar", "expect", "stage_json"),
-                   "probe": ("state_dir",), "config": ("state_dir", "template"), "deploy": ("state_dir",)}
+                   "probe": ("state_dir",), "config": ("state_dir", "template"), "deploy": ("state_dir",), "grant": ("state_dir",)}
 
 
 def parse_args(argv):
@@ -1424,6 +1536,8 @@ class Sim:
         self.ready_never = False
         self.swap_rc = 0
         self.swap_out = ""
+        self.health = {"rc": 0, "code": "200", "body": '{"status":"healthy","serverId":"aprender-mcp-laya-train","hasDeployment":true}'}
+        self.auth = {"rc": 0, "out": "auth-refusal ok: tools/list 401, tools/call 401 after 1 poll(s) (0 s)\n", "err": ""}
         self.iam = {"function": True, "role": "deploy-role", "fn_err": None, "policy": False, "inspect_err": None, "delete_err": None,
                     "sticky": False, "reread_err": None, "reads": 0, "put_err": None, "put_doc": None}
         self.probe_json = {"schema": "laya-train-probe-v1", "train_step_ok": True, "train_step_peak_bytes": 12345678901,
@@ -1447,6 +1561,13 @@ class Sim:
             return self.aws(argv)
         if exe == "touch":
             return Result(0, "", "")
+        if exe == "curl":
+            if self.health["rc"]:
+                return Result(self.health["rc"], "", "curl: (7) Failed to connect")
+            out = self.opt(argv, "-o")
+            if out and self.health["body"] is not None:
+                Path(out).write_text(self.health["body"])
+            return Result(0, self.health["code"], "")
         if exe == "npx":
             rc = self.cdk_rc.get(argv[2], 0)
             return Result(rc, "cdk %s output\n" % argv[2], "")
@@ -1459,6 +1580,8 @@ class Sim:
             if self.account_refusal:
                 return Result(2, "", "REFUSED target-account: profile ze-kasher-dev resolves to an account ending 0001, not the table's\n")
             return Result(0, "", "target-account ok: fake\n")
+        if argv[1] == "_laya-auth-refusal-check":
+            return Result(self.auth["rc"], self.auth["out"], self.auth["err"])
         if argv[1] == "_laya-crates-root-swap":
             return Result(self.swap_rc, self.swap_out, "")
         return Result(127, "", "fake world: unexpected just recipe")
@@ -2341,6 +2464,124 @@ def selftest():
          and fr["rc"] == 1 and "DEPLOY FAILED rc=1" in fr["out"] and not (fail_sdir / "deploy-dev.json").exists(),
          "the endpoint parsed from the log, its host label and tenant checked, deploy-dev.json (mode 600) written; a wrong label, a foreign tenant, "
          "no endpoint and a failed deploy record nothing")
+
+    # ---- plan 14-10: grant (the 401 observed in the same invocation, on the endpoint bound to the function)
+    GRANT_OK = {"LAYA_TRAINER_APPROVED_GRANT": "dev"}
+    GRANT_EP = "https://aprender-mcp-laya-train.us-east.true-mcp.com/mcp"
+    POLICY_DOC = json.dumps({"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": ["dynamodb:GetItem"], "Resource": "*"}]})
+
+    def grant_world(endpoint=GRANT_EP, package=PACKAGE, server_id=SERVER_ID, with_state=True):
+        sim, sdir = world()
+        if with_state:
+            (sdir / "deploy-dev.json").write_text(json.dumps({"schema": "laya-trainer-deploy-v1", "env": "dev", "server_id": server_id, "package": package,
+                                                              "endpoint": endpoint, "deployed_at": "2026-10-29T12:34:56Z"}))
+        outp = sdir / "outputs-dev.json"
+        o = json.loads(outp.read_text())
+        o["trainer"]["RequestLambdaPolicy"] = POLICY_DOC
+        outp.write_text(json.dumps(o))
+        return sim, sdir
+
+    def graw(sim, sdir, argv=("grant", "dev", PROFILE), live=True, **kw):
+        return go(sim, sdir, list(argv), dry=not live, env_extra=GRANT_OK if live else None, **kw)
+
+    def gnames(sim):
+        out = []
+        for c in sim.calls:
+            if c[0] == "curl":
+                out.append("health")
+            elif c[:2] == ["just", "_laya-auth-refusal-check"]:
+                out.append("auth")
+            elif c[:2] == ["just", "_laya-account-check"]:
+                out.append("account")
+            elif c[0] == "aws":
+                out.append(c[2])
+        return out
+
+    AUTH_OPEN = "REFUSED auth-open: unauthenticated tools/list answered HTTP 200 after 1 poll(s) (0 s, wait 0 s); tools/call was not sent\n"
+    sim, sdir = grant_world()
+    sim.auth = {"rc": 1, "out": "", "err": AUTH_OPEN}
+    r = graw(sim, sdir)
+    sim2, sdir2 = grant_world()
+    sim2.auth = {"rc": 1, "out": "", "err": "REFUSED auth-open: tools/call answered HTTP 200 without a bearer although tools/list answered 401\n"}
+    r2 = graw(sim2, sdir2)
+    case("grant-open-refused", r["rc"] == 2 and "REFUSED grant: OAuth not confirmed (tools/list answered 200)" in r["err"] and "put-role-policy" not in gnames(sim)
+         and not aws_calls(sim) and r2["rc"] == 2 and "REFUSED grant: OAuth not confirmed (tools/call answered 200)" in r2["err"] and not aws_calls(sim2),
+         "an open tools/list (200) or tools/call is refused with the answered code; no IAM call, no aws call at all")
+    sim, sdir = grant_world()
+    sim.auth = {"rc": 1, "out": "", "err": "REFUSED auth-check: transport (curl exit 7) on tools/list, poll 1\n"}
+    r = graw(sim, sdir)
+    sim2, sdir2 = grant_world()
+    sim2.health["rc"] = 7
+    r2 = graw(sim2, sdir2)
+    case("grant-unreachable", r["rc"] == 2 and "REFUSED grant: endpoint unreachable (transport error; retry)" in r["err"] and not aws_calls(sim)
+         and r2["rc"] == 2 and "REFUSED grant: endpoint unreachable (transport error; retry)" in r2["err"] and not aws_calls(sim2)
+         and not any(c[:2] == ["just", "_laya-auth-refusal-check"] for c in sim2.calls),
+         "a curl transport failure (on the auth check or on /health) is `endpoint unreachable ... retry`, never `OAuth not confirmed`; no IAM call")
+    NB = "REFUSED grant: endpoint not bound to aprender-mcp-laya-train"
+    variants = []
+    variants.append(grant_world(with_state=False))
+    variants.append(grant_world(endpoint="https://aprender-mcp-decide-motivation.us-east.true-mcp.com/mcp"))
+    variants.append(grant_world(package="aprender-mcp-decide-lambda"))
+    variants.append(grant_world(endpoint="https://aprender-mcp-laya-train.eu-west.augury.pmcp.run/mcp"))
+    sim_h, sdir_h = grant_world()
+    sim_h.health["body"] = '{"status":"healthy","serverId":"aprender-mcp-decide-motivation"}'
+    variants.append((sim_h, sdir_h))
+    sim_c, sdir_c = grant_world()
+    sim_c.health["code"] = "404"
+    variants.append((sim_c, sdir_c))
+    sim_j, sdir_j = grant_world()
+    sim_j.health["body"] = "not json"
+    variants.append((sim_j, sdir_j))
+    res = [(v[0], graw(v[0], v[1])) for v in variants]
+    sim_x, sdir_x = grant_world()
+    rx = graw(sim_x, sdir_x, ["grant", "dev", PROFILE, GRANT_EP])
+    ry = graw(sim_x, sdir_x, ["grant", "dev", PROFILE, "--url", GRANT_EP])
+    case("grant-url-binding", all(rr["rc"] == 2 and NB in rr["err"] and "auth" not in gnames(sm) and not aws_calls(sm) for sm, rr in res)
+         and rx["rc"] == 2 and "REFUSED usage: grant takes exactly ENV PROFILE: unknown argument" in rx["err"] and not sim_x.calls
+         and ry["rc"] == 2 and "REFUSED usage: unknown option --url" in ry["err"],
+         "no deploy state, a foreign host label, a foreign package, a foreign tenant, a /health naming another server, a 404 and a non-JSON /health each "
+         "refuse `endpoint not bound` with no auth check and no IAM call; a URL argument and --url are refused as unknown")
+
+    # grant-dry-run
+    sim, sdir = grant_world()
+    r = graw(sim, sdir, live=False)
+    cmds = [ln for ln in r["out"].splitlines() if ln.startswith("+ ")]
+    idx = lambda pre: next((i for i, ln in enumerate(cmds) if ln.startswith(pre)), -1)
+    i_h, i_a, i_f, i_p = idx("+ curl "), idx("+ just _laya-auth-refusal-check " + GRANT_EP + " 0 train_status"), idx("+ aws lambda get-function --function-name aprender-mcp-laya-train "), idx("+ aws iam put-role-policy ")
+    case("grant-dry-run", r["rc"] == 0 and r["out"].rstrip().endswith("AWS CALLS: 0") and not aws_calls(sim) and 0 <= i_h < i_a < i_f < i_p
+         and "--policy-name aprender-laya-train-dev" in cmds[i_p] and not iam_calls(sim),
+         "health, the train_status auth check, get-function for aprender-mcp-laya-train and put-role-policy aprender-laya-train-dev are printed in that order; AWS CALLS: 0")
+
+    # grant-order: a live grant, the 401 immediately before the IAM call
+    sim, sdir = grant_world()
+    r = graw(sim, sdir)
+    seq = gnames(sim)
+    case("grant-order", r["rc"] == 0 and seq == ["health", "auth", "account", "get-function", "put-role-policy"] and sim.iam["put_doc"] == POLICY_DOC
+         and r["out"].rstrip().endswith("GRANT OK role deploy-role") and "policy: aprender-laya-train-dev" in r["out"]
+         and [c for c in sim.calls if c[:2] == ["just", "_laya-auth-refusal-check"]][0][2:] == [GRANT_EP, "0", "train_status"],
+         "health, the 401 check on the bound endpoint, the account check, the role lookup, then put-role-policy (%s)" % ",".join(seq))
+    sim, sdir = grant_world()
+    sim.account_refusal = True
+    r = graw(sim, sdir)
+    sim_n, sdir_n = grant_world()
+    r_n = go(sim_n, sdir_n, ["grant", "dev", PROFILE])
+    sim_f, sdir_f = grant_world()
+    sim_f.iam["function"] = False
+    r_f = graw(sim_f, sdir_f)
+    sim_p, sdir_p = grant_world()
+    sim_p.iam["put_err"] = "An error occurred (AccessDenied) when calling the PutRolePolicy operation: no"
+    r_p = graw(sim_p, sdir_p)
+    sim_d, sdir_d = grant_world()
+    o2 = json.loads((sdir_d / "outputs-dev.json").read_text())
+    o2["trainer"]["RequestLambdaPolicy"] = "{}"
+    (sdir_d / "outputs-dev.json").write_text(json.dumps(o2))
+    r_d = graw(sim_d, sdir_d)
+    case("grant-refusals", r["rc"] == 2 and "REFUSED target-account" in r["err"] and "get-function" not in gnames(sim)
+         and r_n["rc"] == 2 and "REFUSED approval: a live grant needs LAYA_TRAINER_APPROVED_GRANT=dev" in r_n["err"] and not sim_n.calls
+         and r_f["rc"] == 2 and "REFUSED grant: cannot read the role of function aprender-mcp-laya-train" in r_f["err"] and "put-role-policy" not in gnames(sim_f)
+         and r_p["rc"] == 1 and "GRANT FAILED" in r_p["out"] and "GRANT OK" not in r_p["out"]
+         and r_d["rc"] == 2 and "REFUSED state: outputs-dev.json RequestLambdaPolicy has no Statement" in r_d["err"] and not sim_d.calls,
+         "a foreign account, an unapproved live grant, an absent function, a failing put and a placeholder policy never reach (or never complete) the IAM write")
 
     # ---- placeholder state
     sim, sdir = world(stateless=True)
