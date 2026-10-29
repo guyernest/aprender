@@ -745,28 +745,18 @@ def main(argv=None):
         contract.check_numbers()
         seed = contract.declared_seed()
         seeds = contract.resolve_seeds(args.seeds, args.variant)
-        task = data.load_task(data_dir / "task.json")
-        train_rows = data.load_rows(data_dir / "train.jsonl", task, "train")
-        eval_rows = data.load_rows(data_dir / "eval.jsonl", task, "eval")
-        data.refuse_overlap(train_rows, eval_rows)
-        shift_rows = None
-        if (data_dir / "shift.jsonl").is_file():      # the OPTIONAL shift probe (A2): reported, never a gate clause
-            shift_rows = data.load_rows(data_dir / "shift.jsonl", task, "shift")
-            data.refuse_overlap(train_rows, shift_rows, "shift")
-        # The inputs this run TRAINS on, bound now: the report's inputs_sha256 and the run dir's task.json copy
-        # are taken from these, never re-read from the data dir hours later (a mid-run edit would otherwise be
-        # bound to a model that never saw it). The data dir is re-checked against them before the report.
-        task_bytes = (data_dir / "task.json").read_bytes()
-        input_sha = {"task.json": sha256_bytes(task_bytes)}
-        for name in ("train.jsonl", "eval.jsonl") + (("shift.jsonl",) if shift_rows is not None else ()):
-            input_sha[name] = data.sha256_file(data_dir / name)
-        fit_ids, calib_ids, slice_ids, slice_sha = data.calibration_split(
-            train_rows, contract.constant("calibration_slice_fraction", "float"),
-            contract.constant("calibration_slice_min_per_class", "int"), seed,
-            len(task["labels"]))
-        epochs = None
-        shots_per_class = max(data.class_counts(train_rows, len(task["labels"])))
-        epochs = contract.resolve_epochs(args.variant, shots_per_class, args.epochs)
+        # ONE function holds every data check and the epoch rule (D-08): the shared case table that the server's
+        # pre-filter is judged by is replayed through the very function the trainer calls here.
+        validated = data.validate_data_dir(data_dir, args.epochs, args.variant)
+        task, train_rows, eval_rows, shift_rows = (validated.task, validated.train_rows, validated.eval_rows,
+                                                   validated.shift_rows)
+        # The inputs this run TRAINS on were bound inside validate_data_dir (the report's inputs_sha256 and the
+        # run dir's task.json copy are taken from these, never re-read from the data dir hours later); the data
+        # dir is re-checked against them before the report.
+        task_bytes, input_sha = validated.task_bytes, validated.input_sha256
+        fit_ids, calib_ids, slice_ids, slice_sha = (validated.fit_ids, validated.calib_ids, validated.slice_ids,
+                                                    validated.slice_sha)
+        shots_per_class, epochs = validated.shots_per_class, validated.epochs
         stopping = contract.resolve_stopping(args.stopping)
     except (data.DataError, contract.RecipeError, contract.ContractValueError) as e:
         refuse(str(e))

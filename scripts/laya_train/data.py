@@ -28,10 +28,18 @@ No torch import (module level or anywhere): `python data.py --selftest` runs wit
                                slice_ids_sha256) with slice_ids the SORTED 0-based train.jsonl row
                                indices and its sha256 over the compact JSON array bytes.
 
+    validate_data_dir(dir, epochs, variant)
+                               train.py step 1 as ONE function: every data check, in the trainer's order,
+                               and the epoch rule. The trainer calls it; `--selftest` replays the shared
+                               case table (data_cases.json, D-08) through it, and the Rust pre-filter
+                               (aprender-mcp-laya-train validate.rs) replays the same file.
+
 Every refusal is a DataError whose message starts `REFUSED <rule>:` so the rule is named.
 """
+import collections
 import json
 import math
+import re
 import sys
 import unicodedata
 from pathlib import Path
@@ -308,6 +316,49 @@ def calibration_split(rows, fraction, min_per_class, seed, k):
 
 def slice_ids_sha256(slice_ids):
     return sha256_bytes(json.dumps(list(slice_ids), separators=(",", ":")).encode())
+
+
+# The result of validate_data_dir: the parsed task and rows, the calibration split, the input digests and the
+# epoch count -- exactly the values train.py's step 1 used to bind one by one.
+ValidatedData = collections.namedtuple("ValidatedData", [
+    "task", "task_bytes", "train_rows", "eval_rows", "shift_rows", "input_sha256", "fit_ids", "calib_ids",
+    "slice_ids", "slice_sha", "shots_per_class", "epochs"])
+
+
+def validate_data_dir(data_dir, epochs_arg, variant="production"):
+    """Every data check train.py's step 1 runs, in its order, as one function (D-08): task.json, train rows,
+    eval rows, the eval/train overlap, the optional shift rows and their overlap, the input digests, the
+    seeded calibration split (group_train inside it raises train-conflicting-labels before
+    train-class-too-small), shots_per_class (the largest class count) and the epoch rule. The trainer calls
+    this; the shared case table is replayed through it, so the server-side pre-filter cannot drift from the
+    trainer without a case turning red. Refusals are DataError / contract.RecipeError /
+    contract.ContractValueError, exactly as before the move; no rule changed."""
+    import contract                                # inside the function: data.py keeps no module-level contract import
+    data_dir = Path(data_dir)
+    seed = contract.declared_seed()
+    task = load_task(data_dir / "task.json")
+    train_rows = load_rows(data_dir / "train.jsonl", task, "train")
+    eval_rows = load_rows(data_dir / "eval.jsonl", task, "eval")
+    refuse_overlap(train_rows, eval_rows)
+    shift_rows = None
+    if (data_dir / "shift.jsonl").is_file():       # the OPTIONAL shift probe (A2): reported, never a gate clause
+        shift_rows = load_rows(data_dir / "shift.jsonl", task, "shift")
+        refuse_overlap(train_rows, shift_rows, "shift")
+    # The inputs this run TRAINS on, bound now: the report's inputs_sha256 and the run dir's task.json copy are
+    # taken from these, never re-read from the data dir hours later (a mid-run edit would otherwise be bound
+    # to a model that never saw it). The data dir is re-checked against them before the report.
+    task_bytes = (data_dir / "task.json").read_bytes()
+    input_sha = {"task.json": sha256_bytes(task_bytes)}
+    for name in ("train.jsonl", "eval.jsonl") + (("shift.jsonl",) if shift_rows is not None else ()):
+        input_sha[name] = sha256_file(data_dir / name)
+    k = len(task["labels"])
+    fit_ids, calib_ids, slice_ids, slice_sha = calibration_split(
+        train_rows, contract.constant("calibration_slice_fraction", "float"),
+        contract.constant("calibration_slice_min_per_class", "int"), seed, k)
+    shots_per_class = max(class_counts(train_rows, k))
+    epochs = contract.resolve_epochs(variant, shots_per_class, epochs_arg)
+    return ValidatedData(task, task_bytes, train_rows, eval_rows, shift_rows, input_sha, fit_ids, calib_ids,
+                         slice_ids, slice_sha, shots_per_class, epochs)
 
 
 # ------------------------------------------------------------------------------------------ self-test
@@ -590,6 +641,106 @@ def _python_refusals_sweep(case):
     print("PYTHON REFUSALS swept=%d lifecycle=%d" % (swept, life))
 
 
+# ------------------------------------------------------------------------------------------ shared case table
+
+# The ONE committed table (D-08) both replays read: this selftest through validate_data_dir, and the Rust
+# pre-filter's `shared_case_table` test through validate_for_submit (aprender-mcp-laya-train validate.rs).
+CASE_TABLE = Path(__file__).resolve().parent / "data_cases.json"
+CASE_TABLE_SCHEMA = "laya-data-cases-v1"
+
+
+def refusal_outcome(exc):
+    """A refusal as the table writes it: {"refused": <rule>}. DataError and ContractValueError carry `.rule`;
+    RecipeError (an `epochs` refusal) does not, so its rule is read from its `REFUSED <rule>:` message."""
+    rule = getattr(exc, "rule", None)
+    if rule is None:
+        m = re.match(r"REFUSED ([^:\s]+):", str(exc))
+        rule = m.group(1) if m else None
+    return {"refused": rule}
+
+
+def validation_outcome(data_dir, epochs):
+    """validate_data_dir on `data_dir` as the table writes a result: {"refused": rule} or {"ok": summary} with
+    summary = labels, class_counts (label order), shots_per_class, epochs, shift_present, inputs_sha256.
+    Only the three refusal classes are caught: any other exception is a bug and propagates."""
+    import contract
+    try:
+        v = validate_data_dir(data_dir, epochs)
+    except (DataError, contract.RecipeError, contract.ContractValueError) as e:
+        return refusal_outcome(e)
+    labels = list(v.task["labels"])
+    return {"ok": {"labels": labels, "class_counts": class_counts(v.train_rows, len(labels)),
+                   "shots_per_class": v.shots_per_class, "epochs": v.epochs,
+                   "shift_present": v.shift_rows is not None, "inputs_sha256": dict(v.input_sha256)}}
+
+
+def compare_case(expected, actual):
+    """THE comparator of the shared table: a refusal matches only the SAME rule; an accepted summary matches
+    only field for field (labels, class_counts, shots_per_class, epochs, shift_present, inputs_sha256).
+    A comparator that only checked "both refused" would pass a replay whose rules had drifted, which is why
+    `case-comparator-rule-mismatch` in --selftest feeds it deliberately mismatched inputs."""
+    if "refused" in expected:
+        return set(actual) == {"refused"} and actual["refused"] == expected["refused"]
+    if "ok" in expected:
+        return set(actual) == {"ok"} and actual["ok"] == expected["ok"]
+    return False
+
+
+def _write_case_files(root, files):
+    for name, spec in files.items():
+        if "text" in spec:
+            body = spec["text"].encode("utf-8")
+        else:
+            import base64
+            body = base64.b64decode(spec["b64"], validate=True)
+        (root / name).write_bytes(body)
+
+
+def _shared_table_cases(case):
+    """Replay data_cases.json through validate_data_dir; one `case <id>` line per case, then the table's own
+    guards: the committed bytes ARE the generator's output, and the comparator can fail."""
+    import tempfile
+
+    import data_cases_gen
+    raw = CASE_TABLE.read_bytes()
+    table = json.loads(raw.decode("utf-8"))
+    print("shared case table (%s, %d cases, replayed through validate_data_dir):" % (table["schema"], len(table["cases"])))
+    case("case-table-schema", table["schema"] == CASE_TABLE_SCHEMA and table["deferrable_rules"] == ["train-class-too-small"]
+         and table["stricter_rules"] == ["task-serving-limit"], table["schema"])
+    ids = [c["id"] for c in table["cases"]]
+    case("case-table-ids-unique", len(ids) == len(set(ids)) and all(re.fullmatch(r"[a-z0-9-]+", i) for i in ids),
+         "%d ids" % len(ids))
+    with tempfile.TemporaryDirectory(prefix="laya-data-cases-") as tmp:
+        for c in table["cases"]:
+            root = Path(tmp) / c["id"]
+            root.mkdir()
+            _write_case_files(root, c["files"])
+            try:
+                actual = validation_outcome(root, c["epochs"])
+            except Exception as e:                    # a bug, not a refusal: a FAIL line, never a crash
+                case("case %s" % c["id"], False, "raised %s: %s" % (type(e).__name__, str(e)[:70]))
+                continue
+            ok = compare_case(c["python"], actual)
+            want = c["python"].get("refused", "accepted")
+            got = actual.get("refused", "accepted")
+            case("case %s" % c["id"], ok, want if ok else "expected %s, got %s" % (want, got))
+    case("case-table-equals-generator", data_cases_gen.render().encode("utf-8") == raw,
+         "data_cases.json vs data_cases_gen.render()")
+    summary = {"labels": ["a", "b"], "class_counts": [4, 4], "shots_per_class": 4, "epochs": 12,
+               "shift_present": False, "inputs_sha256": {"task.json": "0" * 64}}
+    other = dict(summary, class_counts=[4, 5])
+    wrong_rule = refusal_outcome(DataError("task-unknown-key", "a different rule"))
+    same_rule = refusal_outcome(DataError("task-schema", "the same rule, other words"))
+    case("case-comparator-rule-mismatch",
+         compare_case({"refused": "task-schema"}, wrong_rule) is False
+         and compare_case({"refused": "task-schema"}, same_rule) is True
+         and compare_case({"ok": summary}, {"ok": other}) is False
+         and compare_case({"ok": summary}, {"ok": dict(summary)}) is True
+         and compare_case({"refused": "task-schema"}, {"ok": summary}) is False
+         and compare_case({"ok": summary}, wrong_rule) is False,
+         "a different rule, or one class count, must not compare equal")
+
+
 def selftest():
     """Every data refusal over temporary files, plus split determinism / stratification / text-disjointness
     and the recipe epoch rule. numpy + pyyaml only (no torch)."""
@@ -793,6 +944,7 @@ def selftest():
 
     _contract_value_cases(case)
     _python_refusals_sweep(case)
+    _shared_table_cases(case)
 
     print("recipe epoch rule (contract.resolve_epochs):")
 

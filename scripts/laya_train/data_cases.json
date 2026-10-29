@@ -1,0 +1,285 @@
+{
+  "cases": [
+    {
+      "epochs": 4,
+      "files": {
+        "eval.jsonl": {
+          "text": "{\"text\": \"eval a 0\", \"label\": \"a\"}\n{\"text\": \"eval a 1\", \"label\": \"a\"}\n{\"text\": \"eval b 0\", \"label\": \"b\"}\n{\"text\": \"eval b 1\", \"label\": \"b\"}\n{\"text\": \"eval c 0\", \"label\": \"c\"}\n{\"text\": \"eval c 1\", \"label\": \"c\"}\n"
+        },
+        "task.json": {
+          "text": "{\"type\": \"choice\", \"instructions\": \"Which?\", \"criteria\": {\"a\": \"first\", \"b\": null, \"c\": \"third\"}}"
+        },
+        "train.jsonl": {
+          "text": "{\"text\": \"train a 0\", \"label\": \"a\"}\n{\"text\": \"train a 1\", \"label\": \"a\"}\n{\"text\": \"train a 2\", \"label\": \"a\"}\n{\"text\": \"train a 3\", \"label\": \"a\"}\n{\"text\": \"train a 4\", \"label\": \"a\"}\n{\"text\": \"train a 5\", \"label\": \"a\"}\n{\"text\": \"train a 6\", \"label\": \"a\"}\n{\"text\": \"train a 7\", \"label\": \"a\"}\n{\"text\": \"train a 8\", \"label\": \"a\"}\n{\"text\": \"train a 9\", \"label\": \"a\"}\n{\"text\": \"train a 10\", \"label\": \"a\"}\n{\"text\": \"train a 11\", \"label\": \"a\"}\n{\"text\": \"train a 12\", \"label\": \"a\"}\n{\"text\": \"train a 13\", \"label\": \"a\"}\n{\"text\": \"train a 14\", \"label\": \"a\"}\n{\"text\": \"train a 15\", \"label\": \"a\"}\n{\"text\": \"train a 16\", \"label\": \"a\"}\n{\"text\": \"train a 17\", \"label\": \"a\"}\n{\"text\": \"train a 18\", \"label\": \"a\"}\n{\"text\": \"train a 19\", \"label\": \"a\"}\n{\"text\": \"train b 0\", \"label\": \"b\"}\n{\"text\": \"train b 1\", \"label\": \"b\"}\n{\"text\": \"train b 2\", \"label\": \"b\"}\n{\"text\": \"train b 3\", \"label\": \"b\"}\n{\"text\": \"train b 4\", \"label\": \"b\"}\n{\"text\": \"train b 5\", \"label\": \"b\"}\n{\"text\": \"train b 6\", \"label\": \"b\"}\n{\"text\": \"train b 7\", \"label\": \"b\"}\n{\"text\": \"train b 8\", \"label\": \"b\"}\n{\"text\": \"train b 9\", \"label\": \"b\"}\n{\"text\": \"train b 10\", \"label\": \"b\"}\n{\"text\": \"train b 11\", \"label\": \"b\"}\n{\"text\": \"train b 12\", \"label\": \"b\"}\n{\"text\": \"train b 13\", \"label\": \"b\"}\n{\"text\": \"train b 14\", \"label\": \"b\"}\n{\"text\": \"train b 15\", \"label\": \"b\"}\n{\"text\": \"train b 16\", \"label\": \"b\"}\n{\"text\": \"train b 17\", \"label\": \"b\"}\n{\"text\": \"train b 18\", \"label\": \"b\"}\n{\"text\": \"train b 19\", \"label\": \"b\"}\n{\"text\": \"train c 0\", \"label\": \"c\"}\n{\"text\": \"train c 1\", \"label\": \"c\"}\n{\"text\": \"train c 2\", \"label\": \"c\"}\n{\"text\": \"train c 3\", \"label\": \"c\"}\n{\"text\": \"train c 4\", \"label\": \"c\"}\n{\"text\": \"train c 5\", \"label\": \"c\"}\n{\"text\": \"train c 6\", \"label\": \"c\"}\n{\"text\": \"train c 7\", \"label\": \"c\"}\n{\"text\": \"train c 8\", \"label\": \"c\"}\n{\"text\": \"train c 9\", \"label\": \"c\"}\n{\"text\": \"train c 10\", \"label\": \"c\"}\n{\"text\": \"train c 11\", \"label\": \"c\"}\n{\"text\": \"train c 12\", \"label\": \"c\"}\n{\"text\": \"train c 13\", \"label\": \"c\"}\n{\"text\": \"train c 14\", \"label\": \"c\"}\n{\"text\": \"train c 15\", \"label\": \"c\"}\n{\"text\": \"train c 16\", \"label\": \"c\"}\n{\"text\": \"train c 17\", \"label\": \"c\"}\n{\"text\": \"train c 18\", \"label\": \"c\"}\n{\"text\": \"train c 19\", \"label\": \"c\"}\n"
+        }
+      },
+      "id": "ok-3class-above-16-epochs-4",
+      "note": "20 shots per class, epochs 4 given: accepted, epochs 4",
+      "python": {
+        "ok": {
+          "class_counts": [
+            20,
+            20,
+            20
+          ],
+          "epochs": 4,
+          "inputs_sha256": {
+            "eval.jsonl": "9db30ec2dab365d7aa0f986c0d509a795bd43347a2f78ee338cef041f6fb77b8",
+            "task.json": "9b7239d01c86c78e405216babd6bf985b4ca2b813d9508f60871e49d4f5c59f2",
+            "train.jsonl": "4af1950bfa41e0552843b79df4244555e68be4a40f16e1dbdb1f2f24949a586f"
+          },
+          "labels": [
+            "a",
+            "b",
+            "c"
+          ],
+          "shift_present": false,
+          "shots_per_class": 20
+        }
+      },
+      "rust": "same"
+    },
+    {
+      "epochs": null,
+      "files": {
+        "eval.jsonl": {
+          "text": "{\"text\": \"eval a 0\", \"label\": \"a\"}\n{\"text\": \"eval a 1\", \"label\": \"a\"}\n{\"text\": \"eval b 0\", \"label\": \"b\"}\n{\"text\": \"eval b 1\", \"label\": \"b\"}\n{\"text\": \"eval c 0\", \"label\": \"c\"}\n{\"text\": \"eval c 1\", \"label\": \"c\"}\n"
+        },
+        "task.json": {
+          "text": "{\"type\": \"choice\", \"instructions\": \"Which?\", \"criteria\": {\"a\": \"first\", \"b\": null, \"c\": \"third\"}}"
+        },
+        "train.jsonl": {
+          "text": "{\"text\": \"train a 0\", \"label\": \"a\"}\n{\"text\": \"train a 1\", \"label\": \"a\"}\n{\"text\": \"train a 2\", \"label\": \"a\"}\n{\"text\": \"train a 3\", \"label\": \"a\"}\n{\"text\": \"train a 4\", \"label\": \"a\"}\n{\"text\": \"train a 5\", \"label\": \"a\"}\n{\"text\": \"train a 6\", \"label\": \"a\"}\n{\"text\": \"train a 7\", \"label\": \"a\"}\n{\"text\": \"train a 8\", \"label\": \"a\"}\n{\"text\": \"train a 9\", \"label\": \"a\"}\n{\"text\": \"train a 10\", \"label\": \"a\"}\n{\"text\": \"train a 11\", \"label\": \"a\"}\n{\"text\": \"train a 12\", \"label\": \"a\"}\n{\"text\": \"train a 13\", \"label\": \"a\"}\n{\"text\": \"train a 14\", \"label\": \"a\"}\n{\"text\": \"train a 15\", \"label\": \"a\"}\n{\"text\": \"train b 0\", \"label\": \"b\"}\n{\"text\": \"train b 1\", \"label\": \"b\"}\n{\"text\": \"train b 2\", \"label\": \"b\"}\n{\"text\": \"train b 3\", \"label\": \"b\"}\n{\"text\": \"train b 4\", \"label\": \"b\"}\n{\"text\": \"train b 5\", \"label\": \"b\"}\n{\"text\": \"train b 6\", \"label\": \"b\"}\n{\"text\": \"train b 7\", \"label\": \"b\"}\n{\"text\": \"train b 8\", \"label\": \"b\"}\n{\"text\": \"train b 9\", \"label\": \"b\"}\n{\"text\": \"train b 10\", \"label\": \"b\"}\n{\"text\": \"train b 11\", \"label\": \"b\"}\n{\"text\": \"train b 12\", \"label\": \"b\"}\n{\"text\": \"train b 13\", \"label\": \"b\"}\n{\"text\": \"train b 14\", \"label\": \"b\"}\n{\"text\": \"train b 15\", \"label\": \"b\"}\n{\"text\": \"train c 0\", \"label\": \"c\"}\n{\"text\": \"train c 1\", \"label\": \"c\"}\n{\"text\": \"train c 2\", \"label\": \"c\"}\n{\"text\": \"train c 3\", \"label\": \"c\"}\n{\"text\": \"train c 4\", \"label\": \"c\"}\n{\"text\": \"train c 5\", \"label\": \"c\"}\n{\"text\": \"train c 6\", \"label\": \"c\"}\n{\"text\": \"train c 7\", \"label\": \"c\"}\n{\"text\": \"train c 8\", \"label\": \"c\"}\n{\"text\": \"train c 9\", \"label\": \"c\"}\n{\"text\": \"train c 10\", \"label\": \"c\"}\n{\"text\": \"train c 11\", \"label\": \"c\"}\n{\"text\": \"train c 12\", \"label\": \"c\"}\n{\"text\": \"train c 13\", \"label\": \"c\"}\n{\"text\": \"train c 14\", \"label\": \"c\"}\n{\"text\": \"train c 15\", \"label\": \"c\"}\n"
+        }
+      },
+      "id": "ok-3class-at-16-no-epochs",
+      "note": "16 shots per class, no epochs: the recipe fixes 12",
+      "python": {
+        "ok": {
+          "class_counts": [
+            16,
+            16,
+            16
+          ],
+          "epochs": 12,
+          "inputs_sha256": {
+            "eval.jsonl": "9db30ec2dab365d7aa0f986c0d509a795bd43347a2f78ee338cef041f6fb77b8",
+            "task.json": "9b7239d01c86c78e405216babd6bf985b4ca2b813d9508f60871e49d4f5c59f2",
+            "train.jsonl": "5b9646a6cad5bac4442f9c2819b13fc6203981ad176914393fca6d46c3655b29"
+          },
+          "labels": [
+            "a",
+            "b",
+            "c"
+          ],
+          "shift_present": false,
+          "shots_per_class": 16
+        }
+      },
+      "rust": "same"
+    },
+    {
+      "epochs": null,
+      "files": {
+        "eval.jsonl": {
+          "text": "{\"text\": \"eval a 0\", \"label\": \"a\"}\n{\"text\": \"eval a 1\", \"label\": \"a\"}\n{\"text\": \"eval b 0\", \"label\": \"b\"}\n{\"text\": \"eval b 1\", \"label\": \"b\"}\n{\"text\": \"eval c 0\", \"label\": \"c\"}\n{\"text\": \"eval c 1\", \"label\": \"c\"}\n"
+        },
+        "train.jsonl": {
+          "text": "{\"text\": \"train a 0\", \"label\": \"a\"}\n{\"text\": \"train a 1\", \"label\": \"a\"}\n{\"text\": \"train a 2\", \"label\": \"a\"}\n{\"text\": \"train a 3\", \"label\": \"a\"}\n{\"text\": \"train b 0\", \"label\": \"b\"}\n{\"text\": \"train b 1\", \"label\": \"b\"}\n{\"text\": \"train b 2\", \"label\": \"b\"}\n{\"text\": \"train b 3\", \"label\": \"b\"}\n{\"text\": \"train c 0\", \"label\": \"c\"}\n{\"text\": \"train c 1\", \"label\": \"c\"}\n{\"text\": \"train c 2\", \"label\": \"c\"}\n{\"text\": \"train c 3\", \"label\": \"c\"}\n"
+        }
+      },
+      "id": "task-missing",
+      "note": "no task.json",
+      "python": {
+        "refused": "task-missing"
+      },
+      "rust": "same"
+    },
+    {
+      "epochs": null,
+      "files": {
+        "eval.jsonl": {
+          "text": "{\"text\": \"eval a 0\", \"label\": \"a\"}\n{\"text\": \"eval a 1\", \"label\": \"a\"}\n{\"text\": \"eval b 0\", \"label\": \"b\"}\n{\"text\": \"eval b 1\", \"label\": \"b\"}\n{\"text\": \"eval c 0\", \"label\": \"c\"}\n{\"text\": \"eval c 1\", \"label\": \"c\"}\n"
+        },
+        "task.json": {
+          "text": "{\"type\": \"choice\", \"instructions\": \"Which?\", \"criteria\": {\"a\": \"first\", \"b\": null, \"c\": \"third\"}, \"labels\": [\"a\"]}"
+        },
+        "train.jsonl": {
+          "text": "{\"text\": \"train a 0\", \"label\": \"a\"}\n{\"text\": \"train a 1\", \"label\": \"a\"}\n{\"text\": \"train a 2\", \"label\": \"a\"}\n{\"text\": \"train a 3\", \"label\": \"a\"}\n{\"text\": \"train b 0\", \"label\": \"b\"}\n{\"text\": \"train b 1\", \"label\": \"b\"}\n{\"text\": \"train b 2\", \"label\": \"b\"}\n{\"text\": \"train b 3\", \"label\": \"b\"}\n{\"text\": \"train c 0\", \"label\": \"c\"}\n{\"text\": \"train c 1\", \"label\": \"c\"}\n{\"text\": \"train c 2\", \"label\": \"c\"}\n{\"text\": \"train c 3\", \"label\": \"c\"}\n"
+        }
+      },
+      "id": "task-unknown-key",
+      "note": "task.json with a key outside {type, instructions, criteria}",
+      "python": {
+        "refused": "task-unknown-key"
+      },
+      "rust": "same"
+    },
+    {
+      "epochs": null,
+      "files": {
+        "eval.jsonl": {
+          "text": "{\"text\": \"eval a 0\", \"label\": \"a\"}\n{\"text\": \"eval a 1\", \"label\": \"a\"}\n{\"text\": \"eval b 0\", \"label\": \"b\"}\n{\"text\": \"eval b 1\", \"label\": \"b\"}\n{\"text\": \"eval c 0\", \"label\": \"c\"}\n{\"text\": \"eval c 1\", \"label\": \"c\"}\n"
+        },
+        "task.json": {
+          "text": "{\"type\": \"choice\", \"instructions\": \"Which?\", \"criteria\": {\"a\": \"first\", \"b\": null, \"c\": \"third\"}}"
+        },
+        "train.jsonl": {
+          "text": "{\"text\": \"train a 0\", \"label\": \"a\"}\n{\"text\": \"train a 1\", \"label\": \"a\"}\n{\"text\": \"train a 2\", \"label\": \"a\"}\n{\"text\": \"train a 3\", \"label\": \"a\"}\n{\"text\": \"train b 0\", \"label\": \"b\"}\n{\"text\": \"train b 1\", \"label\": \"b\"}\n{\"text\": \"train b 2\", \"label\": \"b\"}\n{\"text\": \"train b 3\", \"label\": \"b\"}\n{\"text\": \"train c 0\", \"label\": \"c\"}\n{\"text\": \"train c 1\", \"label\": \"c\"}\n{\"text\": \"train c 2\", \"label\": \"c\"}\n{\"text\": \"train c 3\", \"label\": \"c\"}\n{\"text\": \"an unlabelled row\", \"label\": \"zzz\"}\n"
+        }
+      },
+      "id": "train-row-label",
+      "note": "a train label that is not a criterion name",
+      "python": {
+        "refused": "train-row-label"
+      },
+      "rust": "same"
+    },
+    {
+      "epochs": null,
+      "files": {
+        "task.json": {
+          "text": "{\"type\": \"choice\", \"instructions\": \"Which?\", \"criteria\": {\"a\": \"first\", \"b\": null, \"c\": \"third\"}}"
+        },
+        "train.jsonl": {
+          "text": "{\"text\": \"train a 0\", \"label\": \"a\"}\n{\"text\": \"train a 1\", \"label\": \"a\"}\n{\"text\": \"train a 2\", \"label\": \"a\"}\n{\"text\": \"train a 3\", \"label\": \"a\"}\n{\"text\": \"train b 0\", \"label\": \"b\"}\n{\"text\": \"train b 1\", \"label\": \"b\"}\n{\"text\": \"train b 2\", \"label\": \"b\"}\n{\"text\": \"train b 3\", \"label\": \"b\"}\n{\"text\": \"train c 0\", \"label\": \"c\"}\n{\"text\": \"train c 1\", \"label\": \"c\"}\n{\"text\": \"train c 2\", \"label\": \"c\"}\n{\"text\": \"train c 3\", \"label\": \"c\"}\n"
+        }
+      },
+      "id": "eval-missing",
+      "note": "no eval.jsonl",
+      "python": {
+        "refused": "eval-missing"
+      },
+      "rust": "same"
+    },
+    {
+      "epochs": null,
+      "files": {
+        "eval.jsonl": {
+          "text": "{\"text\": \"eval a 0\", \"label\": \"a\"}\n{\"text\": \"eval a 1\", \"label\": \"a\"}\n{\"text\": \"eval b 0\", \"label\": \"b\"}\n{\"text\": \"eval b 1\", \"label\": \"b\"}\n{\"text\": \"eval c 0\", \"label\": \"c\"}\n{\"text\": \"eval c 1\", \"label\": \"c\"}\n{\"text\": \"train a 0\", \"label\": \"a\"}\n"
+        },
+        "task.json": {
+          "text": "{\"type\": \"choice\", \"instructions\": \"Which?\", \"criteria\": {\"a\": \"first\", \"b\": null, \"c\": \"third\"}}"
+        },
+        "train.jsonl": {
+          "text": "{\"text\": \"train a 0\", \"label\": \"a\"}\n{\"text\": \"train a 1\", \"label\": \"a\"}\n{\"text\": \"train a 2\", \"label\": \"a\"}\n{\"text\": \"train a 3\", \"label\": \"a\"}\n{\"text\": \"train b 0\", \"label\": \"b\"}\n{\"text\": \"train b 1\", \"label\": \"b\"}\n{\"text\": \"train b 2\", \"label\": \"b\"}\n{\"text\": \"train b 3\", \"label\": \"b\"}\n{\"text\": \"train c 0\", \"label\": \"c\"}\n{\"text\": \"train c 1\", \"label\": \"c\"}\n{\"text\": \"train c 2\", \"label\": \"c\"}\n{\"text\": \"train c 3\", \"label\": \"c\"}\n"
+        }
+      },
+      "id": "eval-train-overlap",
+      "note": "an eval text equal to a train text",
+      "python": {
+        "refused": "eval-train-overlap"
+      },
+      "rust": "same"
+    },
+    {
+      "epochs": null,
+      "files": {
+        "eval.jsonl": {
+          "text": "{\"text\": \"eval a 0\", \"label\": \"a\"}\n{\"text\": \"eval a 1\", \"label\": \"a\"}\n{\"text\": \"eval b 0\", \"label\": \"b\"}\n{\"text\": \"eval b 1\", \"label\": \"b\"}\n{\"text\": \"eval c 0\", \"label\": \"c\"}\n{\"text\": \"eval c 1\", \"label\": \"c\"}\n"
+        },
+        "task.json": {
+          "text": "{\"type\": \"choice\", \"instructions\": \"Which?\", \"criteria\": {\"a\": \"first\", \"b\": null, \"c\": \"third\"}}"
+        },
+        "train.jsonl": {
+          "text": "{\"text\": \"train a 0\", \"label\": \"a\"}\n{\"text\": \"train a 1\", \"label\": \"a\"}\n{\"text\": \"train a 2\", \"label\": \"a\"}\n{\"text\": \"train a 3\", \"label\": \"a\"}\n{\"text\": \"train b 0\", \"label\": \"b\"}\n{\"text\": \"train b 1\", \"label\": \"b\"}\n{\"text\": \"train b 2\", \"label\": \"b\"}\n{\"text\": \"train b 3\", \"label\": \"b\"}\n{\"text\": \"train c 0\", \"label\": \"c\"}\n{\"text\": \"train c 1\", \"label\": \"c\"}\n{\"text\": \"train c 2\", \"label\": \"c\"}\n{\"text\": \"train c 3\", \"label\": \"c\"}\n{\"text\": \"train a 0\", \"label\": \"b\"}\n"
+        }
+      },
+      "id": "train-conflicting-labels",
+      "note": "one train text under two labels",
+      "python": {
+        "refused": "train-conflicting-labels"
+      },
+      "rust": "same"
+    },
+    {
+      "epochs": null,
+      "files": {
+        "eval.jsonl": {
+          "text": "{\"text\": \"eval a 0\", \"label\": \"a\"}\n{\"text\": \"eval a 1\", \"label\": \"a\"}\n{\"text\": \"eval b 0\", \"label\": \"b\"}\n{\"text\": \"eval b 1\", \"label\": \"b\"}\n"
+        },
+        "task.json": {
+          "text": "{\"type\": \"choice\", \"instructions\": \"Which?\", \"criteria\": {\"a\": \"first\", \"b\": null, \"c\": \"third\"}}"
+        },
+        "train.jsonl": {
+          "text": "{\"text\": \"train a 0\", \"label\": \"a\"}\n{\"text\": \"train a 1\", \"label\": \"a\"}\n{\"text\": \"train a 2\", \"label\": \"a\"}\n{\"text\": \"train a 3\", \"label\": \"a\"}\n{\"text\": \"train b 0\", \"label\": \"b\"}\n{\"text\": \"train b 1\", \"label\": \"b\"}\n{\"text\": \"train b 2\", \"label\": \"b\"}\n{\"text\": \"train b 3\", \"label\": \"b\"}\n{\"text\": \"train c 0\", \"label\": \"c\"}\n{\"text\": \"train c 1\", \"label\": \"c\"}\n{\"text\": \"train c 2\", \"label\": \"c\"}\n{\"text\": \"train c 3\", \"label\": \"c\"}\n"
+        }
+      },
+      "id": "eval-class-coverage",
+      "note": "an eval file with no row of criterion c",
+      "python": {
+        "refused": "eval-class-coverage"
+      },
+      "rust": "same"
+    },
+    {
+      "epochs": null,
+      "files": {
+        "eval.jsonl": {
+          "text": "{\"text\": \"eval a 0\", \"label\": \"a\"}\n{\"text\": \"eval a 1\", \"label\": \"a\"}\n{\"text\": \"eval b 0\", \"label\": \"b\"}\n{\"text\": \"eval b 1\", \"label\": \"b\"}\n{\"text\": \"eval c 0\", \"label\": \"c\"}\n{\"text\": \"eval c 1\", \"label\": \"c\"}\n"
+        },
+        "task.json": {
+          "text": "{\"type\": \"choice\", \"instructions\": \"Which?\", \"criteria\": {\"a\": \"first\", \"b\": null, \"c\": \"third\"}}"
+        },
+        "train.jsonl": {
+          "text": "{\"text\": \"train a 0\", \"label\": \"a\"}\n{\"text\": \"train a 1\", \"label\": \"a\"}\n{\"text\": \"train a 2\", \"label\": \"a\"}\n{\"text\": \"train a 3\", \"label\": \"a\"}\n{\"text\": \"train a 4\", \"label\": \"a\"}\n{\"text\": \"train a 5\", \"label\": \"a\"}\n{\"text\": \"train a 6\", \"label\": \"a\"}\n{\"text\": \"train a 7\", \"label\": \"a\"}\n{\"text\": \"train a 8\", \"label\": \"a\"}\n{\"text\": \"train a 9\", \"label\": \"a\"}\n{\"text\": \"train a 10\", \"label\": \"a\"}\n{\"text\": \"train a 11\", \"label\": \"a\"}\n{\"text\": \"train a 12\", \"label\": \"a\"}\n{\"text\": \"train a 13\", \"label\": \"a\"}\n{\"text\": \"train a 14\", \"label\": \"a\"}\n{\"text\": \"train a 15\", \"label\": \"a\"}\n{\"text\": \"train a 16\", \"label\": \"a\"}\n{\"text\": \"train a 17\", \"label\": \"a\"}\n{\"text\": \"train a 18\", \"label\": \"a\"}\n{\"text\": \"train a 19\", \"label\": \"a\"}\n{\"text\": \"train b 0\", \"label\": \"b\"}\n{\"text\": \"train b 1\", \"label\": \"b\"}\n{\"text\": \"train b 2\", \"label\": \"b\"}\n{\"text\": \"train b 3\", \"label\": \"b\"}\n{\"text\": \"train b 4\", \"label\": \"b\"}\n{\"text\": \"train b 5\", \"label\": \"b\"}\n{\"text\": \"train b 6\", \"label\": \"b\"}\n{\"text\": \"train b 7\", \"label\": \"b\"}\n{\"text\": \"train b 8\", \"label\": \"b\"}\n{\"text\": \"train b 9\", \"label\": \"b\"}\n{\"text\": \"train b 10\", \"label\": \"b\"}\n{\"text\": \"train b 11\", \"label\": \"b\"}\n{\"text\": \"train b 12\", \"label\": \"b\"}\n{\"text\": \"train b 13\", \"label\": \"b\"}\n{\"text\": \"train b 14\", \"label\": \"b\"}\n{\"text\": \"train b 15\", \"label\": \"b\"}\n{\"text\": \"train b 16\", \"label\": \"b\"}\n{\"text\": \"train b 17\", \"label\": \"b\"}\n{\"text\": \"train b 18\", \"label\": \"b\"}\n{\"text\": \"train b 19\", \"label\": \"b\"}\n{\"text\": \"train c 0\", \"label\": \"c\"}\n{\"text\": \"train c 1\", \"label\": \"c\"}\n{\"text\": \"train c 2\", \"label\": \"c\"}\n{\"text\": \"train c 3\", \"label\": \"c\"}\n{\"text\": \"train c 4\", \"label\": \"c\"}\n{\"text\": \"train c 5\", \"label\": \"c\"}\n{\"text\": \"train c 6\", \"label\": \"c\"}\n{\"text\": \"train c 7\", \"label\": \"c\"}\n{\"text\": \"train c 8\", \"label\": \"c\"}\n{\"text\": \"train c 9\", \"label\": \"c\"}\n{\"text\": \"train c 10\", \"label\": \"c\"}\n{\"text\": \"train c 11\", \"label\": \"c\"}\n{\"text\": \"train c 12\", \"label\": \"c\"}\n{\"text\": \"train c 13\", \"label\": \"c\"}\n{\"text\": \"train c 14\", \"label\": \"c\"}\n{\"text\": \"train c 15\", \"label\": \"c\"}\n{\"text\": \"train c 16\", \"label\": \"c\"}\n{\"text\": \"train c 17\", \"label\": \"c\"}\n{\"text\": \"train c 18\", \"label\": \"c\"}\n{\"text\": \"train c 19\", \"label\": \"c\"}\n"
+        }
+      },
+      "id": "epochs-above-16-missing",
+      "note": "20 shots per class and no epochs",
+      "python": {
+        "refused": "epochs"
+      },
+      "rust": "same"
+    },
+    {
+      "epochs": 12,
+      "files": {
+        "eval.jsonl": {
+          "text": "{\"text\": \"eval a 0\", \"label\": \"a\"}\n{\"text\": \"eval a 1\", \"label\": \"a\"}\n{\"text\": \"eval b 0\", \"label\": \"b\"}\n{\"text\": \"eval b 1\", \"label\": \"b\"}\n{\"text\": \"eval c 0\", \"label\": \"c\"}\n{\"text\": \"eval c 1\", \"label\": \"c\"}\n"
+        },
+        "task.json": {
+          "text": "{\"type\": \"choice\", \"instructions\": \"Which?\", \"criteria\": {\"a\": \"first\", \"b\": null, \"c\": \"third\"}}"
+        },
+        "train.jsonl": {
+          "text": "{\"text\": \"train a 0\", \"label\": \"a\"}\n{\"text\": \"train a 1\", \"label\": \"a\"}\n{\"text\": \"train a 2\", \"label\": \"a\"}\n{\"text\": \"train a 3\", \"label\": \"a\"}\n{\"text\": \"train a 4\", \"label\": \"a\"}\n{\"text\": \"train a 5\", \"label\": \"a\"}\n{\"text\": \"train a 6\", \"label\": \"a\"}\n{\"text\": \"train a 7\", \"label\": \"a\"}\n{\"text\": \"train a 8\", \"label\": \"a\"}\n{\"text\": \"train a 9\", \"label\": \"a\"}\n{\"text\": \"train a 10\", \"label\": \"a\"}\n{\"text\": \"train a 11\", \"label\": \"a\"}\n{\"text\": \"train a 12\", \"label\": \"a\"}\n{\"text\": \"train a 13\", \"label\": \"a\"}\n{\"text\": \"train a 14\", \"label\": \"a\"}\n{\"text\": \"train a 15\", \"label\": \"a\"}\n{\"text\": \"train b 0\", \"label\": \"b\"}\n{\"text\": \"train b 1\", \"label\": \"b\"}\n{\"text\": \"train b 2\", \"label\": \"b\"}\n{\"text\": \"train b 3\", \"label\": \"b\"}\n{\"text\": \"train b 4\", \"label\": \"b\"}\n{\"text\": \"train b 5\", \"label\": \"b\"}\n{\"text\": \"train b 6\", \"label\": \"b\"}\n{\"text\": \"train b 7\", \"label\": \"b\"}\n{\"text\": \"train b 8\", \"label\": \"b\"}\n{\"text\": \"train b 9\", \"label\": \"b\"}\n{\"text\": \"train b 10\", \"label\": \"b\"}\n{\"text\": \"train b 11\", \"label\": \"b\"}\n{\"text\": \"train b 12\", \"label\": \"b\"}\n{\"text\": \"train b 13\", \"label\": \"b\"}\n{\"text\": \"train b 14\", \"label\": \"b\"}\n{\"text\": \"train b 15\", \"label\": \"b\"}\n{\"text\": \"train c 0\", \"label\": \"c\"}\n{\"text\": \"train c 1\", \"label\": \"c\"}\n{\"text\": \"train c 2\", \"label\": \"c\"}\n{\"text\": \"train c 3\", \"label\": \"c\"}\n{\"text\": \"train c 4\", \"label\": \"c\"}\n{\"text\": \"train c 5\", \"label\": \"c\"}\n{\"text\": \"train c 6\", \"label\": \"c\"}\n{\"text\": \"train c 7\", \"label\": \"c\"}\n{\"text\": \"train c 8\", \"label\": \"c\"}\n{\"text\": \"train c 9\", \"label\": \"c\"}\n{\"text\": \"train c 10\", \"label\": \"c\"}\n{\"text\": \"train c 11\", \"label\": \"c\"}\n{\"text\": \"train c 12\", \"label\": \"c\"}\n{\"text\": \"train c 13\", \"label\": \"c\"}\n{\"text\": \"train c 14\", \"label\": \"c\"}\n{\"text\": \"train c 15\", \"label\": \"c\"}\n"
+        }
+      },
+      "id": "epochs-at-16-given",
+      "note": "16 shots per class and epochs 12: fixed, not ignored",
+      "python": {
+        "refused": "epochs"
+      },
+      "rust": "same"
+    },
+    {
+      "epochs": null,
+      "files": {
+        "eval.jsonl": {
+          "text": "{\"text\": \"eval a 0\", \"label\": \"a\"}\n{\"text\": \"eval a 1\", \"label\": \"a\"}\n{\"text\": \"eval b 0\", \"label\": \"b\"}\n{\"text\": \"eval b 1\", \"label\": \"b\"}\n{\"text\": \"eval c 0\", \"label\": \"c\"}\n{\"text\": \"eval c 1\", \"label\": \"c\"}\n"
+        },
+        "task.json": {
+          "text": "{\"type\": \"choice\", \"instructions\": \"Which?\", \"criteria\": {\"a\": \"first\", \"b\": null, \"c\": \"third\"}}"
+        },
+        "train.jsonl": {
+          "b64": "eyJ0ZXh0IjogInRyYWluIGEgMCIsICJsYWJlbCI6ICJhIn0KeyJ0ZXh0IjogInRyYWluIGEgMSIsICJsYWJlbCI6ICJhIn0KeyJ0ZXh0IjogInRyYWluIGEgMiIsICJsYWJlbCI6ICJhIn0KeyJ0ZXh0IjogImNhZukiLCAibGFiZWwiOiAiYSJ9Cg=="
+        }
+      },
+      "id": "train-row-encoding-invalid-byte",
+      "note": "an invalid UTF-8 byte in train.jsonl",
+      "python": {
+        "refused": "train-row-encoding"
+      },
+      "rust": "same"
+    }
+  ],
+  "deferrable_rules": [
+    "train-class-too-small"
+  ],
+  "generator": "scripts/laya_train/data_cases_gen.py",
+  "schema": "laya-data-cases-v1",
+  "stricter_reason": "decide-apr-v1 constants.max_criteria is 510 and pack's Task::from_slice refuses a task.json with more (verify.rs read_data_dir), so a 511-criteria run could never yield an .apr and the pre-filter refuses it at the door",
+  "stricter_rules": [
+    "task-serving-limit"
+  ]
+}

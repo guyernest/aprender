@@ -10,19 +10,42 @@
 //! validate. Only [`validate_for_submit`], which `train` calls, enforces the
 //! epoch rule, through `args::resolve_epochs`.
 //!
+//! # One rule set, two implementations, one table (D-08)
+//!
+//! The rules mirror `scripts/laya_train/data.py` `validate_data_dir`, the function
+//! the trainer calls, in the same order and under the same rule names.
+//! `scripts/laya_train/data_cases.json` is replayed by `data.py --selftest`
+//! through that function and by [`tests::shared_case_table`] through
+//! [`validate_for_submit`], so the two cannot drift silently.
+//!
+//! Two differences are DECLARED, bounded, and visible in the table:
+//!
+//! * [`DEFERRABLE_RULES`]: `train-class-too-small` depends on a seeded permutation
+//!   when a class holds a text that appears in two or more rows. Rust refuses only
+//!   the order-independent case (`count <= max(min_per_class, ceil(fraction *
+//!   count))`); the undecidable case is ACCEPTED and reported in
+//!   [`DatasetSummary::deferred_rules`], never silently dropped.
+//! * [`STRICTER_RULES`]: a `task.json` with more than
+//!   `aprender_decide::task::MAX_CRITERIA` criteria is refused `task-serving-limit`.
+//!   The trainer accepts it, but `pack` reads task.json through `Task::from_slice`
+//!   and refuses it too, so such a run could never yield an `.apr`.
+//!
 //! # No numerics
 //!
-//! Nothing here is a training number. The three epoch values and the contract
-//! hash come from the embedded gate contract; the data rules mirror
-//! `scripts/laya_train/data.py` and refuse with the same rule names. Detail
-//! strings name files, line numbers and counts only, never row text (V7).
+//! Nothing here is a training number. The epoch values, the calibration fraction
+//! and minimum per class, and the contract hash come from the embedded gate
+//! contract. Detail strings name files, line numbers and counts only, never row
+//! text (V7).
 
-use std::collections::BTreeMap;
+use std::borrow::Cow;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::sync::OnceLock;
 
 use aprender_decide::digest::sha256_hex;
-use aprender_decide::task::Task;
+use aprender_decide::task::{Task, MAX_CRITERIA};
+use aprender_decide::verify::normalized_sha256;
+use serde::de::{Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 
 use crate::args::{self, EpochRule};
@@ -32,6 +55,14 @@ use crate::layout::{MAX_FILE_BYTES, MAX_ROWS_PER_FILE, MAX_TOTAL_BYTES};
 /// same numbers the trainer will read, and so every run can record which bytes
 /// judged it (`ValidationPolicy::gate_contract_sha256`).
 pub const GATE_CONTRACT_YAML: &str = include_str!("../../../contracts/laya-finetune-gate-v1.yaml");
+
+/// The only rules the pre-filter may defer to the trainer (see the module doc).
+/// Mirrored by the case table's header `deferrable_rules`.
+pub const DEFERRABLE_RULES: [&str; 1] = ["train-class-too-small"];
+
+/// The only rules where the pre-filter is stricter than the trainer (see the
+/// module doc). Mirrored by the case table's header `stricter_rules`.
+pub const STRICTER_RULES: [&str; 1] = ["task-serving-limit"];
 
 /// A refused request. Displays as `REFUSED <rule>: <detail>`, the trainer's own voice.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,15 +137,21 @@ pub struct DatasetSummary {
     pub epochs_fixed: Option<u32>,
     /// File name to lowercase hex sha256 of the validated bytes.
     pub inputs_sha256: BTreeMap<String, String>,
-    /// Rules the pre-filter has not applied yet (empty until plan 14-02).
+    /// Rules the pre-filter could not decide in the request path and leaves to the
+    /// trainer: a subset of [`DEFERRABLE_RULES`], empty when everything was decided.
     pub deferred_rules: Vec<String>,
 }
 
 /// What the pre-filter judges by.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ValidationPolicy {
     /// The epoch rule, read from the contract's `recipe` block.
     pub epoch_rule: EpochRule,
+    /// `constants.calibration_slice_fraction`: the share of each class the trainer
+    /// holds out for calibration.
+    pub calibration_fraction: f64,
+    /// `constants.calibration_slice_min_per_class`.
+    pub calibration_min_per_class: u64,
     /// sha256 (hex) of [`GATE_CONTRACT_YAML`]'s bytes.
     pub gate_contract_sha256: String,
     /// Largest single file.
@@ -128,6 +165,13 @@ pub struct ValidationPolicy {
 #[derive(Deserialize)]
 struct ContractView {
     recipe: RecipeView,
+    constants: ConstantsView,
+}
+
+#[derive(Deserialize)]
+struct ConstantsView {
+    calibration_slice_fraction: f64,
+    calibration_slice_min_per_class: u64,
 }
 
 #[derive(Deserialize)]
@@ -153,6 +197,8 @@ impl ValidationPolicy {
                 lo: view.recipe.epochs_above_16_min,
                 hi: view.recipe.epochs_above_16_max,
             },
+            calibration_fraction: view.constants.calibration_slice_fraction,
+            calibration_min_per_class: view.constants.calibration_slice_min_per_class,
             gate_contract_sha256: sha256_hex(GATE_CONTRACT_YAML.as_bytes()),
             max_file_bytes: MAX_FILE_BYTES,
             max_total_bytes: MAX_TOTAL_BYTES,
@@ -207,18 +253,362 @@ fn bound_check(files: &DatasetFiles, policy: &ValidationPolicy) -> Result<(), Re
     Ok(())
 }
 
-/// Parse one jsonl file into label indices, refusing by `data.py`'s rule names.
+/// How many members of one JSON object are kept. Members past it are counted and
+/// skipped, so a hostile object costs at most this much memory (the cap is
+/// `MAX_CRITERIA + 1`: one more than any accepted `criteria` object holds, so
+/// "over the serving limit" is still observable).
+const OBJECT_STORE_CAP: usize = MAX_CRITERIA + 1;
+
+/// Just enough of a JSON value for the dataset rules.
+///
+/// Objects are read as a list of `(key, value)` pairs in document order, never
+/// through `serde_json::Value`: that type keeps only the LAST of a repeated key
+/// (and, with `preserve_order` linked in by pmcp, a different order than
+/// `BTreeMap`), while `data.py` reads with `object_pairs_hook=list` and refuses a
+/// repeated key, so the duplicate must stay visible here.
+#[derive(Debug)]
+enum Lite {
+    Str(String),
+    Null,
+    Obj {
+        pairs: Vec<(String, Lite)>,
+        /// Every member the object had, stored or not.
+        total: usize,
+    },
+    /// `[]`, which `data.py` reads as an object with no members (an
+    /// `object_pairs_hook=list` quirk: `all()` over an empty list is true).
+    EmptyArray,
+    /// A number, a boolean, or a non-empty array.
+    Other,
+}
+
+impl<'de> Deserialize<'de> for Lite {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct LiteVisitor;
+
+        impl<'de> Visitor<'de> for LiteVisitor {
+            type Value = Lite;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("any JSON value")
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Lite, E> {
+                Ok(Lite::Str(v.to_owned()))
+            }
+
+            fn visit_string<E>(self, v: String) -> Result<Lite, E> {
+                Ok(Lite::Str(v))
+            }
+
+            fn visit_unit<E>(self) -> Result<Lite, E> {
+                Ok(Lite::Null)
+            }
+
+            fn visit_bool<E>(self, _: bool) -> Result<Lite, E> {
+                Ok(Lite::Other)
+            }
+
+            fn visit_i64<E>(self, _: i64) -> Result<Lite, E> {
+                Ok(Lite::Other)
+            }
+
+            fn visit_u64<E>(self, _: u64) -> Result<Lite, E> {
+                Ok(Lite::Other)
+            }
+
+            fn visit_f64<E>(self, _: f64) -> Result<Lite, E> {
+                Ok(Lite::Other)
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Lite, A::Error> {
+                let mut any = false;
+                while seq.next_element::<Lite>()?.is_some() {
+                    any = true;
+                }
+                Ok(if any { Lite::Other } else { Lite::EmptyArray })
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Lite, A::Error> {
+                let mut pairs = Vec::new();
+                let mut total = 0usize;
+                while let Some(key) = map.next_key::<String>()? {
+                    let value: Lite = map.next_value()?;
+                    total += 1;
+                    if pairs.len() < OBJECT_STORE_CAP {
+                        pairs.push((key, value));
+                    }
+                }
+                Ok(Lite::Obj { pairs, total })
+            }
+        }
+
+        deserializer.deserialize_any(LiteVisitor)
+    }
+}
+
+/// Python's `str.isspace` set: Unicode `White_Space` plus U+001C..U+001F, which
+/// `str.strip()` also strips (Rust's `char::is_whitespace` omits those four).
+/// `data.py` uses `strip()` for the blank-line, empty-text, empty-instructions and
+/// empty-criterion-name tests, so this is the set those tests need here.
+fn py_space(c: char) -> bool {
+    c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c)
+}
+
+fn blank(s: &str) -> bool {
+    s.chars().all(py_space)
+}
+
+/// A name for a refusal detail: at most 40 characters, so a hostile key cannot
+/// make the answer large.
+fn short(s: &str) -> String {
+    let mut out: String = s.chars().take(40).collect();
+    if s.chars().nth(40).is_some() {
+        out.push('~');
+    }
+    out
+}
+
+fn first_ten(ids: &[usize]) -> String {
+    let shown: Vec<String> = ids.iter().take(10).map(ToString::to_string).collect();
+    format!("[{}]", shown.join(", "))
+}
+
+fn task_refusal(rule: &str, detail: impl Into<String>) -> Refusal {
+    Refusal::new(rule, detail)
+}
+
+/// Read and judge `task.json` in `data.py` `load_task` order: parse, a repeated
+/// top-level key, an unknown key, a missing key, `type`, `instructions`, the shape
+/// of `criteria`, a repeated criterion name, fewer than 2 criteria, an empty
+/// criterion name, a non-string description. Then the serving limit (more than
+/// `MAX_CRITERIA` criteria, `task-serving-limit`, declared in [`STRICTER_RULES`]),
+/// which is checked BEFORE `Task::from_slice` runs, so the one place Rust is
+/// stricter is explicit and cannot be mistaken for a parse failure. Finally
+/// `Task::from_slice` itself, the reader `pack` uses, supplies the labels.
+fn check_task(bytes: &[u8]) -> Result<Task, Refusal> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| task_refusal("task-schema", "task.json is not UTF-8 JSON"))?;
+    let doc: Lite = serde_json::from_str(text)
+        .map_err(|_| task_refusal("task-schema", "task.json is not JSON"))?;
+    let pairs = match doc {
+        Lite::Obj { pairs, .. } => pairs,
+        Lite::EmptyArray => Vec::new(),
+        _ => {
+            return Err(task_refusal(
+                "task-schema",
+                "task.json must be a JSON object",
+            ))
+        }
+    };
+    let mut seen: HashSet<&str> = HashSet::new();
+    if !pairs.iter().all(|(k, _)| seen.insert(k.as_str())) {
+        return Err(task_refusal("task-schema", "task.json repeats a key"));
+    }
+    let allowed = ["type", "instructions", "criteria"];
+    let mut unknown: Vec<String> = pairs
+        .iter()
+        .map(|(k, _)| k.as_str())
+        .filter(|k| !allowed.contains(k))
+        .map(short)
+        .collect();
+    if !unknown.is_empty() {
+        unknown.sort_unstable();
+        return Err(task_refusal(
+            "task-unknown-key",
+            format!("task.json has unknown key(s) {unknown:?}; allowed {allowed:?}"),
+        ));
+    }
+    let get = |name: &str| pairs.iter().find(|(k, _)| k == name).map(|(_, v)| v);
+    let (Some(kind), Some(instructions), Some(criteria)) =
+        (get("type"), get("instructions"), get("criteria"))
+    else {
+        return Err(task_refusal(
+            "task-schema",
+            "task.json is missing one of type, instructions, criteria",
+        ));
+    };
+    if !matches!(kind, Lite::Str(t) if t == "choice") {
+        return Err(task_refusal("task-type", "type must be \"choice\""));
+    }
+    if !matches!(instructions, Lite::Str(t) if !blank(t)) {
+        return Err(task_refusal(
+            "task-schema",
+            "instructions must be a non-empty string",
+        ));
+    }
+    let (criteria, total) = match criteria {
+        Lite::Obj { pairs, total } => (pairs.as_slice(), *total),
+        Lite::EmptyArray => (&[][..], 0),
+        _ => {
+            return Err(task_refusal(
+                "task-schema",
+                "criteria must be a JSON object",
+            ))
+        }
+    };
+    let mut names: HashSet<&str> = HashSet::new();
+    if !criteria.iter().all(|(n, _)| names.insert(n.as_str())) {
+        return Err(task_refusal(
+            "task-duplicate-criterion",
+            "a criterion name appears more than once",
+        ));
+    }
+    if total < 2 {
+        return Err(task_refusal(
+            "task-too-few-criteria",
+            format!("a choice task needs at least 2 criteria, got {total}"),
+        ));
+    }
+    for (index, (name, description)) in criteria.iter().enumerate() {
+        if blank(name) {
+            return Err(task_refusal(
+                "task-schema",
+                format!("criterion {index} has an empty name"),
+            ));
+        }
+        if !matches!(description, Lite::Null | Lite::Str(_)) {
+            return Err(task_refusal(
+                "task-schema",
+                format!("criterion {index} description must be a string or null"),
+            ));
+        }
+    }
+    if total > MAX_CRITERIA {
+        return Err(task_refusal(
+            "task-serving-limit",
+            format!(
+                "task.json has {total} criteria; a servable model has at most {MAX_CRITERIA} \
+                 (decide-apr-v1 max_criteria)"
+            ),
+        ));
+    }
+    Task::from_slice(bytes).map_err(|_| {
+        task_refusal(
+            "task-schema",
+            "task.json is refused by the reader pack uses (Task::from_slice)",
+        )
+    })
+}
+
+/// `hex4` of `b[..4]`, or `None` unless four hex digits.
+fn hex4(b: &[u8]) -> Option<u32> {
+    if b.len() < 4 {
+        return None;
+    }
+    let mut value = 0u32;
+    for &c in &b[..4] {
+        value = value * 16 + char::from(c).to_digit(16)?;
+    }
+    Some(value)
+}
+
+/// Byte offsets of every unpaired surrogate escape (`\uD800`..`\uDFFF` not forming
+/// a high+low pair) in `line`. A backslash pair is skipped as a unit, so
+/// `\\ud800` (an escaped backslash then text) is not an escape.
+fn lone_surrogates(line: &str) -> Vec<usize> {
+    let b = line.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != b'\\' {
+            i += 1;
+            continue;
+        }
+        if b.get(i + 1) == Some(&b'u') {
+            if let Some(unit) = b.get(i + 2..).and_then(hex4) {
+                let low = |at: usize| -> Option<u32> {
+                    (b.get(at) == Some(&b'\\') && b.get(at + 1) == Some(&b'u'))
+                        .then(|| b.get(at + 2..).and_then(hex4))
+                        .flatten()
+                };
+                if (0xD800..0xDC00).contains(&unit) {
+                    if low(i + 6).is_some_and(|l| (0xDC00..0xE000).contains(&l)) {
+                        i += 12;
+                    } else {
+                        out.push(i);
+                        i += 6;
+                    }
+                    continue;
+                }
+                if (0xDC00..0xE000).contains(&unit) {
+                    out.push(i);
+                }
+                i += 6;
+                continue;
+            }
+        }
+        i += 2;
+    }
+    out
+}
+
+/// A line with each lone-surrogate escape replaced by one marker character, plus
+/// that character. serde_json refuses a lone surrogate at PARSE time while
+/// `data.py` decodes it and refuses it later as `<role>-row-encoding`, AFTER the
+/// key checks; marking it keeps the line parseable so the key checks run first and
+/// the encoding refusal lands at `data.py`'s point of the check order. The marker
+/// is a Unicode noncharacter that occurs in the line neither literally nor as an
+/// escape; `None` marker means the line had no lone surrogate. `Err` only when all
+/// 32 candidates occur in the line (a hostile line, refused as an encoding error).
+fn mark_lone_surrogates(line: &str) -> Result<(Cow<'_, str>, Option<char>), ()> {
+    if !line.contains("\\u") {
+        return Ok((Cow::Borrowed(line), None));
+    }
+    let offsets = lone_surrogates(line);
+    if offsets.is_empty() {
+        return Ok((Cow::Borrowed(line), None));
+    }
+    let lower = line.to_ascii_lowercase();
+    let marker = ('\u{FDD0}'..='\u{FDEF}')
+        .find(|c| !line.contains(*c) && !lower.contains(&format!("\\u{:04x}", u32::from(*c))))
+        .ok_or(())?;
+    let mut out = String::with_capacity(line.len());
+    let mut at = 0;
+    for offset in offsets {
+        out.push_str(&line[at..offset]);
+        out.push(marker);
+        at = offset + 6;
+    }
+    out.push_str(&line[at..]);
+    Ok((Cow::Owned(out), Some(marker)))
+}
+
+/// One parsed row.
+struct Row {
+    text: String,
+    label: usize,
+}
+
+/// The lines of a jsonl file as Rust's `str::lines` yields them, which is also what
+/// `pack`'s reader (`aprender_decide::verify` `parse_rows`) uses and what
+/// `data.py` `jsonl_lines` reproduces (WR-05: only `\n` ends a line, one `\r`
+/// before it is stripped, U+0085 / U+2028 / U+2029 inside a text never split it).
+fn jsonl_lines(text: &str) -> Vec<&str> {
+    text.lines().collect()
+}
+
+/// Parse one jsonl file, refusing by `data.py` `load_rows` rule names in its order:
+/// the file's UTF-8 first (`<role>-row-encoding`), then per line blank, JSON,
+/// object, unknown key, exact keys (a missing OR repeated key is `row-schema`), the
+/// lone-surrogate encoding of text then label, a non-empty string `text`, a string
+/// `label`, a known label; after the loop `<role>-empty`, and for `eval` only
+/// `eval-class-coverage`.
 fn parse_rows(
     bytes: &[u8],
     role: &str,
     file: &str,
     labels: &[String],
     policy: &ValidationPolicy,
-) -> Result<Vec<usize>, Refusal> {
-    let mut lines: Vec<&[u8]> = bytes.split(|b| *b == b'\n').collect();
-    if lines.last().is_some_and(|l| l.is_empty()) {
-        lines.pop();
-    }
+) -> Result<Vec<Row>, Refusal> {
+    let row_rule = |suffix: &str| format!("{role}-row-{suffix}");
+    let text = std::str::from_utf8(bytes).map_err(|e| {
+        Refusal::new(
+            &row_rule("encoding"),
+            format!("{file} is not valid UTF-8 (byte {})", e.valid_up_to()),
+        )
+    })?;
+    let lines = jsonl_lines(text);
     if lines.len() > policy.max_rows_per_file {
         return Err(Refusal::new(
             "bound-rows",
@@ -229,76 +619,198 @@ fn parse_rows(
             ),
         ));
     }
-    if lines.is_empty() {
-        return Err(Refusal::new(
-            &format!("{role}-empty"),
-            format!("{file} has no rows"),
-        ));
-    }
-    let row_rule = |suffix: &str| format!("{role}-row-{suffix}");
-    let mut out = Vec::with_capacity(lines.len());
+    let mut rows = Vec::with_capacity(lines.len());
     for (index, line) in lines.iter().enumerate() {
         let n = index + 1;
-        if std::str::from_utf8(line).is_err() {
-            return Err(Refusal::new(
-                &row_rule("schema"),
-                format!("{file} line {n} is not valid UTF-8"),
-            ));
+        let schema =
+            |why: &str| Refusal::new(&row_rule("schema"), format!("{file} line {n} {why}"));
+        if blank(line) {
+            return Err(schema("is blank"));
         }
-        if line.iter().all(u8::is_ascii_whitespace) {
-            return Err(Refusal::new(
-                &row_rule("schema"),
-                format!("{file} line {n} is blank"),
-            ));
-        }
-        let value: serde_json::Value = serde_json::from_slice(line).map_err(|_| {
-            Refusal::new(&row_rule("schema"), format!("{file} line {n} is not JSON"))
+        let (parsed_line, marker) = mark_lone_surrogates(line).map_err(|()| {
+            Refusal::new(
+                &row_rule("encoding"),
+                format!("{file} line {n} holds a lone surrogate escape"),
+            )
         })?;
-        let Some(object) = value.as_object() else {
-            return Err(Refusal::new(
-                &row_rule("schema"),
-                format!("{file} line {n} is not a JSON object"),
-            ));
+        let value: Lite = serde_json::from_str(&parsed_line).map_err(|_| schema("is not JSON"))?;
+        let Lite::Obj { mut pairs, total } = value else {
+            return Err(schema("is not a JSON object"));
         };
-        let mut extra: Vec<&str> = object
-            .keys()
-            .map(String::as_str)
+        let mut extra: Vec<String> = pairs
+            .iter()
+            .map(|(k, _)| k.as_str())
             .filter(|k| *k != "text" && *k != "label")
+            .map(short)
             .collect();
         if !extra.is_empty() {
             extra.sort_unstable();
+            extra.dedup();
             return Err(Refusal::new(
                 &row_rule("unknown-key"),
                 format!("{file} line {n} has unknown key(s) {extra:?}"),
             ));
         }
-        let (Some(text), Some(label)) = (object.get("text"), object.get("label")) else {
-            return Err(Refusal::new(
-                &row_rule("schema"),
-                format!("{file} line {n} must hold exactly [\"text\", \"label\"]"),
-            ));
+        let text_at = pairs.iter().position(|(k, _)| k == "text");
+        let label_at = pairs.iter().position(|(k, _)| k == "label");
+        let (Some(text_at), Some(label_at), 2) = (text_at, label_at, total) else {
+            return Err(schema("must hold exactly [\"text\", \"label\"]"));
         };
-        if !text.as_str().is_some_and(|t| !t.trim().is_empty()) {
-            return Err(Refusal::new(
-                &row_rule("schema"),
-                format!("{file} line {n} text must be a non-empty string"),
-            ));
+        let (text_value, label_value) = if text_at < label_at {
+            let label = pairs.swap_remove(label_at).1;
+            (pairs.swap_remove(text_at).1, label)
+        } else {
+            let text = pairs.swap_remove(text_at).1;
+            (text, pairs.swap_remove(label_at).1)
+        };
+        let marked = |v: &Lite| matches!((v, marker), (Lite::Str(s), Some(m)) if s.contains(m));
+        for (field, value) in [("text", &text_value), ("label", &label_value)] {
+            if marked(value) {
+                return Err(Refusal::new(
+                    &row_rule("encoding"),
+                    format!(
+                        "{file} line {n} {field} holds a lone surrogate; it is not UTF-8 and \
+                         the row is refused"
+                    ),
+                ));
+            }
         }
-        let Some(label) = label.as_str() else {
+        let Lite::Str(row_text) = text_value else {
+            return Err(schema("text must be a non-empty string"));
+        };
+        if blank(&row_text) {
+            return Err(schema("text must be a non-empty string"));
+        }
+        let Lite::Str(label) = label_value else {
             return Err(Refusal::new(
                 &row_rule("label"),
                 format!("{file} line {n} label must be a criterion name (a string)"),
             ));
         };
-        let Some(position) = labels.iter().position(|l| l == label) else {
+        let Some(position) = labels.iter().position(|l| *l == label) else {
             return Err(Refusal::new(
                 &row_rule("label"),
                 format!("{file} line {n} label is not a criterion of task.json"),
             ));
         };
-        out.push(position);
+        rows.push(Row {
+            text: row_text,
+            label: position,
+        });
     }
-    Ok(out)
+    if rows.is_empty() {
+        return Err(Refusal::new(
+            &format!("{role}-empty"),
+            format!("{file} has no rows"),
+        ));
+    }
+    if role == "eval" {
+        let mut present = vec![false; labels.len()];
+        for row in &rows {
+            present[row.label] = true;
+        }
+        let missing = present.iter().filter(|p| !**p).count();
+        if missing > 0 {
+            return Err(Refusal::new(
+                "eval-class-coverage",
+                format!(
+                    "{file} holds no row of {missing} criterion/criteria: every criterion needs \
+                     at least one eval row for the gate's macro-F1 to compare the same labels"
+                ),
+            ));
+        }
+    }
+    Ok(rows)
+}
+
+/// `refuse_overlap`: an `role` row (eval, or the shift probe) whose normalized text
+/// hash is a train text's hash is refused `<role>-train-overlap`. Hashing is
+/// `aprender_decide::verify::normalized_sha256` (nfc-trim-ws-v1) only.
+fn refuse_overlap(train_hashes: &HashSet<String>, rows: &[Row], role: &str) -> Result<(), Refusal> {
+    let hits: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| train_hashes.contains(&normalized_sha256(&r.text)))
+        .map(|(i, _)| i)
+        .collect();
+    if hits.is_empty() {
+        return Ok(());
+    }
+    Err(Refusal::new(
+        &format!("{role}-train-overlap"),
+        format!(
+            "{} {role} row(s) equal a train text after NFC/trim/whitespace collapse ({role}.jsonl \
+             rows {})",
+            hits.len(),
+            first_ten(&hits)
+        ),
+    ))
+}
+
+/// The calibration-split rules `data.py` `calibration_split` applies, as far as
+/// they can be decided without the seeded permutation. Returns whether
+/// `train-class-too-small` is DEFERRED to the trainer.
+///
+/// `group_train` first: one normalized text under two labels is refused
+/// `train-conflicting-labels` (groups in first-seen order, as the trainer reports).
+/// Then per class `need = max(min_per_class, ceil(fraction * count))`: a class with
+/// `count <= need` can never leave a fit row, whatever the draw, so it is refused
+/// `train-class-too-small`. A class with `count > need` is refused by the trainer
+/// only when whole text groups of two or more rows overshoot the slice, which
+/// depends on the permutation; that case is accepted here and reported as deferred
+/// when the class has such a group.
+fn check_calibration(
+    train: &[Row],
+    class_count: usize,
+    policy: &ValidationPolicy,
+) -> Result<bool, Refusal> {
+    let mut index: HashMap<String, usize> = HashMap::new();
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for (i, row) in train.iter().enumerate() {
+        let group = *index
+            .entry(normalized_sha256(&row.text))
+            .or_insert_with(|| {
+                groups.push(Vec::new());
+                groups.len() - 1
+            });
+        groups[group].push(i);
+    }
+    if let Some(group) = groups
+        .iter()
+        .find(|g| g.iter().any(|&i| train[i].label != train[g[0]].label))
+    {
+        return Err(Refusal::new(
+            "train-conflicting-labels",
+            format!(
+                "train.jsonl rows {} carry the same normalized text under different labels",
+                first_ten(group)
+            ),
+        ));
+    }
+    let mut counts = vec![0u64; class_count];
+    let mut has_multi_row_group = vec![false; class_count];
+    for group in &groups {
+        let label = train[group[0]].label;
+        counts[label] += group.len() as u64;
+        has_multi_row_group[label] |= group.len() > 1;
+    }
+    let mut deferred = false;
+    for (class, &count) in counts.iter().enumerate() {
+        // `ceil` of an f64 product, exactly as `math.ceil(float(fraction) * n)`.
+        let slice = (policy.calibration_fraction * count as f64).ceil() as u64;
+        let need = policy.calibration_min_per_class.max(slice);
+        if count <= need {
+            return Err(Refusal::new(
+                "train-class-too-small",
+                format!(
+                    "class {class} has {count} train row(s): a calibration slice of >= {need} \
+                     row(s) must leave at least one fit row"
+                ),
+            ));
+        }
+        deferred |= has_multi_row_group[class];
+    }
+    Ok(deferred)
 }
 
 /// INSPECT a dataset: every data rule, and a report of what `train` will need.
@@ -316,28 +828,34 @@ pub fn validate_files(
         .task_json
         .as_deref()
         .ok_or_else(|| Refusal::new("task-missing", "task.json does not exist (it is required)"))?;
-    let task = Task::from_slice(task_bytes)
-        .map_err(|e| Refusal::new("task-schema", format!("task.json is refused: {e:?}")))?;
+    let task = check_task(task_bytes)?;
+    let labels = task.owned_labels();
     let train_bytes = files.train.as_deref().ok_or_else(|| {
         Refusal::new(
             "train-missing",
             "train.jsonl does not exist (it is required)",
         )
     })?;
+    let train = parse_rows(train_bytes, "train", "train.jsonl", &labels, policy)?;
     let eval_bytes = files.eval.as_deref().ok_or_else(|| {
         Refusal::new("eval-missing", "eval.jsonl does not exist (it is required)")
     })?;
-    let labels = task.owned_labels();
-    let train = parse_rows(train_bytes, "train", "train.jsonl", &labels, policy)?;
     let eval = parse_rows(eval_bytes, "eval", "eval.jsonl", &labels, policy)?;
+    let train_hashes: HashSet<String> = train.iter().map(|r| normalized_sha256(&r.text)).collect();
+    refuse_overlap(&train_hashes, &eval, "eval")?;
     let shift = match files.shift.as_deref() {
-        Some(bytes) => Some(parse_rows(bytes, "shift", "shift.jsonl", &labels, policy)?),
+        Some(bytes) => {
+            let rows = parse_rows(bytes, "shift", "shift.jsonl", &labels, policy)?;
+            refuse_overlap(&train_hashes, &rows, "shift")?;
+            Some(rows)
+        }
         None => None,
     };
+    let deferred = check_calibration(&train, labels.len(), policy)?;
 
     let mut counts = vec![0u64; labels.len()];
-    for label in &train {
-        counts[*label] += 1;
+    for row in &train {
+        counts[row.label] += 1;
     }
     let shots_per_class = counts.iter().copied().max().unwrap_or(0);
     let class_counts = labels.iter().cloned().zip(counts).collect();
@@ -365,7 +883,11 @@ pub fn validate_files(
         epochs_range: epochs_required.then_some([rule.lo, rule.hi]),
         epochs_fixed: (!epochs_required).then_some(rule.fixed),
         inputs_sha256,
-        deferred_rules: Vec::new(),
+        deferred_rules: if deferred {
+            DEFERRABLE_RULES.iter().map(ToString::to_string).collect()
+        } else {
+            Vec::new()
+        },
     })
 }
 
@@ -567,6 +1089,149 @@ mod tests {
         assert_eq!(
             validate_files(&dataset(5), &p).expect_err("x").rule,
             "bound-rows"
+        );
+    }
+
+    // ---- the shared case table (D-08) ----
+
+    const CASE_TABLE: &str = include_str!("../../../scripts/laya_train/data_cases.json");
+
+    fn table() -> serde_json::Value {
+        serde_json::from_str(CASE_TABLE).expect("data_cases.json parses")
+    }
+
+    /// Standard-alphabet base64 with padding (the generator's `base64.b64encode`).
+    fn b64_decode(text: &str) -> Vec<u8> {
+        let digit = |c: u8| -> u32 {
+            match c {
+                b'A'..=b'Z' => u32::from(c - b'A'),
+                b'a'..=b'z' => u32::from(c - b'a') + 26,
+                b'0'..=b'9' => u32::from(c - b'0') + 52,
+                b'+' => 62,
+                b'/' => 63,
+                _ => panic!("not base64: {c}"),
+            }
+        };
+        let raw: Vec<u8> = text.bytes().filter(|c| *c != b'=').collect();
+        let mut out = Vec::new();
+        for chunk in raw.chunks(4) {
+            let mut acc = 0u32;
+            for (i, c) in chunk.iter().enumerate() {
+                acc |= digit(*c) << (18 - 6 * i);
+            }
+            for i in 0..chunk.len() - 1 {
+                out.push(u8::try_from((acc >> (16 - 8 * i)) & 0xFF).expect("byte"));
+            }
+        }
+        out
+    }
+
+    fn case_files(case: &serde_json::Value) -> DatasetFiles {
+        let files = case["files"].as_object().expect("files");
+        let get = |name: &str| {
+            files.get(name).map(|spec| match spec.get("text") {
+                Some(t) => t.as_str().expect("text").as_bytes().to_vec(),
+                None => b64_decode(spec["b64"].as_str().expect("b64")),
+            })
+        };
+        DatasetFiles {
+            task_json: get("task.json"),
+            train: get("train.jsonl"),
+            eval: get("eval.jsonl"),
+            shift: get("shift.jsonl"),
+        }
+    }
+
+    fn case_epochs(case: &serde_json::Value) -> Option<u32> {
+        case["epochs"]
+            .as_u64()
+            .map(|e| u32::try_from(e).expect("epochs"))
+    }
+
+    /// An accepted result in the shape the table writes `python.ok` in.
+    fn summary_value(
+        summary: &DatasetSummary,
+        resolved: Option<u32>,
+        policy: &ValidationPolicy,
+    ) -> serde_json::Value {
+        let counts: Vec<u64> = summary
+            .labels
+            .iter()
+            .map(|l| summary.class_counts[l])
+            .collect();
+        #[derive(Serialize)]
+        struct Shape<'a> {
+            labels: &'a [String],
+            class_counts: Vec<u64>,
+            shots_per_class: u64,
+            epochs: u32,
+            shift_present: bool,
+            inputs_sha256: &'a BTreeMap<String, String>,
+        }
+        serde_json::to_value(Shape {
+            labels: &summary.labels,
+            class_counts: counts,
+            shots_per_class: summary.shots_per_class,
+            epochs: resolved.unwrap_or(policy.epoch_rule.fixed),
+            shift_present: summary.shift_present,
+            inputs_sha256: &summary.inputs_sha256,
+        })
+        .expect("a summary serializes")
+    }
+
+    #[test]
+    fn shared_case_table() {
+        let p = policy();
+        let t = table();
+        assert_eq!(t["schema"], "laya-data-cases-v1");
+        let stricter: Vec<&str> = t["stricter_rules"]
+            .as_array()
+            .expect("stricter_rules")
+            .iter()
+            .map(|r| r.as_str().expect("rule"))
+            .collect();
+        let cases = t["cases"].as_array().expect("cases");
+        assert!(cases.len() >= 12, "{} cases", cases.len());
+        let mut deferred = 0;
+        for case in cases {
+            let id = case["id"].as_str().expect("id");
+            let py = &case["python"];
+            let got = validate_for_submit(&case_files(case), case_epochs(case), &p);
+            let rust = &case["rust"];
+            if rust == "same" {
+                match (py.get("refused"), py.get("ok"), &got) {
+                    (Some(rule), None, Err(r)) => {
+                        assert_eq!(rule.as_str(), Some(r.rule.as_str()), "{id}: {r}");
+                    }
+                    (None, Some(ok), Ok((summary, resolved))) => {
+                        assert_eq!(&summary_value(summary, *resolved, &p), ok, "{id}");
+                        assert!(summary.deferred_rules.is_empty(), "{id}");
+                    }
+                    (refused, accepted, got) => {
+                        panic!("{id}: python {refused:?} / {accepted:?}, rust {got:?}")
+                    }
+                }
+            } else if rust == "deferred" {
+                let rule = py["refused"].as_str().expect("python refused");
+                assert!(DEFERRABLE_RULES.contains(&rule), "{id}: {rule}");
+                let (summary, _) = got.unwrap_or_else(|r| panic!("{id}: rust refused: {r}"));
+                assert!(
+                    summary.deferred_rules.iter().any(|d| d == rule),
+                    "{id}: {:?}",
+                    summary.deferred_rules
+                );
+                deferred += 1;
+            } else {
+                let rule = rust["stricter"].as_str().expect("stricter rule");
+                assert!(stricter.contains(&rule), "{id}: {rule}");
+                assert!(py.get("ok").is_some(), "{id}: python must accept");
+                let err = got.expect_err(id);
+                assert_eq!(err.rule, rule, "{id}: {err}");
+            }
+        }
+        println!(
+            "shared_case_table: {} cases, {deferred} deferred",
+            cases.len()
         );
     }
 }
