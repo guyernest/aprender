@@ -1,7 +1,7 @@
 # 14 IAM fix note: ListBucket condition (2026-10-29)
 
-Status: code and offline proof DONE (commit 65e1b754a). Live redeploy NOT done: held at the diff
-because it shows one change beyond IAM policy (see "Diff").
+Status: DONE. Code and offline proof in commit 65e1b754a; trainer stack redeployed once by the owner
+(own shell) and verified read-only.
 
 ## Defect
 
@@ -37,8 +37,27 @@ comes from rebuilding the bootstrap during `laya-trainer-synth` (a non-reproduci
 environment difference), not from a source change. A deploy would therefore also replace the live
 finalizer's code with an unproven rebuild, outside the approved IAM-only scope. Stopped here.
 
-## Next
+## Finalizer asset swap (accepted)
 
-Owner decision: either accept the finalizer code swap (same sources, rebuilt) and run
-`just laya-trainer-infra deploy dev ze-kasher-dev`, or restore the previously deployed asset first. The
-live 404-versus-403 behaviour is first observed in plans 14-13/14-14.
+The orchestrator accepted the `Finalizer` `Code.S3Key` change (`ec55d7ac...zip` -> `7288da6d...zip`) as a
+same-source rebuild: sources unchanged since e3a3aea73, before the 14-12 deploys, tests 60/60 on that source.
+The rebuild is not byte-reproducible across synths, so any future trainer-stack deploy that follows a fresh
+`laya-trainer-synth` will re-upload the finalizer even with no source change.
+
+## Deploy (run by the owner, `assume ze-kasher-dev && just laya-trainer-infra deploy dev ze-kasher-dev`)
+
+`INFRA OK deploy`; stack `aprender-laya-trainer-dev` updated in 39.55 s. The `cdk diff` it ran showed exactly the
+four changes listed above (SageMaker and finalizer ListBucket operators, the RequestLambdaPolicy output, the
+Finalizer code key) and nothing else. Image digests unchanged (train b49b3fe9..., pack 504084d0...).
+`just laya-trainer-infra outputs dev ze-kasher-dev` then refreshed the state file
+(`wrote outputs-dev.json (12 trainer outputs, 5 images outputs)`, `INFRA OK outputs`).
+
+## Verification (read-only, profile ze-kasher-dev, us-east-1)
+
+- `cloudformation get-template` of the deployed stack: SageMaker role default policy ListBucket condition
+  `StringLikeIfExists s3:prefix [datasets/*, base/laya-55cf4c4e/*]`; finalizer default policy
+  `StringLikeIfExists s3:prefix [runs/*]`; `RequestLambdaPolicy` output `StringLikeIfExists s3:prefix [datasets/*]`.
+- `iam get-role-policy` on the live roles: SageMaker `StringLikeIfExists [datasets/*, base/laya-55cf4c4e/*]`,
+  finalizer `StringLikeIfExists [runs/*]`. Prefix lists unchanged.
+
+The live 404-versus-403 behaviour is first observed in plans 14-13/14-14 (not a policy question, so not simulated).
