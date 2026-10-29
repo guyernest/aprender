@@ -62,5 +62,73 @@
     "replied_on": "2026-10-29",
     "recorded_by": "orchestrator, from the owner's own message in the session",
     "scope": "Add a C toolchain (gcc, libc6-dev) to the train image, rebuild it once, redeploy the trainer stack with the new digest, re-run the CUDA probe once. IAM was not part of this approval."
+  },
+  "reprobe_1": {
+    "after": "rebuild-compat (owner, 2026-10-29): train image rebuilt with gcc and libc6-dev, trainer stack redeployed with the new digest, CUDA probe re-run ONCE",
+    "train_image_digest": "sha256:b49b3fe902c49801e1d3eea8e4be37a73d3e59c483bbb42735180a35c2e6f11f",
+    "train_image_commit": "ba35837e9b00fecb172d8456c0758d2348c1a558",
+    "cuda": {
+      "job_name": "laya-probe-cuda-20261029181151",
+      "final_status": "Completed",
+      "failure_reason": null,
+      "billable_seconds": 210,
+      "driver": "595.91.07",
+      "compat_used": false,
+      "torch_cuda_available": true,
+      "torch_version_cuda": "13.0",
+      "device_name": "NVIDIA A10G",
+      "matmul_ok": true,
+      "base_load_ok": true,
+      "base_forward_seconds": 2.4948,
+      "max_memory_allocated_bytes": 1699042816,
+      "train_step_ok": true,
+      "train_step_seconds": 2.616,
+      "train_step_peak_bytes": 22908016640,
+      "train_step_batch": 8,
+      "train_step_tokens": 1024,
+      "host_rss_peak_bytes": 3542331392,
+      "tiny_fixture_rc": 3,
+      "tiny_fixture_device_used": "cuda:0",
+      "job_timeline_seconds": {
+        "pending_preparing_instances": 105,
+        "downloading_image": 162,
+        "training": 40
+      },
+      "logs": "runs/probe/cuda-20261029181151/{helper.log,tiny-fixture.log,probe.json,nvidia-smi.txt} in the trainer bucket (fetched to the gitignored scratchpad, not committed)"
+    },
+    "verdict": "fail",
+    "verdict_basis": "the plan's literal rule: tiny_fixture_rc must be 0 (14-12 Task 3 verify). Measured 3.",
+    "fail_reasons": [
+      "tiny_fixture_rc 3 (not 0): train.py exit 3 is EXIT_GATE_FAIL; the fixture ran to completion on cuda:0 and printed 'GATE FAIL' because its fixed-epoch margin is 0.0000 against the 0.05 bar"
+    ],
+    "what_the_fix_resolved": "the compiler was the only missing piece for the first probe's failure: the base load and the real-model training step now run on the GPU",
+    "control_measurement": {
+      "what": "the identical train.py command run locally on CPU (laya_tiny fixture, --variant synthetic-fixture, --epochs 1 --stopping fixed_epochs, --device cpu)",
+      "result": "rc=3, 'GATE FAIL', macro_f1 0.1667 both arms, margin 0.0000 (need >= 0.05), ece_post 0.0094, nll 1.0969",
+      "cuda_result": "rc=3, 'GATE FAIL', macro_f1 0.1667 both arms, margin 0.0000, ece_post 0.0093, nll 1.0969; noise max_abs 3.7e-08 against the 1e-5 bound, argmax 9/9",
+      "reading": "rc 3 is the fixture's designed outcome on every device (a 12-row random-weight fixture cannot beat zero-shot by 0.05); it is not a CUDA defect. The plan's 'tiny_fixture_rc == 0' criterion (and the selftest's fake tiny_cmd returning 0) assumed otherwise and was never measured on CPU. The CUDA run reproduces the CPU run's numbers to the printed precision, which is what the criterion was meant to establish."
+    },
+    "findings": [
+      {
+        "id": "train-step-memory-headroom",
+        "severity": "high for the real run",
+        "detail": "train_step_peak_bytes 22,908,016,640 against 23,686,938,624 bytes of device memory (96.7%) at batch 8 x 1024 tokens. helper.log shows CUDACachingAllocator logged 'memory allocation failed with OOM ... trying to allocate 207,618,048 bytes (free: 93,782,016)' during the step and the step still completed (the allocator flushed its cache and retried). A real training run at this batch/length sits at the ceiling of an A10G; any longer sequence, bigger batch or fragmentation can OOM. Not tested here: what batch and token length the production run uses."
+      },
+      {
+        "id": "cold-start-timeline",
+        "detail": "job pending 105 s, image download 161 s, training 40 s; billable 210 s"
+      }
+    ],
+    "spend": {
+      "codebuild_builds": 1,
+      "stack_deploys": 1,
+      "probe_jobs": 1,
+      "billable_seconds": 210,
+      "no_probe_job_left_inprogress": true,
+      "checked": "list-training-jobs InProgress = 0 and describe-training-job laya-probe-cuda-20261029181151 = Completed, BillableTimeInSeconds 210"
+    },
+    "owner_decision": null,
+    "proposed_resolution": "amend the probe's pass criterion to tiny_fixture_rc in {0, 3} with tiny_fixture_device_used starting with cuda (2 = refused stays a failure), keeping the CPU control above as the evidence; with that amendment every other measurement passes and the verdict would be pass. NOT applied by the executor: the owner decides.",
+    "sigterm_reprobe": "not re-run (out of the approved scope; the first sigterm record stands: grace 118 s)"
   }
 }

@@ -155,27 +155,46 @@
   "images": {
     "train": {
       "repo_name": "aprender-laya-train-dev",
-      "digest": "sha256:3e2933cb962e4aaca3b8e7d8af689b1a50776d8d86acb7a1a960b65f6bcb1797",
-      "commit": "69af6631267ce931b186b4626eebc3f86ad7588e",
-      "build_id": "aprender-laya-train-image-dev:d4379807-f032-494d-a07c-ca6645f1d8b5"
+      "digest": "sha256:b49b3fe902c49801e1d3eea8e4be37a73d3e59c483bbb42735180a35c2e6f11f",
+      "commit": "ba35837e9b00fecb172d8456c0758d2348c1a558",
+      "build_id": "aprender-laya-train-image-dev:547bc4f3-2d87-4de2-9291-620c7f0daef0",
+      "change": "apt line gains gcc and libc6-dev (owner decision rebuild-compat, 2026-10-29); nothing else"
     },
     "pack": {
       "repo_name": "aprender-laya-pack-dev",
       "digest": "sha256:504084d0c254af66e01b40f9f4679ba48fc09c4bf80386cc458a9388ae3090f3",
       "commit": "69af6631267ce931b186b4626eebc3f86ad7588e",
       "build_id": "aprender-laya-pack-image-dev:d67cc99d-4f5d-4224-b559-e6bc803c949e"
+    },
+    "train_superseded": {
+      "repo_name": "aprender-laya-train-dev",
+      "digest": "sha256:3e2933cb962e4aaca3b8e7d8af689b1a50776d8d86acb7a1a960b65f6bcb1797",
+      "commit": "69af6631267ce931b186b4626eebc3f86ad7588e",
+      "build_id": "aprender-laya-train-image-dev:d4379807-f032-494d-a07c-ca6645f1d8b5",
+      "superseded_by": "rebuild-compat 2026-10-29",
+      "reason": "no C compiler in the image: triton could not JIT its CUDA driver stub (first probe)"
     }
   },
   "image_bytes": {
-    "train": 6441317765,
-    "pack": 119253572
+    "train": 6518525500,
+    "pack": 119253572,
+    "train_superseded": 6441317765
   },
   "stacks": {
     "images_stack": "aprender-laya-trainer-images-dev",
     "trainer_stack": "aprender-laya-trainer-dev",
     "deployed_at": "2026-10-29T17:32:02Z",
     "diff_ran": true,
-    "note": "cdk diff ran immediately before cdk deploy in the same invocation (both stacks); trainer stack deployed with exactly the two digests above; no pmcp.run deploy"
+    "note": "cdk diff ran immediately before cdk deploy in the same invocation (both stacks); trainer stack deployed with exactly the two digests above; no pmcp.run deploy",
+    "redeploy_rebuild_compat": {
+      "deployed_at": "2026-10-29T18:11:00Z",
+      "diff_ran": true,
+      "trainer_stack": "aprender-laya-trainer-dev",
+      "diff_summary": "exactly one resource changed: the Step Functions state machine definition, the train image digest in the training task's AlgorithmSpecification image and in LAYA_TRAIN_IMAGE_DIGEST (sha256:3e2933cb... -> sha256:b49b3fe9...); no IAM, network or storage resource in the diff",
+      "pack_digest_unchanged": "sha256:504084d0c254af66e01b40f9f4679ba48fc09c4bf80386cc458a9388ae3090f3",
+      "outputs_rewritten": true,
+      "note": "`just laya-trainer-infra diff` ran first, then `deploy` (which diffs again in the same invocation), then `outputs`; the images stack was not redeployed; no pmcp.run deploy"
+    }
   },
   "staged": {
     "base": {
@@ -213,5 +232,14 @@
   },
   "live_observations": [
     "Every dataset prefix list-objects-v2 returned empty before staging (the stage recipe refuses otherwise); ran as the owner's IAM user, so the role-conditioned s3:ListBucket 403-vs-404 question from /code-review (laya-trainer-stack.ts s3:prefix condition) was NOT exercised by any step so far"
-  ]
+  ],
+  "rebuild_compat": {
+    "owner_decision": "rebuild-compat",
+    "spend": {
+      "codebuild_builds": 1,
+      "stack_deploys": 1,
+      "probe_jobs": 1,
+      "probe_billable_seconds": 210
+    }
+  }
 }
