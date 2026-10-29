@@ -27,6 +27,15 @@ publish = false
 name = "bootstrap"
 path = "src/bin/bootstrap.rs"
 
+# The finalizer (plan 14-05): the one writer of the terminal record, verdict.json,
+# manifest.json, the retention tags and the lock release. NOT named `bootstrap`:
+# the CDK asset build renames it to `bootstrap` inside its own asset, and
+# cargo-pmcp must never see it as a deployable (it finds the deployable by the
+# name `bootstrap`, which only the request function above may carry).
+[[bin]]
+name = "aprender-laya-train-finalizer"
+path = "src/bin/aprender-laya-train-finalizer.rs"
+
 [lib]
 name = "aprender_mcp_laya_train_lambda"
 path = "src/lib.rs"
@@ -46,6 +55,11 @@ aws-config = "1"
 aws-sdk-dynamodb = "1"
 aws-sdk-s3 = "1"
 aws-sdk-sfn = "1"
+# The finalizer's compute gate (plan 14-05): SageMaker for the training job,
+# ECS for the pack task. aws-sdk-ecs is in 14-LOCK-EVIDENCE.json's
+# owner_verification.names_verified (the owner's 2026-10-28 package check).
+aws-sdk-sagemaker = "1"
+aws-sdk-ecs = "1"
 
 lambda_http = "0.13"
 lambda_runtime = "0.13"
@@ -55,11 +69,10 @@ once_cell = "1.19"
 
 serde = { workspace = true }
 serde_json = { workspace = true }
+# The finalizer hashes the verdict.json bytes it lists in manifest.json.
+sha2 = { workspace = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-[dev-dependencies]
-sha2 = { workspace = true }
 
 [lints]
 workspace = true

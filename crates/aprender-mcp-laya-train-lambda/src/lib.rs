@@ -10,10 +10,24 @@
 //! arrives later, and the three variables below are all it needs to find its
 //! resources.
 
+mod compute;
 mod dataset;
+mod finalizer;
+mod objects;
 mod sfn;
 
+pub use compute::{
+    compute_terminal, stop_live_compute, training_job_name, ComputeState, EcsPackTasks,
+    ExecutionInfo, ExecutionReader, PackTask, PackTasks, SageMakerJobs, SfnExecutionReader,
+    StopOutcome, TrainingJobs, PACK_TASK_ENV, TRAINING_JOB_PREFIX,
+};
 pub use dataset::{ObjectReader, ReadError, S3DatasetSource, S3ObjectReader};
+pub use finalizer::{
+    handle, reconcile, FinalizeReport, FinalizerCtx, FinalizerError, FinalizerInput,
+    ReconcileReport, StateMachinePayload, StatusEvent, DISPATCH_CONFIRM_GRACE_SECS,
+    EVENT_DETAIL_TYPE,
+};
+pub use objects::{ObjectError, ObjectStore, S3ObjectStore};
 pub use sfn::{
     classify_start_error, execution_arn, guard_link_key, Executions, Presign, S3Presign,
     SfnCancelSink, SfnDispatcher, SfnExecutions, StartError, StartErrorKind, CANCEL_JOIN_BOUND,
@@ -28,6 +42,12 @@ pub const ENV_BUCKET: &str = "APRENDER_LAYA_TRAIN_BUCKET";
 
 /// The Step Functions state machine one `train` starts an execution of.
 pub const ENV_STATE_MACHINE_ARN: &str = "APRENDER_LAYA_TRAIN_STATE_MACHINE_ARN";
+
+/// The ECS cluster the pack task runs on (the finalizer lists its tasks).
+pub const ENV_CLUSTER_ARN: &str = "APRENDER_LAYA_TRAIN_CLUSTER_ARN";
+
+/// The pack task-definition family (the finalizer lists tasks of this family).
+pub const ENV_PACK_FAMILY: &str = "APRENDER_LAYA_TRAIN_PACK_FAMILY";
 
 /// The streamable-HTTP config for the deployed Lambda and the tracer test.
 ///

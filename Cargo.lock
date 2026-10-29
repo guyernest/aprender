@@ -1010,7 +1010,9 @@ dependencies = [
  "aprender-setfit-train-lambda",
  "aws-config",
  "aws-sdk-dynamodb",
+ "aws-sdk-ecs",
  "aws-sdk-s3",
+ "aws-sdk-sagemaker",
  "aws-sdk-sfn",
  "lambda_http",
  "lambda_runtime",
@@ -2939,6 +2941,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-ecs"
+version = "1.133.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "88d7912c12ab87c23063e1f7cdecc9c195649a3895eb33669a216612e779ad0c"
+dependencies = [
+ "arc-swap",
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.2",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-lambda"
 version = "1.131.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2998,6 +3025,31 @@ dependencies = [
  "sha2 0.11.0",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "aws-sdk-sagemaker"
+version = "1.210.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73f3b559ec6a8b46e03bc41e759fba238f95f498d1660127846864cc4b2894b0"
+dependencies = [
+ "arc-swap",
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.2",
+ "regex-lite",
+ "tracing",
 ]
 
 [[package]]

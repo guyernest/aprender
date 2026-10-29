@@ -1,0 +1,1863 @@
+//! The Laya training finalizer: the ONE writer of a run's terminal record,
+//! `verdict.json`, `manifest.json`, retention tags and lock release.
+//!
+//! It is re-driven from three directions, so no guarantee rests on any one of
+//! them being delivered:
+//!
+//! 1. the state machine's own `Finalize` payload (the normal end, and the `Catch` end);
+//! 2. an EventBridge `Step Functions Execution Status Change` event for
+//!    `ABORTED | TIMED_OUT | FAILED` (best effort, may repeat);
+//! 3. a scheduled reconcile sweep, `{"source":"reconcile"}`, every 10 minutes.
+//!
+//! # The order of one finalization
+//!
+//! 1. compute is terminal (the training job and every pack task of the run);
+//! 2. the DynamoDB record is written (the arbiter: first writer wins);
+//! 3. `verdict.json`;
+//! 4. `manifest.json`;
+//! 5. the retention tags, each read back;
+//! 6. the single-flight lock is released, LAST.
+//!
+//! A failure or crash at 3 to 5 returns `Err` with the lock STILL HELD, and the
+//! next invocation resumes from the stored record and redoes 3 to 6. The held
+//! lock is the durable "finalization incomplete" marker: a replacement `train`
+//! is refused until the run is both over and published.
+//!
+//! Nothing is recomputed here (D-05): the decision is `finalize_run` over the
+//! files the jobs wrote. Nothing is deleted: expiry is the lifecycle rule's job.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+
+use aprender_mcp_laya_train::finalize::{
+    attach_result_if_absent, decision_result, finalize_run, AttachOutcome, FinalizeDecision,
+    FinalizeInput,
+};
+use aprender_mcp_laya_train::layout::{
+    self, Contracts, ExecutionInput, Images, Manifest, ManifestEntry, Outcome, PackOutcome, Phase,
+    StatusPayload, TrainingManifest, RETENTION_EXPIRE, RETENTION_KEEP, SCHEMA_EXECUTION_INPUT,
+    SCHEMA_MANIFEST, TASK_TTL_MS,
+};
+use aprender_mcp_laya_train::lock;
+use aprender_mcp_laya_train::{AprenderTaskStore, StoredTask, TaskBackend};
+use pmcp::server::task_store::TaskStore;
+use pmcp::types::{CallToolResult, Content, TaskStatus};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use crate::compute::{
+    compute_terminal, stop_live_compute, ExecutionReader, PackTasks, TrainingJobs,
+};
+use crate::objects::{ObjectError, ObjectStore};
+use crate::sfn::execution_arn;
+
+/// A lock whose execution is absent this long after it was taken is an unconfirmed
+/// dispatch (14-01's `submit` left it held because `confirm` could not answer).
+pub const DISPATCH_CONFIRM_GRACE_SECS: u64 = 900;
+
+/// The EventBridge `detail-type` of a Step Functions status change.
+pub const EVENT_DETAIL_TYPE: &str = "Step Functions Execution Status Change";
+
+/// Largest JSON object the finalizer reads from a job-written key.
+const MAX_JSON_BYTES: usize = 1_048_576;
+
+/// Longest stage error the finalizer hands the decision (the decision clips it again).
+const MAX_STAGE_ERROR_CHARS: usize = 2_048;
+
+/// The object names that inventory a run's other objects and so cannot list themselves.
+const SELF_LISTING: [&str; 5] = [
+    layout::VERDICT,
+    layout::MANIFEST,
+    layout::TRAINING_MANIFEST,
+    layout::PARTIAL_MANIFEST,
+    layout::PACK_MANIFEST,
+];
+
+// ------------------------------------------------------------------- errors
+
+/// Why a finalization did not complete.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FinalizerError {
+    /// The input is not one of the three shapes, names another state machine or
+    /// another run's prefix. Nothing was written.
+    Refused(String),
+    /// The records disagree about who owns the run. Nothing was written and the
+    /// lock is left as it was; the FinalizerErrors alarm (14-08) is how a human hears.
+    Integrity(String),
+    /// A backend, S3, tagging or lock-release step failed. The lock is held; a
+    /// retry or the sweep resumes from the stored record.
+    Store(String),
+    /// A compute read or stop failed. Nothing was released.
+    Compute(String),
+}
+
+impl std::fmt::Display for FinalizerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(m) => write!(f, "refused: {m}"),
+            Self::Integrity(m) => write!(f, "integrity: {m}"),
+            Self::Store(m) => write!(f, "store: {m}"),
+            Self::Compute(m) => write!(f, "compute: {m}"),
+        }
+    }
+}
+
+impl std::error::Error for FinalizerError {}
+
+fn refused(message: impl Into<String>) -> FinalizerError {
+    FinalizerError::Refused(message.into())
+}
+
+fn integrity(message: impl Into<String>) -> FinalizerError {
+    FinalizerError::Integrity(message.into())
+}
+
+fn store_err(message: impl std::fmt::Display) -> FinalizerError {
+    FinalizerError::Store(message.to_string())
+}
+
+// -------------------------------------------------------------------- input
+
+/// The state machine's `Finalize` payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateMachinePayload {
+    /// The execution that is finalizing itself.
+    pub execution_arn: String,
+    /// When it started, in epoch seconds.
+    pub start_secs: u64,
+    /// What it was started with.
+    pub input: ExecutionInput,
+    /// The `Catch` error text (`<Error>: <Cause>`), bounded, when one was caught.
+    pub error: Option<String>,
+}
+
+/// An EventBridge status-change event, reduced to what the finalizer trusts.
+///
+/// The event's own `input` is deliberately ignored: the execution input is read
+/// with `DescribeExecution`, so a forged event cannot name another run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusEvent {
+    /// The machine the event names.
+    pub state_machine_arn: String,
+    /// The execution it names.
+    pub execution_arn: String,
+    /// `ABORTED`, `TIMED_OUT` or `FAILED`.
+    pub status: String,
+}
+
+/// The three shapes the finalizer accepts; anything else is refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FinalizerInput {
+    /// The state machine's `Finalize` payload.
+    StateMachine(StateMachinePayload),
+    /// An EventBridge status-change event.
+    Event(StatusEvent),
+    /// The scheduled sweep.
+    Reconcile,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPayload {
+    #[allow(dead_code)]
+    source: String,
+    execution_arn: String,
+    start_time: serde_json::Value,
+    input: serde_json::Value,
+    #[serde(default)]
+    error: Option<RawError>,
+}
+
+#[derive(Deserialize)]
+struct RawError {
+    #[serde(rename = "Error", alias = "error", default)]
+    error: Option<String>,
+    #[serde(rename = "Cause", alias = "cause", default)]
+    cause: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RawEvent {
+    #[serde(rename = "detail-type")]
+    detail_type: String,
+    detail: RawDetail,
+}
+
+#[derive(Deserialize)]
+struct RawDetail {
+    #[serde(rename = "executionArn")]
+    execution_arn: String,
+    #[serde(rename = "stateMachineArn")]
+    state_machine_arn: String,
+    status: String,
+}
+
+/// Days from 1970-01-01 to a civil date (proleptic Gregorian).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Epoch seconds from an RFC 3339 timestamp (`2026-10-28T10:00:00.123Z`, or with a
+/// numeric offset).
+fn parse_rfc3339_secs(text: &str) -> Option<u64> {
+    let (date, rest) = text.split_once(['T', 't'])?;
+    let mut parts = date.split('-');
+    let year: i64 = parts.next()?.parse().ok()?;
+    let month: i64 = parts.next()?.parse().ok()?;
+    let day: i64 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let (clock, offset_secs) = if let Some(clock) = rest.strip_suffix(['Z', 'z']) {
+        (clock, 0_i64)
+    } else {
+        let at = rest.rfind(['+', '-'])?;
+        let (clock, off) = rest.split_at(at);
+        let sign = if off.starts_with('-') { -1 } else { 1 };
+        let (oh, om) = off[1..].split_once(':')?;
+        (
+            clock,
+            sign * (oh.parse::<i64>().ok()? * 3600 + om.parse::<i64>().ok()? * 60),
+        )
+    };
+    let clock = clock.split('.').next()?;
+    let mut hms = clock.split(':');
+    let hour: i64 = hms.next()?.parse().ok()?;
+    let minute: i64 = hms.next()?.parse().ok()?;
+    let second: i64 = hms.next()?.parse().ok()?;
+    if hms.next().is_some() || hour > 23 || minute > 59 || second > 60 {
+        return None;
+    }
+    let secs = days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second
+        - offset_secs;
+    u64::try_from(secs).ok()
+}
+
+/// A start time as epoch seconds: an RFC 3339 string, or a number of seconds.
+fn parse_time_secs(value: &serde_json::Value) -> Option<u64> {
+    match value {
+        serde_json::Value::String(text) => parse_rfc3339_secs(text),
+        serde_json::Value::Number(n) => n.as_u64().or_else(|| {
+            n.as_f64()
+                .filter(|f| f.is_finite() && *f >= 0.0)
+                // Whole seconds are all the TTL comparison needs.
+                .map(|f| f.floor() as u64)
+        }),
+        _ => None,
+    }
+}
+
+fn parse_execution_input(value: &serde_json::Value) -> Result<ExecutionInput, FinalizerError> {
+    let parsed = match value {
+        serde_json::Value::String(text) => serde_json::from_str(text),
+        other => serde_json::from_value(other.clone()),
+    };
+    parsed.map_err(|e| refused(format!("the execution input is not the closed input: {e}")))
+}
+
+fn bounded_error(error: &RawError) -> String {
+    let text = format!(
+        "{}: {}",
+        error.error.as_deref().unwrap_or("error"),
+        error.cause.as_deref().unwrap_or("no cause recorded")
+    );
+    text.chars().take(MAX_STAGE_ERROR_CHARS).collect()
+}
+
+impl FinalizerInput {
+    /// Parse one invocation payload into one of the three shapes.
+    ///
+    /// # Errors
+    ///
+    /// [`FinalizerError::Refused`] for anything else, naming what is wrong (never
+    /// the payload's content).
+    pub fn parse(value: &serde_json::Value) -> Result<Self, FinalizerError> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| refused("the input is not a JSON object"))?;
+        match object.get("source").and_then(serde_json::Value::as_str) {
+            Some("state-machine") => {
+                let raw: RawPayload = serde_json::from_value(value.clone())
+                    .map_err(|e| refused(format!("not a Finalize payload: {e}")))?;
+                let start_secs = parse_time_secs(&raw.start_time)
+                    .ok_or_else(|| refused("start_time is not a time"))?;
+                Ok(Self::StateMachine(StateMachinePayload {
+                    execution_arn: raw.execution_arn,
+                    start_secs,
+                    input: parse_execution_input(&raw.input)?,
+                    error: raw.error.as_ref().map(bounded_error),
+                }))
+            }
+            Some("reconcile") if object.len() == 1 => Ok(Self::Reconcile),
+            Some("reconcile") => Err(refused("a reconcile input carries no other field")),
+            Some("aws.states") => {
+                let raw: RawEvent = serde_json::from_value(value.clone())
+                    .map_err(|e| refused(format!("not a status-change event: {e}")))?;
+                if raw.detail_type != EVENT_DETAIL_TYPE {
+                    return Err(refused(format!(
+                        "detail-type {:?} is not {EVENT_DETAIL_TYPE:?}",
+                        raw.detail_type
+                    )));
+                }
+                if !matches!(raw.detail.status.as_str(), "ABORTED" | "TIMED_OUT" | "FAILED") {
+                    return Err(refused(format!(
+                        "status {} is not finalized by an event",
+                        raw.detail.status
+                    )));
+                }
+                Ok(Self::Event(StatusEvent {
+                    state_machine_arn: raw.detail.state_machine_arn,
+                    execution_arn: raw.detail.execution_arn,
+                    status: raw.detail.status,
+                }))
+            }
+            _ => Err(refused("the input is not a Finalize payload, a status event or a reconcile")),
+        }
+    }
+}
+
+// ------------------------------------------------------------------ context
+
+/// Everything the finalizer needs, built so the store and the lock address ONE
+/// backend (14-01's rule: the store's own backend is private).
+pub struct FinalizerCtx {
+    /// The backend the store was built from, and the lock's.
+    pub backend: Arc<dyn TaskBackend>,
+    /// The task store, built from `backend`, with NO cancel sink: the finalizer's
+    /// own `cancel` (an ABORTED event for a still-working record) must not
+    /// re-stop an execution that is already over.
+    pub store: AprenderTaskStore,
+    /// The server bucket's objects.
+    pub objects: Arc<dyn ObjectStore>,
+    /// Step Functions.
+    pub executions: Arc<dyn ExecutionReader>,
+    /// SageMaker.
+    pub training_jobs: Arc<dyn TrainingJobs>,
+    /// ECS.
+    pub pack_tasks: Arc<dyn PackTasks>,
+    /// The server bucket (for the status payload's `s3://` prefix).
+    pub bucket: String,
+    /// The one state machine this finalizer serves.
+    pub state_machine_arn: String,
+    /// Epoch seconds now.
+    pub now: Arc<dyn Fn() -> u64 + Send + Sync>,
+}
+
+impl std::fmt::Debug for FinalizerCtx {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FinalizerCtx").finish_non_exhaustive()
+    }
+}
+
+impl FinalizerCtx {
+    /// The one constructor: builds the store from `backend` and keeps the same `Arc`.
+    #[must_use]
+    pub fn new(
+        backend: Arc<dyn TaskBackend>,
+        objects: Arc<dyn ObjectStore>,
+        executions: Arc<dyn ExecutionReader>,
+        training_jobs: Arc<dyn TrainingJobs>,
+        pack_tasks: Arc<dyn PackTasks>,
+        bucket: impl Into<String>,
+        state_machine_arn: impl Into<String>,
+    ) -> Self {
+        Self {
+            store: AprenderTaskStore::new(Arc::clone(&backend)),
+            backend,
+            objects,
+            executions,
+            training_jobs,
+            pack_tasks,
+            bucket: bucket.into(),
+            state_machine_arn: state_machine_arn.into(),
+            now: Arc::new(lock::now_secs),
+        }
+    }
+
+    /// Replace the clock (tests).
+    #[must_use]
+    pub fn with_clock(mut self, now: Arc<dyn Fn() -> u64 + Send + Sync>) -> Self {
+        self.now = now;
+        self
+    }
+
+    fn now(&self) -> u64 {
+        (self.now)()
+    }
+}
+
+// ------------------------------------------------------------------ reports
+
+/// What one finalization did. Carries no credential and no object content.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct FinalizeReport {
+    /// The task finalized (empty for a sweep that found nothing).
+    pub task_id: String,
+    /// The phase of the winning payload; `None` while compute is awaited.
+    pub phase: Option<Phase>,
+    /// True when the objects were (re-)tagged `laya-retention=keep`.
+    pub keep: bool,
+    /// How many objects were tagged and read back.
+    pub tagged: usize,
+    /// True when `StopTrainingJob` was issued.
+    pub stopped_training_job: bool,
+    /// How many ECS `StopTask` calls were issued.
+    pub stopped_pack_tasks: usize,
+    /// True when compute was not terminal: nothing was written, the lock is held.
+    pub awaiting_compute: bool,
+    /// How the record was settled: `finished`, `attached`, `reused` or `record_missing`.
+    pub record: String,
+    /// True when this call released the lock.
+    pub released: bool,
+    /// The sweep's own account, when the input was a reconcile.
+    pub reconcile: Option<Box<ReconcileReport>>,
+}
+
+/// What one sweep did.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ReconcileReport {
+    /// The lock holder's task id, when the lock was held.
+    pub holder: Option<String>,
+    /// `lock-free`, `running`, `cancel-retry`, `dispatch-grace`,
+    /// `dispatch-unconfirmed`, `awaiting-compute` or `finalized`.
+    pub action: String,
+    /// The holder's finalization, when the sweep ran one.
+    pub finalized: Option<FinalizeReport>,
+    /// True when the sweep re-issued `StopExecution` for the holder.
+    pub stopped_execution: bool,
+    /// Executions that were not the holder's and were stopped.
+    pub rogue_stopped: Vec<String>,
+}
+
+// ------------------------------------------------------------- run objects
+
+/// What the jobs wrote, parsed.
+#[derive(Default)]
+struct RunObjects {
+    outcome: Option<Outcome>,
+    gate_report: Option<serde_json::Value>,
+    pack_outcome: Option<PackOutcome>,
+    training_manifest: Option<TrainingManifest>,
+    pack_manifest: Vec<ManifestEntry>,
+    /// Every path a writer manifest lists, the `.apr` included.
+    writer_paths: BTreeSet<String>,
+}
+
+/// Read one JSON object under the byte cap. Absent, oversize and unparseable all read
+/// as `None` (the decision then says the file is missing); only a failed call is an error.
+async fn read_json<T: serde::de::DeserializeOwned>(
+    ctx: &FinalizerCtx,
+    key: &str,
+) -> Result<Option<T>, FinalizerError> {
+    match ctx.objects.get(key, MAX_JSON_BYTES).await {
+        Ok(None) => Ok(None),
+        Ok(Some(bytes)) => match serde_json::from_slice::<T>(&bytes) {
+            Ok(value) => Ok(Some(value)),
+            Err(_) => {
+                tracing::warn!("laya finalizer: {key} is not the expected JSON; treated as missing");
+                Ok(None)
+            }
+        },
+        Err(ObjectError::Oversize) => {
+            tracing::warn!("laya finalizer: {key} exceeds {MAX_JSON_BYTES} bytes; treated as missing");
+            Ok(None)
+        }
+        Err(ObjectError::Failed(message)) => Err(store_err(format!("reading {key}: {message}"))),
+    }
+}
+
+async fn read_run_objects(
+    ctx: &FinalizerCtx,
+    prefix: &str,
+    task_id: &str,
+) -> Result<RunObjects, FinalizerError> {
+    // A file that names another task is another run's file: treated as missing.
+    let own = |actual: &str, key: &str| {
+        let ok = actual == task_id;
+        if !ok {
+            tracing::warn!("laya finalizer: {key} names another task; treated as missing");
+        }
+        ok
+    };
+    let key = |name: &str| format!("{prefix}{name}");
+
+    let outcome: Option<Outcome> = read_json(ctx, &key(layout::OUTCOME))
+        .await?
+        .filter(|o: &Outcome| own(&o.task_id, layout::OUTCOME));
+    let gate_report = read_json(ctx, &format!("{prefix}{}gate-report.json", layout::RUN_DIR)).await?;
+    let pack_outcome: Option<PackOutcome> = read_json(ctx, &key(layout::PACK_OUTCOME))
+        .await?
+        .filter(|p: &PackOutcome| own(&p.task_id, layout::PACK_OUTCOME));
+    let mut training_manifest: Option<TrainingManifest> =
+        read_json(ctx, &key(layout::TRAINING_MANIFEST))
+            .await?
+            .filter(|m: &TrainingManifest| own(&m.task_id, layout::TRAINING_MANIFEST));
+    if training_manifest.is_none() {
+        training_manifest = read_json(ctx, &key(layout::PARTIAL_MANIFEST))
+            .await?
+            .filter(|m: &TrainingManifest| own(&m.task_id, layout::PARTIAL_MANIFEST));
+    }
+    let pack_manifest: Vec<ManifestEntry> = read_json(ctx, &key(layout::PACK_MANIFEST))
+        .await?
+        .unwrap_or_default();
+
+    let mut writer_paths = BTreeSet::new();
+    for entry in training_manifest
+        .iter()
+        .flat_map(|m| m.entries.iter())
+        .chain(pack_manifest.iter())
+    {
+        writer_paths.insert(entry.path.clone());
+    }
+    Ok(RunObjects {
+        outcome,
+        gate_report,
+        pack_outcome,
+        training_manifest,
+        pack_manifest,
+        writer_paths,
+    })
+}
+
+// ------------------------------------------------------------------ helpers
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// `^[a-z0-9][a-z0-9._-]{0,63}$`: one path segment that cannot climb.
+fn segment_ok(segment: &str) -> bool {
+    let bytes = segment.as_bytes();
+    bytes
+        .first()
+        .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        && bytes.len() <= 64
+        && bytes.iter().skip(1).all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(*b, b'.' | b'_' | b'-')
+        })
+}
+
+fn result_text(result: &CallToolResult) -> Option<&str> {
+    match result.content.first() {
+        Some(Content::Text { text }) => Some(text.as_str()),
+        _ => None,
+    }
+}
+
+/// The payload that won, as the exact text that was stored.
+struct Winner {
+    text: String,
+    payload: StatusPayload,
+}
+
+impl Winner {
+    fn from_result(result: &CallToolResult, task_id: &str) -> Result<Self, FinalizerError> {
+        let text = result_text(result)
+            .ok_or_else(|| integrity("the stored result is not a text payload"))?;
+        let payload: StatusPayload = serde_json::from_str(text)
+            .map_err(|_| integrity("the stored result is not a status payload"))?;
+        if payload.task_id != task_id {
+            return Err(integrity("the stored result names another task"));
+        }
+        Ok(Self {
+            text: text.to_string(),
+            payload,
+        })
+    }
+
+    fn from_decision(decision: &FinalizeDecision) -> Self {
+        Self {
+            text: decision.payload.to_value().to_string(),
+            payload: decision.payload.clone(),
+        }
+    }
+
+    /// D-19: only a completed run whose gate passed is kept.
+    fn keep(&self) -> bool {
+        self.payload.phase == Phase::Completed
+            && self.payload.verdict.as_ref().is_some_and(|v| v.pass)
+    }
+}
+
+/// Who a finalization is about.
+struct Subject {
+    task_id: String,
+    owner: String,
+    name: String,
+    /// `runs/<name>/<task_id>/`.
+    run_prefix: String,
+    /// When the execution started, in epoch seconds (the lock's, for an orphan).
+    start_secs: u64,
+}
+
+struct Trigger {
+    subject: Subject,
+    /// `None` for the unconfirmed-dispatch path, where no execution ever ran.
+    exec: Option<ExecutionInput>,
+    stage_error: Option<String>,
+    /// True for an `ABORTED` execution.
+    aborted: bool,
+}
+
+fn subject_from(exec: &ExecutionInput, start_secs: u64) -> Result<Subject, FinalizerError> {
+    if exec.schema != SCHEMA_EXECUTION_INPUT {
+        return Err(refused("the execution input has another schema"));
+    }
+    if !segment_ok(&exec.name) || !segment_ok(&exec.task_id) {
+        return Err(refused("the execution input names an unsafe path segment"));
+    }
+    if exec.run_prefix != layout::run_prefix(&exec.name, &exec.task_id) {
+        return Err(refused("run_prefix is not runs/<name>/<task_id>/"));
+    }
+    Ok(Subject {
+        task_id: exec.task_id.clone(),
+        owner: exec.owner.clone(),
+        name: exec.name.clone(),
+        run_prefix: exec.run_prefix.clone(),
+        start_secs,
+    })
+}
+
+async fn read_record(
+    ctx: &FinalizerCtx,
+    subject: &Subject,
+) -> Result<Option<StoredTask>, FinalizerError> {
+    ctx.backend
+        .get(&subject.owner, &subject.task_id)
+        .await
+        .map_err(|e| store_err(format!("reading the task record: {e}")))
+}
+
+/// The decision for a run that never started: a failed `dispatch-unconfirmed`, or
+/// a cancelled one when the client had already cancelled it.
+fn orphan_decision(ctx: &FinalizerCtx, subject: &Subject, aborted: bool) -> FinalizeDecision {
+    let uri = format!("s3://{}/{}", ctx.bucket, subject.run_prefix);
+    let (phase, status) = if aborted {
+        (Phase::Cancelled, TaskStatus::Cancelled)
+    } else {
+        (Phase::Failed, TaskStatus::Failed)
+    };
+    let mut payload = StatusPayload::base(&subject.task_id, &subject.name, &uri, phase);
+    if !aborted {
+        payload.error = Some(
+            "dispatch-unconfirmed: no execution was found for this task after the confirmation grace"
+                .to_string(),
+        );
+    }
+    FinalizeDecision {
+        phase,
+        status,
+        is_error: !aborted,
+        payload,
+        manifest: Manifest {
+            schema: SCHEMA_MANIFEST.to_string(),
+            task_id: subject.task_id.clone(),
+            name: subject.name.clone(),
+            images: Images {
+                train: None,
+                pack: None,
+            },
+            contracts: Contracts {
+                prefilter_gate: None,
+                train_gate: None,
+                pack_gate: None,
+                pack_parity: None,
+            },
+            entries: Vec::new(),
+            unlisted: 0,
+        },
+        keep: false,
+        manifest_partial: false,
+    }
+}
+
+fn decide(
+    ctx: &FinalizerCtx,
+    trigger: &Trigger,
+    objects: &RunObjects,
+    aborted: bool,
+) -> FinalizeDecision {
+    match &trigger.exec {
+        None => orphan_decision(ctx, &trigger.subject, aborted),
+        Some(exec) => finalize_run(&FinalizeInput {
+            bucket: ctx.bucket.clone(),
+            execution: exec.clone(),
+            stage_error: trigger.stage_error.clone(),
+            aborted,
+            outcome: objects.outcome.clone(),
+            gate_report: objects.gate_report.clone(),
+            pack_outcome: objects.pack_outcome.clone(),
+            training_manifest: objects.training_manifest.clone(),
+            pack_manifest: objects.pack_manifest.clone(),
+        }),
+    }
+}
+
+// --------------------------------------------------------------- the record
+
+/// Settle the DynamoDB record, the arbiter, and return the payload that won.
+///
+/// (a) terminal with a stored result: that result is the decision;
+/// (b) still working: `finish` it with `decision`;
+/// (c) terminal with NO result: a client `tasks/cancel` leaves exactly this, so a
+///     `Cancelled` record gets `aborted_decision` attached by compare-and-swap
+///     (result only when none is stored); any other status is an integrity fault.
+///
+/// A `finish` that no-ops because a cancel landed after the first read leaves
+/// (Cancelled, no result), which is (c) on the next pass; an attach that answers
+/// `AlreadyPresent` means another invocation won, so its payload is reused.
+async fn settle_record(
+    ctx: &FinalizerCtx,
+    subject: &Subject,
+    mut record: StoredTask,
+    decision: &FinalizeDecision,
+    aborted_decision: &FinalizeDecision,
+) -> Result<(Winner, &'static str), FinalizerError> {
+    let mut how = "reused";
+    for _ in 0..3 {
+        if let Some(result) = &record.result {
+            return Winner::from_result(result, &subject.task_id).map(|w| (w, how));
+        }
+        if !record.task.status.is_terminal() {
+            ctx.store
+                .finish(
+                    &subject.task_id,
+                    &subject.owner,
+                    decision.status,
+                    decision_result(decision),
+                )
+                .await
+                .map_err(|e| store_err(format!("finishing the task: {e}")))?;
+            how = "finished";
+        } else if record.task.status == TaskStatus::Cancelled {
+            let attached = attach_result_if_absent(
+                ctx.backend.as_ref(),
+                &subject.owner,
+                &subject.task_id,
+                decision_result(aborted_decision),
+            )
+            .await
+            .map_err(|e| store_err(format!("attaching the cancelled payload: {e}")))?;
+            match attached {
+                AttachOutcome::Attached => how = "attached",
+                AttachOutcome::AlreadyPresent => {}
+                AttachOutcome::NotTerminal | AttachOutcome::NotFound => {
+                    return Err(integrity("the record changed under the attach"));
+                }
+            }
+        } else {
+            return Err(integrity(format!(
+                "task {} is {:?} with no stored result",
+                subject.task_id, record.task.status
+            )));
+        }
+        record = read_record(ctx, subject)
+            .await?
+            .ok_or_else(|| integrity("the task record vanished while it was settled"))?;
+    }
+    Err(integrity("the task record could not be settled"))
+}
+
+// -------------------------------------------------------------- publication
+
+/// Write `bytes` at `key` unless the object already holds exactly them.
+async fn put_if_different(
+    ctx: &FinalizerCtx,
+    key: &str,
+    bytes: &[u8],
+) -> Result<(), FinalizerError> {
+    match ctx.objects.get(key, MAX_JSON_BYTES).await {
+        Ok(Some(existing)) if existing == bytes => return Ok(()),
+        Ok(_) | Err(ObjectError::Oversize) => {}
+        Err(ObjectError::Failed(message)) => {
+            return Err(store_err(format!("reading {key}: {message}")))
+        }
+    }
+    ctx.objects
+        .put(key, bytes.to_vec(), RETENTION_EXPIRE)
+        .await
+        .map_err(|e| store_err(format!("writing {key}: {e}")))
+}
+
+/// Steps 3 to 6: verdict.json, manifest.json, the tags, the lock. Idempotent: every
+/// step that already holds its end state writes nothing.
+async fn publish(
+    ctx: &FinalizerCtx,
+    subject: &Subject,
+    winner: &Winner,
+    base: &Manifest,
+    writer_paths: &BTreeSet<String>,
+    report: &mut FinalizeReport,
+) -> Result<(), FinalizerError> {
+    let prefix = &subject.run_prefix;
+
+    // (3) verdict.json: the winning payload's own text, byte for byte.
+    let verdict_bytes = winner.text.clone().into_bytes();
+    let verdict_key = format!("{prefix}{}", layout::VERDICT);
+    put_if_different(ctx, &verdict_key, &verdict_bytes).await?;
+
+    // (4) manifest.json: every writer entry the decision kept, plus verdict.json.
+    // Written once: a valid manifest.json that already lists exactly this
+    // verdict.json is the first writer's and is kept as it is.
+    let manifest_key = format!("{prefix}{}", layout::MANIFEST);
+    let verdict_entry = ManifestEntry {
+        path: layout::VERDICT.to_string(),
+        size: verdict_bytes.len() as u64,
+        sha256: sha256_hex(&verdict_bytes),
+    };
+    let adopted = match ctx.objects.get(&manifest_key, MAX_JSON_BYTES).await {
+        Ok(Some(bytes)) => serde_json::from_slice::<Manifest>(&bytes).ok().filter(|m| {
+            m.task_id == subject.task_id && m.entries.iter().any(|e| *e == verdict_entry)
+        }),
+        Ok(None) | Err(ObjectError::Oversize) => None,
+        Err(ObjectError::Failed(message)) => {
+            return Err(store_err(format!("reading {manifest_key}: {message}")))
+        }
+    };
+    let manifest = if let Some(existing) = adopted {
+        existing
+    } else {
+        let mut entries: BTreeMap<String, ManifestEntry> = winner
+            .payload
+            .manifest
+            .iter()
+            .map(|link| {
+                (
+                    link.path.clone(),
+                    ManifestEntry {
+                        path: link.path.clone(),
+                        size: link.size,
+                        sha256: link.sha256.clone(),
+                    },
+                )
+            })
+            .collect();
+        entries.insert(layout::VERDICT.to_string(), verdict_entry);
+        let listed = ctx
+            .objects
+            .list(prefix)
+            .await
+            .map_err(|e| store_err(format!("listing {prefix}: {e}")))?;
+        let unlisted = listed
+            .iter()
+            .filter_map(|(key, _)| key.strip_prefix(prefix.as_str()))
+            .filter(|path| !writer_paths.contains(*path) && !SELF_LISTING.contains(path))
+            .count() as u64;
+        let fresh = Manifest {
+            schema: SCHEMA_MANIFEST.to_string(),
+            task_id: subject.task_id.clone(),
+            name: subject.name.clone(),
+            images: base.images.clone(),
+            contracts: base.contracts.clone(),
+            entries: entries.into_values().collect(),
+            unlisted,
+        };
+        let manifest_bytes = serde_json::to_vec_pretty(&fresh)
+            .map_err(|e| store_err(format!("serializing manifest.json: {e}")))?;
+        put_if_different(ctx, &manifest_key, &manifest_bytes).await?;
+        fresh
+    };
+
+    // (5) retention tags, each read back (D-19).
+    let keep = winner.keep();
+    let want = if keep { RETENTION_KEEP } else { RETENTION_EXPIRE };
+    let mut targets: Vec<String> = manifest
+        .entries
+        .iter()
+        .map(|e| format!("{prefix}{}", e.path))
+        .collect();
+    targets.push(manifest_key);
+    for key in &targets {
+        let current = ctx
+            .objects
+            .get_tag(key)
+            .await
+            .map_err(|e| store_err(format!("reading the tag of {key}: {e}")))?;
+        if current.as_deref() != Some(want) {
+            ctx.objects
+                .put_tag(key, want)
+                .await
+                .map_err(|e| store_err(format!("tagging {key}: {e}")))?;
+        }
+    }
+    for key in &targets {
+        let found = ctx
+            .objects
+            .get_tag(key)
+            .await
+            .map_err(|e| store_err(format!("reading back the tag of {key}: {e}")))?;
+        if found.as_deref() != Some(want) {
+            return Err(store_err(format!("{key} did not read back as {want}")));
+        }
+    }
+    report.keep = keep;
+    report.tagged = targets.len();
+
+    // (6) the lock, LAST, and only when it is really free afterwards.
+    report.released = lock::release(ctx.backend.as_ref(), &subject.task_id).await;
+    if let Some(state) = lock::read(ctx.backend.as_ref()).await {
+        if state.holder == subject.task_id && !state.released {
+            return Err(store_err("the single-flight lock could not be released"));
+        }
+    }
+    Ok(())
+}
+
+// --------------------------------------------------------- one finalization
+
+async fn finalize_task(
+    ctx: &FinalizerCtx,
+    trigger: Trigger,
+) -> Result<FinalizeReport, FinalizerError> {
+    let subject = &trigger.subject;
+    let mut report = FinalizeReport {
+        task_id: subject.task_id.clone(),
+        ..FinalizeReport::default()
+    };
+
+    // The lock's recorded owner must be the run's owner, or the records disagree.
+    if let Some(state) = lock::read(ctx.backend.as_ref()).await {
+        if state.holder == subject.task_id && !state.released && state.holder_owner != subject.owner
+        {
+            return Err(integrity(format!(
+                "the lock holder's owner differs from the owner of task {}",
+                subject.task_id
+            )));
+        }
+    }
+
+    // NotFound is split, never conflated: an absent record is EXPIRED only when the
+    // execution is older than the task TTL; inside the TTL it is an integrity fault.
+    let mut record = read_record(ctx, subject).await?;
+    let expired = record.is_none();
+    if expired
+        && (trigger.exec.is_none()
+            || ctx.now() <= subject.start_secs.saturating_add(TASK_TTL_MS / 1000))
+    {
+        return Err(integrity(format!(
+            "task {} has no record inside its TTL",
+            subject.task_id
+        )));
+    }
+
+    // An ABORTED execution for a record nobody cancelled: readers must see
+    // `cancelled` at once, whatever compute is still doing.
+    if trigger.aborted {
+        if let Some(rec) = &record {
+            if !rec.task.status.is_terminal() {
+                if let Err(e) = ctx.store.cancel(&subject.task_id, &subject.owner).await {
+                    tracing::warn!("laya finalizer: cancel of {} failed: {e}", subject.task_id);
+                }
+                record = read_record(ctx, subject).await?;
+            }
+        }
+    }
+
+    // The compute gate (D-11, D-12): outputs are read, and the lock released, only
+    // when nothing of the run is still billing.
+    let state = compute_terminal(ctx, &subject.task_id)
+        .await
+        .map_err(FinalizerError::Compute)?;
+    if !state.terminal {
+        let stopped = stop_live_compute(ctx, &subject.task_id, &state).await;
+        report.stopped_training_job = stopped.training_job;
+        report.stopped_pack_tasks = stopped.pack_tasks;
+        report.awaiting_compute = true;
+        if stopped.errors.is_empty() {
+            return Ok(report);
+        }
+        return Err(FinalizerError::Compute(stopped.errors.join("; ")));
+    }
+
+    let objects = if trigger.exec.is_some() {
+        read_run_objects(ctx, &subject.run_prefix, &subject.task_id).await?
+    } else {
+        RunObjects::default()
+    };
+    let cancelled = record
+        .as_ref()
+        .is_some_and(|rec| rec.task.status == TaskStatus::Cancelled);
+    let decision = decide(ctx, &trigger, &objects, trigger.aborted || cancelled);
+    let aborted_decision = decide(ctx, &trigger, &objects, true);
+
+    let winner = match record {
+        Some(rec) => {
+            let (winner, how) =
+                settle_record(ctx, subject, rec, &decision, &aborted_decision).await?;
+            report.record = how.to_string();
+            winner
+        }
+        None => {
+            report.record = "record_missing".to_string();
+            // First writer wins in S3 as well: an existing verdict.json is the decision.
+            let key = format!("{}{}", subject.run_prefix, layout::VERDICT);
+            match ctx.objects.get(&key, MAX_JSON_BYTES).await {
+                Ok(Some(bytes)) => {
+                    let text = String::from_utf8(bytes)
+                        .map_err(|_| integrity("the existing verdict.json is not text"))?;
+                    let payload: StatusPayload = serde_json::from_str(&text)
+                        .map_err(|_| integrity("the existing verdict.json is not a payload"))?;
+                    Winner { text, payload }
+                }
+                Ok(None) | Err(ObjectError::Oversize) => Winner::from_decision(&decision),
+                Err(ObjectError::Failed(message)) => {
+                    return Err(store_err(format!("reading {key}: {message}")))
+                }
+            }
+        }
+    };
+    report.phase = Some(winner.payload.phase);
+    publish(
+        ctx,
+        subject,
+        &winner,
+        &decision.manifest,
+        &objects.writer_paths,
+        &mut report,
+    )
+    .await?;
+    Ok(report)
+}
+
+// ------------------------------------------------------------------- handle
+
+/// The state machine this finalizer serves owns exactly the executions
+/// `laya-<task_id>`; anything else is refused.
+fn check_execution(
+    ctx: &FinalizerCtx,
+    exec: &ExecutionInput,
+    execution_arn_seen: &str,
+) -> Result<(), FinalizerError> {
+    let derived = execution_arn(&ctx.state_machine_arn, &exec.task_id)
+        .ok_or_else(|| refused("the configured state machine ARN is malformed"))?;
+    if derived != execution_arn_seen {
+        return Err(refused(
+            "the execution is not laya-<task_id> of the configured state machine",
+        ));
+    }
+    Ok(())
+}
+
+/// Finalize one invocation. See the module doc for the order and the three shapes.
+///
+/// # Errors
+///
+/// [`FinalizerError::Refused`] for a shape or machine that is not this finalizer's
+/// (nothing written); [`FinalizerError::Integrity`] when the records disagree
+/// (nothing written, lock untouched); [`FinalizerError::Store`] and
+/// [`FinalizerError::Compute`] when a step failed (lock held, retry or sweep resumes).
+pub async fn handle(
+    ctx: &FinalizerCtx,
+    input: FinalizerInput,
+) -> Result<FinalizeReport, FinalizerError> {
+    match input {
+        FinalizerInput::StateMachine(payload) => {
+            check_execution(ctx, &payload.input, &payload.execution_arn)?;
+            let subject = subject_from(&payload.input, payload.start_secs)?;
+            finalize_task(
+                ctx,
+                Trigger {
+                    subject,
+                    exec: Some(payload.input),
+                    stage_error: payload.error,
+                    aborted: false,
+                },
+            )
+            .await
+        }
+        FinalizerInput::Event(event) => {
+            if event.state_machine_arn != ctx.state_machine_arn {
+                return Err(refused("the event is for another state machine"));
+            }
+            let info = ctx
+                .executions
+                .describe(&event.execution_arn)
+                .await
+                .map_err(FinalizerError::Compute)?
+                .ok_or_else(|| refused("the event names an execution that does not exist"))?;
+            if !info.is_terminal() {
+                return Err(refused("the event names an execution that is still running"));
+            }
+            let exec: ExecutionInput = parse_execution_input(&serde_json::Value::String(
+                info.input.clone(),
+            ))?;
+            check_execution(ctx, &exec, &event.execution_arn)?;
+            let subject = subject_from(&exec, info.start_secs)?;
+            finalize_task(
+                ctx,
+                Trigger {
+                    subject,
+                    exec: Some(exec),
+                    stage_error: None,
+                    aborted: event.status == "ABORTED",
+                },
+            )
+            .await
+        }
+        FinalizerInput::Reconcile => {
+            let sweep = reconcile(ctx).await?;
+            let mut report = sweep.finalized.clone().unwrap_or_default();
+            report.reconcile = Some(Box::new(sweep));
+            Ok(report)
+        }
+    }
+}
+
+// ---------------------------------------------------------------- reconcile
+
+/// The execution name's task id when `arn` is `...:execution:<machine>:laya-<id>`.
+fn execution_name(arn: &str) -> Option<&str> {
+    arn.rsplit(':').next()
+}
+
+/// The scheduled sweep (every 10 minutes, plan 14-08): makes best-effort event
+/// delivery and the best-effort cancel sink durable.
+///
+/// It starts from the lock. Free: nothing. Held by T: `DescribeExecution laya-T` —
+/// absent past [`DISPATCH_CONFIRM_GRACE_SECS`] is a failed `dispatch-unconfirmed`;
+/// `RUNNING` with T cancelled re-issues `StopExecution` and the residual compute
+/// stops (a durable cancel); `RUNNING` otherwise is left alone; terminal goes
+/// through the same path as that status's event (a lost event, a failed Finalize
+/// invocation, or a crash between the record and the release). Then every RUNNING
+/// execution of the machine that is not the holder's is stopped (a rogue start).
+///
+/// # Errors
+///
+/// The holder's finalization error, or a failed stop, after the rest of the sweep
+/// has run.
+pub async fn reconcile(ctx: &FinalizerCtx) -> Result<ReconcileReport, FinalizerError> {
+    let mut report = ReconcileReport::default();
+    let lock_state = lock::read(ctx.backend.as_ref())
+        .await
+        .filter(|state| !state.released);
+    report.holder = lock_state.as_ref().map(|state| state.holder.clone());
+    report.action = "lock-free".to_string();
+
+    let holder_result = match &lock_state {
+        Some(state) => reconcile_holder(ctx, state, &mut report).await,
+        None => Ok(()),
+    };
+
+    // Rogue executions: RUNNING, and not the lock holder's.
+    let mut stop_errors: Vec<String> = Vec::new();
+    match ctx.executions.list_running(&ctx.state_machine_arn).await {
+        Ok(running) => {
+            let holder_name = report
+                .holder
+                .as_ref()
+                .map(|id| format!("{}{id}", crate::sfn::EXECUTION_NAME_PREFIX));
+            for arn in running {
+                if holder_name.as_deref() == execution_name(&arn) {
+                    continue;
+                }
+                tracing::warn!("laya finalizer: stopping a rogue execution {arn}");
+                match ctx.executions.stop(&arn).await {
+                    Ok(()) => report.rogue_stopped.push(arn),
+                    Err(e) => stop_errors.push(format!("StopExecution {arn}: {e}")),
+                }
+            }
+        }
+        Err(e) => stop_errors.push(format!("ListExecutions: {e}")),
+    }
+
+    holder_result?;
+    if stop_errors.is_empty() {
+        Ok(report)
+    } else {
+        Err(FinalizerError::Compute(stop_errors.join("; ")))
+    }
+}
+
+async fn reconcile_holder(
+    ctx: &FinalizerCtx,
+    state: &lock::LockState,
+    report: &mut ReconcileReport,
+) -> Result<(), FinalizerError> {
+    let holder = &state.holder;
+    let arn = execution_arn(&ctx.state_machine_arn, holder)
+        .ok_or_else(|| refused("the configured state machine ARN is malformed"))?;
+    let info = ctx
+        .executions
+        .describe(&arn)
+        .await
+        .map_err(FinalizerError::Compute)?;
+
+    let Some(info) = info else {
+        // No execution of that name.
+        let age = ctx.now().saturating_sub(state.acquired_at_secs);
+        if age <= DISPATCH_CONFIRM_GRACE_SECS {
+            report.action = "dispatch-grace".to_string();
+            return Ok(());
+        }
+        report.action = "dispatch-unconfirmed".to_string();
+        let Some(subject) = orphan_subject(ctx, state).await? else {
+            return Ok(());
+        };
+        let finalized = finalize_task(
+            ctx,
+            Trigger {
+                subject,
+                exec: None,
+                stage_error: None,
+                aborted: false,
+            },
+        )
+        .await?;
+        report.finalized = Some(finalized);
+        return Ok(());
+    };
+
+    if !info.is_terminal() {
+        // Running: nothing, unless the client cancelled and the stop was lost.
+        let record = ctx
+            .backend
+            .get(&state.holder_owner, holder)
+            .await
+            .map_err(|e| store_err(format!("reading the holder's record: {e}")))?;
+        let cancelled = record.is_some_and(|rec| rec.task.status == TaskStatus::Cancelled);
+        if !cancelled {
+            report.action = "running".to_string();
+            return Ok(());
+        }
+        report.action = "cancel-retry".to_string();
+        let mut errors = Vec::new();
+        match ctx.executions.stop(&arn).await {
+            Ok(()) => report.stopped_execution = true,
+            Err(e) => errors.push(format!("StopExecution: {e}")),
+        }
+        let compute = compute_terminal(ctx, holder)
+            .await
+            .map_err(FinalizerError::Compute)?;
+        errors.extend(stop_live_compute(ctx, holder, &compute).await.errors);
+        return if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(FinalizerError::Compute(errors.join("; ")))
+        };
+    }
+
+    // Terminal: the same path as that status's event.
+    let exec = parse_execution_input(&serde_json::Value::String(info.input.clone()))?;
+    check_execution(ctx, &exec, &arn)?;
+    let subject = subject_from(&exec, info.start_secs)?;
+    let finalized = finalize_task(
+        ctx,
+        Trigger {
+            subject,
+            exec: Some(exec),
+            stage_error: None,
+            aborted: info.status == "ABORTED",
+        },
+    )
+    .await?;
+    report.action = if finalized.awaiting_compute {
+        "awaiting-compute"
+    } else {
+        "finalized"
+    }
+    .to_string();
+    report.finalized = Some(finalized);
+    Ok(())
+}
+
+/// The envelope `submit` stashed on the holder's record: the run's name and prefix.
+#[derive(Deserialize)]
+struct StoredEnvelope {
+    name: String,
+}
+
+/// Who the unconfirmed-dispatch path is about, from the lock and the holder's record.
+async fn orphan_subject(
+    ctx: &FinalizerCtx,
+    state: &lock::LockState,
+) -> Result<Option<Subject>, FinalizerError> {
+    let record = ctx
+        .backend
+        .get(&state.holder_owner, &state.holder)
+        .await
+        .map_err(|e| store_err(format!("reading the holder's record: {e}")))?;
+    let Some(record) = record else {
+        // Gone: the lock's liveness check already reads it as free.
+        return Ok(None);
+    };
+    let name = record
+        .envelope
+        .and_then(|value| serde_json::from_value::<StoredEnvelope>(value).ok())
+        .map(|e| e.name)
+        .filter(|name| segment_ok(name))
+        .ok_or_else(|| integrity("the unconfirmed holder's record carries no usable name"))?;
+    Ok(Some(Subject {
+        task_id: state.holder.clone(),
+        owner: state.holder_owner.clone(),
+        run_prefix: layout::run_prefix(&name, &state.holder),
+        name,
+        start_secs: state.acquired_at_secs,
+    }))
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)] // serde_json::json! expands to .unwrap() internally
+mod tests {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Mutex;
+
+    use aprender_mcp_laya_train::lock::LOCK_OWNER;
+    use aprender_mcp_laya_train::{BackendError, CancelSink, InMemoryTaskBackend};
+    use pmcp::server::task_store::TaskStoreError;
+    use pmcp::types::tasks::Task;
+    use serde_json::{json, Value};
+
+    use super::*;
+    use crate::compute::fakes::{FakeExecutionReader, FakeJobs, FakePacks};
+    use crate::compute::training_job_name;
+    use crate::objects::fakes::{FakeObjects, Op};
+
+    const OUTCOME: &str = include_str!("../../aprender-mcp-laya-train/fixtures/outcome-v1.json");
+    const TRAINING_MANIFEST: &str =
+        include_str!("../../aprender-mcp-laya-train/fixtures/training-manifest-v1.json");
+    const PACK_OUTCOME: &str =
+        include_str!("../../aprender-mcp-laya-train/fixtures/pack-outcome-v1.json");
+    const GATE_REPORT: &str =
+        include_str!("../../aprender-mcp-laya-train/fixtures/gate-report-v1.json");
+
+    const TASK_ID: &str = "00000000-0000-4000-8000-000000000001";
+    const NAME: &str = "fixture-model";
+    const OWNER: &str = "alice";
+    const BUCKET: &str = "fixture-bucket";
+    const MACHINE: &str = "arn:aws:states:us-east-1:123456789012:stateMachine:laya-train-dev";
+    const T0: u64 = 1_800_000_000;
+    const TTL_SECS: u64 = TASK_TTL_MS / 1000;
+
+    fn sha(label: &str) -> String {
+        sha256_hex(label.as_bytes())
+    }
+
+    fn parse(text: &str) -> Value {
+        serde_json::from_str(text).expect("fixture json")
+    }
+
+    // ------------------------------------------------------------ the backend
+
+    /// An in-memory backend that logs the finalizer's record and release writes
+    /// into the shared log, and can fail the next lock release or run a client
+    /// cancel just before the finalizer's `finish` applies.
+    struct TestBackend {
+        inner: Arc<InMemoryTaskBackend>,
+        log: Arc<Mutex<Vec<String>>>,
+        fail_release: AtomicBool,
+        cancel_race: AtomicBool,
+    }
+
+    impl TestBackend {
+        fn push(&self, line: &str) {
+            self.log.lock().expect("lock").push(line.to_string());
+        }
+    }
+
+    #[pmcp::async_trait]
+    impl TaskBackend for TestBackend {
+        async fn put_new(&self, owner_id: &str, record: StoredTask) -> Result<(), BackendError> {
+            self.inner.put_new(owner_id, record).await
+        }
+
+        async fn get(
+            &self,
+            owner_id: &str,
+            task_id: &str,
+        ) -> Result<Option<StoredTask>, BackendError> {
+            self.inner.get(owner_id, task_id).await
+        }
+
+        async fn cas(
+            &self,
+            owner_id: &str,
+            task_id: &str,
+            expected_version: u64,
+            record: StoredTask,
+        ) -> Result<(), BackendError> {
+            let is_lock = owner_id == LOCK_OWNER;
+            let is_release = is_lock && record.task.status.is_terminal();
+            let is_record = !is_lock && record.result.is_some();
+            if is_release && self.fail_release.swap(false, Ordering::SeqCst) {
+                return Err(BackendError::Store(TaskStoreError::Internal {
+                    message: "injected lock release failure".to_string(),
+                }));
+            }
+            if is_record && self.cancel_race.swap(false, Ordering::SeqCst) {
+                let store = AprenderTaskStore::new(
+                    Arc::clone(&self.inner) as Arc<dyn TaskBackend>
+                );
+                store.cancel(task_id, owner_id).await.expect("client cancel");
+            }
+            let done = self
+                .inner
+                .cas(owner_id, task_id, expected_version, record)
+                .await;
+            if done.is_ok() {
+                if is_release {
+                    self.push("release");
+                }
+                if is_record {
+                    self.push("record");
+                }
+            }
+            done
+        }
+
+        async fn list(
+            &self,
+            owner_id: &str,
+            cursor: Option<&str>,
+        ) -> Result<(Vec<StoredTask>, Option<String>), BackendError> {
+            self.inner.list(owner_id, cursor).await
+        }
+
+        async fn sweep_expired(&self) -> Result<usize, BackendError> {
+            self.inner.sweep_expired().await
+        }
+    }
+
+    // --------------------------------------------------------------- the files
+
+    struct Files {
+        outcome: Option<Value>,
+        gate_report: Option<Value>,
+        training_manifest: Option<Value>,
+        partial_manifest: Option<Value>,
+        pack_outcome: Option<Value>,
+        pack_manifest: Option<Value>,
+        extra_objects: Vec<String>,
+    }
+
+    fn pack_manifest_json() -> Value {
+        json!([
+            {"path": "fixture-model.apr", "size": 4_194_304, "sha256": sha("apr")},
+            {"path": "pack-outcome.json", "size": 640, "sha256": sha("pack-outcome")},
+            {"path": "pack.log", "size": 1_024, "sha256": sha("pack-log")},
+            {"path": "verify.log", "size": 2_048, "sha256": sha("verify-log")},
+        ])
+    }
+
+    /// A passing, accepted run built from the committed fixtures.
+    fn passing() -> Files {
+        Files {
+            outcome: Some(parse(OUTCOME)),
+            gate_report: Some(parse(GATE_REPORT)),
+            training_manifest: Some(parse(TRAINING_MANIFEST)),
+            partial_manifest: None,
+            pack_outcome: Some(parse(PACK_OUTCOME)),
+            pack_manifest: Some(pack_manifest_json()),
+            extra_objects: Vec::new(),
+        }
+    }
+
+    /// A gate failure: no pack ran.
+    fn gate_failed() -> Files {
+        let mut files = passing();
+        files.outcome.as_mut().expect("outcome")["exit_class"] = json!("gate_fail");
+        files.gate_report.as_mut().expect("report")["pass"] = json!(false);
+        files.pack_outcome = None;
+        files.pack_manifest = None;
+        files
+    }
+
+    fn entry_paths(manifest: &Value) -> Vec<String> {
+        let list = manifest.get("entries").unwrap_or(manifest);
+        list.as_array()
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|r| r["path"].as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    // --------------------------------------------------------------- the rig
+
+    struct Rig {
+        backend: Arc<TestBackend>,
+        objects: Arc<FakeObjects>,
+        executions: Arc<FakeExecutionReader>,
+        jobs: Arc<FakeJobs>,
+        packs: Arc<FakePacks>,
+        clock: Arc<AtomicU64>,
+        log: Arc<Mutex<Vec<String>>>,
+        ctx: FinalizerCtx,
+        owner: String,
+    }
+
+    impl Rig {
+        fn new() -> Self {
+            Self::with_owner(OWNER)
+        }
+
+        fn with_owner(owner: &str) -> Self {
+            let log: Arc<Mutex<Vec<String>>> = Arc::default();
+            let backend = Arc::new(TestBackend {
+                inner: Arc::new(InMemoryTaskBackend::new()),
+                log: Arc::clone(&log),
+                fail_release: AtomicBool::new(false),
+                cancel_race: AtomicBool::new(false),
+            });
+            let objects = Arc::new(FakeObjects::with_log(Arc::clone(&log)));
+            let executions = Arc::new(FakeExecutionReader::default());
+            let jobs = Arc::new(FakeJobs::default());
+            let packs = Arc::new(FakePacks::default());
+            let clock = Arc::new(AtomicU64::new(T0));
+            let tick = Arc::clone(&clock);
+            let ctx = FinalizerCtx::new(
+                Arc::clone(&backend) as Arc<dyn TaskBackend>,
+                Arc::clone(&objects) as Arc<dyn ObjectStore>,
+                Arc::clone(&executions) as Arc<dyn ExecutionReader>,
+                Arc::clone(&jobs) as Arc<dyn TrainingJobs>,
+                Arc::clone(&packs) as Arc<dyn PackTasks>,
+                BUCKET,
+                MACHINE,
+            )
+            .with_clock(Arc::new(move || tick.load(Ordering::SeqCst)));
+            Self {
+                backend,
+                objects,
+                executions,
+                jobs,
+                packs,
+                clock,
+                log,
+                ctx,
+                owner: owner.to_string(),
+            }
+        }
+
+        fn prefix() -> String {
+            layout::run_prefix(NAME, TASK_ID)
+        }
+
+        fn key(rel: &str) -> String {
+            format!("{}{rel}", Self::prefix())
+        }
+
+        fn arn() -> String {
+            execution_arn(MACHINE, TASK_ID).expect("arn")
+        }
+
+        fn exec_input(&self) -> ExecutionInput {
+            ExecutionInput {
+                schema: SCHEMA_EXECUTION_INPUT.to_string(),
+                task_id: TASK_ID.to_string(),
+                owner: self.owner.clone(),
+                name: NAME.to_string(),
+                dataset_prefix: "datasets/fixture/".to_string(),
+                run_prefix: Self::prefix(),
+                epochs: String::new(),
+                inputs_sha256: layout::inputs_string(
+                    &[
+                        ("task.json", sha("data-task")),
+                        ("train.jsonl", sha("data-train")),
+                        ("eval.jsonl", sha("data-eval")),
+                    ]
+                    .into_iter()
+                    .map(|(k, v)| (k.to_string(), v))
+                    .collect(),
+                ),
+                gate_contract_sha256: sha("prefilter-gate"),
+            }
+        }
+
+        /// A Working task holding the lock, as `submit` leaves one.
+        async fn start(&self) {
+            let record = StoredTask {
+                task: Task::new(TASK_ID, TaskStatus::Working),
+                result: None,
+                envelope: Some(json!({
+                    "dataset_uri": format!("s3://{BUCKET}/datasets/fixture/"),
+                    "name": NAME,
+                    "run_prefix": format!("s3://{BUCKET}/{}", Self::prefix()),
+                })),
+                version: 1,
+                expires_at_secs: Some(lock::now_secs() + TTL_SECS),
+            };
+            self.backend
+                .put_new(&self.owner, record)
+                .await
+                .expect("mint");
+            lock::acquire(self.backend.as_ref(), TASK_ID, &self.owner, T0)
+                .await
+                .expect("lock");
+        }
+
+        /// The execution as Step Functions would describe it.
+        fn set_execution(&self, status: &str) {
+            let input = serde_json::to_string(&self.exec_input()).expect("input");
+            self.executions.set(&Self::arn(), status, &input, T0);
+        }
+
+        fn seed(&self, files: &Files) {
+            let mut seeded: BTreeSet<String> = BTreeSet::new();
+            let mut put = |rel: &str, value: &Value| {
+                self.objects
+                    .seed(&Self::key(rel), &serde_json::to_vec(value).expect("json"));
+                seeded.insert(rel.to_string());
+            };
+            if let Some(v) = &files.outcome {
+                put("outcome.json", v);
+            }
+            if let Some(v) = &files.gate_report {
+                put("run/gate-report.json", v);
+            }
+            if let Some(v) = &files.training_manifest {
+                put("training-manifest.json", v);
+            }
+            if let Some(v) = &files.partial_manifest {
+                put("partial-manifest.json", v);
+            }
+            if let Some(v) = &files.pack_outcome {
+                put("pack-outcome.json", v);
+            }
+            if let Some(v) = &files.pack_manifest {
+                put("pack-manifest.json", v);
+            }
+            let listed: Vec<String> = [
+                &files.training_manifest,
+                &files.partial_manifest,
+                &files.pack_manifest,
+            ]
+            .into_iter()
+            .flatten()
+            .flat_map(entry_paths)
+            .collect();
+            for rel in listed.into_iter().chain(files.extra_objects.iter().cloned()) {
+                if !seeded.contains(&rel) {
+                    self.objects.seed(&Self::key(&rel), b"object bytes");
+                    seeded.insert(rel);
+                }
+            }
+        }
+
+        async fn payload(&self, error: Option<Value>) -> Result<FinalizeReport, FinalizerError> {
+            let mut value = json!({
+                "source": "state-machine",
+                "execution_arn": Self::arn(),
+                "start_time": T0,
+                "input": self.exec_input(),
+            });
+            if let Some(error) = error {
+                value["error"] = error;
+            }
+            handle(&self.ctx, FinalizerInput::parse(&value)?).await
+        }
+
+        async fn event(&self, status: &str) -> Result<FinalizeReport, FinalizerError> {
+            handle(
+                &self.ctx,
+                FinalizerInput::parse(&event_json(status, MACHINE))?,
+            )
+            .await
+        }
+
+        async fn sweep(&self) -> Result<ReconcileReport, FinalizerError> {
+            reconcile(&self.ctx).await
+        }
+
+        async fn record(&self) -> StoredTask {
+            self.backend
+                .get(&self.owner, TASK_ID)
+                .await
+                .expect("get")
+                .expect("record")
+        }
+
+        async fn lock_state(&self) -> lock::LockState {
+            lock::read(self.backend.as_ref()).await.expect("lock state")
+        }
+
+        async fn lock_released(&self) -> bool {
+            self.lock_state().await.released
+        }
+
+        async fn stored_payload(&self) -> StatusPayload {
+            let rec = self.record().await;
+            let text = result_text(rec.result.as_ref().expect("a stored result")).expect("text");
+            serde_json::from_str(text).expect("status payload")
+        }
+
+        fn manifest(&self) -> Manifest {
+            serde_json::from_slice(&self.objects.bytes(&Self::key("manifest.json")).expect("manifest"))
+                .expect("manifest json")
+        }
+
+        /// Every object manifest.json names, plus manifest.json itself.
+        fn published_keys(&self) -> Vec<String> {
+            let mut keys: Vec<String> = self
+                .manifest()
+                .entries
+                .iter()
+                .map(|e| Self::key(&e.path))
+                .collect();
+            keys.push(Self::key("manifest.json"));
+            keys
+        }
+
+        fn assert_all_tagged(&self, want: &str) {
+            for key in self.published_keys() {
+                assert_eq!(self.objects.tag(&key).as_deref(), Some(want), "{key}");
+            }
+        }
+
+        fn log(&self) -> Vec<String> {
+            self.log.lock().expect("lock").clone()
+        }
+
+        /// The finalizer's S3 mutations (puts and tags), not the backend's.
+        fn s3_writes(&self) -> Vec<String> {
+            self.objects.log()
+        }
+
+        /// A client `tasks/cancel` through the real store, with a recording sink.
+        async fn cancel_through_store(&self) -> Arc<RecordingSink> {
+            let sink = Arc::new(RecordingSink::default());
+            let store = AprenderTaskStore::new(Arc::clone(&self.backend) as Arc<dyn TaskBackend>)
+                .with_cancel_sink(Arc::clone(&sink) as Arc<dyn CancelSink>);
+            store.cancel(TASK_ID, &self.owner).await.expect("cancel");
+            sink
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingSink {
+        seen: Mutex<Vec<String>>,
+    }
+
+    impl CancelSink for RecordingSink {
+        fn cancel(&self, task_id: &str) {
+            self.seen.lock().expect("lock").push(task_id.to_string());
+        }
+    }
+
+    fn event_json(status: &str, machine: &str) -> Value {
+        json!({
+            "version": "0",
+            "id": "11111111-2222-3333-4444-555555555555",
+            "detail-type": EVENT_DETAIL_TYPE,
+            "source": "aws.states",
+            "account": "123456789012",
+            "time": "2026-10-29T10:00:00Z",
+            "region": "us-east-1",
+            "resources": [Rig::arn()],
+            "detail": {
+                "executionArn": Rig::arn(),
+                "stateMachineArn": machine,
+                "name": format!("laya-{TASK_ID}"),
+                "status": status,
+            }
+        })
+    }
+
+    fn phase_of(rec: &StoredTask) -> Phase {
+        let text = result_text(rec.result.as_ref().expect("result")).expect("text");
+        serde_json::from_str::<StatusPayload>(text)
+            .expect("payload")
+            .phase
+    }
+
+    /// A rig with the run started, its files seeded and its compute finished.
+    async fn ready(files: &Files) -> Rig {
+        let rig = Rig::new();
+        rig.start().await;
+        rig.seed(files);
+        rig.jobs.set(&training_job_name(TASK_ID), "Completed");
+        rig.set_execution("RUNNING");
+        rig
+    }
+
+    // ------------------------------------------------------------------ tracer
+
+    #[tokio::test]
+    async fn tracer_completed() {
+        let rig = ready(&passing()).await;
+        let report = rig.payload(None).await.expect("finalized");
+
+        assert_eq!(report.phase, Some(Phase::Completed));
+        assert!(report.keep, "{report:?}");
+        assert!(report.released);
+        let rec = rig.record().await;
+        assert_eq!(rec.task.status, TaskStatus::Completed);
+        assert!(!rec.result.as_ref().expect("result").is_error);
+        let payload = rig.stored_payload().await;
+        assert_eq!(payload.phase, Phase::Completed);
+        assert!(payload.manifest.iter().all(|l| l.url.is_none()));
+
+        // verdict.json is the stored payload, byte for byte.
+        let stored_text = result_text(rec.result.as_ref().expect("result")).expect("text");
+        assert_eq!(
+            rig.objects.bytes(&Rig::key("verdict.json")).expect("verdict"),
+            stored_text.as_bytes()
+        );
+
+        // manifest.json: images, contracts, listing, unlisted.
+        let manifest = rig.manifest();
+        assert_eq!(manifest.schema, SCHEMA_MANIFEST);
+        let tm: TrainingManifest = serde_json::from_str(TRAINING_MANIFEST).expect("tm");
+        let po: PackOutcome = serde_json::from_str(PACK_OUTCOME).expect("po");
+        assert_eq!(manifest.images.train, Some(tm.train_image_digest.clone()));
+        assert_eq!(manifest.images.pack, Some(po.pack_image_digest.clone()));
+        assert_eq!(manifest.contracts.train_gate, Some(tm.gate_contract_sha256));
+        assert_eq!(manifest.contracts.pack_gate, Some(po.gate_contract_sha256));
+        assert_eq!(
+            manifest.contracts.pack_parity,
+            Some(po.parity_contract_sha256)
+        );
+        assert_eq!(manifest.contracts.prefilter_gate, Some(sha("prefilter-gate")));
+        assert_eq!(manifest.unlisted, 0);
+        assert_eq!(manifest.entries.len(), 12, "11 writer entries and verdict.json");
+        assert!(manifest.entries.iter().any(|e| e.path == "verdict.json"
+            && e.sha256 == sha256_hex(stored_text.as_bytes())));
+        assert!(manifest.entries.iter().any(|e| e.path == "fixture-model.apr"));
+
+        // D-19: every manifest entry plus both files read back keep.
+        rig.assert_all_tagged(RETENTION_KEEP);
+        assert_eq!(report.tagged, 13);
+
+        // The lock is free.
+        assert!(rig.lock_released().await);
+
+        // Publication order: record, verdict.json, manifest.json, tags, release LAST.
+        let log = rig.log();
+        let at = |needle: &str| {
+            log.iter()
+                .position(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} missing from {log:?}"))
+        };
+        let last_tag = log.iter().rposition(|l| l.starts_with("tag:")).expect("tags");
+        assert!(at("record") < at("put:runs/fixture-model/00000000-0000-4000-8000-000000000001/verdict.json"));
+        assert!(
+            at("verdict.json") < at("put:runs/fixture-model/00000000-0000-4000-8000-000000000001/manifest.json")
+        );
+        assert!(at("put:runs/fixture-model/00000000-0000-4000-8000-000000000001/manifest.json") < at("tag:"));
+        assert!(last_tag < at("release"));
+        assert_eq!(at("release"), log.len() - 1, "the release is the last step");
+    }
+
+    // ------------------------------------------------------------ input shapes
+
+    // ------------------------------------------------------ every way a run ends
+
+    // ------------------------------------------------- duplicates and first writer
+
+    // -------------------------------------------------------- NotFound and integrity
+
+    // ---------------------------------------------------------------- client cancel
+
+    // ---------------------------------------------------------------- compute gate
+
+    // ------------------------------------------------------------------- reconcile
+
+    // ---------------------------------------------------------------- crash resume
+}
