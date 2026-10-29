@@ -19,10 +19,18 @@
 //! # Who is "live"
 //!
 //! A holder is live when the lock is not released, its lease has not passed and
-//! the holder's own task record (found through the stored `holder_owner`) is not
-//! terminal. A record that is released, past its lease, or whose holder task is
-//! terminal or gone is taken over by compare-and-swap, so a finalizer that
-//! crashed before releasing cannot wedge the deployment.
+//! the holder's own task record (found through the stored `holder_owner`) still
+//! exists. A record that is released, past its lease, or whose holder task is
+//! gone is taken over by compare-and-swap, so a lost task record cannot wedge the
+//! deployment.
+//!
+//! A holder whose task is TERMINAL is still live until the lock is RELEASED
+//! (plan 14-05). A client `tasks/cancel` makes the task `Cancelled` immediately,
+//! while its training job or pack task may still be running; the finalizer
+//! releases the lock only when compute is terminal. Reading "terminal" as "free"
+//! would let a replacement `train` start a second billed run beside the first.
+//! A finalizer that crashed before releasing is resumed by its scheduled
+//! reconcile sweep, and the lease bounds the worst case.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -158,9 +166,10 @@ async fn is_live(backend: &dyn TaskBackend, state: &LockState, now: u64) -> bool
         return false;
     }
     match backend.get(&state.holder_owner, &state.holder).await {
-        Ok(Some(holder_task)) => !holder_task.task.status.is_terminal(),
         // The holder's task is gone (expired or lost): nothing will ever release the lock.
         Ok(None) => false,
+        // Present, terminal or not: the lock is the finalizer's to release (module doc).
+        Ok(Some(_)) => true,
         // Cannot tell: fail closed, treat it as live.
         Err(_) => true,
     }
@@ -388,12 +397,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lock_terminal_holder_is_taken_over_without_a_release() {
+    async fn lock_terminal_holder_keeps_the_lock_until_it_is_released() {
+        // A cancelled (terminal) task's compute may still be running: the lock is
+        // the finalizer's to release, not something a terminal status frees.
         let b = backend();
         mint(b.as_ref(), "T1").await;
         mint(b.as_ref(), "T2").await;
         acquire(b.as_ref(), "T1", OWNER, 1_000).await.expect("T1");
         finish(b.as_ref(), "T1").await;
+        assert_eq!(peek_at(b.as_ref(), 1_001).await.as_deref(), Some("T1"));
+        let err = acquire(b.as_ref(), "T2", OWNER, 1_001)
+            .await
+            .expect_err("a terminal holder still holds the lock");
+        assert!(matches!(err, AcquireError::Held(_)), "{err:?}");
+        assert!(release(b.as_ref(), "T1").await);
+        acquire(b.as_ref(), "T2", OWNER, 1_002)
+            .await
+            .expect("T2 after the release");
+    }
+
+    #[tokio::test]
+    async fn lock_holder_with_a_gone_record_is_taken_over() {
+        let b = backend();
+        mint(b.as_ref(), "T2").await;
+        // T1 never had a task record (expired or lost): nothing can release it.
+        acquire(b.as_ref(), "T1", OWNER, 1_000).await.expect("T1");
         assert_eq!(peek_at(b.as_ref(), 1_001).await, None);
         acquire(b.as_ref(), "T2", OWNER, 1_001)
             .await
