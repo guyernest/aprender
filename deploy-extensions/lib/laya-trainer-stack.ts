@@ -212,7 +212,9 @@ export class LayaTrainerStack extends cdk.Stack {
         // S3Prefix channels list the prefix before downloading it.
         actions: ['s3:ListBucket'],
         resources: [bucketArn],
-        conditions: { StringLike: { 's3:prefix': ['datasets/*', `${BASE_PREFIX}*`] } },
+        // StringLikeIfExists, not StringLike: GetObject/HeadObject carry no s3:prefix key, and a
+        // ListBucket condition that fails there turns a missing key's 404 into 403.
+        conditions: { StringLikeIfExists: { 's3:prefix': ['datasets/*', `${BASE_PREFIX}*`] } },
       }),
     );
     this.sagemakerRole.addToPolicy(
@@ -348,7 +350,9 @@ export class LayaTrainerStack extends cdk.Stack {
       new iam.PolicyStatement({
         actions: ['s3:ListBucket'],
         resources: [bucketArn],
-        conditions: { StringLike: { 's3:prefix': ['runs/*'] } },
+        // StringLikeIfExists: a missing key must answer NoSuchKey (404), not AccessDenied (403); the
+        // finalizer's ObjectStore::get treats only NoSuchKey as absent.
+        conditions: { StringLikeIfExists: { 's3:prefix': ['runs/*'] } },
       }),
     );
     finalizer.addToRolePolicy(
@@ -616,7 +620,8 @@ export class LayaTrainerStack extends cdk.Stack {
             Effect: 'Allow',
             Action: ['s3:ListBucket'],
             Resource: bucketArn,
-            Condition: { StringLike: { 's3:prefix': ['datasets/*'] } },
+            // StringLikeIfExists keeps real list calls on datasets/* while a HeadObject (no s3:prefix key) passes.
+            Condition: { StringLikeIfExists: { 's3:prefix': ['datasets/*'] } },
           },
         ],
       }),

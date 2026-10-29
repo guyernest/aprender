@@ -273,7 +273,8 @@ reach a function that can start paid GPU runs.
 The policy contains exactly: the DynamoDB item actions on the task table; `states:StartExecution` on the
 machine; `states:DescribeExecution` (the dispatch confirm) and `states:StopExecution` (the cancel sink) on
 its executions; `s3:GetObject` on `datasets/*` and `runs/*`; and `s3:ListBucket` conditioned on
-`s3:prefix` `datasets/*`. It grants no `s3:Put*`.
+`StringLikeIfExists` `s3:prefix` `datasets/*` (`IfExists`, because `GetObject`/`HeadObject` carry no `s3:prefix` key and a
+plain `StringLike` would turn a missing key's 404 into a 403). It grants no `s3:Put*`.
 
 ## What each principal may do
 
@@ -281,7 +282,7 @@ its executions; `s3:GetObject` on `datasets/*` and `runs/*`; and `s3:ListBucket`
 |-----------|----|-------|
 | SageMaker role | read `datasets/*` and `base/laya-55cf4c4e/*`; write `runs/*` (`PutObject` and `PutObjectTagging`, because every `run_step` upload is tagged) and `sagemaker-output/*` | ECR pull on the train repository, its own log group |
 | Fargate task role | read `runs/*` and `base/laya-55cf4c4e/*`; write `runs/*` (`PutObject` and `PutObjectTagging`) | none |
-| Finalizer | `Get`, `Put`, `PutObjectTagging`, `GetObjectTagging` and `ListBucket` on `runs/*` | DynamoDB items, describe and stop this machine's executions, list its executions, describe and stop `training-job/laya-*`, list, describe and stop ECS tasks conditioned on the cluster |
+| Finalizer | `Get`, `Put`, `PutObjectTagging`, `GetObjectTagging` and `ListBucket` on `runs/*` (every `ListBucket` condition is `StringLikeIfExists` on `s3:prefix`, so a missing key answers 404, not 403) | DynamoDB items, describe and stop this machine's executions, list its executions, describe and stop `training-job/laya-*`, list, describe and stop ECS tasks conditioned on the cluster |
 | Request function | nothing until step 11 | see above |
 
 No statement grants `Action "*"`, `s3:*`, `iam:*` or `sagemaker:*`, and `iam:PassRole` is only ever on a

@@ -160,8 +160,16 @@ def s3_grants(statements_, bucket):
             for r in as_list(st.get("Resource", [])):
                 tail = norm_resource(r, bucket)
                 if a == "s3:ListBucket":
-                    pre = st.get("Condition", {}).get("StringLike", {}).get("s3:prefix")
-                    tail = "[%s]" % ",".join(sorted(as_list(pre))) if pre else "<unconditioned>"
+                    cond = st.get("Condition", {})
+                    pre = cond.get("StringLikeIfExists", {}).get("s3:prefix")
+                    # Plain StringLike fails on GetObject/HeadObject (no s3:prefix key), turning a missing
+                    # key's 404 into a 403; any operator but StringLikeIfExists is its own, rejected tail.
+                    if pre and not cond.get("StringLike"):
+                        tail = "[%s]" % ",".join(sorted(as_list(pre)))
+                    elif cond.get("StringLike", {}).get("s3:prefix"):
+                        tail = "<StringLike:%s>" % ",".join(sorted(as_list(cond["StringLike"]["s3:prefix"])))
+                    else:
+                        tail = "<unconditioned>"
                 grants.setdefault(a, set()).add(tail)
     return grants
 
@@ -424,8 +432,9 @@ def check_request_policy(t, rep):
     acts = {a for s in sts for a in as_list(s.get("Action", []))}
     rep.check("request-no-put", not any(a.startswith(("s3:Put", "s3:Delete", "s3:*")) for a in acts), "the request policy grants %s" % sorted(a for a in acts if a.startswith("s3:")))
     lb = [s for s in sts if "s3:ListBucket" in as_list(s.get("Action", []))]
-    rep.check("request-list-condition", len(lb) == 1 and lb[0].get("Condition", {}).get("StringLike", {}).get("s3:prefix") == ["datasets/*"],
-              "ListBucket statements are %r (must be conditioned on s3:prefix datasets/*)" % lb)
+    rep.check("request-list-condition", len(lb) == 1 and list(lb[0].get("Condition", {})) == ["StringLikeIfExists"]
+              and lb[0]["Condition"]["StringLikeIfExists"].get("s3:prefix") == ["datasets/*"],
+              "ListBucket statements are %r (must be conditioned on StringLikeIfExists s3:prefix datasets/*; plain StringLike turns a missing key's 404 into 403)" % lb)
     dx = [s for s in sts if "states:DescribeExecution" in as_list(s.get("Action", []))]
     rep.check("request-describe-execution", bool(dx) and all(":execution:aprender-laya-train-" in flat(r) for s in dx for r in as_list(s.get("Resource", []))),
               "no states:DescribeExecution on the machine's executions (14-04's dispatch confirm)")
@@ -563,6 +572,14 @@ def drop_action(st, action):
     acts = as_list(st.get("Action", []))
     if action in acts:
         st["Action"] = [a for a in acts if a != action]
+
+
+def swap_list_operator(st, new_op):
+    """Rewrite a ListBucket statement's Condition operator (None drops the condition altogether)."""
+    if "s3:ListBucket" in as_list(st.get("Action", [])) and "Condition" in st:
+        cond = st.pop("Condition")
+        if new_op:
+            st["Condition"] = {new_op: cond["StringLikeIfExists"]}
 
 
 def add_statement(role_key, statement):
@@ -712,6 +729,11 @@ CASES = [
     ("an iam:PassRole on \"*\"", add_statement("finalizer", {"Effect": "Allow", "Action": "iam:PassRole", "Resource": "*"}), True, "iam-passrole"),
     ("the request policy granting s3:PutObject", edit_request_policy(lambda d: [s["Action"].append("s3:PutObject") for s in d["Statement"] if "s3:GetObject" in s.get("Action", [])]), True, "request-no-put"),
     ("ListBucket without the datasets/* condition", edit_request_policy(lambda d: [s.pop("Condition", None) for s in d["Statement"] if "s3:ListBucket" in s.get("Action", [])]), True, "request-list-condition"),
+    ("ListBucket with the old StringLike operator (request policy)", edit_request_policy(lambda d: [s["Condition"].update(StringLike=s["Condition"].pop("StringLikeIfExists")) for s in d["Statement"] if "s3:ListBucket" in s.get("Action", [])]), True, "request-list-condition"),
+    ("ListBucket with the old StringLike operator (finalizer)", edit_policy("finalizer", lambda s: swap_list_operator(s, "StringLike")), True, "finalizer-s3-scope"),
+    ("ListBucket with the old StringLike operator (SageMaker)", edit_policy("sagemaker", lambda s: swap_list_operator(s, "StringLike")), True, "sagemaker-s3-scope"),
+    ("ListBucket without any prefix restriction (finalizer)", edit_policy("finalizer", lambda s: swap_list_operator(s, None)), True, "finalizer-s3-scope"),
+    ("ListBucket without any prefix restriction (SageMaker)", edit_policy("sagemaker", lambda s: swap_list_operator(s, None)), True, "sagemaker-s3-scope"),
     ("the EventBridge rule without ABORTED", drop_aborted, True, "status-rule-statuses"),
     ("ECR tag mutability MUTABLE", set_first("AWS::ECR::Repository", ["Properties", "ImageTagMutability"], "MUTABLE"), False, "ecr-immutable"),
     # the ten cases that answer the plan's review dispositions
