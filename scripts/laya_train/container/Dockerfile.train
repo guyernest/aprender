@@ -14,7 +14,7 @@
 #   pinned by digest or hash   the CUDA base image (@sha256, below), the uv image (@sha256), the aws CLI v2 zip
 #                              (version + sha256, verified in the RUN), the python deps (uv.lock, `--frozen`: every
 #                              wheel by hash; `laya` by full git commit SHA 4066d5d5), the contracts and scripts (COPY)
-#   NOT pinned                 the apt packages (ca-certificates, curl, unzip, git, and cuda-compat-13-0 if the base ever
+#   NOT pinned                 the apt packages (ca-certificates, curl, unzip, git, gcc, libc6-dev, and cuda-compat-13-0 if the base ever
 #                              stops shipping it): they resolve from the base image's Ubuntu / NVIDIA archives at build
 #                              time. The uv-managed CPython 3.13.7 is fetched by uv (it checks its own download hashes).
 #   never in the image         the base-model snapshot or any weights (the `base` channel carries laya-base.tar, verified
@@ -34,8 +34,11 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
+# gcc + libc6-dev: torch 2.14's triton JIT-compiles a tiny CUDA driver stub (triton/backends/nvidia/driver.c) on the first
+# CUDA forward and needs a C compiler to do it. The nvidia/cuda -base image ships none, so the first live CUDA probe (plan
+# 14-12, 2026-10-29) failed with "Failed to find C compiler" on a healthy A10G host. Nothing else is added.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates curl unzip git \
+ && apt-get install -y --no-install-recommends ca-certificates curl unzip git gcc libc6-dev \
  && rm -rf /var/lib/apt/lists/*
 
 # The CUDA compat libraries: confirm they ship with the base, install them if not, and FAIL THE BUILD when absent.
