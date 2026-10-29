@@ -127,7 +127,12 @@
       "no_probe_job_left_inprogress": true,
       "checked": "list-training-jobs InProgress = 0 and describe-training-job laya-probe-cuda-20261029181151 = Completed, BillableTimeInSeconds 210"
     },
-    "owner_decision": null,
+    "owner_decision": {
+      "reply": "amend-criterion",
+      "replied_on": "2026-10-29",
+      "recorded_by": "orchestrator, from the owner's own message in the session",
+      "scope": "The CUDA pass rule becomes tiny_fixture_rc in {0,3} with tiny_fixture_device_used starting with cuda; rc 2 (a refusal) stays a failure. IAM and the S3 ListBucket condition were not part of this approval."
+    },
     "proposed_resolution": "amend the probe's pass criterion to tiny_fixture_rc in {0, 3} with tiny_fixture_device_used starting with cuda (2 = refused stays a failure), keeping the CPU control above as the evidence; with that amendment every other measurement passes and the verdict would be pass. NOT applied by the executor: the owner decides.",
     "sigterm_reprobe": "not re-run (out of the approved scope; the first sigterm record stands: grace 118 s)"
   }
