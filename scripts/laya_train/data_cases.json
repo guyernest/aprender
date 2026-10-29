@@ -3600,6 +3600,92 @@
       "epochs": null,
       "files": {
         "eval.jsonl": {
+          "text": "{\"text\": \"eval a 0\", \"label\": \"a\"}\n{\"text\": \"eval a 1\", \"label\": \"a\"}\n{\"text\": \"eval b 0\", \"label\": \"b\"}\n{\"text\": \"eval b 1\", \"label\": \"b\"}\n{\"text\": \"eval c 0\", \"label\": \"c\"}\n{\"text\": \"eval c 1\", \"label\": \"c\"}\n{\"text\": \"train a 0\", \"label\": \"a\"}\n"
+        },
+        "shift.jsonl": {
+          "text": "{\"text\": \"eval a 0\", \"label\": \"a\"}\n{\"text\": \"eval a 1\", \"label\": \"a\"}\n{\"text\": \"x\", \"label\": \"zzz\"}\n"
+        },
+        "task.json": {
+          "text": "{\"type\": \"choice\", \"instructions\": \"Which?\", \"criteria\": {\"a\": \"first\", \"b\": null, \"c\": \"third\"}}"
+        },
+        "train.jsonl": {
+          "text": "{\"text\": \"train a 0\", \"label\": \"a\"}\n{\"text\": \"train a 1\", \"label\": \"a\"}\n{\"text\": \"train a 2\", \"label\": \"a\"}\n{\"text\": \"train a 3\", \"label\": \"a\"}\n{\"text\": \"train b 0\", \"label\": \"b\"}\n{\"text\": \"train b 1\", \"label\": \"b\"}\n{\"text\": \"train b 2\", \"label\": \"b\"}\n{\"text\": \"train b 3\", \"label\": \"b\"}\n{\"text\": \"train c 0\", \"label\": \"c\"}\n{\"text\": \"train c 1\", \"label\": \"c\"}\n{\"text\": \"train c 2\", \"label\": \"c\"}\n{\"text\": \"train c 3\", \"label\": \"c\"}\n"
+        }
+      },
+      "id": "order-eval-overlap-before-shift-row-error",
+      "note": "eval overlaps train AND a shift row has a bad label: the eval overlap is raised first",
+      "python": {
+        "refused": "eval-train-overlap"
+      },
+      "rust": "same"
+    },
+    {
+      "epochs": null,
+      "files": {
+        "eval.jsonl": {
+          "text": "{\"text\": \"eval a 0\", \"label\": \"a\"}\n{\"text\": \"eval a 1\", \"label\": \"a\"}\n{\"text\": \"eval b 0\", \"label\": \"b\"}\n{\"text\": \"eval b 1\", \"label\": \"b\"}\n{\"text\": \"eval c 0\", \"label\": \"c\"}\n{\"text\": \"eval c 1\", \"label\": \"c\"}\n{\"text\": \"train a 0\", \"label\": \"a\"}\n"
+        },
+        "shift.jsonl": {
+          "text": "{\"text\": \"eval a 0\", \"label\": \"a\"}\n{\"text\": \"eval a 1\", \"label\": \"a\"}\n{\"text\": \"train b 0\", \"label\": \"b\"}\n"
+        },
+        "task.json": {
+          "text": "{\"type\": \"choice\", \"instructions\": \"Which?\", \"criteria\": {\"a\": \"first\", \"b\": null, \"c\": \"third\"}}"
+        },
+        "train.jsonl": {
+          "text": "{\"text\": \"train a 0\", \"label\": \"a\"}\n{\"text\": \"train a 1\", \"label\": \"a\"}\n{\"text\": \"train a 2\", \"label\": \"a\"}\n{\"text\": \"train a 3\", \"label\": \"a\"}\n{\"text\": \"train b 0\", \"label\": \"b\"}\n{\"text\": \"train b 1\", \"label\": \"b\"}\n{\"text\": \"train b 2\", \"label\": \"b\"}\n{\"text\": \"train b 3\", \"label\": \"b\"}\n{\"text\": \"train c 0\", \"label\": \"c\"}\n{\"text\": \"train c 1\", \"label\": \"c\"}\n{\"text\": \"train c 2\", \"label\": \"c\"}\n{\"text\": \"train c 3\", \"label\": \"c\"}\n"
+        }
+      },
+      "id": "order-eval-overlap-before-shift-overlap",
+      "note": "eval AND shift each overlap train: eval first",
+      "python": {
+        "refused": "eval-train-overlap"
+      },
+      "rust": "same"
+    },
+    {
+      "epochs": null,
+      "files": {
+        "eval.jsonl": {
+          "text": "{\"text\": \"eval a 0\", \"label\": \"a\"}\n{\"text\": \"eval a 1\", \"label\": \"a\"}\n{\"text\": \"eval b 0\", \"label\": \"b\"}\n{\"text\": \"eval b 1\", \"label\": \"b\"}\n{\"text\": \"eval c 0\", \"label\": \"c\"}\n{\"text\": \"eval c 1\", \"label\": \"c\"}\n"
+        },
+        "task.json": {
+          "text": "{\"type\": \"choice\", \"instructions\": \"Which?\", \"criteria\": {\"a\": \"first\", \"b\": null, \"c\": \"third\"}}"
+        },
+        "train.jsonl": {
+          "text": "{\"text\": \"train a 0\", \"label\": \"a\"}\n{\"text\": \"train a 1\", \"label\": \"a\"}\n{\"text\": \"train a 2\", \"label\": \"a\"}\n{\"text\": \"train a 3\", \"label\": \"a\"}\n{\"text\": \"train a 4\", \"label\": \"a\"}\n{\"text\": \"train a 5\", \"label\": \"a\"}\n{\"text\": \"train a 6\", \"label\": \"a\"}\n{\"text\": \"train a 7\", \"label\": \"a\"}\n{\"text\": \"train a 8\", \"label\": \"a\"}\n{\"text\": \"train a 9\", \"label\": \"a\"}\n{\"text\": \"train a 10\", \"label\": \"a\"}\n{\"text\": \"train a 11\", \"label\": \"a\"}\n{\"text\": \"train a 12\", \"label\": \"a\"}\n{\"text\": \"train a 13\", \"label\": \"a\"}\n{\"text\": \"train a 14\", \"label\": \"a\"}\n{\"text\": \"train a 15\", \"label\": \"a\"}\n{\"text\": \"train a 16\", \"label\": \"a\"}\n{\"text\": \"train a 17\", \"label\": \"a\"}\n{\"text\": \"train a 18\", \"label\": \"a\"}\n{\"text\": \"train a 19\", \"label\": \"a\"}\n{\"text\": \"train b 0\", \"label\": \"b\"}\n{\"text\": \"train b 1\", \"label\": \"b\"}\n{\"text\": \"train b 2\", \"label\": \"b\"}\n{\"text\": \"train b 3\", \"label\": \"b\"}\n{\"text\": \"train b 4\", \"label\": \"b\"}\n{\"text\": \"train b 5\", \"label\": \"b\"}\n{\"text\": \"train b 6\", \"label\": \"b\"}\n{\"text\": \"train b 7\", \"label\": \"b\"}\n{\"text\": \"train b 8\", \"label\": \"b\"}\n{\"text\": \"train b 9\", \"label\": \"b\"}\n{\"text\": \"train b 10\", \"label\": \"b\"}\n{\"text\": \"train b 11\", \"label\": \"b\"}\n{\"text\": \"train b 12\", \"label\": \"b\"}\n{\"text\": \"train b 13\", \"label\": \"b\"}\n{\"text\": \"train b 14\", \"label\": \"b\"}\n{\"text\": \"train b 15\", \"label\": \"b\"}\n{\"text\": \"train b 16\", \"label\": \"b\"}\n{\"text\": \"train b 17\", \"label\": \"b\"}\n{\"text\": \"train b 18\", \"label\": \"b\"}\n{\"text\": \"train b 19\", \"label\": \"b\"}\n{\"text\": \"c one\", \"label\": \"c\"}\n{\"text\": \"c two\", \"label\": \"c\"}\n"
+        }
+      },
+      "id": "order-class-too-small-before-epochs",
+      "note": "a 2-row class AND epochs missing above 16 shots: the split is checked before the epoch rule",
+      "python": {
+        "refused": "train-class-too-small"
+      },
+      "rust": "same"
+    },
+    {
+      "epochs": null,
+      "files": {
+        "eval.jsonl": {
+          "text": "{\"text\": \"eval a 0\", \"label\": \"a\"}\n{\"text\": \"eval a 1\", \"label\": \"a\"}\n{\"text\": \"eval b 0\", \"label\": \"b\"}\n{\"text\": \"eval b 1\", \"label\": \"b\"}\n{\"text\": \"eval c 0\", \"label\": \"c\"}\n{\"text\": \"eval c 1\", \"label\": \"c\"}\n"
+        },
+        "task.json": {
+          "text": "{\"type\": \"choice\", \"instructions\": \"Which?\", \"criteria\": {\"a\": \"first\", \"b\": null, \"c\": \"third\"}}"
+        },
+        "train.jsonl": {
+          "text": "{\"text\": \"train a 0\", \"label\": \"a\"}\n{\"text\": \"train a 1\", \"label\": \"a\"}\n{\"text\": \"train a 2\", \"label\": \"a\"}\n{\"text\": \"train a 3\", \"label\": \"a\"}\n{\"text\": \"train b 0\", \"label\": \"b\"}\n{\"text\": \"train b 1\", \"label\": \"b\"}\n{\"text\": \"train b 2\", \"label\": \"b\"}\n{\"text\": \"train b 3\", \"label\": \"b\"}\n{\"text\": \"dup a\", \"label\": \"a\"}\n{\"text\": \"dup a\", \"label\": \"b\"}\n{\"text\": \"c0\", \"label\": \"c\"}\n{\"text\": \"c1\", \"label\": \"c\"}\n"
+        }
+      },
+      "id": "order-conflicting-labels-before-too-small",
+      "note": "conflicting labels AND a 2-row class: conflicts first",
+      "python": {
+        "refused": "train-conflicting-labels"
+      },
+      "rust": "same"
+    },
+    {
+      "epochs": null,
+      "files": {
+        "eval.jsonl": {
           "text": "{\"text\": \"eval a 0\", \"label\": \"a\"}\r\n{\"text\": \"eval a 1\", \"label\": \"a\"}\r\n{\"text\": \"eval b 0\", \"label\": \"b\"}\r\n{\"text\": \"eval b 1\", \"label\": \"b\"}\r\n{\"text\": \"eval c 0\", \"label\": \"c\"}\r\n{\"text\": \"eval c 1\", \"label\": \"c\"}\r\n"
         },
         "task.json": {

@@ -321,6 +321,26 @@ def cases_overlap_and_split():
                     "first, then the triple, and the slice swallows the class",
                     dataset(train=rows_text(rows)), refused("train-class-too-small"), rust="deferred"))
 
+    # check ORDER across files and stages (the trainer's step-1 order: eval overlap, then the shift rows and their
+    # overlap, then the calibration split, then the epoch rule). Found by re-mutating validate_data_dir: moving the
+    # shift check before the eval overlap survived every case above.
+    clash = {"text": "train a 0", "label": "a"}
+    out.append(make("order-eval-overlap-before-shift-row-error", "eval overlaps train AND a shift row has a bad label: "
+                    "the eval overlap is raised first",
+                    dataset(ev=rows_text(ev + [clash]), shift=rows_text(ev[:2]) + '{"text": "x", "label": "zzz"}\n'),
+                    refused("eval-train-overlap")))
+    out.append(make("order-eval-overlap-before-shift-overlap", "eval AND shift each overlap train: eval first",
+                    dataset(ev=rows_text(ev + [clash]), shift=rows_text(ev[:2] + [{"text": "train b 0", "label": "b"}])),
+                    refused("eval-train-overlap")))
+    pair = [r for r in train_rows(20) if r["label"] != "c"] + [{"text": "c one", "label": "c"}, {"text": "c two", "label": "c"}]
+    out.append(make("order-class-too-small-before-epochs", "a 2-row class AND epochs missing above 16 shots: the split "
+                    "is checked before the epoch rule", dataset(train=rows_text(pair)), refused("train-class-too-small")))
+    both = base + [{"text": "dup a", "label": "a"}, {"text": "dup a", "label": "b"}]
+    out.append(make("order-conflicting-labels-before-too-small", "conflicting labels AND a 2-row class: conflicts first",
+                    dataset(train=rows_text([r for r in both if r["label"] != "c"]
+                                            + [{"text": "c%d" % i, "label": "c"} for i in range(2)])),
+                    refused("train-conflicting-labels")))
+
     # accepted traps
     crlf = dataset(train=rows_text(base, "\r\n"), ev=rows_text(ev, "\r\n"))
     out.append(make("ok-crlf", "CRLF line endings in train and eval (the CR is stripped, WR-05)", crlf,
