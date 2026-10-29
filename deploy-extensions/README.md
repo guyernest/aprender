@@ -204,3 +204,114 @@ just destroy-training dev
 
 `dev` destroys its data by design; `prod` retains the table and the bucket, so a
 `destroy` there leaves them behind for you to remove deliberately.
+
+---
+
+# Laya training server (Phase 14): ORDER MATTERS
+
+The Laya training MCP server (`aprender-mcp-laya-train`) is a request function deployed by
+cargo-pmcp (plans 14-10 and 14-13) plus everything in this directory's two Laya stacks. Both
+stacks are selected with `--context stack=...`; `stack=training` stays the default, so every SetFit
+recipe above synthesizes exactly what it did before. `dev` and `prod` are the only environments
+(D-01); the deploy recipes (plan 14-09) default the profile to `ze-kasher-dev`.
+
+| Stack | Context | Holds |
+|-------|---------|-------|
+| `aprender-laya-trainer-images-<env>` | `stack=laya-trainer-images` | two ECR repositories (immutable tags, scan on push, untagged-only expiry), the build-context bucket, two privileged CodeBuild projects (x86_64 for the CUDA training image, arm64 for the pack image) |
+| `aprender-laya-trainer-<env>` | `stack=laya-trainer` `trainImageDigest=sha256:...` `packImageDigest=sha256:...` | the run bucket, the task table, a no-NAT VPC and cluster, the arm64 Fargate pack task, the finalizer Lambda, the `aprender-laya-train-<env>` state machine, the EventBridge rules, the DLQ and the alarm |
+
+## Offline check (what this plan proves)
+
+```bash
+just laya-trainer-synth dev      # cross-builds the finalizer, synthesizes BOTH stacks with no
+                                 # credentials, runs the template assertions, prints TRAINER SYNTH OK
+python3 -I scripts/laya_deploy/laya_trainer_stack_check.py --selftest   # every assertion is shown to fail
+```
+
+With no digests the synth uses all-zero placeholders and says so (`PLACEHOLDER DIGESTS (synth
+only)`); the trainer stack refuses anything that is not `sha256:<64 hex>`, so a floating tag can never
+be deployed. Every spend limit is a literal in the template and is asserted from it: `ml.g5.xlarge`,
+count 1, `MaxRuntimeInSeconds` 21600, the 36,000 s machine timeout, the 8 vCPU / 16 GiB ARM64 pack task,
+the exact `data` and `base` SageMaker channels, and digest-pinned images. None is read from the
+execution input.
+
+## Order of the first deployment
+
+1. **Images stack.** `diff` then `deploy` the images stack (`just laya-trainer-infra diff-images`,
+   `deploy-images`, plan 14-09). It must exist before the trainer stack because the trainer stack pins
+   the images by digest.
+2. **Images stack outputs.** `outputs-images` records the two repository URIs, the two CodeBuild project
+   names and the build-context bucket.
+3. **CodeBuild image builds.** `just laya-trainer-image train` and `pack` upload a context assembled from
+   `HEAD`, start the matching project, and record the `IMAGE DIGEST sha256:...` line each build prints.
+   Tags are the 40-hex commit and are immutable; the digests are what the stack pins.
+4. **Trainer stack with those digests.** `just laya-trainer-infra diff` then `deploy`; the deploy refuses
+   placeholder digests.
+5. **Trainer stack outputs.** `BucketName`, `TableName`, `StateMachineArn`, `FinalizerName`,
+   `SageMakerRoleArn`, `TrainRepoUri`, `PackTaskDefinitionArn`, `ClusterArn`, `SubnetIds`,
+   `SecurityGroupId`, `FinalizerDlqUrl` and `RequestLambdaPolicy`.
+6. **Stage the base tar and the datasets.** `just laya-trainer-stage base` (only when its sha256 is the
+   pinned one) and `just laya-trainer-stage dataset DIR PREFIX`. A datasets prefix is immutable: a new
+   dataset is a new prefix.
+7. **Probe jobs** (`just laya-trainer-probe cuda|sigterm`, owner-approved spend), plan 14-12.
+8. **Deploy the request function** to pmcp.run (plans 14-10 and 14-13). It has no AWS permission yet.
+9. **Owner enables OAuth** on the server.
+10. **401 check.** The unauthenticated `tools/list` and `tools/call` must answer 401 before anything is
+    granted.
+11. **Grant `RequestLambdaPolicy`** (`just laya-trainer-grant`), the stack output, to the request
+    function's role. This is the only way the request function ever gets AWS rights.
+12. **Smoke** (`just laya-trainer-call`).
+
+### Why the grant comes last (D-10)
+
+`RequestLambdaPolicy` is an OUTPUT, never a statement attached by this stack: the request function is
+deployed by cargo-pmcp from a different app and this stack has no right to reach into it. Until step 11,
+every `train` call compensates to `failed` with `AccessDenied` and **nothing can be spent**. Attaching it
+before the 401 check would mean an unauthenticated caller could, in the window before OAuth is enabled,
+reach a function that can start paid GPU runs.
+
+The policy contains exactly: the DynamoDB item actions on the task table; `states:StartExecution` on the
+machine; `states:DescribeExecution` (the dispatch confirm) and `states:StopExecution` (the cancel sink) on
+its executions; `s3:GetObject` on `datasets/*` and `runs/*`; and `s3:ListBucket` conditioned on
+`s3:prefix` `datasets/*`. It grants no `s3:Put*`.
+
+## What each principal may do
+
+| Principal | S3 | Other |
+|-----------|----|-------|
+| SageMaker role | read `datasets/*` and `base/laya-55cf4c4e/*`; write `runs/*` (`PutObject` and `PutObjectTagging`, because every `run_step` upload is tagged) and `sagemaker-output/*` | ECR pull on the train repository, its own log group |
+| Fargate task role | read `runs/*` and `base/laya-55cf4c4e/*`; write `runs/*` (`PutObject` and `PutObjectTagging`) | none |
+| Finalizer | `Get`, `Put`, `PutObjectTagging`, `GetObjectTagging` and `ListBucket` on `runs/*` | DynamoDB items, describe and stop this machine's executions, list its executions, describe and stop `training-job/laya-*`, list, describe and stop ECS tasks conditioned on the cluster |
+| Request function | nothing until step 11 | see above |
+
+No statement grants `Action "*"`, `s3:*`, `iam:*` or `sagemaker:*`, and `iam:PassRole` is only ever on a
+specific role ARN. The check script asserts all of it.
+
+## Retention (D-19)
+
+The bucket keeps `datasets/` and `base/` forever and is `RETAIN`ed on stack deletion in every
+environment, blocks all public access and requires TLS. Three lifecycle rules, no more: `runs/` objects
+tagged `laya-retention=expire` expire after 30 days (a `keep`-tagged run matches nothing), `sagemaker-output/`
+expires after 30 days, and incomplete multipart uploads are aborted after 7 days. ECR expires **untagged**
+images only; every pushed image carries its immutable commit tag, so no deployed or
+reproduction-referenced digest can be deleted by a count rule.
+
+## Recovery model
+
+Three things drive the finalizer: the state machine's own `Finalize` and `CatchFinalize` states, an
+EventBridge rule on this machine's `FAILED`, `TIMED_OUT` and `ABORTED` status changes, and a rule that
+sends `{"source":"reconcile"}` every 10 minutes. Step Functions status events are best effort, so the
+schedule is the floor: it re-drives every run whose finalization is incomplete.
+
+- **The single-flight lock is the marker.** The finalizer releases it last, only when the SageMaker job and
+  every pack task are terminal and publication is complete. A lock that stays held means a run's
+  finalization is incomplete (or its compute is still running); nothing replaces it until then.
+- **Both EventBridge targets** retry 4 times and send what still fails to the SQS queue
+  `aprender-laya-train-finalizer-dlq-<env>` (14-day retention); its URL is the `FinalizerDlqUrl` output.
+- **The `FinalizerErrors` CloudWatch alarm** (`aprender-laya-train-FinalizerErrors-<env>`) goes to ALARM on
+  any finalizer error in a 5-minute period. It is visible in the CloudWatch console under that name; it has
+  no notification action, so look at it (or at the DLQ) when a run seems stuck.
+- **What the template cannot prove** (live recovery after lost events, a live ECS task after cancel) is
+  failure-injected offline in plan 14-05 and observed live in plan 14-14.
+- A synth with a concrete account (`cdk diff`, `cdk deploy`) makes one read-only availability-zone lookup
+  and writes `cdk.context.json`, which is gitignored because it embeds the account id.
