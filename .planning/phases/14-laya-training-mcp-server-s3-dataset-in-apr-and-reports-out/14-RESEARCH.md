@@ -395,28 +395,31 @@ Reads of `name`, `task_id`, bucket and prefix come from SageMaker `Environment`/
 | A12 | The A10G with 16 GB host RAM holds ModernBERT-large 421M fp32 AdamW at the recipe batch size | Container | OOM on first run; the probe on the real shape measures it |
 | A13 | Model-name slug rule `^[a-z0-9][a-z0-9-]{0,47}$` is acceptable | Security | Owner may want another alphabet or length |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
-1. **How is the epoch count decided above 16 shots/class? (blocking, owner)**
+1. **How is the epoch count decided above 16 shots/class? (blocking, owner)** — RESOLVED
    - What we know: the trainer requires `--epochs` in [4,12] there and refuses it below; Phases 10 and 12 used 4 and 12.
    - What's unclear: whether D-06 should be amended to allow an optional `epochs` (recommended), or the server pins a value.
    - Recommendation: option (a) in Pitfall 1; the plan's first decision checkpoint.
+   - **RESOLVED by D-21 (owner, 2026-10-28):** `train` takes an optional `epochs` in [4,12], accepted only above 16 shots per class and required there, never defaulted. Implemented by plan 14-01 (`resolve_epochs`, read from the contract) and mirrored on the shared table in 14-02.
 
-2. **Does the ml.g5 training host run CUDA 13 torch? (blocking, probe)**
+2. **Does the ml.g5 training host run CUDA 13 torch? (blocking, probe)** — RESOLVED
    - What we know: wheels are cu13 only; the only found AWS driver table puts g5 at 470.
    - What's unclear: the training-job driver; compat package behaviour.
    - Recommendation: a probe job before the lock work is merged.
+   - **RESOLVED by plan 14-12's CUDA probe job** (the compat-library switch is built in 14-06): it is answered by measurement into 14-PROBE-EVIDENCE.json before any gate run, and the owner decides the next step from its verdict; a failed probe never proceeds, and any torch pin change is an owner decision (14-03).
 
-3. **Register: owner go for deployment-unit 10 -> 11 (blocking-human).**
+3. **Register: owner go for deployment-unit 10 -> 11 (blocking-human).** — RESOLVED
    - Recommendation: lib-only server crate plus one Lambda crate; record the decision in CONTEXT or a DECISION file, then edit the test and the two allowlists in the same PR as the crate.
+   - **RESOLVED by D-22 (owner, 2026-10-28), implemented in plan 14-04:** `DEPLOYMENT_UNIT_BASELINE` 10 -> 11 with the duplicate-bin allowlist and the selftest row, in the same commit as the `bootstrap` bin; `aprender-mcp-laya-train` stays a library.
 
-4. **Where do the owner's datasets get into the bucket?** D-03 has the owner or a recipe write `datasets/<prefix>/`. There is no upload tool. A `just laya-dataset-put <dir> <prefix>` recipe (aws CLI, owner-run) is the obvious companion; the motivation-v1 dir (395 lines, 92 KB) is local and gitignored (`/data/` root-anchored) and would be the first upload. Needs the owner (AWS call).
+4. **Where do the owner's datasets get into the bucket?** — RESOLVED by plan 14-09's owner-run `just laya-trainer-stage dataset` (staged in 14-12; motivation-v1 checked against Phase 12's inputs sha256). D-03 has the owner or a recipe write `datasets/<prefix>/`. There is no upload tool. A `just laya-dataset-put <dir> <prefix>` recipe (aws CLI, owner-run) is the obvious companion; the motivation-v1 dir (395 lines, 92 KB) is local and gitignored (`/data/` root-anchored) and would be the first upload. Needs the owner (AWS call).
 
-5. **Service quota for `ml.g5.xlarge` for training job usage in ze-kasher-dev.** Quotas for training, endpoint and processing are separate; nothing could be checked without an AWS call. Owner action; likely a Service Quotas request.
+5. **Service quota for `ml.g5.xlarge` for training job usage in ze-kasher-dev.** — RESOLVED by plan 14-12's blocking owner checkpoint (D-13): the owner confirms price and quota before any AWS call. Quotas for training, endpoint and processing are separate; nothing could be checked without an AWS call. Owner action; likely a Service Quotas request.
 
-6. **Image digest pinning and records.** Recommended: build in CodeBuild, push to ECR, reference `repo@sha256:<digest>` in `TrainingImage` and in the Fargate task definition revision, and write both digests into `manifest.json`. Who runs CodeBuild is an owner/AWS action.
+6. **Image digest pinning and records.** — RESOLVED by plans 14-08/14-09 (CodeBuild to IMMUTABLE ECR, `repo@sha256:<digest>` in TrainingImage and the task definition) and the run record: the state machine passes each digest as an env literal, run_step writes `train_image_digest` / `pack_image_digest` (14-06, 14-07), and the finalizer copies both into manifest.json `images` (14-01, 14-05). Recommended: build in CodeBuild, push to ECR, reference `repo@sha256:<digest>` in `TrainingImage` and in the Fargate task definition revision, and write both digests into `manifest.json`. Who runs CodeBuild is an owner/AWS action.
 
-7. **Retention of GATE PASS runs includes a 0.84 GB checkpoint per run.** "Indefinitely" is the owner's word; flag the storage line item once.
+7. **Retention of GATE PASS runs includes a 0.84 GB checkpoint per run.** — RESOLVED (informational): D-19 is the owner's decision; no plan action beyond this flagged line item. "Indefinitely" is the owner's word; flag the storage line item once.
 
 ## Environment Availability
 

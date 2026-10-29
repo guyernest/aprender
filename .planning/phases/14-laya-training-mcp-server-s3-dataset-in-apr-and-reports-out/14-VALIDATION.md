@@ -44,18 +44,19 @@ Decision-keyed (no REQ-IDs are mapped to this phase). Task IDs are filled in onc
 
 | Decision | Behavior | Test Type | Automated Command | File Exists | Status |
 |----------|----------|-----------|-------------------|-------------|--------|
-| D-06 / D-21 | unknown `train` args refused; `epochs` accepted only in [4,12] above 16 shots/class, refused otherwise; above-16 without `epochs` refused | unit | `cargo test -p aprender-mcp-laya-train --lib args` | ❌ W0 | ⬜ pending |
-| D-08 | Rust validation equals `data.py` on one shared case table | unit + python | `cargo test -p aprender-mcp-laya-train --test validation_cases` and `uv run --project scripts/laya_train --frozen python scripts/laya_train/data.py --selftest` | ❌ W0 | ⬜ pending |
-| D-11 | second `train` refused naming running task; lock expiry takeover; finalizer release | unit (in-memory backend) | `cargo test -p aprender-mcp-laya-train-lambda --lib lock` | ❌ W0 | ⬜ pending |
-| D-10 | no tool callable without auth | live check (owner) | `just _laya-auth-refusal-check <url> 0` | ✅ | ⬜ pending |
-| D-18 | one payload shape; links absent from stored record | unit | `cargo test -p aprender-mcp-laya-train --lib payload` | ❌ W0 | ⬜ pending |
-| D-19 | lifecycle rules by tag; pending default expires | synth assertion | `just synth-laya-train` + template assertion | ❌ W0 | ⬜ pending |
-| D-20 | fetch recipe verifies every sha256, refuses a tampered file, restores run+data+apr | recipe selftest | `just laya-fetch-selftest` | ❌ W0 | ⬜ pending |
-| D-14 | pack/verify runs at the fixed contracts path on arm64 | local docker smoke | `docker run --platform linux/arm64 <img> pack_laya inspect <fixture.apr>` | ❌ W0 | ⬜ pending |
-| D-02 / D-12 / D-13 | job shape: instance, MaxRuntime 21600, channels | synth assertion | `just synth-laya-train` + state-machine JSON assertion | ❌ W0 | ⬜ pending |
-| D-15 | verify refusal → failed task, no `.apr`, reports attached | finalizer unit | `cargo test -p aprender-mcp-laya-train-lambda --lib finalize` | ❌ W0 | ⬜ pending |
-| D-22 | register 11, dup-bin allowlist, selftest row 6 claimants | existing tests | `cargo test -p aprender-core --test monorepo_invariants`; `bash scripts/check_duplicate_bin_names.sh`; `just laya-gates-selftest` | ✅ (edit) | ⬜ pending |
-| container | pinned stack imports; lifecycle passes | local-only | `just laya-train-lifecycle` | ✅ (local) | ⬜ pending |
+| D-06 / D-21 | unknown `train` args refused; `epochs` accepted only in [4,12] above 16 shots/class, refused otherwise; above-16 without `epochs` refused | unit | `cargo test -p aprender-mcp-laya-train --lib args` (+ `--lib name`, `--lib uri`; 14-01 Task 2) | ❌ W0 | ⬜ pending |
+| D-08 | Rust validation equals `data.py` on one shared case table | unit + python | `cargo test -p aprender-mcp-laya-train --lib shared_case_table` (+ `contract_mirror`, `deferrable_rules_mirror`, `no_false_refusal`; 14-02) and `uv run --project scripts/laya_train --frozen python scripts/laya_train/data.py --selftest` | ❌ W0 | ⬜ pending |
+| D-11 | second `train` refused naming running task; lock expiry takeover; finalizer release | unit (in-memory backend) | `cargo test -p aprender-mcp-laya-train --lib lock` and `--lib submit_single_flight` (14-01); release on every path `cargo test -p aprender-mcp-laya-train-lambda --lib fin_` (14-05) | ❌ W0 | ⬜ pending |
+| D-10 | no tool callable without auth | live check (owner) | `just _laya-auth-refusal-check <url> 0 train_status` (tool argument added in 14-10; run inside `just laya-trainer-grant`, 14-13) | ✅ | ⬜ pending |
+| D-18 | one payload shape; links absent from stored record; a client-cancelled task ends with a stored cancelled payload | unit | `cargo test -p aprender-mcp-laya-train --lib payload` and `--lib attach` (14-01); `cargo test -p aprender-mcp-laya-train-lambda --lib fin_cancel` (14-05) | ❌ W0 | ⬜ pending |
+| D-19 | lifecycle rules by tag; pending default expires | synth assertion | `just laya-trainer-synth dev` (prints `TRAINER SYNTH OK env=dev`) + `python3 -I scripts/laya_deploy/laya_trainer_stack_check.py --selftest` (14-08) | ❌ W0 | ⬜ pending |
+| D-20 | fetch recipe verifies every sha256, refuses a tampered file, restores run+data+apr | recipe selftest | `just laya-fetch --selftest` and `LAYA_GATES_ONLY=fetch just laya-gates-selftest` (14-11) | ❌ W0 | ⬜ pending |
+| D-14 | pack/verify runs at the fixed contracts path on arm64 | local docker smoke | `bash deploy-extensions/container/pack-arm64/smoke.sh` (prints `SMOKE OK image`; 14-07) and `python3 -I scripts/laya_train/container/run_step.py --selftest` | ❌ W0 | ⬜ pending |
+| D-02 / D-12 / D-13 | job shape: instance, MaxRuntime 21600, channels, image digests | synth assertion | `just laya-trainer-synth dev` + `python3 -I scripts/laya_deploy/laya_trainer_stack_check.py --selftest` (14-08) | ❌ W0 | ⬜ pending |
+| D-15 | verify refusal → failed task, no `.apr`, reports attached | finalizer unit | `cargo test -p aprender-mcp-laya-train --lib finalize_` (14-01) and `cargo test -p aprender-mcp-laya-train-lambda --lib fin_` + `--lib tracer_completed` (14-05) | ❌ W0 | ⬜ pending |
+| D-22 | register 11, dup-bin allowlist, selftest row 6 claimants | existing tests | `cargo test -p aprender-core --test monorepo_invariants`; `bash scripts/check_duplicate_bin_names.sh`; `LAYA_GATES_ONLY=dup-bin-names just laya-gates-selftest` (14-04 Task 3) | ✅ (edit) | ⬜ pending |
+| README | every new crate has a README linking the monorepo | existing test | `cargo test -p aprender-core --test readme_contract` (CI fragment 040; 14-01, 14-04) | ✅ | ⬜ pending |
+| container | pinned stack imports; lifecycle passes | local-only | `just laya-train-lifecycle`; `python3 -I scripts/laya_train/container/run_step.py --selftest` (14-06) | ✅ (local) | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -63,9 +64,9 @@ Decision-keyed (no REQ-IDs are mapped to this phase). Task IDs are filled in onc
 
 ## Wave 0 Requirements
 
-- [ ] `scripts/laya_train/data_cases.json` + replay in `data.py --selftest` + `crates/aprender-mcp-laya-train/tests/validation_cases.rs`
+- [ ] `scripts/laya_train/data_cases.json` + replay in `data.py --selftest` + a `--lib` replay test in `aprender-mcp-laya-train` (no new `tests/*.rs`)
 - [ ] `crates/aprender-mcp-laya-train/` and `crates/aprender-mcp-laya-train-lambda/` skeletons with in-memory backend tests
-- [ ] CI fragment for every new `tests/*.rs`
+- [ ] CI fragment for every new `tests/*.rs` (none planned: the plans keep these as `--lib` tests)
 - [ ] CDK stack + synth recipe; ASL JSON assertion
 - [ ] Dockerfiles + CodeBuild buildspec (owner runs); local arm64 smoke recipe
 - [ ] fetch recipe + selftest with a tampered-file negative control

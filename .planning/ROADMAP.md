@@ -1058,7 +1058,38 @@ Owner decisions already made (2026-10-28), to be recorded in this phase's CONTEX
 Known constraints: Laya training does not fit Lambda (CPU, 900 s cap) — Phase 10's gate run took 16,822 s on Apple MPS for three seeds and Phase 12's pilot 752 s; SageMaker GPU instances are x86_64 + CUDA while every Laya parity and pack-tolerance number is aarch64 (`contracts/laya-parity-v1.yaml` A1; `--device cuda` exists and the noise record is written per run), so a one-cell probe comes before any gate run is trusted there; `pack_laya` is a cargo example, not a shipped binary, and no `apr decide` subcommand exists (Phase 8 D-02); the base snapshot (`convaiinnovations/laya` @ 55cf4c4e, 0.84 GB, sha-pinned) must reach the job from S3, never baked into the image; the Lambda crate's `bootstrap` bin needs a FALSIFY-MONO-011 allowlist entry (baseline 27); reading a prefix needs prefix-scoped `s3:ListBucket` or a missing key answers 403, not 404 (the SetFit server's lesson); CI never installs torch, so the container's lifecycle check is local-only like `laya-verify-suite`; no AWS call without the owner.
 **Requirements**: none mapped; the plans implement CONTEXT decisions
 **Depends on:** Phase 13
-**Plans:** 0 plans
+**Plans:** 15 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 14 to break down)
+**Wave 1**
+- [ ] 14-01-PLAN.md — library crate aprender-mcp-laya-train: tools, shared layout vocabulary, single-flight lease, status payload, finalize decision (wave 1)
+- [ ] 14-03-PLAN.md — verified Linux x86_64 resolution of the pinned uv lock (owner package check) (wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 14-02-PLAN.md — D-08 shared case table: validate_data_dir used by the trainer, Rust pre-filter replay, mutations (wave 2)
+- [ ] 14-04-PLAN.md — lambda crate request side (bootstrap, S3 dataset source, Step Functions dispatcher, cancel sink) and the D-22 register 10 -> 11 (wave 2)
+- [ ] 14-06-PLAN.md — GPU training container: run_step.py train/probe modes, deterministic base staging, Dockerfile.train (wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 14-05-PLAN.md — the finalizer bin: verdict.json, manifest.json, retention tags, lock release on every path (wave 3)
+- [ ] 14-07-PLAN.md — arm64 pack-and-verify step and image with a native local smoke (wave 3)
+- [ ] 14-11-PLAN.md — D-20 laya-fetch recipe with sha256 verification (wave 3)
+
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 14-08-PLAN.md — CDK images and trainer stacks with template assertions (D-12, D-13, D-14, D-19, least privilege) (wave 4)
+
+**Wave 5** *(blocked on Wave 4 completion)*
+- [ ] 14-09-PLAN.md — owner-run ops recipes: image builds, stack deploy, staging, probe jobs (DRY_RUN-proven) (wave 5)
+
+**Wave 6** *(blocked on Wave 5 completion)*
+- [ ] 14-10-PLAN.md — publish, grant-after-401 and authenticated call recipes; deploy template without IAM (wave 6)
+- [ ] 14-12-PLAN.md — live: infrastructure bring-up in ze-kasher-dev and the CUDA / SIGTERM probes (owner-gated) (wave 6)
+
+**Wave 7** *(blocked on Wave 6 completion)*
+- [ ] 14-13-PLAN.md — live: publish on pmcp.run, OAuth, 401, grant, free live checks (owner-gated) (wave 7)
+
+**Wave 8** *(blocked on Wave 7 completion)*
+- [ ] 14-14-PLAN.md — live: end-to-end smoke, cancel test, D-16 band and retry declaration (owner-gated) (wave 8)
+
+**Wave 9** *(blocked on Wave 8 completion)*
+- [ ] 14-15-PLAN.md — live: D-16 motivation-v1 reproduction on SageMaker and its verdict (owner-gated) (wave 9)
