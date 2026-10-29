@@ -1,0 +1,69 @@
+{
+  "schema": "laya-trainer-deploy-evidence-v1",
+  "plan": "14-13",
+  "profile": "ze-kasher-dev",
+  "endpoint": "https://aprender-mcp-laya-train.us-east.true-mcp.com/mcp",
+  "exposure_start_utc": "2026-10-29T19:04:44Z",
+  "exposure_start_basis": "the deployment-creation time embedded in the cargo-pmcp deployment id (epoch seconds 1793300684), which the deploy log prints at its 'Creating deployment' step; the log carries no wall-clock stamps of its own. The earlier 'Deploying to pmcp.run' line precedes it (template render and bootstrap upload with retries) but the function did not exist before the deployment was created and completed, so this is the stated start of exposure",
+  "publish_done_utc": "2026-10-29T19:05:52Z",
+  "package_in_log": true,
+  "crates_root_restored": true,
+  "deploy_attempts": [
+    {
+      "n": 1,
+      "result": "failed before anything was created: cargo-pmcp's descriptor parse reported 'missing field `enable_xray` in `observability`' and its cdk-synth fallback cannot run; crates root restored byte-identical",
+      "created_anything": false
+    },
+    {
+      "n": 2,
+      "result": "failed the same way on 'missing field `timeout_seconds` in `server`' after the first field was added; crates root restored byte-identical",
+      "created_anything": false
+    },
+    {
+      "n": 3,
+      "result": "DEPLOY OK aprender-mcp-laya-train; the renderer path (pmcp-cfn-renderer) was used, [environment] applied to McpFunction, [server] sizing MemorySize 256 -> 1024; the bootstrap upload needed 3 retries on network errors and then succeeded",
+      "created_anything": true
+    }
+  ],
+  "template_fix_commit": "e28ecbaf0",
+  "oauth_enabled_at_publish": false,
+  "health": {
+    "code": 200,
+    "names": "aprender-mcp-laya-train"
+  },
+  "tools": [
+    "train",
+    "train_status",
+    "validate_dataset"
+  ],
+  "unauth_initialize_code": 200,
+  "unauth_tools_list_code": 200,
+  "unauth_validate": {
+    "rule": "dataset-access",
+    "verbatim": "REFUSED dataset-access: the server role has no read grant on s3://<BucketName>/datasets/motivation-v1/",
+    "expected": "dataset-access",
+    "unexpected_posture": null
+  },
+  "unauth_minted": {
+    "table_count_before": 0,
+    "table_count_after": 0,
+    "executions": 0
+  },
+  "pre_grant_role": {
+    "inline_policies": [
+      "pmcp-declared",
+      "PmcpCompositionPolicy"
+    ],
+    "attached_policies": [
+      "AWSLambdaBasicExecutionRole"
+    ],
+    "simulation": {
+      "states:StartExecution": "implicitDeny",
+      "dynamodb:PutItem": "implicitDeny",
+      "s3:GetObject": "implicitDeny"
+    },
+    "max_session_seconds": 3600
+  },
+  "no_unauthenticated_train_call": true,
+  "owner_replies": []
+}
