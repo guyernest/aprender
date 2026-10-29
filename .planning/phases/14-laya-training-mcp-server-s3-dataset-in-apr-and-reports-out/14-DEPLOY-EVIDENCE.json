@@ -70,6 +70,11 @@
       "reply": "oauth-on m2m-ready <m2m-file>. The token URL is part of the json.",
       "replied_on": "2026-10-29",
       "note": "the M2M file was moved by the owner from the repository root to a mode-600 path outside the checkout; verified outside the repo, mode 600, holding client_id/client_secret/token_url; token host is the function's own host"
+    },
+    {
+      "reply": "smoke-go",
+      "replied_on": "2026-10-29",
+      "note": "owner's own message in the session, recorded by the orchestrator; no spend ceiling was stated beyond the plan's own (tweet-stance-64 epochs 4, tweet-stance-16 cancelled in training, tweet-stance-16 cancelled in packing)"
     }
   ],
   "auth": {
