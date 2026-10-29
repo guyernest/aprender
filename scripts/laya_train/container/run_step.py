@@ -65,6 +65,28 @@ MAX_OBJECT_BYTES = 5 * 1024 ** 3
 SMALL_FILE_BYTES = 5 * 1024 ** 2
 MIN_CALL_S = 0.2                                     # an upload is not started with less time than this left
 
+# D-12: ONE absolute deadline after SIGTERM. t0 = the signal; SIGTERM to the trainer's group at t0, SIGKILL at
+# t0 + CHILD_GRACE_S; small-file uploads stop at t0 + SHUTDOWN_DEADLINE_S - FINAL_RESERVE_S; partial-manifest.json
+# and outcome.json {timeout} take the reserved last seconds; the process exits by t0 + SHUTDOWN_DEADLINE_S.
+# 25 s is [ASSUMED] to fit SageMaker's stop grace; plan 14-12's probe-sigterm measures the real one.
+SHUTDOWN_DEADLINE_S = 25
+CHILD_GRACE_S = 5
+FINAL_RESERVE_S = 5
+SYNC_INTERVAL_S = 300                                # periodic upload of changed small files + partial-manifest
+GPU_SAMPLE_INTERVAL_S = 30
+HEARTBEAT_INTERVAL_S = 2                             # probe-sigterm
+PROBE_TRAIN_STEP_TOKENS = 1024                       # above the decide servers' 800 built-token cap: an upper bound
+PROBE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
+
+# D-02 / D-13: torch 2.14 Linux wheels are CUDA 13; AWS documents driver 580 for CUDA 13 and the compat-package
+# switch for older host drivers, so the compat libraries go on LD_LIBRARY_PATH only below this major.
+COMPAT_BELOW_MAJOR = 580
+COMPAT_DIR = "/usr/local/cuda/compat"
+PROC_NVIDIA_VERSION = Path("/proc/driver/nvidia/version")
+SMI_VERSION_CMD = ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"]
+SMI_SAMPLE_CMD = ["nvidia-smi", "--query-gpu=memory.used,utilization.gpu", "--format=csv,noheader,nounits"]
+DRIVER_RE = re.compile(r"\b(\d{3,4}\.\d+(?:\.\d+)?)\b")
+
 DEVICE_RE = re.compile(r"^DEVICE seed=\d+ requested=(\S+) used=(\S+) torch=")
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
 TASK_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,63}$")
@@ -260,6 +282,66 @@ def list_files(work):
     return out
 
 
+def small_files(work):
+    """list_files() restricted to what a mid-run sync or a SIGTERM shutdown may upload: at most 5 MiB and never
+    anything under a checkpoint directory (the checkpoints are uploaded only by the normal finish)."""
+    out = []
+    for rel, path in list_files(work):
+        try:
+            if path.stat().st_size <= SMALL_FILE_BYTES and "checkpoint" not in rel.split("/"):
+                out.append((rel, path))
+        except OSError:
+            pass
+    return out
+
+
+def shutdown_priority(rel):
+    """train.log first, then the reports (gate-report / recipe / per-seed JSON), then the rest."""
+    if rel == "train.log":
+        return 0
+    if rel.startswith("run/") and rel.endswith(".json"):
+        return 1
+    return 2
+
+
+def parse_driver(text):
+    m = DRIVER_RE.search(text or "")
+    return m.group(1) if m else None
+
+
+def host_driver(proc_path=PROC_NVIDIA_VERSION, smi_cmd=None):
+    """The host NVIDIA driver version string: /proc/driver/nvidia/version first, `nvidia-smi` second, else "unknown"."""
+    try:
+        drv = parse_driver(Path(proc_path).read_text(errors="replace"))
+        if drv:
+            return drv
+    except OSError:
+        pass
+    try:
+        r = subprocess.run(list(smi_cmd or SMI_VERSION_CMD), capture_output=True, text=True, timeout=15)
+        drv = parse_driver(r.stdout) if r.returncode == 0 else None
+        if drv:
+            return drv
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "unknown"
+
+
+def decide_compat(driver):
+    """True only when the driver's major version is known and below COMPAT_BELOW_MAJOR."""
+    m = re.match(r"^(\d+)\.", driver or "")
+    return bool(m) and int(m.group(1)) < COMPAT_BELOW_MAJOR
+
+
+def with_compat(env, compat_used):
+    """env with /usr/local/cuda/compat first on LD_LIBRARY_PATH when compat_used; otherwise a plain copy."""
+    env = dict(env)
+    if compat_used:
+        old = env.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = COMPAT_DIR + (":" + old if old else "")
+    return env
+
+
 # ------------------------------------------------------------------------------------------ S3 transfer
 
 def aws_runner(argv, timeout):
@@ -359,6 +441,8 @@ class Trainer:
         self.cpu_fallback = False
         self.devices = []
         self.started = None
+        self.rc = None
+        self.exited = threading.Event()
 
     def start(self):
         self.started = time.monotonic()
@@ -366,8 +450,18 @@ class Trainer:
                                      start_new_session=True)
         self.pump = threading.Thread(target=self._pump, daemon=True)
         self.pump.start()
+        threading.Thread(target=self._reap, daemon=True).start()
+
+    def _reap(self):
+        # the ONLY place that waits on the Popen: a SIGTERM handler that ran Popen.wait/poll would find
+        # Popen's waitpid lock held by the interrupted frame and see a dead trainer as alive, so everything
+        # else (the main wait, the handler) goes through `exited`.
+        self.rc = self.proc.wait()
+        self.exited.set()
 
     def kill_group(self, sig=signal.SIGKILL):
+        if self.exited.is_set():
+            return
         try:
             os.killpg(self.proc.pid, sig)
         except (ProcessLookupError, PermissionError):
@@ -391,12 +485,84 @@ class Trainer:
 
     def wait(self):
         """The trainer's exit status (negative = killed by a signal); joins the pump."""
-        rc = self.proc.wait()
+        self.exited.wait()
         self.pump.join(10)
-        return rc
+        return self.rc
 
     def seconds(self):
         return time.monotonic() - self.started if self.started is not None else 0.0
+
+
+class Sampler(threading.Thread):
+    """Samples `nvidia-smi --query-gpu=memory.used,utilization.gpu` every `interval` s into <work>/gpu-samples.json
+    (rewritten atomically, so a mid-run sync never reads half a file)."""
+
+    def __init__(self, work, cmd, interval):
+        super().__init__(daemon=True)
+        self.path, self.cmd, self.interval = Path(work) / "gpu-samples.json", list(cmd), interval
+        self.stop = threading.Event()
+        self.samples = []
+        self.peak = None
+
+    def sample(self):
+        row = {"t": now_iso()}
+        try:
+            r = subprocess.run(self.cmd, capture_output=True, text=True, timeout=10)
+            if r.returncode != 0:
+                raise RuntimeError("exit %d" % r.returncode)
+            mem, util = [int(x.strip()) for x in r.stdout.strip().splitlines()[0].split(",")[:2]]
+            row.update({"memory_used_mib": mem, "utilization_pct": util})
+            self.peak = mem if self.peak is None else max(self.peak, mem)
+        except Exception as e:                           # a missing or failing nvidia-smi is a recorded gap
+            row["error"] = "%s: %s" % (type(e).__name__, str(e)[:100])
+        self.samples = (self.samples + [row])[-4000:]
+        self.write()
+
+    def write(self):
+        obj = {"schema": "laya-train-gpu-samples-v1", "interval_s": self.interval, "samples": self.samples,
+               "peak_memory_used_mib": self.peak}
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        tmp.write_text(json.dumps(obj, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, self.path)
+
+    def run(self):
+        while True:
+            self.sample()
+            if self.stop.wait(self.interval):
+                break
+
+    def finish(self):
+        self.stop.set()
+        self.join(15)
+
+
+class Syncer(threading.Thread):
+    """Every `interval` s: upload the changed small files, THEN partial-manifest.json (complete false) listing
+    every file uploaded so far, each only after its own upload returned success. A run killed hard still leaves
+    recipe.json, the per-seed files and an inventory that names them."""
+
+    def __init__(self, run, interval):
+        super().__init__(daemon=True)
+        self.run_, self.interval = run, interval
+        self.stop = threading.Event()
+
+    def sync_once(self):
+        up = self.run_.uploader
+        sent = False
+        for rel, path in small_files(self.run_.work):
+            if self.stop.is_set():
+                return
+            sent |= up.put(rel, path, attempts=2, timeout=60.0) == "uploaded"
+        if sent and not self.stop.is_set():
+            self.run_.put_partial_manifest(attempts=2, timeout=60.0)
+
+    def run(self):
+        while not self.stop.wait(self.interval):
+            self.sync_once()
+
+    def finish(self):
+        self.stop.set()
+        self.join(180)
 
 
 # ------------------------------------------------------------------------------------------ the run
@@ -422,6 +588,15 @@ class Knobs:
     upload_timeout: float = 900.0
     echo: bool = True
     prepare_base: object = None                       # callable() -> HF_HOME Path (the base channel's staging)
+    sync_interval: float = SYNC_INTERVAL_S
+    sample_interval: float = GPU_SAMPLE_INTERVAL_S
+    sampler_cmd: tuple = tuple(SMI_SAMPLE_CMD)
+    deadline: float = SHUTDOWN_DEADLINE_S
+    grace: float = CHILD_GRACE_S
+    reserve: float = FINAL_RESERVE_S
+    proc_version: Path = PROC_NVIDIA_VERSION
+    smi_version_cmd: tuple = tuple(SMI_VERSION_CMD)
+    install_signals: bool = True                      # the selftest runs in-process with False
 
 
 def child_env(hf_home):
@@ -442,6 +617,11 @@ class Run:
         self.log_path.write_bytes(b"")
         self.started_at = now_iso()
         self.trainer = None
+        self.sampler = None
+        self.syncer = None
+        self.shutting_down = False
+        self.completed = False                           # outcome.json is uploaded: a later SIGTERM must not replace it
+        self.exit_code = 1
         self.gate_sha = sha256_file(knobs.contract_path)
         self.run_env = {"schema": "laya-train-run-env-v1", "python": sys.version.split()[0],
                         "hf_hub_offline": True, "peak_gpu_memory_mib": None}
@@ -464,6 +644,8 @@ class Run:
                 shutil.copyfile(src, dst / name)
 
     def execute(self):
+        if self.knobs.install_signals:
+            signal.signal(signal.SIGTERM, self.on_sigterm)
         bad = check_inputs(self.paths.data_channel, self.cfg.expected_inputs)
         if bad is not None:
             line = "REFUSED inputs-changed: %s" % bad
@@ -478,9 +660,18 @@ class Run:
             except Exception as e:                       # base staging failed: no trainer, the run is a crash
                 self.append_log("BASE STAGING FAILED: %s" % str(e)[:300])
                 return self.finish("crash", None, 0.0, None, False)
+        driver = host_driver(self.knobs.proc_version, self.knobs.smi_version_cmd)
+        compat = decide_compat(driver)
+        env = with_compat(child_env(hf_home), compat)
+        self.run_env.update({"driver": driver, "compat_used": compat,
+                             "compat_ld_library_path": env["LD_LIBRARY_PATH"] if compat else None})
         self.write_run_env()
+        self.sampler = Sampler(self.work, self.knobs.sampler_cmd, self.knobs.sample_interval)
+        self.sampler.start()
+        self.syncer = Syncer(self, self.knobs.sync_interval)
+        self.syncer.start()
         argv = trainer_argv(self.knobs.python, self.knobs.trainer, self.work, self.cfg.epochs)
-        self.trainer = Trainer(argv, child_env(hf_home), self.log_path, self.knobs.echo)
+        self.trainer = Trainer(argv, env, self.log_path, self.knobs.echo)
         try:
             self.trainer.start()
         except OSError as e:
@@ -497,6 +688,11 @@ class Run:
 
     def finish(self, exit_class, train_rc, train_seconds, refused_line_hint, cpu_fallback):
         """Classify, hash, upload every file, then training-manifest.json, then outcome.json LAST."""
+        if self.syncer is not None:
+            self.syncer.finish()
+        if self.sampler is not None:
+            self.sampler.finish()
+            self.run_env["peak_gpu_memory_mib"] = self.sampler.peak
         report_dev = read_gate_device(self.work / "run")
         log_dev = self.trainer.devices[0] if self.trainer is not None and self.trainer.devices else None
         dev = report_dev
@@ -520,12 +716,69 @@ class Run:
         man_path = self.work / "training-manifest.json"
         write_json(man_path, manifest_obj(self.cfg, self.gate_sha, True, entries))
         up.put("training-manifest.json", man_path, attempts=k.attempts, timeout=k.upload_timeout, record=False)
-        up.put("outcome.json", out_path, attempts=k.attempts, timeout=k.upload_timeout, record=False)
+        sent = up.put("outcome.json", out_path, attempts=k.attempts, timeout=k.upload_timeout, record=False)
         failed = dict(up.failed)
         if failed:
             say("upload failures: %s" % ", ".join("%s (%s)" % (p, e) for p, e in sorted(failed.items())))
         code = job_exit_code(exit_class)
-        return 1 if failed and code == 0 else code
+        code = 1 if failed and code == 0 else code
+        self.exit_code, self.completed = code, sent != "failed"
+        return code
+
+    # ------------------------------------------------------------------ partial inventory and SIGTERM
+    def put_partial_manifest(self, attempts, timeout, deadline=None):
+        """partial-manifest.json: a TrainingManifest with complete false listing exactly the files uploaded so far."""
+        path = self.work / "partial-manifest.json"
+        write_json(path, manifest_obj(self.cfg, self.gate_sha, False, self.uploader.entries()))
+        return self.uploader.put("partial-manifest.json", path, attempts=attempts, timeout=timeout,
+                                 deadline=deadline, record=False)
+
+    def on_sigterm(self, signum, frame):
+        """SIGTERM (MaxRuntime or a stop): do the whole bounded shutdown here, in the main thread, then exit. The
+        deadline is anchored to the moment the handler starts."""
+        t0 = time.monotonic()
+        if self.shutting_down:
+            return
+        self.shutting_down = True
+        code = self.exit_code if self.completed else self.shutdown(t0)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(code)
+
+    def shutdown(self, t0):
+        k = self.knobs
+        end = t0 + k.deadline
+        uploads_stop = end - k.reserve
+        for th in (self.syncer, self.sampler):
+            if th is not None:
+                th.stop.set()
+        tr = self.trainer
+        if tr is not None and tr.proc is not None and not tr.exited.is_set():
+            tr.kill_group(signal.SIGTERM)
+            if not tr.exited.wait(max(0.0, t0 + k.grace - time.monotonic())):
+                tr.kill_group(signal.SIGKILL)
+                tr.exited.wait(max(0.1, min(1.0, uploads_stop - time.monotonic())))
+            tr.pump.join(0.5)
+        up = self.uploader
+        for rel, path in sorted(small_files(self.work), key=lambda rp: shutdown_priority(rp[0])):
+            if time.monotonic() >= uploads_stop - MIN_CALL_S:
+                break
+            up.put(rel, path, attempts=1, timeout=10.0, deadline=uploads_stop)
+        log_dev = tr.devices[0] if tr is not None and tr.devices else None
+        dev = read_gate_device(self.work / "run") or log_dev
+        self.run_env["peak_gpu_memory_mib"] = self.sampler.peak if self.sampler is not None else None
+        self.write_run_env()
+        outcome = {"schema": SCHEMA_OUTCOME, "task_id": self.cfg.task_id, "exit_class": "timeout", "train_rc": None,
+                   "device_used": dev or "none", "device_ok": bool(dev and dev.startswith("cuda")),
+                   "refused_line": None, "started_at": self.started_at, "finished_at": now_iso(),
+                   "train_seconds": round(tr.seconds(), 1) if tr is not None else 0.0}
+        out_path = self.work / "outcome.json"
+        write_json(out_path, outcome)
+        # the reserve is shared: the inventory may use its first half, outcome.json (the completion marker) is
+        # always left the rest, so a slow runner cannot starve the marker
+        self.put_partial_manifest(attempts=1, timeout=10.0, deadline=end - k.reserve / 2)
+        up.put("outcome.json", out_path, attempts=1, timeout=10.0, deadline=end, record=False)
+        return 1
 
 
 def run_train(cfg, paths, runner, knobs):
@@ -542,6 +795,244 @@ def entry_train(env, paths, runner, knobs):
     return run_train(cfg, paths, runner, knobs)
 
 
+# ------------------------------------------------------------------------------------------ probe modes
+
+PROBE_KEYS = ("schema", "driver", "nvidia_smi", "compat_used", "torch_cuda_available", "torch_version_cuda",
+              "device_name", "matmul_ok", "base_load_ok", "base_forward_seconds", "max_memory_allocated_bytes",
+              "train_step_ok", "train_step_seconds", "train_step_peak_bytes", "host_rss_peak_bytes",
+              "train_step_batch", "train_step_tokens", "tiny_fixture_rc", "tiny_fixture_device_used", "finished_at")
+HELPER_KEYS = ("torch_cuda_available", "torch_version_cuda", "device_name", "matmul_ok", "base_load_ok",
+               "base_forward_seconds", "max_memory_allocated_bytes", "train_step_ok", "train_step_seconds",
+               "train_step_peak_bytes", "host_rss_peak_bytes", "train_step_batch", "train_step_tokens")
+BOOL_PROBE_KEYS = ("torch_cuda_available", "matmul_ok", "base_load_ok", "train_step_ok")
+
+# The CUDA half of the probe, run by the venv interpreter (`python -c`): torch availability, one matmul, the real
+# base loaded OFFLINE through train.py's own loader, one forward, then ONE bounded real-model training step
+# (forward, backward, one AdamW step over the trainable parameters on a synthetic batch). A memory and kernel
+# check only, never a training numeric. It prints one `PROBE_JSON {...}` line and always exits 0: a failure is a
+# false field plus an `error`, because the finding is the record.
+PROBE_HELPER_PY = r"""
+import argparse, json, os, resource, sys, time
+ap = argparse.ArgumentParser()
+ap.add_argument("--device", default="cuda")
+ap.add_argument("--matmul-n", type=int, default=4096)
+ap.add_argument("--batch", type=int, default=0)
+ap.add_argument("--tokens", type=int, default=1024)
+ap.add_argument("--base-dir", default="")
+ap.add_argument("--base-sha256", default="")
+ap.add_argument("--repo", required=True)
+a = ap.parse_args()
+res = {}
+def emit(**kv):
+    res.update(kv)
+    print("PROBE_JSON " + json.dumps(res), flush=True)
+def rss():
+    r = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return r * 1024 if sys.platform.startswith("linux") else r
+try:
+    import torch
+    dev = torch.device(a.device)
+    cuda = dev.type == "cuda"
+    res["torch_cuda_available"] = bool(torch.cuda.is_available())
+    res["torch_version_cuda"] = torch.version.cuda
+    if cuda and not torch.cuda.is_available():
+        emit(matmul_ok=False, error="cuda requested but torch.cuda.is_available() is false")
+        sys.exit(0)
+    res["device_name"] = torch.cuda.get_device_name(0) if cuda else a.device
+    x = torch.randn(a.matmul_n, a.matmul_n, device=dev)
+    y = x @ x
+    if cuda:
+        torch.cuda.synchronize()
+    res["matmul_ok"] = bool(torch.isfinite(y).all().item())
+    del x, y
+except SystemExit:
+    raise
+except BaseException as e:
+    emit(matmul_ok=False, error="matmul: %s: %s" % (type(e).__name__, str(e)[:300]))
+    sys.exit(0)
+sys.path.insert(0, os.path.join(a.repo, "scripts", "laya_train"))
+k = 3
+try:
+    import contract, train
+    from laya.common import QTYPES
+    if a.base_dir:
+        src, rev, digest = a.base_dir, None, a.base_sha256
+    else:
+        b = contract.base()
+        src, rev, digest = b["repo"], b["revision"], b["model_safetensors_sha256"]
+    batch = a.batch or contract.recipe_number("batch_size", "int")
+    if cuda:
+        torch.cuda.reset_peak_memory_stats()
+    agent, used = train.load_agent(src, a.device, digest, rev)
+    if cuda and not used.startswith("cuda"):
+        raise RuntimeError("the base landed on %s, not cuda" % used)
+    model, dv = agent.model, agent.device
+    def tensors(n, length):
+        ids = torch.randint(5, max(8, len(agent.tok)), (n, length), device=dv)
+        att = torch.ones((n, length), dtype=torch.long, device=dv)
+        mpos = torch.tensor([[1, 2, 3]] * n, dtype=torch.long, device=dv)
+        mm = torch.ones((n, k), dtype=torch.bool, device=dv)
+        qt = torch.full((n,), QTYPES["choice"], dtype=torch.long, device=dv)
+        return ids, att, mpos, mm, qt
+    model.eval()
+    t = time.time()
+    with torch.no_grad():
+        z, _ = model(*tensors(1, 64))
+    if cuda:
+        torch.cuda.synchronize()
+    res["base_forward_seconds"] = round(time.time() - t, 4)
+    res["base_load_ok"] = bool(torch.isfinite(z.float()).all().item())
+    res["max_memory_allocated_bytes"] = int(torch.cuda.max_memory_allocated()) if cuda else 0
+except BaseException as e:
+    emit(base_load_ok=False, error="base: %s: %s" % (type(e).__name__, str(e)[:300]))
+    sys.exit(0)
+try:
+    model.train()
+    params = [p for p in model.parameters() if p.requires_grad]
+    opt = torch.optim.AdamW(params, lr=1e-6)
+    if cuda:
+        torch.cuda.reset_peak_memory_stats()
+    t = time.time()
+    z, act = model(*tensors(batch, a.tokens))
+    loss = z[:, :k].float().logsumexp(-1).mean() + 0.0 * act.float().sum()
+    opt.zero_grad()
+    loss.backward()
+    opt.step()
+    if cuda:
+        torch.cuda.synchronize()
+    res.update(train_step_ok=bool(torch.isfinite(loss).item()), train_step_seconds=round(time.time() - t, 3),
+               train_step_peak_bytes=int(torch.cuda.max_memory_allocated()) if cuda else 0,
+               train_step_batch=batch, train_step_tokens=a.tokens, host_rss_peak_bytes=rss())
+except BaseException as e:
+    res.update(train_step_ok=False, train_step_batch=batch, train_step_tokens=a.tokens,
+               train_step_peak_bytes=int(torch.cuda.max_memory_allocated()) if cuda else 0,
+               host_rss_peak_bytes=rss(), error="train step: %s: %s" % (type(e).__name__, str(e)[:300]))
+emit()
+"""
+
+
+def run_text(cmd, timeout=60, env=None):
+    """(returncode, merged output text); a command that cannot run is (None, the error)."""
+    try:
+        r = subprocess.run(list(cmd), capture_output=True, text=True, timeout=timeout, env=env, errors="replace")
+        return r.returncode, (r.stdout or "") + (r.stderr or "")
+    except (OSError, subprocess.SubprocessError) as e:
+        return None, "%s: %s" % (type(e).__name__, str(e)[:200])
+
+
+def parse_probe_env(env):
+    bucket, pid = env.get("LAYA_BUCKET", ""), env.get("LAYA_PROBE_ID", "")
+    if not BUCKET_RE.match(bucket):
+        raise Refusal("env: LAYA_BUCKET is required and must be a bucket name")
+    if not PROBE_ID_RE.match(pid):
+        raise Refusal("env: LAYA_PROBE_ID must match ^[a-z0-9][a-z0-9-]{0,47}$")
+    return bucket, pid
+
+
+def run_probe(bucket, probe_id, paths, runner, knobs, helper_cmd=None, tiny_cmd=None, smi_cmd=None, tiny_out=None):
+    """The paid probe's answer sheet (plan 14-12): nvidia-smi, the host driver and the compat decision, the CUDA
+    helper (matmul, offline real-base load and forward, ONE real-model training step) and a synthetic-fixture
+    train.py run on cuda, written to probe.json and uploaded under runs/probe/<probe_id>/ with the logs."""
+    work = Path(paths.work) / "probe"
+    work.mkdir(parents=True, exist_ok=True)
+    snap = Path(tempfile.mkdtemp(prefix="laya-probe-snap-"))
+    up = Uploader(runner, bucket, "runs/probe/%s/" % probe_id, snap, knobs.backoff)
+    _, smi_text = run_text(smi_cmd or ["nvidia-smi"], timeout=30)
+    driver = host_driver(knobs.proc_version, knobs.smi_version_cmd)
+    compat = decide_compat(driver)
+    hf_home = paths.hf_home
+    if knobs.prepare_base is not None:
+        try:
+            hf_home = knobs.prepare_base()
+        except Exception as e:
+            (work / "base-staging.log").write_text("BASE STAGING FAILED: %s\n" % str(e)[:300])
+    env = with_compat(child_env(hf_home), compat)
+    tiny = ROOT / "crates" / "aprender-decide" / "tests" / "fixtures" / "laya_tiny"
+    tiny_out = Path(tiny_out) if tiny_out else work / "tiny-run"
+    if helper_cmd is None:
+        helper_cmd = [knobs.python, "-c", PROBE_HELPER_PY, "--device", "cuda", "--repo", str(ROOT),
+                      "--tokens", str(PROBE_TRAIN_STEP_TOKENS)]
+    if tiny_cmd is None:
+        tiny_cmd = [knobs.python, str(knobs.trainer), "--data", str(tiny / "data"), "--out", str(tiny_out),
+                    "--variant", "synthetic-fixture", "--base", str(tiny / "checkpoint"), "--base-sha256",
+                    sha256_file(tiny / "checkpoint" / "model.safetensors"), "--device", "cuda", "--epochs", "1",
+                    "--stopping", "fixed_epochs"]
+    h_rc, h_text = run_text(helper_cmd, timeout=3600, env=env)
+    helper = {}
+    for line in h_text.splitlines():
+        if line.startswith("PROBE_JSON "):
+            try:
+                helper = json.loads(line[len("PROBE_JSON "):])
+            except ValueError:
+                pass
+    t_rc, t_text = run_text(tiny_cmd, timeout=1800, env=env)
+    tiny_dev = read_gate_device(tiny_out)
+    probe = {"schema": "laya-train-probe-v1", "driver": driver, "nvidia_smi": smi_text[:16384], "compat_used": compat}
+    for key in HELPER_KEYS:
+        probe[key] = helper.get(key, False if key in BOOL_PROBE_KEYS else None)
+    probe.update({"tiny_fixture_rc": t_rc, "tiny_fixture_device_used": tiny_dev, "finished_at": now_iso()})
+    probe = {key: probe[key] for key in PROBE_KEYS}
+    (work / "nvidia-smi.txt").write_text(smi_text, encoding="utf-8")
+    (work / "helper.log").write_text("rc=%s\n%s" % (h_rc, h_text[-200000:]), encoding="utf-8")
+    (work / "tiny-fixture.log").write_text("rc=%s\n%s" % (t_rc, t_text[-200000:]), encoding="utf-8")
+    write_json(work / "probe.json", probe)
+    for name in ("nvidia-smi.txt", "helper.log", "tiny-fixture.log", "probe.json"):
+        up.put(name, work / name, attempts=knobs.attempts, timeout=knobs.upload_timeout)
+    return 0 if "probe.json" in up.uploaded else 1
+
+
+def entry_probe(env, paths, runner, knobs):
+    try:
+        bucket, pid = parse_probe_env(env)
+    except Refusal as e:
+        print("REFUSED " + str(e), file=sys.stderr, flush=True)
+        return 2
+    return run_probe(bucket, pid, paths, runner, knobs)
+
+
+def run_probe_sigterm(bucket, probe_id, paths, runner, knobs, ready_path=None):
+    """Measures SageMaker's SIGTERM grace: after SIGTERM it uploads sigterm-heartbeat-<n>.json {seconds_since_sigterm}
+    every 2 s until the container is killed, so the last heartbeat bounds the grace from below."""
+    work = Path(paths.work) / "probe-sigterm"
+    work.mkdir(parents=True, exist_ok=True)
+    up = Uploader(runner, bucket, "runs/probe/%s/" % probe_id, Path(tempfile.mkdtemp(prefix="laya-hb-")), knobs.backoff)
+    state = {"in_handler": False}
+
+    def beat(n, since):
+        name = "sigterm-heartbeat-%d.json" % n
+        write_json(work / name, {"schema": "laya-train-probe-sigterm-v1", "n": n, "seconds_since_sigterm": round(since, 3)})
+        up.put(name, work / name, attempts=1, timeout=5.0, record=False)
+
+    def handler(signum, frame):
+        if state["in_handler"]:
+            return
+        state["in_handler"] = True
+        t0 = time.monotonic()
+        n = 0
+        while True:
+            beat(n, time.monotonic() - t0)
+            n += 1
+            time.sleep(max(0.0, t0 + n * HEARTBEAT_INTERVAL_S - time.monotonic()))
+
+    signal.signal(signal.SIGTERM, handler)
+    write_json(work / "sigterm-ready.json", {"schema": "laya-train-probe-sigterm-v1", "started_at": now_iso()})
+    up.put("sigterm-ready.json", work / "sigterm-ready.json", attempts=3, timeout=30.0, record=False)
+    if ready_path:
+        Path(ready_path).write_text("1")
+    say("probe-sigterm ready; waiting for SIGTERM")
+    while True:
+        time.sleep(1.0)
+
+
+def entry_probe_sigterm(env, paths, runner, knobs):
+    try:
+        bucket, pid = parse_probe_env(env)
+    except Refusal as e:
+        print("REFUSED " + str(e), file=sys.stderr, flush=True)
+        return 2
+    return run_probe_sigterm(bucket, pid, paths, runner, knobs)
+
+
 # ------------------------------------------------------------------------------------------ selftest
 
 FAKE_TRAINER = r'''
@@ -556,18 +1047,43 @@ if mark:
     pathlib.Path(mark, "trainer.started").write_text("1")
 out.mkdir(parents=True, exist_ok=True)
 (out / "argv.json").write_text(json.dumps(args))
+(out / "env.json").write_text(json.dumps({k: os.environ.get(k) for k in ("LD_LIBRARY_PATH", "HF_HUB_OFFLINE", "HF_HOME")}))
 def device_line(dev):
     print("DEVICE seed=13 requested=cuda used=%s torch=x" % dev, flush=True)
 def report(dev="cuda:0"):
     (out / "gate-report.json").write_text(json.dumps({"pass": mode == "pass", "device_used": dev, "device_is_cpu": False}))
+def checkpoint(root):
+    (root / "checkpoint").mkdir(parents=True, exist_ok=True)
+    (root / "checkpoint" / "model.safetensors").write_bytes(b"w" * 1024)
 if mode in ("pass", "gate3"):
     device_line("cuda:0")
     (out / "recipe.json").write_text('{"fake":true}')
-    (out / "checkpoint").mkdir()
-    (out / "checkpoint" / "model.safetensors").write_bytes(b"w" * 1024)
+    checkpoint(out)
     report()
     print("GATE PASS" if mode == "pass" else "GATE FAIL", flush=True)
     sys.exit(0 if mode == "pass" else 3)
+if mode == "slow":
+    time.sleep(0.5)
+    (out / "recipe.json").write_text('{"fake":true}')
+    (out / "big.bin").write_bytes(b"b" * (6 * 1024 * 1024))
+    time.sleep(3.0)
+    device_line("cuda:0")
+    report()
+    pathlib.Path(mark, "trainer.done").write_text("1")
+    sys.exit(0)
+if mode == "sigterm":
+    got = pathlib.Path(mark, "got-sigterm")
+    signal.signal(signal.SIGTERM, lambda s, f: got.write_text("1"))
+    (out / "recipe.json").write_text('{"fake":true}')
+    checkpoint(out)
+    (out / "seeds" / "seed-13").mkdir(parents=True)
+    checkpoint(out / "seeds" / "seed-13")
+    (out / "seeds" / "seed-13" / "eval-probs.json").write_text("[]")
+    device_line("cuda:0")
+    pathlib.Path(mark, "pid").write_text(str(os.getpid()))
+    pathlib.Path(mark, "ready").write_text("1")
+    while True:
+        time.sleep(0.1)
 if mode == "refused":
     print("starting", flush=True)
     print("REFUSED data: fake refusal", file=sys.stderr, flush=True)
@@ -582,6 +1098,66 @@ if mode == "cpu":
     device_line("cpu")
     time.sleep(60)
 '''
+
+
+class FakeRunner:
+    """The selftest's S3: copies the --body into a temp 'bucket' dir and records every call (key, tag, times, whether
+    the fake trainer had finished). `delay` is how long an upload takes (it honours the call's timeout, like
+    subprocess.run), `fail(key)` makes chosen uploads raise, `log_path` persists the calls for a child process."""
+
+    def __init__(self, bucket, marker_dir=None, delay=0.0, fail=None, log_path=None):
+        self.bucket, self.marker_dir, self.delay, self.fail = Path(bucket), marker_dir, delay, fail
+        self.log_path = Path(log_path) if log_path else None
+        self.calls = []
+
+    def __call__(self, argv, timeout):
+        a = dict(zip(argv[3::2], argv[4::2])) if argv[:3] == ["aws", "s3api", "put-object"] else None
+        if a is None:
+            raise RuntimeError("not a put-object argv")
+        key, body = a["--key"], a["--body"]
+        rec = {"key": key, "tagging": a.get("--tagging"), "t": time.monotonic(), "wall": time.time(), "ok": False,
+               "trainer_done": bool(self.marker_dir and (Path(self.marker_dir) / "trainer.done").exists())}
+        self.calls.append(rec)
+        try:
+            if self.delay:
+                time.sleep(min(self.delay, timeout))
+                if self.delay > timeout:
+                    raise TimeoutError("fake runner timed out")
+            if self.fail and self.fail(key):
+                raise RuntimeError("fake runner failure")
+            dst = self.bucket / key
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(body, dst)
+            rec["ok"] = True
+            if key.endswith("partial-manifest.json"):
+                rec["body"] = json.loads(Path(body).read_text())
+        finally:
+            if self.log_path:
+                with open(self.log_path, "a") as f:
+                    f.write(json.dumps(rec) + "\n")
+
+
+NO_GPU = {"proc_version": Path("/nonexistent/nvidia-version"), "smi_version_cmd": ("/nonexistent/nvidia-smi",),
+          "sampler_cmd": ("/nonexistent/nvidia-smi",), "install_signals": False}
+
+
+def selftest_child(spec):
+    """A child process of the selftest: the real run_step with the real SIGTERM handler, a fake trainer and a fake
+    S3, so the parent can send it SIGTERM and time the shutdown. `spec` is JSON on the command line."""
+    global QUIET
+    QUIET = True
+    fail = None
+    if spec.get("fail") == "small":
+        fail = lambda key: not key.endswith(("partial-manifest.json", "outcome.json"))   # noqa: E731
+    runner = FakeRunner(spec["bucket"], spec["marks"], spec.get("delay", 0.0), fail, spec["log"])
+    knobs = Knobs(trainer=Path(spec["trainer"]), backoff=(0.0,), echo=False, deadline=spec["deadline"],
+                  grace=spec["grace"], reserve=spec["reserve"], sync_interval=3600.0, sample_interval=3600.0,
+                  **{**NO_GPU, "install_signals": True})
+    paths = Paths(data_channel=Path(spec["chan"]), base_tar=Path(spec["work"]) / "none.tar", work=Path(spec["work"]))
+    if spec["kind"] == "probe-sigterm":
+        bucket, pid = parse_probe_env({"LAYA_BUCKET": "test-bucket", "LAYA_PROBE_ID": "probe-1"})
+        return run_probe_sigterm(bucket, pid, paths, runner, knobs, ready_path=spec["ready"])
+    return entry_train(spec["env"], paths, runner, knobs)
 
 
 def selftest():
@@ -604,32 +1180,6 @@ def selftest():
     task = "00000000-0000-4000-8000-000000000001"
     digest = "sha256:" + "ab" * 32
 
-    class FakeRunner:
-        """Copies the --body into a temp 'bucket' dir and records the call (key, tag, time, state)."""
-
-        def __init__(self, bucket, marker_dir=None, delay=0.0, fail=None):
-            self.bucket, self.marker_dir, self.delay, self.fail = Path(bucket), marker_dir, delay, fail
-            self.calls = []
-
-        def __call__(self, argv, timeout):
-            a = dict(zip(argv[3::2], argv[4::2])) if argv[:3] == ["aws", "s3api", "put-object"] else None
-            if a is None:
-                raise RuntimeError("not a put-object argv")
-            key, body = a["--key"], a["--body"]
-            rec = {"key": key, "tagging": a.get("--tagging"), "t": time.monotonic(), "ok": False,
-                   "trainer_done": bool(self.marker_dir and (Path(self.marker_dir) / "trainer.done").exists())}
-            self.calls.append(rec)
-            if self.delay:
-                time.sleep(min(self.delay, timeout))
-                if self.delay > timeout:
-                    raise TimeoutError("fake runner timed out")
-            if self.fail and self.fail(key):
-                raise RuntimeError("fake runner failure")
-            dst = self.bucket / key
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(body, dst)
-            rec["ok"] = True
-
     class Env:
         def __init__(self, **kv):
             self.kv, self.old = kv, {}
@@ -646,7 +1196,7 @@ def selftest():
                 else:
                     os.environ[k] = v
 
-    def make_case(tmp, name, mode, shift=False, epochs="", extra_files=None, **runner_kw):
+    def make_case(tmp, name, mode, shift=False, epochs="", extra_files=None, knob_kw=None, **runner_kw):
         d = Path(tmp) / name
         chan, bucket, marks = d / "channel", d / "bucket", d / "marks"
         for p in (chan, bucket, marks):
@@ -666,10 +1216,11 @@ def selftest():
         trainer = d / "fake_trainer.py"
         trainer.write_text(FAKE_TRAINER)
         paths = Paths(data_channel=chan, base_tar=d / "none.tar", work=d / "work")
-        knobs = Knobs(trainer=trainer, backoff=(0.0,), echo=False)
+        knob_kw = {**NO_GPU, "sync_interval": 3600.0, "sample_interval": 3600.0, **(knob_kw or {})}
+        knobs = Knobs(trainer=trainer, backoff=(0.0,), echo=False, **knob_kw)
         runner = FakeRunner(bucket / "b", marker_dir=marks, **runner_kw)
         return {"env": env, "paths": paths, "knobs": knobs, "runner": runner, "bucket": bucket / "b",
-                "marks": marks, "chan": chan, "dir": d, "mode": mode}
+                "marks": marks, "chan": chan, "dir": d, "mode": mode, "trainer": trainer}
 
     def run_case(c, quiet_err=True):
         err = io.StringIO()
@@ -859,6 +1410,246 @@ def selftest():
         case("inputs-changed: a shift.jsonl expected but absent from the channel -> names shift.jsonl",
              rc == 1 and out["refused_line"] == "REFUSED inputs-changed: shift.jsonl")
 
+        print("compat:")
+        proc = Path(tmp) / "nvidia-version"
+        proc.write_text("NVRM version: NVIDIA UNIX x86_64 Kernel Module  570.172.08  Mon Jul 14 2025\n")
+        case("compat: driver string 570.172.08 is parsed from the /proc text", host_driver(proc, ("/nonexistent",)) == "570.172.08")
+        case("compat: decide_compat table 570.172.08 true, 579.99 true, 580.65.06 false, 590.1 false, unknown false",
+             [decide_compat(x) for x in ("570.172.08", "579.99", "580.65.06", "590.1", "unknown")] == [True, True, False, False, False])
+        e570 = with_compat({"LD_LIBRARY_PATH": "/x"}, decide_compat("570.172.08"))
+        e580 = with_compat({"LD_LIBRARY_PATH": "/x"}, decide_compat("580.65.06"))
+        case("compat: 570 puts /usr/local/cuda/compat first on LD_LIBRARY_PATH, 580 leaves it unchanged",
+             e570["LD_LIBRARY_PATH"] == "/usr/local/cuda/compat:/x" and e580["LD_LIBRARY_PATH"] == "/x"
+             and with_compat({}, True)["LD_LIBRARY_PATH"] == "/usr/local/cuda/compat")
+        case("compat: an unreadable /proc version and no nvidia-smi -> unknown, compat_used false",
+             host_driver("/nonexistent/v", ("/nonexistent/smi",)) == "unknown" and not decide_compat("unknown"))
+        smi_fake = (sys.executable, "-c", "print('570.172.08')")
+        case("compat: nvidia-smi is the fallback when /proc is unreadable", host_driver("/nonexistent/v", smi_fake) == "570.172.08")
+        old_ld = os.environ.get("LD_LIBRARY_PATH")
+        c = make_case(tmp, "compat570", "pass", knob_kw={"proc_version": proc})
+        run_case(c)
+        child_env_seen = json.loads(bucket_file(c, "run/env.json").read_text())
+        renv = json.loads(bucket_file(c, "run-env.json").read_text())
+        case("compat: a 570 host -> the trainer child sees LD_LIBRARY_PATH starting /usr/local/cuda/compat, recorded in run-env.json",
+             (child_env_seen["LD_LIBRARY_PATH"] or "").startswith("/usr/local/cuda/compat") and renv["compat_used"] is True
+             and renv["driver"] == "570.172.08" and child_env_seen["HF_HUB_OFFLINE"] == "1", str(child_env_seen))
+        proc580 = Path(tmp) / "nvidia-version-580"
+        proc580.write_text("NVRM version: NVIDIA UNIX x86_64 Kernel Module  580.65.06  Mon Aug 11 2025\n")
+        c = make_case(tmp, "compat580", "pass", knob_kw={"proc_version": proc580})
+        run_case(c)
+        child_env_seen = json.loads(bucket_file(c, "run/env.json").read_text())
+        renv = json.loads(bucket_file(c, "run-env.json").read_text())
+        case("compat: a 580 host -> compat_used false and the child's LD_LIBRARY_PATH is the inherited one",
+             renv["compat_used"] is False and child_env_seen["LD_LIBRARY_PATH"] == old_ld and renv["compat_ld_library_path"] is None)
+        c = make_case(tmp, "compat-unknown", "pass")
+        run_case(c)
+        renv = json.loads(bucket_file(c, "run-env.json").read_text())
+        case("compat: no readable driver -> run-env.json driver unknown, compat_used false",
+             renv["driver"] == "unknown" and renv["compat_used"] is False)
+
+        print("gpu sampler:")
+        c = make_case(tmp, "sampler", "slow", knob_kw={"sampler_cmd": (sys.executable, "-c", "print('1234, 56')"),
+                                                        "sample_interval": 0.4})
+        run_case(c)
+        gs = json.loads(bucket_file(c, "gpu-samples.json").read_text())
+        ok_rows = [r for r in gs["samples"] if "memory_used_mib" in r]
+        case("gpu sampler: gpu-samples.json is uploaded with parsed rows and a peak (nvidia-smi is a fake)",
+             len(ok_rows) >= 3 and ok_rows[0]["memory_used_mib"] == 1234 and ok_rows[0]["utilization_pct"] == 56
+             and gs["peak_memory_used_mib"] == 1234)
+        case("gpu sampler: the peak lands in run-env.json peak_gpu_memory_mib",
+             json.loads(bucket_file(c, "run-env.json").read_text())["peak_gpu_memory_mib"] == 1234)
+
+        print("periodic-sync:")
+        c = make_case(tmp, "sync", "slow", knob_kw={"sync_interval": 1.0})
+        rc = run_case(c)
+        calls = c["runner"].calls
+        idx = lambda pred: next((i for i, x in enumerate(calls) if pred(x)), None)             # noqa: E731
+        i_rec = idx(lambda x: x["key"].endswith("run/recipe.json") and x["ok"] and not x["trainer_done"])
+        i_man = idx(lambda x: x["key"].endswith("partial-manifest.json") and x["ok"] and not x["trainer_done"])
+        case("periodic-sync: recipe.json written mid-run is uploaded before the trainer exits", i_rec is not None, "rc=%s" % rc)
+        case("periodic-sync: a partial-manifest.json follows it, still before the trainer exits",
+             i_man is not None and i_rec is not None and i_man > i_rec)
+        body = calls[i_man]["body"] if i_man is not None else {}
+        rec_sha = sha256_file(bucket_file(c, "run/recipe.json"))
+        case("periodic-sync: the partial manifest is complete false and lists recipe.json with its sha256",
+             body.get("complete") is False and set(body) == manifest_keys
+             and any(e["path"] == "run/recipe.json" and e["sha256"] == rec_sha for e in body.get("entries", [])))
+        big = [x for x in calls if x["key"].endswith("run/big.bin")]
+        case("periodic-sync: a file over 5 MiB is not synced mid-run (only after the trainer exits)",
+             bool(big) and all(x["trainer_done"] for x in big))
+        case("periodic-sync: the final training-manifest.json supersedes it (complete true)",
+             json.loads(bucket_file(c, "training-manifest.json").read_text())["complete"] is True)
+        c = make_case(tmp, "sync-fail", "slow", knob_kw={"sync_interval": 1.0},
+                      fail=lambda key: key.endswith("run/recipe.json"))
+        run_case(c)
+        mid = [x for x in c["runner"].calls if x["key"].endswith("partial-manifest.json") and not x["trainer_done"] and "body" in x]
+        case("periodic-sync: a partial manifest never lists a file whose upload failed",
+             all(e["path"] != "run/recipe.json" for x in c["runner"].calls if "body" in x for e in x["body"]["entries"])
+             and not any(x["ok"] for x in c["runner"].calls if x["key"].endswith("run/recipe.json")),
+             "mid-run partials %d" % len(mid))
+
+        print("sigterm:")
+        import signal as _signal
+
+        def sigterm_run(name, deadline, grace, reserve, delay=0.0, fail=None, wait_after=0.0):
+            c = make_case(tmp, name, "sigterm")
+            log = c["dir"] / "calls.jsonl"
+            spec = {"kind": "train", "env": c["env"], "chan": str(c["chan"]), "work": str(c["paths"].work),
+                    "trainer": str(c["trainer"]), "bucket": str(c["bucket"]), "marks": str(c["marks"]),
+                    "log": str(log), "delay": delay, "fail": fail, "deadline": deadline, "grace": grace,
+                    "reserve": reserve}
+            env = dict(os.environ, FAKE_MODE="sigterm", FAKE_MARK=str(c["marks"]))
+            proc = subprocess.Popen([sys.executable, "-I", str(Path(__file__).resolve()), "--selftest-child",
+                                     json.dumps(spec)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            t_end = time.monotonic() + 20
+            while not (c["marks"] / "ready").exists() and time.monotonic() < t_end and proc.poll() is None:
+                time.sleep(0.05)
+            time.sleep(0.3)                                      # a mid-run state for the trainer to be killed in
+            wall = time.time()
+            t_sig = time.monotonic()
+            proc.send_signal(_signal.SIGTERM)
+            try:
+                rc = proc.wait(timeout=deadline + 15)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                rc = None
+            c.update(rc=rc, took=time.monotonic() - t_sig, wall=wall)
+            c["calls"] = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+            return c
+
+        def trainer_dead(c):
+            pid = int((c["marks"] / "pid").read_text())
+            for _ in range(20):
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    return True
+                time.sleep(0.1)
+            return False
+
+        c = sigterm_run("sigterm", deadline=6, grace=1, reserve=2)
+        keys = [x["key"].split(task + "/", 1)[1] for x in c["calls"]]
+        outc = json.loads(bucket_file(c, "outcome.json").read_text()) if bucket_file(c, "outcome.json").exists() else {}
+        case("sigterm: the trainer got SIGTERM, then was SIGKILLed after the child grace (it ignores SIGTERM)",
+             (c["marks"] / "got-sigterm").exists() and trainer_dead(c))
+        case("sigterm: run_step exits 1 within deadline + 1 s of the signal", c["rc"] == 1 and c["took"] <= 7.0,
+             "rc=%s took %.2f s" % (c["rc"], c["took"]))
+        case("sigterm: small files go first (train.log, then reports), then partial-manifest.json, then outcome.json last",
+             keys[0] == "train.log" and keys[-2:] == ["partial-manifest.json", "outcome.json"]
+             and {"run/recipe.json", "run/seeds/seed-13/eval-probs.json"} <= set(keys), str(keys))
+        case("sigterm: no checkpoint file is uploaded (run/checkpoint, run/seeds/*/checkpoint)",
+             not any("checkpoint" in k for k in keys))
+        pm = json.loads(bucket_file(c, "partial-manifest.json").read_text())
+        okset = {x["key"].split(task + "/", 1)[1] for x in c["calls"] if x["ok"]} - {"partial-manifest.json", "outcome.json"}
+        case("sigterm: outcome.json is exit_class timeout and the partial manifest lists exactly the uploaded files",
+             outc.get("exit_class") == "timeout" and pm["complete"] is False
+             and {e["path"] for e in pm["entries"]} == okset, "%s vs %s" % (sorted(e["path"] for e in pm["entries"]), sorted(okset)))
+
+        print("sigterm-slow:")
+        c = sigterm_run("sigterm-slow", deadline=9, grace=1, reserve=5, delay=2.0)
+        keys = [x["key"].split(task + "/", 1)[1] for x in c["calls"]]
+        case("sigterm-slow: a 2 s-per-upload runner still exits within deadline + 1 s", c["rc"] == 1 and c["took"] <= 10.0,
+             "rc=%s took %.2f s" % (c["rc"], c["took"]))
+        case("sigterm-slow: outcome.json is the last call, preceded by the partial manifest", keys[-2:] == ["partial-manifest.json", "outcome.json"], str(keys))
+        man_call = next(x for x in c["calls"] if x["key"].endswith("partial-manifest.json"))
+        before_ok = {x["key"].split(task + "/", 1)[1] for x in c["calls"] if x["ok"] and x["t"] < man_call["t"]}
+        pm = json.loads(bucket_file(c, "partial-manifest.json").read_text()) if bucket_file(c, "partial-manifest.json").exists() else None
+        case("sigterm-slow: the partial manifest lists exactly the files whose upload returned before it",
+             pm is not None and {e["path"] for e in pm["entries"]} == before_ok and len(before_ok) >= 1,
+             "%s vs %s" % (None if pm is None else sorted(e["path"] for e in pm["entries"]), sorted(before_ok)))
+        case("sigterm-slow: outcome.json reached the bucket as timeout",
+             bucket_file(c, "outcome.json").exists() and json.loads(bucket_file(c, "outcome.json").read_text())["exit_class"] == "timeout")
+
+        print("sigterm-failing:")
+        c = sigterm_run("sigterm-failing", deadline=6, grace=1, reserve=2, fail="small")
+        keys = [x["key"].split(task + "/", 1)[1] for x in c["calls"]]
+        small = [k for k in keys if k not in ("partial-manifest.json", "outcome.json")]
+        case("sigterm-failing: every failing small file is attempted exactly once (no retry past the signal)",
+             bool(small) and len(small) == len(set(small)), str(keys))
+        case("sigterm-failing: partial-manifest.json and outcome.json are still attempted and exit is within deadline + 1 s",
+             keys[-2:] == ["partial-manifest.json", "outcome.json"] and c["rc"] == 1 and c["took"] <= 7.0,
+             "rc=%s took %.2f s" % (c["rc"], c["took"]))
+        pm = json.loads(bucket_file(c, "partial-manifest.json").read_text()) if bucket_file(c, "partial-manifest.json").exists() else None
+        case("sigterm-failing: the partial manifest lists nothing (no file uploaded) and no call starts after the deadline",
+             pm is not None and pm["entries"] == [] and max(x["wall"] for x in c["calls"]) <= c["wall"] + 6 + 1.0)
+
+        print("probe:")
+        tiny_out = Path(tmp) / "tiny-fixture-run"
+        helper_json = {"torch_cuda_available": True, "torch_version_cuda": "13.0", "device_name": "NVIDIA A10G",
+                       "matmul_ok": True, "base_load_ok": True, "base_forward_seconds": 0.12,
+                       "max_memory_allocated_bytes": 1000, "train_step_ok": True, "train_step_seconds": 1.5,
+                       "train_step_peak_bytes": 2000, "host_rss_peak_bytes": 3000, "train_step_batch": 8,
+                       "train_step_tokens": PROBE_TRAIN_STEP_TOKENS}
+        helper_cmd = [sys.executable, "-c", "import json; print('noise'); print('PROBE_JSON ' + json.dumps(%r))" % helper_json]
+        tiny_cmd = [sys.executable, "-c", "import json,sys,pathlib; o=pathlib.Path(sys.argv[1]); o.mkdir(parents=True); "
+                    "(o/'gate-report.json').write_text(json.dumps({'device_used':'cuda:0'}))", str(tiny_out)]
+        smi_cmd = [sys.executable, "-c", "print('FAKE NVIDIA-SMI Driver Version: 570.172.08')"]
+        pdir = Path(tmp) / "probe"
+        pdir.mkdir()
+        prunner = FakeRunner(pdir / "bucket")
+        pknobs = Knobs(backoff=(0.0,), echo=False, **{**NO_GPU, "proc_version": proc})
+        ppaths = Paths(data_channel=pdir, base_tar=pdir / "none", work=pdir / "work")
+        rc = run_probe("test-bucket", "probe-1", ppaths, prunner, pknobs, helper_cmd=helper_cmd, tiny_cmd=tiny_cmd,
+                       smi_cmd=smi_cmd, tiny_out=tiny_out)
+        pj = json.loads((pdir / "bucket" / "runs/probe/probe-1/probe.json").read_text())
+        case("probe: probe.json has exactly the declared key set and schema laya-train-probe-v1",
+             set(pj) == set(PROBE_KEYS) and len(PROBE_KEYS) == 20 and pj["schema"] == "laya-train-probe-v1", str(sorted(set(pj) ^ set(PROBE_KEYS))))
+        case("probe: it records nvidia-smi, the driver, compat_used, the CUDA helper's fields and the tiny fixture's device",
+             rc == 0 and "FAKE NVIDIA-SMI" in pj["nvidia_smi"] and pj["driver"] == "570.172.08" and pj["compat_used"] is True
+             and pj["torch_version_cuda"] == "13.0" and pj["matmul_ok"] is True and pj["train_step_ok"] is True
+             and pj["train_step_peak_bytes"] == 2000 and pj["host_rss_peak_bytes"] == 3000
+             and pj["train_step_batch"] == 8 and pj["train_step_tokens"] == 1024
+             and pj["tiny_fixture_rc"] == 0 and pj["tiny_fixture_device_used"] == "cuda:0")
+        case("probe: probe.json, the logs and nvidia-smi.txt are uploaded under runs/probe/<probe_id>/ with the expire tag",
+             {"runs/probe/probe-1/" + n for n in ("probe.json", "helper.log", "tiny-fixture.log", "nvidia-smi.txt")}
+             <= {x["key"] for x in prunner.calls if x["ok"]} and all(x["tagging"] == "laya-retention=expire" for x in prunner.calls))
+        bad_runner = FakeRunner(pdir / "bucket-bad")
+        rc = run_probe("test-bucket", "probe-2", ppaths, bad_runner, pknobs, helper_cmd=[sys.executable, "-c", "raise SystemExit(1)"],
+                       tiny_cmd=[sys.executable, "-c", "raise SystemExit(5)"], smi_cmd=smi_cmd, tiny_out=tiny_out / "none")
+        pj = json.loads((pdir / "bucket-bad" / "runs/probe/probe-2/probe.json").read_text())
+        case("probe: a failing helper and tiny fixture are recorded as false / null / rc, never as a crash of the probe",
+             rc == 0 and pj["train_step_ok"] is False and pj["base_load_ok"] is False and pj["matmul_ok"] is False
+             and pj["tiny_fixture_rc"] == 5 and pj["tiny_fixture_device_used"] is None and set(pj) == set(PROBE_KEYS))
+        errbuf = io.StringIO()
+        with contextlib.redirect_stderr(errbuf):
+            prc = entry_probe({"LAYA_BUCKET": "test-bucket", "LAYA_PROBE_ID": "Bad_ID"}, ppaths, prunner, pknobs)
+        case("probe: a LAYA_PROBE_ID outside ^[a-z0-9][a-z0-9-]{0,47}$ is REFUSED env: (exit 2)",
+             prc == 2 and "REFUSED env:" in errbuf.getvalue())
+
+        print("probe-sigterm:")
+        pd = Path(tmp) / "probe-sigterm"
+        (pd / "marks").mkdir(parents=True)
+        spec = {"kind": "probe-sigterm", "chan": str(pd), "work": str(pd / "work"), "trainer": str(TRAIN_PY),
+                "bucket": str(pd / "bucket"), "marks": str(pd / "marks"), "log": str(pd / "calls.jsonl"),
+                "deadline": 25, "grace": 5, "reserve": 5, "ready": str(pd / "marks" / "ready")}
+        proc = subprocess.Popen([sys.executable, "-I", str(Path(__file__).resolve()), "--selftest-child", json.dumps(spec)],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        t_end = time.monotonic() + 20
+        while not (pd / "marks" / "ready").exists() and time.monotonic() < t_end and proc.poll() is None:
+            time.sleep(0.05)
+        proc.send_signal(_signal.SIGTERM)
+        time.sleep(5.5)
+        alive_after = proc.poll() is None
+        proc.kill()
+        proc.wait()
+        hb = sorted((pd / "bucket" / "runs/probe/probe-1").glob("sigterm-heartbeat-*.json"),
+                    key=lambda q: int(q.stem.rsplit("-", 1)[1]))
+        secs = [json.loads(q.read_text())["seconds_since_sigterm"] for q in hb]
+        case("probe-sigterm: it announced itself (sigterm-ready.json) before the signal",
+             (pd / "bucket" / "runs/probe/probe-1/sigterm-ready.json").exists())
+        case("probe-sigterm: heartbeats keep arriving every 2 s after SIGTERM until it is killed (0, 2, 4 s)",
+             alive_after and len(secs) >= 3 and secs[0] < 1.0 and all(1.5 <= b - a <= 3.0 for a, b in zip(secs, secs[1:])),
+             "seconds %s" % secs)
+
+        print("no-determinism:")
+        src = Path(__file__).read_text(encoding="utf-8")
+        banned = ["use_determin" + "istic_algorithms", "CUBLAS_WORKSPACE" + "_CONFIG"]
+        case("no-determinism: the module source contains neither the deterministic-algorithms call nor the cuBLAS workspace variable",
+             not any(b in src for b in banned) and all(len(b) > 10 for b in banned))
+        d_img = ROOT / "scripts" / "laya_train" / "container" / "Dockerfile.train"
+        case("no-determinism: neither appears in Dockerfile.train when it exists",
+             not d_img.exists() or not any(b in d_img.read_text() for b in banned))
+
         print("no network:")
         case("the default aws Runner was never called", DEFAULT_RUNNER_CALLS == 0, "calls=%d" % DEFAULT_RUNNER_CALLS)
 
@@ -874,14 +1665,21 @@ def selftest():
 def main(argv):
     if argv[1:] == ["--selftest"]:
         return selftest()
+    if len(argv) == 3 and argv[1] == "--selftest-child":
+        return selftest_child(json.loads(argv[2]))
     if len(argv) != 2 or argv[1] != "train":
         print("usage: run_step.py train | --selftest", file=sys.stderr)
         return 2
     step = os.environ.get("LAYA_STEP", "") or "train"
-    if step != "train":
-        print("REFUSED env: LAYA_STEP %r is not a mode of this image" % step, file=sys.stderr, flush=True)
-        return 2
-    return entry_train(os.environ, Paths(), aws_runner, Knobs())
+    knobs = Knobs()
+    if step == "train":
+        return entry_train(os.environ, Paths(), aws_runner, knobs)
+    if step == "probe":
+        return entry_probe(os.environ, Paths(), aws_runner, knobs)
+    if step == "probe-sigterm":
+        return entry_probe_sigterm(os.environ, Paths(), aws_runner, knobs)
+    print("REFUSED env: LAYA_STEP %r is not a mode of this image" % step, file=sys.stderr, flush=True)
+    return 2
 
 
 if __name__ == "__main__":
