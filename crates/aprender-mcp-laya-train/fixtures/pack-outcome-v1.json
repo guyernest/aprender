@@ -1,0 +1,19 @@
+{
+  "schema": "laya-train-pack-outcome-v1",
+  "task_id": "00000000-0000-4000-8000-000000000001",
+  "pack_image_digest": "sha256:f59060360430b53654f4bd5d0734a13efe9bd0fbf952aa3fe460805f254815a9",
+  "gate_contract_sha256": "bc5b89030053bc62e4a406091f6b1f4e41899107fd7271faf919be90e1838a8f",
+  "parity_contract_sha256": "0d9e492d248c3df90f33a5ed4563357797f911fbdfd7bf8504593f3c2eea99c2",
+  "ran": true,
+  "skipped": null,
+  "exit_code": 0,
+  "accepted": true,
+  "apr_sha256": "02b3dce98c61897231fdcf1a0594d6c2e159ff8a812386001c769706727efb3e",
+  "shipped_seed": 20260927,
+  "waived": null,
+  "packed_line": "PACKED waived=none",
+  "verify_line": "{\"deploy_eligible\":true,\"waived\":null}",
+  "deploy_eligible": true,
+  "pack_seconds": 41.25,
+  "verify_seconds": 87.5
+}

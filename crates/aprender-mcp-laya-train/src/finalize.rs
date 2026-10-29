@@ -37,6 +37,7 @@
 
 use std::collections::BTreeMap;
 
+use aprender_mcp_setfit_train::{BackendError, TaskBackend};
 use pmcp::types::{CallToolResult, Content, TaskStatus};
 
 use crate::layout::{
@@ -515,5 +516,850 @@ pub fn finalize_run(input: &FinalizeInput) -> FinalizeDecision {
                 Some(id) => decide_packed(&b, verdict, Some(&id)),
             }
         }
+    }
+}
+
+/// What [`attach_result_if_absent`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttachOutcome {
+    /// The result was written.
+    Attached,
+    /// A result was already stored; nothing was written.
+    AlreadyPresent,
+    /// The task is not terminal yet; nothing was written.
+    NotTerminal,
+    /// No such task for this owner; nothing was written.
+    NotFound,
+}
+
+/// Give a terminal task that has no stored result its payload, without changing
+/// anything else.
+///
+/// It exists because the store's own writers cannot do this: `TaskStore::set_result`
+/// overwrites unconditionally, and `AprenderTaskStore::finish` refuses a terminal
+/// record. A client `tasks/cancel` moves a task to `Cancelled` and writes NO
+/// result, so until something attaches one, `tasks/result` answers "task not
+/// completed". This is the finalizer's (14-05) only way to give a cancelled task
+/// its stored payload.
+///
+/// It writes `result` only when none is stored and only on a terminal record, by
+/// compare-and-swap on the version, never touches the status or the timestamps,
+/// and never replaces a result: first writer wins is preserved. On a lost CAS it
+/// re-reads once and applies the same rules again.
+///
+/// # Errors
+///
+/// A backend failure other than the one retried conflict.
+pub async fn attach_result_if_absent(
+    backend: &dyn TaskBackend,
+    owner: &str,
+    task_id: &str,
+    result: CallToolResult,
+) -> Result<AttachOutcome, BackendError> {
+    for attempt in 0..2 {
+        let Some(mut record) = backend.get(owner, task_id).await? else {
+            return Ok(AttachOutcome::NotFound);
+        };
+        if record.result.is_some() {
+            return Ok(AttachOutcome::AlreadyPresent);
+        }
+        if !record.task.status.is_terminal() {
+            return Ok(AttachOutcome::NotTerminal);
+        }
+        let expected = record.version;
+        record.result = Some(result.clone());
+        record.version = expected + 1;
+        match backend.cas(owner, task_id, expected, record).await {
+            Ok(()) => return Ok(AttachOutcome::Attached),
+            Err(BackendError::Conflict) if attempt == 0 => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Err(BackendError::Conflict)
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)] // serde_json::json! expands to .unwrap() internally
+pub(crate) mod fixtures {
+    use aprender_decide::digest::sha256_hex;
+
+    use super::FinalizeInput;
+    use crate::layout::{
+        inputs_string, ExecutionInput, ManifestEntry, Outcome, PackOutcome, TrainingManifest,
+        SCHEMA_EXECUTION_INPUT,
+    };
+
+    pub const OUTCOME: &str = include_str!("../fixtures/outcome-v1.json");
+    pub const TRAINING_MANIFEST: &str = include_str!("../fixtures/training-manifest-v1.json");
+    pub const PACK_OUTCOME: &str = include_str!("../fixtures/pack-outcome-v1.json");
+    pub const MANIFEST: &str = include_str!("../fixtures/manifest-v1.json");
+    pub const GATE_REPORT: &str = include_str!("../fixtures/gate-report-v1.json");
+    /// The REAL report the trainer's own tiny run wrote (one seed, no pilot waiver).
+    pub const REAL_TINY_REPORT: &str =
+        include_str!("../../aprender-decide/tests/fixtures/laya_tiny/gate-report.json");
+
+    pub const TASK_ID: &str = "00000000-0000-4000-8000-000000000001";
+    pub const NAME: &str = "fixture-model";
+    pub const BUCKET: &str = "fixture-bucket";
+
+    pub fn sha(label: &str) -> String {
+        sha256_hex(label.as_bytes())
+    }
+
+    pub fn outcome() -> Outcome {
+        serde_json::from_str(OUTCOME).expect("outcome fixture")
+    }
+
+    pub fn training_manifest() -> TrainingManifest {
+        serde_json::from_str(TRAINING_MANIFEST).expect("training manifest fixture")
+    }
+
+    pub fn pack_outcome() -> PackOutcome {
+        serde_json::from_str(PACK_OUTCOME).expect("pack outcome fixture")
+    }
+
+    pub fn gate_report() -> serde_json::Value {
+        serde_json::from_str(GATE_REPORT).expect("gate report fixture")
+    }
+
+    /// The packer's inventory, spelled out here (not read back from the golden
+    /// manifest), so the golden-equality test checks the merge for real.
+    pub fn pack_entries() -> Vec<ManifestEntry> {
+        [
+            ("fixture-model.apr", 4_194_304, "apr"),
+            ("pack-outcome.json", 640, "pack-outcome"),
+            ("pack.log", 1_024, "pack-log"),
+            ("verify.log", 2_048, "verify-log"),
+        ]
+        .into_iter()
+        .map(|(path, size, label)| ManifestEntry {
+            path: path.to_string(),
+            size,
+            sha256: sha(label),
+        })
+        .collect()
+    }
+
+    pub fn execution() -> ExecutionInput {
+        let inputs = [
+            ("task.json", "data-task"),
+            ("train.jsonl", "data-train"),
+            ("eval.jsonl", "data-eval"),
+        ]
+        .into_iter()
+        .map(|(file, label)| (file.to_string(), sha(label)))
+        .collect();
+        ExecutionInput {
+            schema: SCHEMA_EXECUTION_INPUT.to_string(),
+            task_id: TASK_ID.to_string(),
+            owner: "alice".to_string(),
+            name: NAME.to_string(),
+            dataset_prefix: "datasets/fixture/".to_string(),
+            run_prefix: format!("runs/{NAME}/{TASK_ID}/"),
+            epochs: String::new(),
+            inputs_sha256: inputs_string(&inputs),
+            gate_contract_sha256: sha("prefilter-gate"),
+        }
+    }
+
+    /// A passing, accepted run, built only from the committed fixtures.
+    pub fn input() -> FinalizeInput {
+        FinalizeInput {
+            bucket: BUCKET.to_string(),
+            execution: execution(),
+            stage_error: None,
+            aborted: false,
+            outcome: Some(outcome()),
+            gate_report: Some(gate_report()),
+            pack_outcome: Some(pack_outcome()),
+            training_manifest: Some(training_manifest()),
+            pack_manifest: pack_entries(),
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::disallowed_methods)] // serde_json::json! expands to .unwrap() internally
+mod tests {
+    use super::fixtures::{self, input, sha};
+    use super::*;
+    use crate::layout::{ExitClass, Manifest, PackOutcome, TrainingManifest};
+
+    fn gate_fail_input() -> FinalizeInput {
+        let mut i = input();
+        i.outcome.as_mut().expect("outcome").exit_class = ExitClass::GateFail;
+        i.gate_report.as_mut().expect("report")["pass"] = serde_json::json!(false);
+        i.pack_outcome = None;
+        i.pack_manifest = Vec::new();
+        i
+    }
+
+    fn waived_input(id: &str) -> FinalizeInput {
+        let mut i = gate_fail_input();
+        i.gate_report.as_mut().expect("report")["pilot_waiver"] =
+            serde_json::json!({ "id": id, "waives": "ece_post" });
+        let mut pack = fixtures::pack_outcome();
+        pack.waived = Some(id.to_string());
+        i.pack_outcome = Some(pack);
+        i.pack_manifest = fixtures::pack_entries();
+        i
+    }
+
+    fn paths(d: &FinalizeDecision) -> Vec<&str> {
+        d.manifest.entries.iter().map(|e| e.path.as_str()).collect()
+    }
+
+    fn has_apr(d: &FinalizeDecision) -> bool {
+        d.manifest.entries.iter().any(|e| e.path.ends_with(".apr"))
+            || d.payload.manifest.iter().any(|l| l.path.ends_with(".apr"))
+    }
+
+    fn all_report_entries_present(d: &FinalizeDecision) {
+        for entry in &fixtures::training_manifest().entries {
+            assert!(
+                paths(d).contains(&entry.path.as_str()),
+                "report entry {} is missing",
+                entry.path
+            );
+        }
+    }
+
+    fn error_of(d: &FinalizeDecision) -> String {
+        d.payload.error.clone().unwrap_or_default()
+    }
+
+    #[test]
+    fn fixtures_round_trip() {
+        fn round_trip<T: serde::Serialize + serde::de::DeserializeOwned>(text: &str) {
+            let value: serde_json::Value = serde_json::from_str(text).expect("json");
+            let parsed: T = serde_json::from_value(value.clone()).expect("parses into its struct");
+            assert_eq!(serde_json::to_value(parsed).expect("ser"), value);
+        }
+        round_trip::<Outcome>(fixtures::OUTCOME);
+        round_trip::<TrainingManifest>(fixtures::TRAINING_MANIFEST);
+        round_trip::<PackOutcome>(fixtures::PACK_OUTCOME);
+        round_trip::<Manifest>(fixtures::MANIFEST);
+
+        // The gate-report fixture mirrors the REAL report's nesting exactly.
+        let report = fixtures::gate_report();
+        let keys = |v: &serde_json::Value| -> Vec<String> {
+            let mut k: Vec<String> = v.as_object().expect("object").keys().cloned().collect();
+            k.sort();
+            k
+        };
+        assert_eq!(
+            keys(&report),
+            [
+                "calibration",
+                "device_is_cpu",
+                "device_used",
+                "eval_probs_sha256",
+                "fine_tuned",
+                "inputs_sha256",
+                "margin",
+                "pass",
+                "probes_sha256",
+                "recipe_id",
+                "rescore_noise_sha256",
+                "schema",
+                "seeds",
+                "thresholds",
+                "torch_version",
+                "zero_shot",
+                "zero_shot_probs_sha256"
+            ]
+        );
+        assert_eq!(
+            keys(&report["calibration"]),
+            [
+                "bucket",
+                "clamp_hit",
+                "slice_ids",
+                "slice_ids_sha256",
+                "slice_size",
+                "t_applied",
+                "t_fitted"
+            ]
+        );
+        assert!(report["fine_tuned"].get("ece_post").is_some());
+        assert!(report["calibration"].get("ece_post").is_none());
+        assert_eq!(
+            keys(&report["inputs_sha256"]),
+            [
+                "base_model",
+                "eval_jsonl",
+                "task_json",
+                "tokenizer_json",
+                "train_jsonl"
+            ]
+        );
+        assert_eq!(
+            report["seeds"]["per_seed"].as_array().expect("rows").len(),
+            3
+        );
+        let real: serde_json::Value =
+            serde_json::from_str(fixtures::REAL_TINY_REPORT).expect("real");
+        assert_eq!(keys(&report["fine_tuned"]), keys(&real["fine_tuned"]));
+        assert_eq!(keys(&report["calibration"]), keys(&real["calibration"]));
+    }
+
+    #[test]
+    fn finalize_completed() {
+        let d = finalize_run(&input());
+        assert_eq!(d.phase, Phase::Completed);
+        assert_eq!(d.status, TaskStatus::Completed);
+        assert!(!d.is_error);
+        assert!(d.keep);
+        assert!(has_apr(&d));
+        assert_eq!(d.payload.error, None);
+        assert!(!d.payload.prefilter_disagreement);
+        assert!(!d.manifest_partial);
+        let verdict = d.payload.verdict.as_ref().expect("verdict");
+        assert!(verdict.pass);
+        assert_eq!(verdict.apr_sha256, Some(sha("apr")));
+        assert_eq!(verdict.waived, None);
+        assert_eq!(verdict.pack.as_ref().map(|p| p.accepted), Some(true));
+        assert_eq!(
+            d.payload.run_prefix,
+            format!(
+                "s3://fixture-bucket/runs/fixture-model/{}/",
+                fixtures::TASK_ID
+            )
+        );
+        // The merge, the images and the contracts equal the committed golden manifest.
+        let golden: serde_json::Value = serde_json::from_str(fixtures::MANIFEST).expect("golden");
+        assert_eq!(serde_json::to_value(&d.manifest).expect("ser"), golden);
+    }
+
+    #[test]
+    fn finalize_gate_fail() {
+        let mut i = gate_fail_input();
+        // Even a stray .apr in a pack manifest must not surface.
+        i.pack_manifest = vec![fixtures::pack_entries().remove(0)];
+        let d = finalize_run(&i);
+        assert_eq!(d.phase, Phase::GateFailed);
+        assert_eq!(d.status, TaskStatus::Completed);
+        assert!(!d.is_error);
+        assert!(!d.keep);
+        assert!(!has_apr(&d));
+        assert!(!d.payload.verdict.as_ref().expect("verdict").pass);
+        all_report_entries_present(&d);
+    }
+
+    #[test]
+    fn finalize_gate_fail_no_claim() {
+        let i = gate_fail_input();
+        assert!(i
+            .gate_report
+            .as_ref()
+            .expect("report")
+            .get("pilot_waiver")
+            .is_none());
+        let d = finalize_run(&i);
+        assert_eq!(d.phase, Phase::GateFailed, "no claim: gate_failed, no pack");
+        assert_eq!(d.payload.verdict.as_ref().expect("verdict").waived, None);
+        assert!(!d.keep);
+    }
+
+    fn pack_refused(code: i32) -> FinalizeDecision {
+        let mut i = input();
+        let pack = i.pack_outcome.as_mut().expect("pack");
+        pack.accepted = false;
+        pack.apr_sha256 = None;
+        pack.exit_code = Some(code);
+        pack.deploy_eligible = false;
+        // The worst case: the packer wrote the model, then verify refused it.
+        i.pack_manifest = fixtures::pack_entries();
+        finalize_run(&i)
+    }
+
+    fn assert_refused_pack(d: &FinalizeDecision) {
+        assert_eq!(d.phase, Phase::Failed);
+        assert_eq!(d.status, TaskStatus::Failed);
+        assert!(d.is_error);
+        assert!(!d.keep);
+        let verdict = d
+            .payload
+            .verdict
+            .as_ref()
+            .expect("the report verdict is kept");
+        assert_eq!(verdict.apr_sha256, None);
+        assert_eq!(verdict.pack.as_ref().map(|p| p.accepted), Some(false));
+        assert!(!has_apr(d), "a refused pack can never surface an .apr");
+        all_report_entries_present(d);
+        assert!(error_of(d).contains("pack refused"), "{}", error_of(d));
+    }
+
+    #[test]
+    fn finalize_pack_refused_3() {
+        let d = pack_refused(3);
+        assert_refused_pack(&d);
+        assert!(error_of(&d).contains("exit 3"), "{}", error_of(&d));
+    }
+
+    #[test]
+    fn finalize_pack_refused_2() {
+        let d = pack_refused(2);
+        assert_refused_pack(&d);
+        assert!(error_of(&d).contains("exit 2"), "{}", error_of(&d));
+    }
+
+    #[test]
+    fn finalize_pack_missing() {
+        let mut i = input();
+        i.pack_outcome = None;
+        i.pack_manifest = Vec::new();
+        i.stage_error = Some("pack stage failed: ECS task exited 137".to_string());
+        let d = finalize_run(&i);
+        assert_eq!(d.phase, Phase::Failed);
+        assert!(
+            error_of(&d).contains("ECS task exited 137"),
+            "{}",
+            error_of(&d)
+        );
+        // Without a recorded stage error the missing record is itself the finding.
+        i.stage_error = None;
+        let d = finalize_run(&i);
+        assert_eq!(d.phase, Phase::Failed);
+        assert!(
+            error_of(&d).contains("pack-outcome.json is missing"),
+            "{}",
+            error_of(&d)
+        );
+        assert!(!has_apr(&d));
+        all_report_entries_present(&d);
+    }
+
+    #[test]
+    fn finalize_refused() {
+        let mut i = input();
+        let outcome = i.outcome.as_mut().expect("outcome");
+        outcome.exit_class = ExitClass::Refused;
+        outcome.refused_line =
+            Some("REFUSED eval-class-coverage: eval.jsonl holds no row".to_string());
+        let d = finalize_run(&i);
+        assert_eq!(d.phase, Phase::Failed);
+        assert!(d.is_error);
+        assert!(
+            d.payload.prefilter_disagreement,
+            "D-08: a defect to surface"
+        );
+        assert!(
+            error_of(&d).contains("REFUSED eval-class-coverage"),
+            "{}",
+            error_of(&d)
+        );
+    }
+
+    #[test]
+    fn finalize_inputs_changed() {
+        let mut i = input();
+        let outcome = i.outcome.as_mut().expect("outcome");
+        outcome.exit_class = ExitClass::Refused;
+        outcome.refused_line = Some("REFUSED inputs-changed: train.jsonl".to_string());
+        let d = finalize_run(&i);
+        assert_eq!(d.phase, Phase::Failed);
+        assert!(
+            !d.payload.prefilter_disagreement,
+            "the dataset changed after validation; the rules did not drift"
+        );
+        assert!(error_of(&d).contains("inputs-changed"), "{}", error_of(&d));
+    }
+
+    #[test]
+    fn finalize_crash() {
+        let mut i = input();
+        i.outcome.as_mut().expect("outcome").exit_class = ExitClass::Crash;
+        let d = finalize_run(&i);
+        assert_eq!(
+            (d.phase, d.status, d.is_error),
+            (Phase::Failed, TaskStatus::Failed, true)
+        );
+        assert!(!d.keep);
+    }
+
+    #[test]
+    fn finalize_timeout() {
+        let mut i = input();
+        i.outcome.as_mut().expect("outcome").exit_class = ExitClass::Timeout;
+        let d = finalize_run(&i);
+        assert_eq!(
+            (d.phase, d.status, d.is_error),
+            (Phase::Failed, TaskStatus::Failed, true)
+        );
+        assert!(error_of(&d).contains("runtime cap"), "{}", error_of(&d));
+    }
+
+    #[test]
+    fn finalize_cpu() {
+        let mut i = input();
+        let outcome = i.outcome.as_mut().expect("outcome");
+        outcome.device_ok = false;
+        outcome.device_used = "cpu".to_string();
+        let d = finalize_run(&i);
+        assert_eq!(
+            (d.phase, d.status, d.is_error),
+            (Phase::Failed, TaskStatus::Failed, true)
+        );
+        assert!(error_of(&d).contains("cpu"), "{}", error_of(&d));
+    }
+
+    #[test]
+    fn finalize_aborted() {
+        let mut i = input();
+        i.aborted = true;
+        let d = finalize_run(&i);
+        assert_eq!(d.phase, Phase::Cancelled);
+        assert_eq!(d.status, TaskStatus::Cancelled);
+        assert!(!d.is_error);
+        assert!(!d.keep);
+        assert!(d.payload.verdict.is_none());
+        assert_eq!(d.payload.error, None);
+        assert!(!has_apr(&d));
+        all_report_entries_present(&d);
+    }
+
+    #[test]
+    fn finalize_no_outcome() {
+        let mut i = input();
+        i.outcome = None;
+        i.stage_error = Some("train stage failed: SageMaker job Failed".to_string());
+        let d = finalize_run(&i);
+        assert_eq!(d.phase, Phase::Failed);
+        assert!(
+            error_of(&d).contains("SageMaker job Failed"),
+            "{}",
+            error_of(&d)
+        );
+        i.stage_error = None;
+        let d = finalize_run(&i);
+        assert_eq!(d.phase, Phase::Failed);
+        assert!(
+            error_of(&d).contains("outcome.json is missing"),
+            "{}",
+            error_of(&d)
+        );
+    }
+
+    #[test]
+    fn finalize_integrity() {
+        let mut i = input();
+        let mut clash = i.training_manifest.as_ref().expect("tm").entries[0].clone();
+        clash.sha256 = sha("somebody-else");
+        i.pack_manifest.push(clash);
+        let d = finalize_run(&i);
+        assert_eq!(d.phase, Phase::Failed);
+        assert!(error_of(&d).contains("integrity"), "{}", error_of(&d));
+        // The same path with the same content is simply de-duplicated.
+        let mut i = input();
+        i.pack_manifest
+            .push(i.training_manifest.as_ref().expect("tm").entries[0].clone());
+        let d = finalize_run(&i);
+        assert_eq!(d.phase, Phase::Completed);
+        assert_eq!(d.manifest.entries.len(), 11);
+    }
+
+    #[test]
+    fn finalize_images() {
+        let d = finalize_run(&input());
+        let tm = fixtures::training_manifest();
+        let pack = fixtures::pack_outcome();
+        assert_eq!(
+            d.manifest.images.train.as_deref(),
+            Some(tm.train_image_digest.as_str())
+        );
+        assert_eq!(
+            d.manifest.images.pack.as_deref(),
+            Some(pack.pack_image_digest.as_str())
+        );
+        let d = finalize_run(&gate_fail_input());
+        assert_eq!(
+            d.manifest.images.train.as_deref(),
+            Some(tm.train_image_digest.as_str())
+        );
+        assert_eq!(
+            d.manifest.images.pack, None,
+            "no pack-outcome, no pack image"
+        );
+    }
+
+    #[test]
+    fn finalize_contracts() {
+        let mut i = input();
+        i.execution.gate_contract_sha256 = "e".repeat(64);
+        let d = finalize_run(&i);
+        let tm = fixtures::training_manifest();
+        let pack = fixtures::pack_outcome();
+        let c = &d.manifest.contracts;
+        assert_eq!(c.prefilter_gate.as_deref(), Some("e".repeat(64).as_str()));
+        assert_eq!(
+            c.train_gate.as_deref(),
+            Some(tm.gate_contract_sha256.as_str())
+        );
+        assert_eq!(
+            c.pack_gate.as_deref(),
+            Some(pack.gate_contract_sha256.as_str())
+        );
+        assert_eq!(
+            c.pack_parity.as_deref(),
+            Some(pack.parity_contract_sha256.as_str())
+        );
+        let d = finalize_run(&gate_fail_input());
+        assert!(d.manifest.contracts.prefilter_gate.is_some());
+        assert_eq!(
+            d.manifest.contracts.pack_gate, None,
+            "null when the file is absent"
+        );
+        assert_eq!(d.manifest.contracts.pack_parity, None);
+    }
+
+    #[test]
+    fn finalize_partial_manifest() {
+        let mut i = input();
+        let tm = i.training_manifest.as_mut().expect("tm");
+        tm.complete = false;
+        tm.entries.truncate(4);
+        i.outcome.as_mut().expect("outcome").exit_class = ExitClass::Timeout;
+        i.pack_outcome = None;
+        i.pack_manifest = Vec::new();
+        let d = finalize_run(&i);
+        assert_eq!(d.phase, Phase::Failed);
+        assert_eq!(
+            d.manifest.entries.len(),
+            4,
+            "the four uploaded files stay inventoried"
+        );
+        assert!(d.manifest_partial);
+        assert!(
+            d.payload.manifest_partial,
+            "the payload records the inventory as partial"
+        );
+        // A complete manifest is not partial.
+        assert!(!finalize_run(&input()).payload.manifest_partial);
+    }
+
+    #[test]
+    fn finalize_waived_accepted() {
+        let d = finalize_run(&waived_input("W-1"));
+        assert_eq!(d.phase, Phase::Completed);
+        assert_eq!(d.status, TaskStatus::Completed);
+        assert!(!d.is_error);
+        let verdict = d.payload.verdict.as_ref().expect("verdict");
+        assert!(!verdict.pass, "a waiver never changes the gate's own pass");
+        assert_eq!(verdict.waived.as_deref(), Some("W-1"));
+        assert_eq!(verdict.apr_sha256, Some(sha("apr")));
+        assert!(has_apr(&d), ".apr listed");
+        assert!(
+            !d.keep,
+            "D-19 keeps GATE PASS only; a waived acceptance expires"
+        );
+    }
+
+    #[test]
+    fn finalize_waived_pack_refused() {
+        let mut i = waived_input("W-1");
+        let pack = i.pack_outcome.as_mut().expect("pack");
+        pack.accepted = false;
+        pack.apr_sha256 = None;
+        pack.exit_code = Some(3);
+        let d = finalize_run(&i);
+        assert_eq!(d.phase, Phase::Failed);
+        assert!(d.is_error);
+        assert!(!has_apr(&d));
+        all_report_entries_present(&d);
+        assert_eq!(
+            d.payload.verdict.as_ref().expect("verdict").apr_sha256,
+            None
+        );
+    }
+
+    #[test]
+    fn finalize_waived_mismatch() {
+        let mut i = waived_input("W-1");
+        i.pack_outcome.as_mut().expect("pack").waived = Some("W-2".to_string());
+        let d = finalize_run(&i);
+        assert_eq!(d.phase, Phase::Failed);
+        assert!(error_of(&d).contains("integrity"), "{}", error_of(&d));
+        assert!(!has_apr(&d));
+        // An accepted pack that reports no waiver at all is a mismatch too.
+        let mut i = waived_input("W-1");
+        i.pack_outcome.as_mut().expect("pack").waived = None;
+        let d = finalize_run(&i);
+        assert_eq!(d.phase, Phase::Failed);
+        assert!(error_of(&d).contains("integrity"), "{}", error_of(&d));
+    }
+
+    #[test]
+    fn finalize_pass_waived_integrity() {
+        let mut i = input();
+        i.pack_outcome.as_mut().expect("pack").waived = Some("W-1".to_string());
+        let d = finalize_run(&i);
+        assert_eq!(d.phase, Phase::Failed);
+        assert!(error_of(&d).contains("integrity"), "{}", error_of(&d));
+        assert!(!d.keep);
+    }
+
+    #[test]
+    fn finalize_without_a_listed_model_is_an_integrity_failure() {
+        let mut i = input();
+        i.pack_manifest.retain(|e| !e.path.ends_with(".apr"));
+        let d = finalize_run(&i);
+        assert_eq!(d.phase, Phase::Failed);
+        assert!(error_of(&d).contains("integrity"), "{}", error_of(&d));
+        let mut i = input();
+        i.pack_manifest[0].sha256 = sha("a different model");
+        assert!(error_of(&finalize_run(&i)).contains("integrity"));
+    }
+
+    #[test]
+    fn finalize_malformed_report_is_refused_not_defaulted() {
+        let mut i = input();
+        i.gate_report.as_mut().expect("report")["fine_tuned"]
+            .as_object_mut()
+            .expect("object")
+            .remove("ece_post");
+        let d = finalize_run(&i);
+        assert_eq!(d.phase, Phase::Failed);
+        assert!(error_of(&d).contains("ece_post"), "{}", error_of(&d));
+        let mut i = input();
+        i.gate_report = None;
+        assert_eq!(finalize_run(&i).phase, Phase::Failed);
+        // The outcome and the report must agree about the gate.
+        let mut i = input();
+        i.gate_report.as_mut().expect("report")["pass"] = serde_json::json!(false);
+        assert!(error_of(&finalize_run(&i)).contains("integrity"));
+    }
+
+    #[test]
+    fn verdict_from_real_report() {
+        let real: serde_json::Value =
+            serde_json::from_str(fixtures::REAL_TINY_REPORT).expect("real");
+        let v = verdict_from_report(&real);
+        assert_eq!(v.ece_post, real["fine_tuned"]["ece_post"].as_f64());
+        assert!(v.ece_post.is_some());
+        assert_eq!(v.margin, real["margin"].as_f64());
+        assert_eq!(v.zero_shot_macro_f1, real["zero_shot"]["macro_f1"].as_f64());
+        assert_eq!(v.ft_macro_f1, real["fine_tuned"]["macro_f1"].as_f64());
+        assert_eq!(v.pass, real["pass"].as_bool().expect("pass"));
+        assert_eq!(
+            v.shipped_seed, None,
+            "a one-seed report has no shipped seed"
+        );
+        assert!(v.per_seed.is_empty());
+        assert_eq!(v.device_used.as_deref(), real["device_used"].as_str());
+        assert_eq!(v.torch_version.as_deref(), real["torch_version"].as_str());
+        assert_eq!(v.recipe_id.as_deref(), real["recipe_id"].as_str());
+        assert!(v.shift_probe.is_none());
+        assert_eq!(
+            report_defect(&real),
+            None,
+            "the real report has every required field"
+        );
+
+        // Three seeds, and a `calibration` block with no ece key.
+        let report = fixtures::gate_report();
+        let v = verdict_from_report(&report);
+        assert_eq!(v.ece_post, report["fine_tuned"]["ece_post"].as_f64());
+        assert_eq!(v.shipped_seed, report["seeds"]["shipped"].as_u64());
+        assert_eq!(v.per_seed.len(), 3);
+        for (row, source) in v
+            .per_seed
+            .iter()
+            .zip(report["seeds"]["per_seed"].as_array().expect("rows"))
+        {
+            assert_eq!(Some(row.seed), source["seed"].as_u64());
+            assert_eq!(row.ece_post, source["ece_post"].as_f64());
+            assert_eq!(row.macro_f1, source["macro_f1"].as_f64());
+            assert_eq!(row.margin, source["margin"].as_f64());
+            assert_eq!(row.pass, source["pass"].as_bool());
+        }
+        // The shipped seed's own row is the report's fine_tuned block.
+        let shipped = v
+            .per_seed
+            .iter()
+            .find(|r| Some(r.seed) == v.shipped_seed)
+            .expect("shipped row");
+        assert_eq!(shipped.ece_post, v.ece_post);
+    }
+
+    #[test]
+    fn verdict_copies_the_shift_probe_as_is() {
+        let mut report = fixtures::gate_report();
+        report["shift_probe"] =
+            serde_json::json!({ "n": 12, "ece": 0.19, "note": "kept verbatim" });
+        let v = verdict_from_report(&report);
+        assert_eq!(v.shift_probe, Some(report["shift_probe"].clone()));
+        report["shift_probe"] = serde_json::Value::Null;
+        assert!(verdict_from_report(&report).shift_probe.is_none());
+    }
+
+    fn every_decision() -> Vec<FinalizeDecision> {
+        let mut crash = input();
+        crash.outcome.as_mut().expect("outcome").exit_class = ExitClass::Crash;
+        let mut aborted = input();
+        aborted.aborted = true;
+        vec![
+            finalize_run(&input()),
+            finalize_run(&gate_fail_input()),
+            finalize_run(&waived_input("W-1")),
+            finalize_run(&crash),
+            finalize_run(&aborted),
+            pack_refused(3),
+        ]
+    }
+
+    #[test]
+    fn payload_no_links_stored() {
+        for d in every_decision() {
+            assert!(
+                d.payload.manifest.iter().all(|l| l.url.is_none()),
+                "{:?} stored a link",
+                d.phase
+            );
+            let stored = serde_json::to_value(&d.payload).expect("ser");
+            for entry in stored["manifest"].as_array().expect("manifest") {
+                assert!(entry["url"].is_null());
+            }
+            let text = decision_result(&d);
+            let Some(Content::Text { text }) = text.content.first() else {
+                panic!("no text");
+            };
+            assert!(
+                !text.contains("https://"),
+                "a stored payload carries no link: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn payload_size() {
+        let mut i = input();
+        let tm = i.training_manifest.as_mut().expect("tm");
+        tm.entries = (0..64)
+            .map(|n| ManifestEntry {
+                path: format!("run/seeds/seed-20260925/checkpoint/shard-{n:04}.safetensors"),
+                size: 1 << 28,
+                sha256: sha(&format!("shard-{n}")),
+            })
+            .collect();
+        let d = finalize_run(&i);
+        assert_eq!(d.phase, Phase::Completed);
+        assert_eq!(d.payload.manifest.len(), 64 + 4);
+        assert_eq!(
+            d.payload.verdict.as_ref().expect("verdict").per_seed.len(),
+            3
+        );
+        let size = decision_result(&d)
+            .content
+            .iter()
+            .map(|c| match c {
+                Content::Text { text } => text.len(),
+                _ => 0,
+            })
+            .sum::<usize>();
+        assert!(
+            size < 64 * 1024,
+            "{size} bytes: far under the 380 KB item ceiling"
+        );
     }
 }

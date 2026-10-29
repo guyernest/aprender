@@ -1,0 +1,44 @@
+{
+  "schema": "laya-train-training-manifest-v1",
+  "task_id": "00000000-0000-4000-8000-000000000001",
+  "complete": true,
+  "train_image_digest": "sha256:6659b091367bf0f59d6ee1e4af009823a7f5fe62dbb57b4e80646bbaea2c2057",
+  "gate_contract_sha256": "9c82df499761f0f4e0b72af412e3ea359c900b229c67fdd68d8da238c72ad1f8",
+  "entries": [
+    {
+      "path": "data/eval.jsonl",
+      "size": 2048,
+      "sha256": "40935be6c2204611e3fdf69539ff0fc809bf149cfccc1ee99246ad30a1f4ae8b"
+    },
+    {
+      "path": "data/task.json",
+      "size": 275,
+      "sha256": "8596f438ac50d28f00af817a127402060c36eae14fbb81c8c4bdea2311c7e438"
+    },
+    {
+      "path": "data/train.jsonl",
+      "size": 9216,
+      "sha256": "8b4c0064c94f0c6ae4bbd2d699de1ae6c9e72aca889713ee460b7b7eceb7de77"
+    },
+    {
+      "path": "outcome.json",
+      "size": 312,
+      "sha256": "25a63e52a98f6fdaa6187da559a0a3a55d845d0322ca183ad6ad5e006c4ed646"
+    },
+    {
+      "path": "run/gate-report.json",
+      "size": 2310,
+      "sha256": "3640ba387dde461eaeb5a55cb68f8da1ed0663c4e7e73a6a354ff7c1ff88e2da"
+    },
+    {
+      "path": "run/recipe.json",
+      "size": 560,
+      "sha256": "e1d8e552330911f9f779f85b6f2c00a15e790dcc3fbb3b28f5da1d660a30c5b8"
+    },
+    {
+      "path": "train.log",
+      "size": 18432,
+      "sha256": "6bc92e1a3f720307f43e0f23954ec05bf1ccab9d981ae66168ab9b49e3e4bb5f"
+    }
+  ]
+}

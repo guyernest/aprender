@@ -653,12 +653,15 @@ async fn status(
     task_id: &str,
 ) -> pmcp::Result<serde_json::Value> {
     let owner = resolve_owner(extra);
-    ctx.store
-        .get(task_id, &owner)
-        .await
-        .map_err(|e| pmcp::Error::validation(format!("no task {task_id} on this server: {e}")))?;
+    let task =
+        ctx.store.get(task_id, &owner).await.map_err(|e| {
+            pmcp::Error::validation(format!("no task {task_id} on this server: {e}"))
+        })?;
 
+    // A stored result is THE payload: both doors serve one document.
+    let mut unreadable = false;
     if let Ok(result) = ctx.store.get_result(task_id, &owner).await {
+        unreadable = true;
         if let Some(Content::Text { text }) = result.content.first() {
             if let Ok(mut payload) = serde_json::from_str::<StatusPayload>(text) {
                 let bucket_prefix = format!("s3://{}/", ctx.dispatcher.bucket());
@@ -673,6 +676,13 @@ async fn status(
         }
     }
 
+    // No usable stored result: synthesize the same shape from the envelope at
+    // READ time, and never write it back.
+    //   Working                    -> the working answer
+    //   Cancelled                  -> phase cancelled (verdict null, manifest empty): the
+    //                                 store's cancel writes no result
+    //   any other terminal status  -> phase failed `no stored result` (no code path
+    //                                 writes one; it must not read as working forever)
     let envelope = ctx
         .store
         .get_envelope(task_id, &owner)
@@ -684,7 +694,13 @@ async fn status(
         || (String::new(), String::new()),
         |e| (e.name, e.run_prefix),
     );
-    Ok(StatusPayload::base(task_id, &name, &uri, Phase::Working).to_value())
+    let payload = match task.status {
+        _ if unreadable => failed_payload(task_id, &name, &uri, "stored result is unreadable"),
+        TaskStatus::Cancelled => StatusPayload::base(task_id, &name, &uri, Phase::Cancelled),
+        status if status.is_terminal() => failed_payload(task_id, &name, &uri, "no stored result"),
+        _ => StatusPayload::base(task_id, &name, &uri, Phase::Working),
+    };
+    Ok(payload.to_value())
 }
 
 /// The streamable-HTTP config this server serves: `max_request_bytes` narrowed
@@ -760,10 +776,9 @@ mod tests {
     use pmcp::server::auth::AuthContext;
 
     use super::*;
-    use crate::finalize::{decision_result, finalize_run, FinalizeInput};
-    use crate::layout::{
-        apr_entry_path, ExitClass, ManifestEntry, Outcome, PackOutcome, TrainingManifest,
-        SCHEMA_OUTCOME, SCHEMA_PACK_OUTCOME, SCHEMA_TRAINING_MANIFEST,
+    use crate::finalize::{
+        attach_result_if_absent, decision_result, finalize_run, fixtures, AttachOutcome,
+        FinalizeInput,
     };
     use crate::validate::test_data::dataset;
 
@@ -906,87 +921,26 @@ mod tests {
         }
     }
 
-    fn hex(c: char) -> String {
-        c.to_string().repeat(64)
-    }
-
-    /// Run outputs for a passing, accepted run, built from layout.rs's structs.
+    /// The committed fixtures, bound to this run's task id and model name.
     pub(crate) fn passing_input(spec: &RunSpec) -> FinalizeInput {
-        let apr = ManifestEntry {
-            path: apr_entry_path(&spec.name),
-            size: 4096,
-            sha256: hex('a'),
-        };
-        let report = serde_json::json!({
-            "schema": "laya-gate-report-v1",
-            "pass": true,
-            "margin": 0.21,
-            "zero_shot": { "macro_f1": 0.4, "f_avg": null, "ece": 0.05, "n": 6 },
-            "fine_tuned": { "macro_f1": 0.61, "f_avg": null, "ece_pre": 0.09, "ece_post": 0.04, "nll": 0.5, "n": 6 },
-            "calibration": { "bucket": "choice:3-5", "t_fitted": 1.2, "t_applied": 1.2, "clamp_hit": false,
-                             "slice_size": 6, "slice_ids": [0, 1], "slice_ids_sha256": hex('b') },
-            "seeds": { "declared": 7, "n": 1, "label": "single seed" },
-            "device_used": "cuda", "device_is_cpu": false, "torch_version": "2.14.0",
-            "recipe_id": hex('c'),
-        });
-        FinalizeInput {
-            bucket: BUCKET.to_string(),
-            execution: spec.execution_input(),
-            stage_error: None,
-            aborted: false,
-            outcome: Some(Outcome {
-                schema: SCHEMA_OUTCOME.to_string(),
-                task_id: spec.task_id.clone(),
-                exit_class: ExitClass::Pass,
-                train_rc: Some(0),
-                device_used: "cuda".to_string(),
-                device_ok: true,
-                refused_line: None,
-                started_at: "2026-10-29T10:00:00Z".to_string(),
-                finished_at: "2026-10-29T11:00:00Z".to_string(),
-                train_seconds: 3600.0,
-            }),
-            gate_report: Some(report),
-            pack_outcome: Some(PackOutcome {
-                schema: SCHEMA_PACK_OUTCOME.to_string(),
-                task_id: spec.task_id.clone(),
-                pack_image_digest: format!("sha256:{}", hex('d')),
-                gate_contract_sha256: hex('e'),
-                parity_contract_sha256: hex('f'),
-                ran: true,
-                skipped: None,
-                exit_code: Some(0),
-                accepted: true,
-                apr_sha256: Some(hex('a')),
-                shipped_seed: Some(7),
-                waived: None,
-                packed_line: Some("PACKED waived=none".to_string()),
-                verify_line: Some("{\"deploy_eligible\":true}".to_string()),
-                deploy_eligible: true,
-                pack_seconds: Some(10.0),
-                verify_seconds: Some(20.0),
-            }),
-            training_manifest: Some(TrainingManifest {
-                schema: SCHEMA_TRAINING_MANIFEST.to_string(),
-                task_id: spec.task_id.clone(),
-                complete: true,
-                train_image_digest: format!("sha256:{}", hex('1')),
-                gate_contract_sha256: hex('2'),
-                entries: vec![
-                    ManifestEntry {
-                        path: "gate-report.json".to_string(),
-                        size: 900,
-                        sha256: hex('3'),
-                    },
-                    ManifestEntry {
-                        path: "outcome.json".to_string(),
-                        size: 300,
-                        sha256: hex('4'),
-                    },
-                ],
-            }),
-            pack_manifest: vec![apr],
+        let mut input = fixtures::input();
+        input.bucket = BUCKET.to_string();
+        input.execution = spec.execution_input();
+        if let Some(outcome) = input.outcome.as_mut() {
+            outcome.task_id.clone_from(&spec.task_id);
         }
+        if let Some(pack) = input.pack_outcome.as_mut() {
+            pack.task_id.clone_from(&spec.task_id);
+        }
+        if let Some(tm) = input.training_manifest.as_mut() {
+            tm.task_id.clone_from(&spec.task_id);
+        }
+        for entry in &mut input.pack_manifest {
+            if entry.path == "fixture-model.apr" {
+                entry.path = layout::apr_entry_path(&spec.name);
+            }
+        }
+        input
     }
 
     #[tokio::test]
@@ -1101,9 +1055,12 @@ mod tests {
         let read = status(&h.ctx, &extra("alice"), &id).await.expect("status");
         assert_eq!(read["phase"], "completed");
         assert_eq!(read["verdict"]["pass"], true);
-        assert_eq!(read["verdict"]["apr_sha256"], hex('a'));
+        assert_eq!(read["verdict"]["apr_sha256"], fixtures::sha("apr"));
         let manifest = read["manifest"].as_array().expect("manifest");
-        assert_eq!(manifest.len(), 3);
+        assert_eq!(
+            manifest.len(),
+            fixtures::training_manifest().entries.len() + fixtures::pack_entries().len()
+        );
         for entry in manifest {
             let path = entry["path"].as_str().expect("path");
             assert_eq!(entry["url"], format!("https://presigned.example/{path}"));
@@ -1790,5 +1747,244 @@ mod tests {
         assert_eq!(at["epochs_required"], false);
         assert_eq!(at["epochs_fixed"], 12);
         assert!(at["epochs_range"].is_null());
+    }
+
+    // ------------------------------------------------------------------
+    // Task 3: the cancelled-task rule and the payload invariants
+    // ------------------------------------------------------------------
+
+    async fn started(h: &Harness) -> (String, RunSpec) {
+        let answer = h
+            .train("alice", "tracer-model", Some(4))
+            .await
+            .expect("accepted");
+        let id = answer["taskId"].as_str().expect("taskId").to_string();
+        let spec = h.dispatcher.recorded().remove(0);
+        (id, spec)
+    }
+
+    async fn record(h: &Harness, id: &str) -> StoredTask {
+        h.backend
+            .get("alice", id)
+            .await
+            .expect("get")
+            .expect("record")
+    }
+
+    fn stored_text(record: &StoredTask) -> Option<String> {
+        match record.result.as_ref()?.content.first() {
+            Some(Content::Text { text }) => Some(text.clone()),
+            _ => None,
+        }
+    }
+
+    #[tokio::test]
+    async fn status_cancelled_unfinalized() {
+        let h = Harness::new(20);
+        let (id, _) = started(&h).await;
+        let cancelled = h.ctx.store.cancel(&id, "alice").await.expect("cancel");
+        assert_eq!(cancelled.status, TaskStatus::Cancelled);
+        let before = record(&h, &id).await;
+        assert!(
+            before.result.is_none(),
+            "the store's cancel writes no result"
+        );
+        let answer = status(&h.ctx, &extra("alice"), &id).await.expect("status");
+        assert_eq!(answer["phase"], "cancelled");
+        assert!(answer["verdict"].is_null());
+        assert_eq!(answer["manifest"], serde_json::json!([]));
+        assert!(answer["error"].is_null());
+        assert_eq!(answer["name"], "tracer-model");
+        assert_eq!(
+            answer["run_prefix"],
+            format!("s3://{BUCKET}/runs/tracer-model/{id}/")
+        );
+        let after = record(&h, &id).await;
+        assert_eq!(before.version, after.version, "the read wrote nothing");
+        assert!(after.result.is_none());
+    }
+
+    #[tokio::test]
+    async fn status_terminal_without_result_reads_failed() {
+        let h = Harness::new(20);
+        let (id, _) = started(&h).await;
+        let mut rec = record(&h, &id).await;
+        let expected = rec.version;
+        rec.task.status = TaskStatus::Failed;
+        rec.version += 1;
+        h.backend
+            .cas("alice", &id, expected, rec)
+            .await
+            .expect("cas");
+        let before = record(&h, &id).await.version;
+        let answer = status(&h.ctx, &extra("alice"), &id).await.expect("status");
+        assert_eq!(answer["phase"], "failed");
+        assert_eq!(answer["error"], "no stored result");
+        assert_eq!(record(&h, &id).await.version, before, "read time only");
+    }
+
+    #[tokio::test]
+    async fn attach_cancelled() {
+        let h = Harness::new(20);
+        let (id, spec) = started(&h).await;
+        h.ctx.store.cancel(&id, "alice").await.expect("cancel");
+        // Before the attach, tasks/result has nothing to serve.
+        assert!(h.ctx.store.get_result(&id, "alice").await.is_err());
+
+        let mut input = passing_input(&spec);
+        input.aborted = true;
+        let decision = finalize_run(&input);
+        assert_eq!(decision.phase, Phase::Cancelled);
+        let outcome =
+            attach_result_if_absent(h.backend.as_ref(), "alice", &id, decision_result(&decision))
+                .await
+                .expect("attach");
+        assert_eq!(outcome, AttachOutcome::Attached);
+
+        let after = record(&h, &id).await;
+        assert_eq!(
+            after.task.status,
+            TaskStatus::Cancelled,
+            "the status is unchanged"
+        );
+        let stored = h
+            .ctx
+            .store
+            .get_result(&id, "alice")
+            .await
+            .expect("tasks/result now serves it");
+        let Some(Content::Text { text }) = stored.content.first() else {
+            panic!("no text");
+        };
+        let payload: serde_json::Value = serde_json::from_str(text).expect("json");
+        assert_eq!(payload["schema"], layout::SCHEMA_STATUS);
+        assert_eq!(payload["phase"], "cancelled");
+        // train_status now returns the stored payload.
+        let mut answer = status(&h.ctx, &extra("alice"), &id).await.expect("status");
+        for entry in answer["manifest"].as_array_mut().expect("manifest") {
+            assert!(entry["url"].is_string(), "links are minted at read time");
+            entry["url"] = serde_json::Value::Null;
+        }
+        assert_eq!(
+            answer, payload,
+            "the same stored document, plus read-time links"
+        );
+    }
+
+    #[tokio::test]
+    async fn attach_second_noop() {
+        let h = Harness::new(20);
+        let (id, spec) = started(&h).await;
+        h.ctx.store.cancel(&id, "alice").await.expect("cancel");
+        let mut input = passing_input(&spec);
+        input.aborted = true;
+        let first = finalize_run(&input);
+        assert_eq!(
+            attach_result_if_absent(h.backend.as_ref(), "alice", &id, decision_result(&first))
+                .await
+                .expect("attach"),
+            AttachOutcome::Attached
+        );
+        let before = record(&h, &id).await;
+        let other = finalize_run(&passing_input(&spec));
+        assert_eq!(
+            attach_result_if_absent(h.backend.as_ref(), "alice", &id, decision_result(&other))
+                .await
+                .expect("attach"),
+            AttachOutcome::AlreadyPresent
+        );
+        let after = record(&h, &id).await;
+        assert_eq!(before.version, after.version);
+        assert_eq!(
+            stored_text(&before),
+            stored_text(&after),
+            "nothing replaces a stored result"
+        );
+        assert_eq!(after.task.status, TaskStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn attach_refuses_working() {
+        let h = Harness::new(20);
+        let (id, spec) = started(&h).await;
+        let decision = finalize_run(&passing_input(&spec));
+        let before = record(&h, &id).await;
+        assert_eq!(
+            attach_result_if_absent(h.backend.as_ref(), "alice", &id, decision_result(&decision))
+                .await
+                .expect("attach"),
+            AttachOutcome::NotTerminal
+        );
+        let after = record(&h, &id).await;
+        assert_eq!(before.version, after.version, "nothing written");
+        assert!(after.result.is_none());
+        assert_eq!(after.task.status, TaskStatus::Working);
+        assert_eq!(
+            attach_result_if_absent(
+                h.backend.as_ref(),
+                "alice",
+                "no-such-task",
+                decision_result(&decision)
+            )
+            .await
+            .expect("attach"),
+            AttachOutcome::NotFound
+        );
+        assert_eq!(
+            attach_result_if_absent(h.backend.as_ref(), "bob", &id, decision_result(&decision))
+                .await
+                .expect("attach"),
+            AttachOutcome::NotFound,
+            "another owner's task is not found"
+        );
+    }
+
+    #[tokio::test]
+    async fn payload_one_shape() {
+        let h = Harness::new(20);
+        let (id, spec) = started(&h).await;
+        let keys = |v: &serde_json::Value| -> Vec<String> {
+            let mut k: Vec<String> = v.as_object().expect("object").keys().cloned().collect();
+            k.sort();
+            k
+        };
+        let mut shapes = Vec::new();
+        // working (read at status time)
+        shapes.push((
+            "working",
+            status(&h.ctx, &extra("alice"), &id).await.expect("status"),
+        ));
+        // every finalize phase
+        let mut crash = passing_input(&spec);
+        crash.outcome.as_mut().expect("outcome").exit_class = layout::ExitClass::Crash;
+        let mut gate_fail = passing_input(&spec);
+        gate_fail.outcome.as_mut().expect("outcome").exit_class = layout::ExitClass::GateFail;
+        gate_fail.gate_report.as_mut().expect("report")["pass"] = serde_json::json!(false);
+        gate_fail.pack_outcome = None;
+        let mut aborted = passing_input(&spec);
+        aborted.aborted = true;
+        for (label, input) in [
+            ("completed", passing_input(&spec)),
+            ("gate_failed", gate_fail),
+            ("failed", crash),
+            ("cancelled", aborted),
+        ] {
+            let decision = finalize_run(&input);
+            shapes.push((label, decision.payload.to_value()));
+        }
+        // the read-time cancelled answer
+        h.ctx.store.cancel(&id, "alice").await.expect("cancel");
+        shapes.push((
+            "read-time cancelled",
+            status(&h.ctx, &extra("alice"), &id).await.expect("status"),
+        ));
+        let reference = keys(&shapes[0].1);
+        for (label, shape) in &shapes {
+            assert_eq!(&keys(shape), &reference, "{label} has a different key set");
+        }
+        // And the submit answer is the same document plus taskId, status and ttl.
+        let submit_keys = keys(&working_answer(&id, "n", "u"));
+        assert!(reference.iter().all(|k| submit_keys.contains(k)));
+        assert_eq!(submit_keys.len(), reference.len() + 3);
     }
 }

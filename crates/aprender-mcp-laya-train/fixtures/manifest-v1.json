@@ -1,0 +1,73 @@
+{
+  "schema": "laya-train-manifest-v1",
+  "task_id": "00000000-0000-4000-8000-000000000001",
+  "name": "fixture-model",
+  "images": {
+    "train": "sha256:6659b091367bf0f59d6ee1e4af009823a7f5fe62dbb57b4e80646bbaea2c2057",
+    "pack": "sha256:f59060360430b53654f4bd5d0734a13efe9bd0fbf952aa3fe460805f254815a9"
+  },
+  "contracts": {
+    "prefilter_gate": "35dc0d2283161f3ac57cacbdec2e4dfc5e10d5576ba5d4c75df7e69417294dfb",
+    "train_gate": "9c82df499761f0f4e0b72af412e3ea359c900b229c67fdd68d8da238c72ad1f8",
+    "pack_gate": "bc5b89030053bc62e4a406091f6b1f4e41899107fd7271faf919be90e1838a8f",
+    "pack_parity": "0d9e492d248c3df90f33a5ed4563357797f911fbdfd7bf8504593f3c2eea99c2"
+  },
+  "entries": [
+    {
+      "path": "data/eval.jsonl",
+      "size": 2048,
+      "sha256": "40935be6c2204611e3fdf69539ff0fc809bf149cfccc1ee99246ad30a1f4ae8b"
+    },
+    {
+      "path": "data/task.json",
+      "size": 275,
+      "sha256": "8596f438ac50d28f00af817a127402060c36eae14fbb81c8c4bdea2311c7e438"
+    },
+    {
+      "path": "data/train.jsonl",
+      "size": 9216,
+      "sha256": "8b4c0064c94f0c6ae4bbd2d699de1ae6c9e72aca889713ee460b7b7eceb7de77"
+    },
+    {
+      "path": "fixture-model.apr",
+      "size": 4194304,
+      "sha256": "02b3dce98c61897231fdcf1a0594d6c2e159ff8a812386001c769706727efb3e"
+    },
+    {
+      "path": "outcome.json",
+      "size": 312,
+      "sha256": "25a63e52a98f6fdaa6187da559a0a3a55d845d0322ca183ad6ad5e006c4ed646"
+    },
+    {
+      "path": "pack-outcome.json",
+      "size": 640,
+      "sha256": "754a92ee04b535464b1976000024f45712ebf7be4b38d19dd8e5e1917843b1e5"
+    },
+    {
+      "path": "pack.log",
+      "size": 1024,
+      "sha256": "cd3de4e3b5e5334aba243178d7dd2eeedddcc887d98e1cb9e5caf79b2b37dc53"
+    },
+    {
+      "path": "run/gate-report.json",
+      "size": 2310,
+      "sha256": "3640ba387dde461eaeb5a55cb68f8da1ed0663c4e7e73a6a354ff7c1ff88e2da"
+    },
+    {
+      "path": "run/recipe.json",
+      "size": 560,
+      "sha256": "e1d8e552330911f9f779f85b6f2c00a15e790dcc3fbb3b28f5da1d660a30c5b8"
+    },
+    {
+      "path": "train.log",
+      "size": 18432,
+      "sha256": "6bc92e1a3f720307f43e0f23954ec05bf1ccab9d981ae66168ab9b49e3e4bb5f"
+    },
+    {
+      "path": "verify.log",
+      "size": 2048,
+      "sha256": "805eed2f664a5dae854f390f9301674bb11510ab9626abdf76d8ab6ee31dd45d"
+    }
+  ],
+  "unlisted": 0
+}

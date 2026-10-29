@@ -1,0 +1,12 @@
+{
+  "schema": "laya-train-outcome-v1",
+  "task_id": "00000000-0000-4000-8000-000000000001",
+  "exit_class": "pass",
+  "train_rc": 0,
+  "device_used": "cuda",
+  "device_ok": true,
+  "refused_line": null,
+  "started_at": "2026-10-29T10:00:00Z",
+  "finished_at": "2026-10-29T11:00:30Z",
+  "train_seconds": 3600.5
+}

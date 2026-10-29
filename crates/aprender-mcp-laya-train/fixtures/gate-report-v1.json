@@ -1,0 +1,97 @@
+{
+  "schema": "laya-gate-report-v1",
+  "pass": true,
+  "thresholds": {
+    "min_macro_f1_margin": 0.05,
+    "max_ece": 0.1,
+    "ece_bins": 15
+  },
+  "zero_shot": {
+    "macro_f1": 0.4,
+    "f_avg": null,
+    "ece": 0.05,
+    "n": 640
+  },
+  "fine_tuned": {
+    "macro_f1": 0.57,
+    "f_avg": null,
+    "ece_pre": 0.09,
+    "ece_post": 0.052,
+    "nll": 0.5,
+    "n": 640
+  },
+  "margin": 0.17,
+  "calibration": {
+    "bucket": "choice:2",
+    "t_fitted": 1.29,
+    "t_applied": 1.29,
+    "clamp_hit": false,
+    "slice_size": 64,
+    "slice_ids": [
+      1,
+      5,
+      9
+    ],
+    "slice_ids_sha256": "c96c291dcad751c87ce752537fd0f3241ae817f1e0669d69a0b3d1f0fe921c62"
+  },
+  "seeds": {
+    "declared": 20260925,
+    "n": 3,
+    "label": "median-ECE seed of 3 seeds",
+    "policy": "median_ece",
+    "shipped": 20260927,
+    "per_seed": [
+      {
+        "seed": 20260925,
+        "macro_f1": 0.58,
+        "f_avg": null,
+        "ece_post": 0.061,
+        "margin": 0.18,
+        "pass": true,
+        "t_applied": 1.31,
+        "rank_key": 61000,
+        "eval_probs_sha256": "1852bfb9e3e2e82c78081f8ee918add5484d1d3e80bcccb6572a40b76aef564d",
+        "model_safetensors_sha256": "d675cf6305ee4828100327af069fafb9eeb46f53ad5c8efa6741abda5065403e"
+      },
+      {
+        "seed": 20260926,
+        "macro_f1": 0.61,
+        "f_avg": null,
+        "ece_post": 0.044,
+        "margin": 0.21,
+        "pass": true,
+        "t_applied": 1.29,
+        "rank_key": 44000,
+        "eval_probs_sha256": "8f3726b144f5daae984019068136246add499638a486b728916b5a1303a8cdbb",
+        "model_safetensors_sha256": "258f656b054a4d73f0b7a70995825be0785b30e1472e34330c893d2799896c00"
+      },
+      {
+        "seed": 20260927,
+        "macro_f1": 0.57,
+        "f_avg": null,
+        "ece_post": 0.052,
+        "margin": 0.17,
+        "pass": true,
+        "t_applied": 1.33,
+        "rank_key": 52000,
+        "eval_probs_sha256": "20c38257bd7e2a8c4e3ece807b466f564210e970741d29b922d598ca5b69bd5e",
+        "model_safetensors_sha256": "d126dae7c92acb0166eec0d7fed82de485c4b24ff67de2c0fb81209c0feebfab"
+      }
+    ]
+  },
+  "device_used": "cuda",
+  "device_is_cpu": false,
+  "torch_version": "2.14.0",
+  "recipe_id": "e1d8e552330911f9f779f85b6f2c00a15e790dcc3fbb3b28f5da1d660a30c5b8",
+  "inputs_sha256": {
+    "task_json": "8596f438ac50d28f00af817a127402060c36eae14fbb81c8c4bdea2311c7e438",
+    "train_jsonl": "8b4c0064c94f0c6ae4bbd2d699de1ae6c9e72aca889713ee460b7b7eceb7de77",
+    "eval_jsonl": "40935be6c2204611e3fdf69539ff0fc809bf149cfccc1ee99246ad30a1f4ae8b",
+    "base_model": "cae662172fd450bb0cd710a769079c05bfc5d8e35efa6576edc7d0377afdd4a2",
+    "tokenizer_json": "5f97e3774c51edd1d63706c2ec3826c564a067794770cdab0f8c4797971cacf9"
+  },
+  "eval_probs_sha256": "6542f59e410664da907cb7dafb848615269c372dcaeb9687f39392d357e83c6a",
+  "zero_shot_probs_sha256": "806c23dd53ebb79fef0c946b8b6ac2f0cf6bac8f35602576da85289ddb933cd3",
+  "probes_sha256": "11c4a847b3b962007a8599b3c6b141c3c8db0e3732dacdccba62fe40c97c24e8",
+  "rescore_noise_sha256": "8cccdc213d8ee6366e02cfc67c9951f642cb490e8c9d649f00cd591c4d49ff5e"
+}
