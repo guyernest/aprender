@@ -1234,4 +1234,218 @@ mod tests {
             cases.len()
         );
     }
+
+    #[test]
+    fn deferred_rules_reach_the_serialized_answer() {
+        let p = policy();
+        let t = table();
+        let case = t["cases"]
+            .as_array()
+            .expect("cases")
+            .iter()
+            .find(|c| c["rust"] == "deferred")
+            .expect("the table holds a deferred case");
+        let (summary, _) = validate_for_submit(&case_files(case), case_epochs(case), &p)
+            .expect("rust defers, it does not refuse");
+        let answer = serde_json::to_value(&summary).expect("a summary serializes");
+        assert_eq!(
+            answer["deferred_rules"],
+            serde_json::Value::from(vec!["train-class-too-small"]),
+            "validate_dataset serializes the summary as is, so the caller sees the deferral"
+        );
+    }
+
+    #[test]
+    fn contract_mirror() {
+        // Read through a second, untyped path so the typed view cannot agree with itself.
+        let doc: serde_yaml::Value =
+            serde_yaml::from_str(GATE_CONTRACT_YAML).expect("the gate contract parses");
+        let p = policy();
+        let constants = &doc["constants"];
+        assert_eq!(
+            Some(p.calibration_fraction),
+            constants["calibration_slice_fraction"].as_f64()
+        );
+        assert_eq!(
+            Some(p.calibration_min_per_class),
+            constants["calibration_slice_min_per_class"].as_u64()
+        );
+        let recipe = &doc["recipe"];
+        assert_eq!(
+            Some(u64::from(p.epoch_rule.fixed)),
+            recipe["epochs_at_most_16_per_class"].as_u64()
+        );
+        assert_eq!(
+            Some(u64::from(p.epoch_rule.lo)),
+            recipe["epochs_above_16_min"].as_u64()
+        );
+        assert_eq!(
+            Some(u64::from(p.epoch_rule.hi)),
+            recipe["epochs_above_16_max"].as_u64()
+        );
+        // The numbers are real, not zero defaults.
+        assert!(p.calibration_fraction > 0.0 && p.calibration_fraction < 1.0);
+        assert!(p.calibration_min_per_class >= 1);
+    }
+
+    #[test]
+    fn deferrable_rules_mirror() {
+        let t = table();
+        let names = |key: &str| -> Vec<String> {
+            t[key]
+                .as_array()
+                .expect(key)
+                .iter()
+                .map(|r| r.as_str().expect("rule").to_string())
+                .collect()
+        };
+        assert_eq!(names("deferrable_rules"), DEFERRABLE_RULES);
+        assert_eq!(names("stricter_rules"), STRICTER_RULES);
+        // Every deferred case defers a rule the header declares, and nothing else is deferred.
+        for case in t["cases"].as_array().expect("cases") {
+            if case["rust"] == "deferred" {
+                let rule = case["python"]["refused"].as_str().expect("refused");
+                assert!(DEFERRABLE_RULES.contains(&rule), "{}", case["id"]);
+            }
+        }
+    }
+
+    #[test]
+    fn no_false_refusal() {
+        let p = policy();
+        let t = table();
+        let mut accepted_by_python = 0;
+        for case in t["cases"].as_array().expect("cases") {
+            let id = case["id"].as_str().expect("id");
+            if case["python"].get("ok").is_none() {
+                continue;
+            }
+            accepted_by_python += 1;
+            match validate_for_submit(&case_files(case), case_epochs(case), &p) {
+                Ok(_) => {}
+                Err(r) => {
+                    assert!(
+                        STRICTER_RULES.contains(&r.rule.as_str()),
+                        "{id}: the trainer accepts, rust refused {r}"
+                    );
+                    assert_eq!(
+                        case["rust"]["stricter"].as_str(),
+                        Some(r.rule.as_str()),
+                        "{id}: a stricter refusal must be declared on the case"
+                    );
+                }
+            }
+        }
+        assert!(
+            accepted_by_python >= 8,
+            "{accepted_by_python} accepted cases"
+        );
+        // The boundary is in the table: 510 criteria accepted, 511 declared stricter.
+        let find = |id: &str| {
+            t["cases"]
+                .as_array()
+                .expect("cases")
+                .iter()
+                .find(|c| c["id"] == id)
+                .unwrap_or_else(|| panic!("{id} is not in the table"))
+        };
+        assert_eq!(find("criteria-510")["rust"], "same");
+        assert_eq!(
+            find("criteria-511")["rust"]["stricter"],
+            "task-serving-limit"
+        );
+    }
+
+    #[test]
+    fn inspect_never_refuses_epochs() {
+        let p = policy();
+        let t = table();
+        let mut epoch_cases = 0;
+        for case in t["cases"].as_array().expect("cases") {
+            let id = case["id"].as_str().expect("id");
+            let inspected = validate_files(&case_files(case), &p);
+            if let Err(r) = &inspected {
+                assert_ne!(r.rule, "epochs", "{id}: inspection refused epochs");
+            }
+            if case["python"]["refused"] == "epochs" {
+                epoch_cases += 1;
+                let s = inspected.unwrap_or_else(|r| panic!("{id}: inspection refused {r}"));
+                assert_eq!(
+                    s.epochs_required,
+                    s.shots_per_class > args::EPOCH_THRESHOLD,
+                    "{id}"
+                );
+                if s.epochs_required {
+                    assert_eq!(
+                        s.epochs_range,
+                        Some([p.epoch_rule.lo, p.epoch_rule.hi]),
+                        "{id}"
+                    );
+                    assert_eq!(s.epochs_fixed, None, "{id}");
+                } else {
+                    assert_eq!(s.epochs_range, None, "{id}");
+                    assert_eq!(s.epochs_fixed, Some(p.epoch_rule.fixed), "{id}");
+                }
+            }
+        }
+        assert!(epoch_cases >= 4, "{epoch_cases} epoch cases in the table");
+    }
+
+    #[test]
+    fn refusal_details_never_echo_row_text() {
+        let p = policy();
+        let t = table();
+        let mut secret_cases = 0;
+        for case in t["cases"].as_array().expect("cases") {
+            let id = case["id"].as_str().expect("id");
+            if let Err(r) = validate_for_submit(&case_files(case), case_epochs(case), &p) {
+                let shown = r.to_string();
+                assert!(!shown.contains("SECRET"), "{id}: {shown}");
+                if id.starts_with("secret-") {
+                    secret_cases += 1;
+                }
+            }
+        }
+        assert_eq!(
+            secret_cases, 4,
+            "the four SECRET cases refuse and are checked"
+        );
+    }
+
+    /// `validate_files` on `MAX_ROWS_PER_FILE` train rows: the request path's cost
+    /// is bounded well inside the API Gateway's 30 s cap (the S3 fetch shares it).
+    #[test]
+    fn validate_bound_timing() {
+        let p = policy();
+        let rows = MAX_ROWS_PER_FILE;
+        let mut train = String::with_capacity(rows * 48);
+        for i in 0..rows {
+            let label = ["a", "b", "c"][i % 3];
+            train.push_str(&format!(
+                "{{\"text\": \"synthetic train row number {i} for class {label}\", \"label\": \"{label}\"}}\n"
+            ));
+        }
+        let mut eval = String::new();
+        for i in 0..2_000 {
+            let label = ["a", "b", "c"][i % 3];
+            eval.push_str(&format!(
+                "{{\"text\": \"synthetic eval row {i}\", \"label\": \"{label}\"}}\n"
+            ));
+        }
+        let files = DatasetFiles {
+            task_json: Some(
+                br#"{"type":"choice","instructions":"Which?","criteria":{"a":null,"b":null,"c":null}}"#
+                    .to_vec(),
+            ),
+            train: Some(train.into_bytes()),
+            eval: Some(eval.into_bytes()),
+            shift: None,
+        };
+        let started = std::time::Instant::now();
+        let summary = validate_files(&files, &p).expect("the synthetic dataset is valid");
+        let seconds = started.elapsed().as_secs_f64();
+        println!("validate_bound_timing: {rows} train rows in {seconds:.3} s");
+        assert_eq!(summary.rows.train, rows as u64);
+        assert!(seconds < 20.0, "{rows} rows took {seconds:.1} s");
+    }
 }
