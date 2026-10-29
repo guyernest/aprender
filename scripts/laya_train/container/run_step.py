@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""The training container's one program: SageMaker runs `run_step.py train` and nothing else (plan 14-06).
+"""The training container's one program: SageMaker runs `run_step.py train` and nothing else (plan 14-06); the
+arm64 pack image runs `run_step.py pack` (plan 14-07, the PACK RULES below).
 
     run_step.py train            (SageMaker's single argument; the effective mode is env LAYA_STEP, default train)
+    run_step.py pack             (the pack image's CMD; the effective mode is env LAYA_STEP, default the argument)
     run_step.py --selftest       (offline; a fake trainer and a fake S3 runner; prints RUN STEP SELFTEST OK)
 
 DECLARED RULES (written before the code; the selftest asserts each one):
 
-    mode      LAYA_STEP is `train` (default), `probe` or `probe-sigterm`; anything else is `REFUSED env:` (exit 2).
+    mode      LAYA_STEP is `train` (default), `probe`, `probe-sigterm` or `pack`; anything else is `REFUSED env:` (exit 2).
     trainer   the pinned trainer runs UNCHANGED: `train.py --data <work>/data --out <work>/run --device cuda
               [--epochs N]` and nothing else; never a seeds, stopping, base or variant flag. This program never
               packs, verifies or recomputes a metric; x86_64 touches only torch.
@@ -29,6 +31,30 @@ DECLARED RULES (written before the code; the selftest asserts each one):
     never     no pip, no download of weights, no AWS call in the selftest, and no determinism switch: this program
               sets no deterministic-algorithms flag and no cuBLAS workspace variable (D-17).
 
+PACK RULES (plan 14-07; D-14, D-15, D-04, D-19; the selftest asserts each one):
+
+    where     pack and verify run on linux/arm64 only, in the pack image, with `pack_laya` (built as an example) at
+              /src/target/release/examples/pack_laya and its policy at /src/contracts (its compile-time path).
+    policy    THE POLICY IS NOT AN ARGUMENT: the child is `pack_laya pack --run R --data D --base B --out X.apr`, then
+              `pack_laya verify X.apr --run R --data D --base B`, path arguments only, and the child environment is
+              stripped to PATH, HOME, LANG and TMPDIR. The binary and contracts paths are constants; only a selftest
+              function parameter can change them (no env var or argument does).
+    env       LAYA_TASK_ID, LAYA_NAME, LAYA_BUCKET, LAYA_RUN_PREFIX as in train mode, plus LAYA_PACK_IMAGE_DIGEST
+              (`sha256:` + 64 lowercase hex), written as pack-outcome.json pack_image_digest on every recorded outcome.
+              Missing or malformed is `REFUSED env:` (exit 2) before any download.
+    skip      pack runs for outcome `pass`, and for `gate_fail` only when the run's gate-report.json (downloaded and
+              re-hashed first) carries a `pilot_waiver` claim (train.py never lets the claim change `pass` or the exit
+              status; pack and verify decide). Anything else (gate_fail without a claim, refused, crash, timeout, or
+              device_ok false) is recorded `{ran false, skipped <exit_class>}`, exit 0, with no base download.
+    inputs    exactly the training-manifest entries under run/ and data/ are downloaded and re-hashed (a mismatch is
+              exit 1 `integrity`); the base tar is checked against base-stage.json before safe_extract.
+    accept    accepted = pack exit 0 AND verify exit 0 AND deploy_eligible true AND the PACKED sha256 equals the local
+              hash of the written file AND PACKED `waived=` agrees with the verify JSON `waived`. Only then is the
+              .apr uploaded. Every other way of ending is `accepted false`, no .apr, the reports untouched, exit 0.
+    upload    .apr (accepted only), pack.log, verify.log, pack-manifest.json, pack-outcome.json LAST, each tagged
+              laya-retention=expire; an upload failure or an infrastructure error (download, integrity, base pin) is
+              exit 1.
+
 Standard library only, Python >= 3.11 (it runs under the image's uv venv, and under `python3 -I` for the selftest).
 """
 import contextlib
@@ -45,7 +71,7 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 HERE = Path(__file__).resolve().parent
 ROOT = Path(__file__).resolve().parents[3]          # the repo root, on the laptop and under /opt/laya in the image
@@ -1051,6 +1077,399 @@ def entry_probe_sigterm(env, paths, runner, knobs):
     return run_probe_sigterm(bucket, pid, paths, runner, knobs)
 
 
+# ------------------------------------------------------------------------------------------ pack mode (plan 14-07)
+
+PACK_BIN = Path("/src/target/release/examples/pack_laya")      # the example built in the pack image's build stage
+PACK_CONTRACTS = Path("/src/contracts")                        # pack_laya's compile-time ../../contracts, from /src/crates/aprender-decide
+PACK_WORK = Path("/work")
+PACK_GATE_CONTRACT = "laya-finetune-gate-v1.yaml"
+PACK_PARITY_CONTRACT = "laya-parity-v1.yaml"
+SCHEMA_PACK_OUTCOME = "laya-train-pack-outcome-v1"
+SCHEMA_BASE_STAGE = "laya-base-stage-v1"
+EXIT_CLASSES = ("pass", "gate_fail", "refused", "crash", "timeout")
+PACK_CHILD_ENV_KEYS = ("PATH", "HOME", "LANG", "TMPDIR")      # the whole environment the pack and verify children get
+PACK_CHILD_TIMEOUT_S = 3 * 3600                                # the Fargate task's own 3 h taskTimeout is the real bound
+LINE_CLIP = 4000
+
+
+class PackError(Exception):
+    """An infrastructure error of the pack step (download, integrity, base pin, an unrunnable binary): exit 1, no
+    outcome recorded. str() is `<kind>: <detail>`; kind is one of outcome, manifest, download, integrity, base, child."""
+
+    def __init__(self, kind, detail):
+        super().__init__("%s: %s" % (kind, detail))
+        self.kind = kind
+
+
+@dataclass(frozen=True)
+class PackCfg:
+    task_id: str
+    name: str
+    bucket: str
+    run_prefix: str
+    image_digest: str
+
+
+def parse_pack_env(env):
+    """The pack-mode env contract. Raises Refusal("env: ...") on anything missing or malformed (values never echoed)."""
+    def need(key):
+        val = env.get(key, "")
+        if not val:
+            raise Refusal("env: %s is required" % key)
+        return val
+
+    task_id = need("LAYA_TASK_ID")
+    if not TASK_RE.match(task_id):
+        raise Refusal("env: LAYA_TASK_ID is malformed")
+    name = need("LAYA_NAME")
+    if not NAME_RE.match(name):
+        raise Refusal("env: LAYA_NAME is malformed")
+    bucket = need("LAYA_BUCKET")
+    if not BUCKET_RE.match(bucket):
+        raise Refusal("env: LAYA_BUCKET is malformed")
+    prefix = need("LAYA_RUN_PREFIX")
+    if prefix != "runs/%s/%s/" % (name, task_id):
+        raise Refusal("env: LAYA_RUN_PREFIX must be runs/<LAYA_NAME>/<LAYA_TASK_ID>/")
+    digest = need("LAYA_PACK_IMAGE_DIGEST")
+    if not DIGEST_RE.match(digest):
+        raise Refusal("env: LAYA_PACK_IMAGE_DIGEST must be sha256: followed by 64 lowercase hex")
+    return PackCfg(task_id, name, bucket, prefix, digest)
+
+
+@dataclass
+class PackKnobs:
+    """Everything a selftest may change. The defaults are the image's constants; no env var or argument reaches here."""
+    pack_cmd: tuple = (str(PACK_BIN),)
+    contracts_dir: Path = PACK_CONTRACTS
+    work: Path = PACK_WORK
+    pin_path: Path = HERE / "base-stage.json"
+    backoff: tuple = (1.0, 4.0)
+    attempts: int = 3
+    transfer_timeout: float = 1800.0
+    upload_timeout: float = 900.0
+    child_timeout: float = PACK_CHILD_TIMEOUT_S
+    sleep: object = time.sleep
+
+
+def pack_child_env():
+    """The pack and verify children's whole environment: PATH, HOME, LANG and TMPDIR when set, nothing else."""
+    return {k: os.environ[k] for k in PACK_CHILD_ENV_KEYS if k in os.environ}
+
+
+def base_key_from_pin(pin):
+    """The base tar's S3 key, derived from the pin: base/laya-<first 8 of the revision>/<tar_name> (the value of
+    layout::BASE_KEY in crates/aprender-mcp-laya-train; the selftest compares them when that source is present)."""
+    rev, tar_name = str(pin.get("revision", "")), str(pin.get("tar_name", ""))
+    if not re.fullmatch(r"[0-9a-z]{8,64}", rev):
+        raise PackError("base", "base-stage.json has no usable revision")
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", tar_name):
+        raise PackError("base", "base-stage.json has no usable tar_name")
+    return "base/laya-%s/%s" % (rev[:8], tar_name)
+
+
+def s3_get(runner, bucket, key, dest, knobs):
+    """Download one object to `dest` through the Runner (`aws s3api get-object`), with retries. Raises PackError."""
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    err = "no attempt"
+    for i in range(knobs.attempts):
+        dest.unlink(missing_ok=True)
+        try:
+            runner(["aws", "s3api", "get-object", "--bucket", bucket, "--key", key, str(dest)], knobs.transfer_timeout)
+            if dest.is_file():
+                return dest
+            err = "no file was written"
+        except Exception as e:                            # a Runner failure of any kind is one failed attempt
+            err = "%s: %s" % (type(e).__name__, str(e)[:200])
+        if i + 1 < knobs.attempts:
+            knobs.sleep(knobs.backoff[min(i, len(knobs.backoff) - 1)])
+    raise PackError("download", "%s (%s)" % (key, err))
+
+
+def read_json_object(path, what):
+    try:
+        obj = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise PackError("manifest" if "manifest" in what else "outcome", "%s is not readable JSON (%s)" % (what, type(e).__name__))
+    if not isinstance(obj, dict):
+        raise PackError("manifest" if "manifest" in what else "outcome", "%s is not a JSON object" % what)
+    return obj
+
+
+def parse_training_manifest(obj, task_id):
+    """-> {path: (size, sha256)} after refusing a malformed manifest, a foreign task, an unsafe or repeated path."""
+    if obj.get("schema") != SCHEMA_TRAINING_MANIFEST or obj.get("task_id") != task_id:
+        raise PackError("manifest", "schema or task_id does not match this run")
+    out = {}
+    entries = obj.get("entries")
+    if not isinstance(entries, list):
+        raise PackError("manifest", "entries is not a list")
+    for e in entries:
+        if not isinstance(e, dict) or set(e) != {"path", "size", "sha256"}:
+            raise PackError("manifest", "an entry does not have exactly path, size and sha256")
+        path, size, sha = e["path"], e["size"], e["sha256"]
+        if (not isinstance(path, str) or not isinstance(size, int) or isinstance(size, bool) or size < 0
+                or not isinstance(sha, str) or not HEX64_RE.match(sha)):
+            raise PackError("manifest", "an entry has a malformed field")
+        pp = PurePosixPath(path)
+        if (not path or path.startswith("/") or "\\" in path or "\0" in path or not pp.parts
+                or any(part in ("", ".", "..") for part in path.split("/"))):
+            raise PackError("integrity", "the manifest names an unsafe path %r" % path[:80])
+        if path in out:
+            raise PackError("integrity", "the manifest names %s twice" % path[:80])
+        out[path] = (size, sha)
+    return out
+
+
+def fetch_verified(runner, cfg, rel, size_sha, dest, knobs):
+    """Download run-prefix/<rel> to `dest` and re-hash it against the manifest entry; raises PackError integrity."""
+    s3_get(runner, cfg.bucket, cfg.run_prefix + rel, dest, knobs)
+    size, sha = size_sha
+    if Path(dest).stat().st_size != size or sha256_file(dest) != sha:
+        raise PackError("integrity", "%s does not match training-manifest.json (size or sha256)" % rel)
+    return dest
+
+
+def last_line_with(path, prefix):
+    """The LAST line of the file that starts with `prefix` (the child's final answer), else None."""
+    found = None
+    try:
+        with open(path, "rb") as f:
+            for raw in f:
+                line = raw.decode("utf-8", "replace").rstrip("\r\n")
+                if line.startswith(prefix):
+                    found = line
+    except OSError:
+        pass
+    return found
+
+
+def parse_packed_line(line):
+    """PACKED ... sha256=<64 hex> ... shipped_seed=<n|null> ... waived=<id|none> -> (sha256, shipped_seed, waived)
+    or None when the line is not that shape. waived is None for `none`."""
+    if line is None or not line.startswith("PACKED "):
+        return None
+    m_sha = re.search(r"\bsha256=([0-9a-f]{64})\b", line)
+    m_seed = re.search(r"\bshipped_seed=(null|-?[0-9]+)(?=\s|$)", line)
+    m_waived = re.search(r"\bwaived=(\S+)\s*$", line)
+    if not (m_sha and m_seed and m_waived):
+        return None
+    seed = None if m_seed.group(1) == "null" else int(m_seed.group(1))
+    waived = None if m_waived.group(1) == "none" else m_waived.group(1)
+    return m_sha.group(1), seed, waived
+
+
+def parse_verify_line(path):
+    """The last JSON object line of verify.log with a deploy_eligible key -> (line, dict) or (None, None)."""
+    found = (None, None)
+    try:
+        with open(path, "rb") as f:
+            for raw in f:
+                line = raw.decode("utf-8", "replace").strip()
+                if line.startswith("{"):
+                    try:
+                        obj = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(obj, dict) and "deploy_eligible" in obj:
+                        found = (line, obj)
+    except OSError:
+        pass
+    return found
+
+
+def run_child(cmd, log_path, timeout):
+    """Run a pack_laya child with the stripped environment, stdout and stderr to `log_path`. Returns (rc, seconds);
+    rc is None when the child timed out (it is killed). A child that cannot start is a PackError."""
+    t0 = time.monotonic()
+    with open(log_path, "wb") as log:
+        try:
+            r = subprocess.run(list(cmd), stdout=log, stderr=subprocess.STDOUT, env=pack_child_env(), timeout=timeout)
+            rc = r.returncode
+        except subprocess.TimeoutExpired:
+            log.write(b"\nrun_step: child killed after the timeout\n")
+            rc = None
+        except OSError as e:
+            raise PackError("child", "%s cannot start (%s)" % (cmd[0], type(e).__name__))
+    return rc, time.monotonic() - t0
+
+
+def new_pack_outcome(cfg, gate_sha, parity_sha, **kv):
+    out = {"schema": SCHEMA_PACK_OUTCOME, "task_id": cfg.task_id, "pack_image_digest": cfg.image_digest,
+           "gate_contract_sha256": gate_sha, "parity_contract_sha256": parity_sha, "ran": False, "skipped": None,
+           "exit_code": None, "accepted": False, "apr_sha256": None, "shipped_seed": None, "waived": None,
+           "packed_line": None, "verify_line": None, "deploy_eligible": False, "pack_seconds": None,
+           "verify_seconds": None}
+    out.update(kv)
+    return out
+
+
+def publish_pack(cfg, work, up, outcome, knobs):
+    """pack-manifest.json (a JSON array of {path,size,sha256}: everything uploaded so far plus pack-outcome.json),
+    then pack-outcome.json LAST. Returns True when both uploads returned success."""
+    out_path = Path(work) / "pack-outcome.json"
+    write_json(out_path, outcome)
+    entries = up.entries()
+    entries.append({"path": "pack-outcome.json", "size": out_path.stat().st_size, "sha256": sha256_file(out_path)})
+    man_path = Path(work) / "pack-manifest.json"
+    write_json(man_path, sorted(entries, key=lambda e: e["path"]))
+    a = knobs.attempts
+    m = up.put("pack-manifest.json", man_path, attempts=a, timeout=knobs.upload_timeout, record=False)
+    o = up.put("pack-outcome.json", out_path, attempts=a, timeout=knobs.upload_timeout, record=False)
+    return m != "failed" and o != "failed"
+
+
+def decide_skip(runner, cfg, outcome, work, knobs):
+    """None when pack should run, else the exit_class string to record as `skipped`. Raises PackError."""
+    ec = outcome.get("exit_class")
+    if ec not in EXIT_CLASSES:
+        raise PackError("outcome", "outcome.json has an unknown exit_class")
+    if outcome.get("device_ok") is not True or ec not in ("pass", "gate_fail"):
+        return ec
+    if ec == "pass":
+        return None
+    # gate_fail: pack runs only for a pilot-waiver claim in the (re-hashed) gate-report.json
+    manifest = None
+    for name in ("training-manifest.json", "partial-manifest.json"):
+        try:
+            got = s3_get(runner, cfg.bucket, cfg.run_prefix + name, Path(work) / "dl" / name, knobs)
+        except PackError:
+            continue
+        manifest = parse_training_manifest(read_json_object(got, name), cfg.task_id)
+        break
+    entry = (manifest or {}).get("run/gate-report.json")
+    if entry is None:
+        return ec
+    path = fetch_verified(runner, cfg, "run/gate-report.json", entry, Path(work) / "dl" / "gate-report.json", knobs)
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError:
+        raise PackError("integrity", "run/gate-report.json is not JSON")
+    claim = report.get("pilot_waiver") if isinstance(report, dict) else None
+    if isinstance(claim, dict) and isinstance(claim.get("id"), str) and claim["id"]:
+        return None
+    return ec
+
+
+def run_pack(cfg, runner, knobs):
+    work = Path(knobs.work)
+    work.mkdir(parents=True, exist_ok=True)
+    (work / "dl").mkdir(parents=True, exist_ok=True)
+    snap = Path(tempfile.mkdtemp(prefix="laya-pack-snap-"))
+    up = Uploader(runner, cfg.bucket, cfg.run_prefix, snap, knobs.backoff, sleep=knobs.sleep)
+    gate_sha = sha256_file(Path(knobs.contracts_dir) / PACK_GATE_CONTRACT)
+    parity_sha = sha256_file(Path(knobs.contracts_dir) / PACK_PARITY_CONTRACT)
+
+    got = s3_get(runner, cfg.bucket, cfg.run_prefix + "outcome.json", work / "dl" / "outcome.json", knobs)
+    outcome = read_json_object(got, "outcome.json")
+    if outcome.get("schema") != SCHEMA_OUTCOME or outcome.get("task_id") != cfg.task_id:
+        raise PackError("outcome", "outcome.json schema or task_id does not match this run")
+
+    skipped = decide_skip(runner, cfg, outcome, work, knobs)
+    if skipped is not None:
+        say("pack skipped: the run ended %s" % skipped)
+        rec = new_pack_outcome(cfg, gate_sha, parity_sha, skipped=skipped)
+        return 0 if publish_pack(cfg, work, up, rec, knobs) else 1
+
+    # ---- the inputs: exactly the manifest's run/ and data/ entries, each re-hashed
+    got = s3_get(runner, cfg.bucket, cfg.run_prefix + "training-manifest.json", work / "dl" / "training-manifest.json", knobs)
+    mobj = read_json_object(got, "training-manifest.json")
+    if mobj.get("complete") is not True:
+        raise PackError("manifest", "training-manifest.json is not complete")
+    manifest = parse_training_manifest(mobj, cfg.task_id)
+    for rel in sorted(manifest):
+        if rel.split("/", 1)[0] in ("run", "data") and "/" in rel:
+            fetch_verified(runner, cfg, rel, manifest[rel], work / rel, knobs)
+    run_dir, data_dir = work / "run", work / "data"
+    if not run_dir.is_dir() or not data_dir.is_dir():
+        raise PackError("manifest", "the manifest lists no run/ or no data/ files")
+
+    # ---- the base: pinned by sha256 BEFORE safe_extract, offline layout under <hf>/hub
+    try:
+        pin = json.loads(Path(knobs.pin_path).read_text(encoding="utf-8"))
+        base_key = base_key_from_pin(pin)
+        base_tar = s3_get(runner, cfg.bucket, base_key, work / "base.tar", knobs)
+        hf_home = stage_channel_base(base_tar, knobs.pin_path, work / "hf")
+        base_tar.unlink(missing_ok=True)                 # the extracted copy is the one used; free the disk
+    except PackError:
+        raise
+    except Exception as e:
+        raise PackError("base", "%s: %s" % (type(e).__name__, str(e)[:200]))
+    sys.path.insert(0, str(HERE))
+    import stage_base
+    base_dir = Path(hf_home) / "hub" / stage_base.CACHE_DIR_NAME / "snapshots" / str(pin["revision"])
+    if not base_dir.is_dir():
+        raise PackError("base", "the staged base has no snapshot directory")
+
+    # ---- pack, then (only on 0) verify: path arguments only, each timed
+    apr = work / "out" / ("%s.apr" % cfg.name)
+    apr.parent.mkdir(parents=True, exist_ok=True)
+    pack_log, verify_log = work / "pack.log", work / "verify.log"
+    pack_argv = list(knobs.pack_cmd) + ["pack", "--run", str(run_dir), "--data", str(data_dir), "--base", str(base_dir),
+                                        "--out", str(apr)]
+    verify_argv = list(knobs.pack_cmd) + ["verify", str(apr), "--run", str(run_dir), "--data", str(data_dir),
+                                          "--base", str(base_dir)]
+    pack_rc, pack_s = run_child(pack_argv, pack_log, knobs.child_timeout)
+    verify_rc, verify_s = None, None
+    if pack_rc == 0:
+        verify_rc, verify_s = run_child(verify_argv, verify_log, knobs.child_timeout)
+
+    packed_line = last_line_with(pack_log, "PACKED ") or last_line_with(pack_log, "REFUSED ")
+    packed = parse_packed_line(last_line_with(pack_log, "PACKED ")) if pack_rc == 0 else None
+    verify_json_line, verify_obj = parse_verify_line(verify_log) if verify_rc == 0 else (None, None)
+    verify_line = verify_json_line or (last_line_with(verify_log, "REFUSED ") if verify_rc is not None else None)
+    eligible = bool(verify_obj is not None and verify_obj.get("deploy_eligible") is True)
+    local_sha = sha256_file(apr) if apr.is_file() else None
+    verify_waived = verify_obj.get("waived") if verify_obj is not None else None
+    waived_ok = packed is not None and (verify_waived is None or isinstance(verify_waived, str)) \
+        and packed[2] == verify_waived
+    accepted = bool(pack_rc == 0 and verify_rc == 0 and packed is not None and eligible
+                    and local_sha is not None and packed[0] == local_sha and waived_ok)
+
+    # ---- upload: the .apr only for an accepted run; a failed .apr upload un-accepts it
+    if accepted:
+        if up.put("%s.apr" % cfg.name, apr, attempts=knobs.attempts, timeout=knobs.upload_timeout) != "uploaded":
+            say("the .apr upload failed; recording accepted false")
+            accepted = False
+    for rel, path in (("pack.log", pack_log), ("verify.log", verify_log)):
+        if path.is_file():
+            up.put(rel, path, attempts=knobs.attempts, timeout=knobs.upload_timeout)
+    exit_code = pack_rc if pack_rc != 0 else verify_rc     # the first child that did not exit 0, else 0
+    rec = new_pack_outcome(
+        cfg, gate_sha, parity_sha, ran=True, exit_code=exit_code, accepted=accepted,
+        apr_sha256=local_sha if accepted else None,
+        shipped_seed=packed[1] if accepted and packed is not None else None,
+        waived=packed[2] if accepted and packed is not None else None,
+        packed_line=packed_line[:LINE_CLIP] if packed_line else None,
+        verify_line=verify_line[:LINE_CLIP] if verify_line else None,
+        deploy_eligible=eligible and verify_rc == 0,
+        pack_seconds=round(pack_s, 2), verify_seconds=round(verify_s, 2) if verify_s is not None else None)
+    published = publish_pack(cfg, work, up, rec, knobs)
+    failed = dict(up.failed)
+    if failed:
+        say("upload failures: %s" % ", ".join("%s (%s)" % (p, e) for p, e in sorted(failed.items())))
+    return 0 if published and not failed else 1
+
+
+def entry_pack(env, runner, knobs):
+    """Parse the env contract, check the contracts exist, then run. A refusal is `REFUSED env: ...` (exit 2) before
+    any download; an infrastructure error is `ERROR <kind>: <detail>` (exit 1)."""
+    try:
+        cfg = parse_pack_env(env)
+    except Refusal as e:
+        print("REFUSED " + str(e), file=sys.stderr, flush=True)
+        return 2
+    for name in (PACK_GATE_CONTRACT, PACK_PARITY_CONTRACT):
+        if not (Path(knobs.contracts_dir) / name).is_file():
+            print("REFUSED contracts: %s is missing from the pack image" % name, file=sys.stderr, flush=True)
+            return 2
+    try:
+        return run_pack(cfg, runner, knobs)
+    except PackError as e:
+        print("ERROR %s" % e, file=sys.stderr, flush=True)
+        return 1
+
+
 # ------------------------------------------------------------------------------------------ selftest
 
 FAKE_TRAINER = r'''
@@ -1118,6 +1537,47 @@ if mode == "cpu":
 '''
 
 
+FAKE_PACK = r'''
+import hashlib, json, os, pathlib, sys, time
+here = pathlib.Path(__file__).resolve().parent
+cfg = json.loads((here / "cfg.json").read_text())
+args = sys.argv[1:]
+def opt(n):
+    return args[args.index(n) + 1] if n in args else None
+base = opt("--base")
+rec = {"argv": args, "env_keys": sorted(os.environ), "run_ok": os.path.isdir(opt("--run") or "/nonexistent"),
+       "data_ok": os.path.isdir(opt("--data") or "/nonexistent"),
+       "base_ok": os.path.isfile(os.path.join(base or "/nonexistent", "model.safetensors")),
+       "files": sorted(str(p.relative_to(opt("--run"))) for p in pathlib.Path(opt("--run")).rglob("*") if p.is_file())
+       if opt("--run") and os.path.isdir(opt("--run")) else []}
+with open(here / "calls.jsonl", "a") as f:
+    f.write(json.dumps(rec) + "\n")
+print("fake pack_laya noise on stderr", file=sys.stderr, flush=True)
+time.sleep(0.02)
+if args[0] == "pack":
+    rc = cfg["pack_rc"]
+    if rc != 0:
+        print("REFUSED %s fake refusal (nothing written)" % ("GateFailed" if rc == 3 else "BadInput"), flush=True)
+        sys.exit(rc)
+    out = pathlib.Path(opt("--out"))
+    out.parent.mkdir(parents=True, exist_ok=True)
+    data = b"APR-FAKE-BYTES" * 10
+    out.write_bytes(data)
+    sha = cfg.get("packed_sha") or hashlib.sha256(data).hexdigest()
+    print("PACKED %s sha256=%s rescore_max_abs=1e-6 zs_rescore_max_abs=1e-6 rescore_bound=1e-5 zs_rescore_bound=1e-5 "
+          "noise=null zs_noise=null shipped_seed=%s argmax=10/10 waived=%s" % (out, sha, cfg["seed"], cfg["pack_waived"]), flush=True)
+    sys.exit(0)
+if args[0] == "verify":
+    rc = cfg["verify_rc"]
+    if rc != 0:
+        print("REFUSED ParityExceeded fake verify refusal (nothing written)", flush=True)
+        sys.exit(rc)
+    print(json.dumps({"artifact_sha256": "x", "deploy_eligible": cfg["eligible"], "waived": cfg["verify_waived"]}), flush=True)
+    sys.exit(0)
+sys.exit(2)
+'''
+
+
 class FakeRunner:
     """The selftest's S3: copies the --body into a temp 'bucket' dir and records every call (key, tag, times, whether
     the fake trainer had finished). `delay` is how long an upload takes (it honours the call's timeout, like
@@ -1128,12 +1588,34 @@ class FakeRunner:
         self.log_path = Path(log_path) if log_path else None
         self.calls = []
 
+    def _get(self, argv):
+        """aws s3api get-object --bucket B --key K <outfile>: copy the fake bucket's object to the outfile."""
+        a = dict(zip(argv[3:7:2], argv[4:7:2]))
+        key = a["--key"]
+        rec = {"op": "get", "key": key, "tagging": None, "t": time.monotonic(), "wall": time.time(), "ok": False,
+               "trainer_done": False}
+        self.calls.append(rec)
+        try:
+            if self.fail and self.fail(key):
+                raise RuntimeError("fake runner failure")
+            src = self.bucket / key
+            if not src.is_file():
+                raise RuntimeError("NoSuchKey: %s" % key)
+            shutil.copyfile(src, argv[7])
+            rec["ok"] = True
+        finally:
+            if self.log_path:
+                with open(self.log_path, "a") as f:
+                    f.write(json.dumps(rec) + "\n")
+
     def __call__(self, argv, timeout):
+        if argv[:3] == ["aws", "s3api", "get-object"] and len(argv) == 8:
+            return self._get(argv)
         a = dict(zip(argv[3::2], argv[4::2])) if argv[:3] == ["aws", "s3api", "put-object"] else None
         if a is None:
             raise RuntimeError("not a put-object argv")
         key, body = a["--key"], a["--body"]
-        rec = {"key": key, "tagging": a.get("--tagging"), "t": time.monotonic(), "wall": time.time(), "ok": False,
+        rec = {"op": "put", "key": key, "tagging": a.get("--tagging"), "t": time.monotonic(), "wall": time.time(), "ok": False,
                "trainer_done": bool(self.marker_dir and (Path(self.marker_dir) / "trainer.done").exists())}
         self.calls.append(rec)
         try:
@@ -1180,7 +1662,8 @@ def selftest_child(spec):
 
 def selftest():
     global QUIET, DEFAULT_RUNNER_CALLS
-    for need in (FIXTURES / "outcome-v1.json", FIXTURES / "training-manifest-v1.json", GATE_CONTRACT):
+    for need in (FIXTURES / "outcome-v1.json", FIXTURES / "training-manifest-v1.json", FIXTURES / "pack-outcome-v1.json",
+                 GATE_CONTRACT, ROOT / "contracts" / PACK_PARITY_CONTRACT):
         if not need.is_file():
             print("RUN STEP SELFTEST CANNOT RUN: %s is missing (ROOT=%s)" % (need, ROOT))
             return 2
@@ -1713,6 +2196,339 @@ def selftest():
         case("base: after staging the trainer runs with HF_HOME at the staged home and HF_HUB_OFFLINE=1",
              rc == 0 and env_seen["HF_HOME"] == str(Path(tmp) / "hf4") and env_seen["HF_HUB_OFFLINE"] == "1")
 
+        print("pack:")
+        pack_fix = json.loads((FIXTURES / "pack-outcome-v1.json").read_text())
+        entry_keys = set(json.loads((FIXTURES / "training-manifest-v1.json").read_text())["entries"][0])
+        pdigest = "sha256:" + "cd" * 32
+        ppin = Path(tmp) / "pack-pin.json"
+        ppin.write_text(json.dumps({"schema": SCHEMA_BASE_STAGE, "tar_sha256": sha256_file(btar), "revision": brev,
+                                    "tar_name": "laya-base.tar"}))
+        pbase_key = base_key_from_pin(json.loads(ppin.read_text()))
+        pcontracts = ROOT / "contracts"
+        want_gate = hashlib.sha256((pcontracts / PACK_GATE_CONTRACT).read_bytes()).hexdigest()
+        want_parity = hashlib.sha256((pcontracts / PACK_PARITY_CONTRACT).read_bytes()).hexdigest()
+        prefix = "runs/motiv-1/%s/" % task
+        claim_w = {"id": "W-1", "waives": "ece_post"}
+
+        def make_pack_case(name, exit_class="pass", device_ok=True, claim=None, drop_gate_entry=False, partial=False,
+                           corrupt=None, base_bytes=None, runner_kw=None, **fake):
+            d = Path(tmp) / ("pack-" + name)
+            bucket = d / "bucket"
+            root = bucket / prefix
+            report = {"schema": "laya-gate-report-v1", "pass": exit_class == "pass", "device_used": "cuda:0"}
+            if claim:
+                report["pilot_waiver"] = claim
+            files = {"run/gate-report.json": json.dumps(report).encode(), "run/recipe.json": b'{"fake":true}',
+                     "run/checkpoint/model.safetensors": b"w" * 2048, "data/task.json": b'{"task":"t"}\n',
+                     "data/train.jsonl": b'{"a":1}\n', "data/eval.jsonl": b'{"b":2}\n', "train.log": b"log\n"}
+            out_obj = {"schema": SCHEMA_OUTCOME, "task_id": task, "exit_class": exit_class,
+                       "train_rc": {"pass": 0, "gate_fail": 3, "refused": 2}.get(exit_class), "device_used": "cuda:0",
+                       "device_ok": device_ok, "refused_line": None, "started_at": "t", "finished_at": "t",
+                       "train_seconds": 1.0}
+            files["outcome.json"] = (json.dumps(out_obj) + "\n").encode()
+            entries = [{"path": rel, "size": len(b), "sha256": sha256_bytes(b)} for rel, b in sorted(files.items())]
+            if drop_gate_entry:
+                entries = [e for e in entries if e["path"] != "run/gate-report.json"]
+            man = {"schema": SCHEMA_TRAINING_MANIFEST, "task_id": task, "complete": not partial,
+                   "train_image_digest": digest, "gate_contract_sha256": "0" * 64, "entries": entries}
+            for rel, b in files.items():
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_bytes(b)
+            (root / ("partial-manifest.json" if partial else "training-manifest.json")).write_text(json.dumps(man))
+            for rel, b in (corrupt or {}).items():
+                (root / rel).write_bytes(b)
+            (bucket / pbase_key).parent.mkdir(parents=True, exist_ok=True)
+            (bucket / pbase_key).write_bytes(base_bytes if base_bytes is not None else btar.read_bytes())
+            fdir = d / "fake"
+            fdir.mkdir(parents=True)
+            (fdir / "fake_pack.py").write_text(FAKE_PACK)
+            (fdir / "cfg.json").write_text(json.dumps({"pack_rc": 0, "verify_rc": 0, "eligible": True,
+                                                       "pack_waived": "none", "verify_waived": None,
+                                                       "seed": 20260927, "packed_sha": None, **fake}))
+            knobs = PackKnobs(pack_cmd=(sys.executable, "-I", str(fdir / "fake_pack.py")), contracts_dir=pcontracts,
+                              work=d / "work", pin_path=ppin, backoff=(0.0,), attempts=2, sleep=lambda s: None,
+                              child_timeout=60.0)
+            env = {"LAYA_TASK_ID": task, "LAYA_NAME": "motiv-1", "LAYA_BUCKET": "test-bucket",
+                   "LAYA_RUN_PREFIX": prefix, "LAYA_PACK_IMAGE_DIGEST": pdigest}
+            return {"d": d, "bucket": bucket, "root": root, "fdir": fdir, "knobs": knobs, "env": env, "files": files,
+                    "runner": FakeRunner(bucket, **(runner_kw or {}))}
+
+        def run_pack_case(c):
+            err = io.StringIO()
+            with Env(LAYA_POLICY_PROBE="1", LAYA_STEP="pack", PACK_POLICY_OVERRIDE="x", AWS_ACCESS_KEY_ID="not-a-key"), \
+                    contextlib.redirect_stderr(err):
+                rc = entry_pack(c["env"], c["runner"], c["knobs"])
+            c["stderr"] = err.getvalue()
+            return rc
+
+        def puts(c):
+            return [x for x in c["runner"].calls if x["op"] == "put" and x["ok"]]
+
+        def gets(c):
+            return [x["key"][len(prefix):] if x["key"].startswith(prefix) else x["key"]
+                    for x in c["runner"].calls if x["op"] == "get"]
+
+        def fake_calls(c):
+            p = c["fdir"] / "calls.jsonl"
+            return [json.loads(line) for line in p.read_text().splitlines()] if p.exists() else []
+
+        def pobj(c, rel):
+            return json.loads((c["root"] / rel).read_text())
+
+        def put_keys(c):
+            return [x["key"][len(prefix):] for x in puts(c)]
+
+        def no_apr(c):
+            return not any(x["key"].endswith(".apr") for x in c["runner"].calls if x["op"] == "put")
+
+        c = make_pack_case("accepted")
+        rc = run_pack_case(c)
+        po = pobj(c, "pack-outcome.json") if (c["root"] / "pack-outcome.json").exists() else {}
+        apr_obj = c["root"] / "motiv-1.apr"
+        calls = puts(c)
+        case("pack-accepted: exit 0 and an outcome that says ran, accepted and deploy_eligible, nothing skipped",
+             rc == 0 and po.get("ran") is True and po.get("accepted") is True and po.get("deploy_eligible") is True
+             and po.get("skipped") is None and po.get("exit_code") == 0, "rc=%s %s" % (rc, c["stderr"][-120:]))
+        case("pack-accepted: apr_sha256 is hashlib's sha256 of the uploaded .apr and shipped_seed is the PACKED one",
+             apr_obj.is_file() and po.get("apr_sha256") == hashlib.sha256(apr_obj.read_bytes()).hexdigest()
+             and po.get("shipped_seed") == 20260927 and po.get("waived") is None)
+        case("pack-accepted: the PACKED line and the verify JSON line are recorded",
+             str(po.get("packed_line")).startswith("PACKED ") and str(po.get("verify_line")).startswith("{")
+             and json.loads(po["verify_line"])["deploy_eligible"] is True)
+        case("pack-accepted: the .apr, both logs, the manifest and the outcome are uploaded, each tagged laya-retention=expire",
+             {"motiv-1.apr", "pack.log", "verify.log", "pack-manifest.json", "pack-outcome.json"} <= set(put_keys(c))
+             and all(x["tagging"] == "laya-retention=expire" for x in calls), str(put_keys(c)))
+        case("pack-accepted: upload order is .apr, pack.log, verify.log, pack-manifest.json, pack-outcome.json last",
+             put_keys(c) == ["motiv-1.apr", "pack.log", "verify.log", "pack-manifest.json", "pack-outcome.json"],
+             str(put_keys(c)))
+        pm = pobj(c, "pack-manifest.json")
+        bad = [e["path"] for e in pm if e["path"] != "pack-outcome.json" and
+               (sha256_file(c["root"] / e["path"]) != e["sha256"] or (c["root"] / e["path"]).stat().st_size != e["size"])]
+        case("pack-accepted: pack-manifest lists the .apr, pack.log, verify.log and pack-outcome.json with hashlib's sha256",
+             isinstance(pm, list) and not bad
+             and {e["path"] for e in pm} == {"motiv-1.apr", "pack.log", "verify.log", "pack-outcome.json"}
+             and any(e["path"] == "pack-outcome.json" and e["sha256"] == sha256_file(c["root"] / "pack-outcome.json")
+                     for e in pm), "mismatch %s" % bad)
+        want_get = {"outcome.json", "run/gate-report.json", "run/recipe.json", "run/checkpoint/model.safetensors",
+                    "data/task.json", "data/train.jsonl", "data/eval.jsonl", "training-manifest.json", pbase_key}
+        case("pack-accepted: exactly the manifest's run/ and data/ files, the manifest, the outcome and the base are downloaded",
+             set(gets(c)) == want_get and "train.log" not in gets(c), str(sorted(set(gets(c)) ^ want_get)))
+        fc = fake_calls(c)
+        case("pack-accepted: pack_laya saw the run and data files and the staged base (offline layout) when it ran",
+             len(fc) == 2 and all(x["run_ok"] and x["data_ok"] and x["base_ok"] for x in fc)
+             and {"gate-report.json", "recipe.json", "checkpoint/model.safetensors"} <= set(fc[0]["files"]))
+
+        print("pack-keys:")
+        case("pack-keys: pack-outcome.json has exactly the key set of 14-01's pack-outcome-v1.json fixture",
+             set(po) == set(pack_fix), str(sorted(set(po) ^ set(pack_fix))))
+        case("pack-keys: pack-manifest.json is a JSON array whose entries have exactly the fixture entry keys",
+             isinstance(pm, list) and all(set(e) == entry_keys for e in pm) and po.get("schema") == SCHEMA_PACK_OUTCOME
+             and po.get("task_id") == task)
+
+        print("pack-argv:")
+        want_pack = ["pack", "--run", str(c["knobs"].work / "run"), "--data", str(c["knobs"].work / "data"), "--base",
+                     fc[0]["argv"][6] if fc else "", "--out", str(c["knobs"].work / "out" / "motiv-1.apr")]
+        want_verify = ["verify", str(c["knobs"].work / "out" / "motiv-1.apr"), "--run", str(c["knobs"].work / "run"),
+                       "--data", str(c["knobs"].work / "data"), "--base", fc[0]["argv"][6] if fc else ""]
+        case("pack-argv: the children got exactly pack --run R --data D --base B --out <name>.apr, then verify <name>.apr --run R --data D --base B",
+             len(fc) == 2 and fc[0]["argv"] == want_pack and fc[1]["argv"] == want_verify
+             and fc[0]["argv"][6].endswith("/snapshots/" + brev), str(fc[0]["argv"] if fc else None))
+        allowed = set(PACK_CHILD_ENV_KEYS) | {"LC_CTYPE", "__CF_USER_TEXT_ENCODING"}
+        seen = {k for x in fc for k in x["env_keys"]}
+        case("pack-argv: the children's environment has no LAYA_*, *POLICY*, PACK_* or AWS_* variable (only PATH, HOME, LANG, TMPDIR)",
+             bool(fc) and not any(k.startswith(("LAYA_", "PACK_", "AWS_")) or "POLICY" in k for k in seen)
+             and seen <= allowed, str(sorted(seen - allowed)))
+        with Env(LAYA_POLICY_PROBE="1", HOME="/home/x", PATH="/p", LANG="C", TMPDIR="/t", SECRET_TOKEN="s"):
+            stripped = pack_child_env()
+        case("pack-argv: pack_child_env keeps exactly PATH, HOME, LANG and TMPDIR",
+             stripped == {"PATH": "/p", "HOME": "/home/x", "LANG": "C", "TMPDIR": "/t"})
+        case("pack-argv: the defaults are the image constants and no env var names a binary, contracts or policy override",
+             PackKnobs().pack_cmd == (str(PACK_BIN),) and PackKnobs().contracts_dir == PACK_CONTRACTS
+             and str(PACK_BIN) == "/src/target/release/examples/pack_laya" and str(PACK_CONTRACTS) == "/src/contracts"
+             and not re.search(r"environ(\.get)?[\[(]\s*[\"'][A-Z_]*(BIN|CONTRACT|POLICY)", Path(__file__).read_text(encoding="utf-8")))
+
+        print("pack-contracts / pack-timings:")
+        case("pack-contracts: gate_contract_sha256 and parity_contract_sha256 equal hashlib's sha256 of the two contract files",
+             po["gate_contract_sha256"] == want_gate and po["parity_contract_sha256"] == want_parity
+             and want_gate != want_parity)
+        case("pack-image-env: LAYA_PACK_IMAGE_DIGEST is written verbatim as pack_image_digest (accepted outcome)",
+             po["pack_image_digest"] == pdigest)
+        case("pack-timings: pack_seconds and verify_seconds are non-negative numbers when both children ran",
+             isinstance(po["pack_seconds"], (int, float)) and po["pack_seconds"] >= 0
+             and isinstance(po["verify_seconds"], (int, float)) and po["verify_seconds"] >= 0)
+
+        print("pack refusals (no .apr):")
+
+        def refused_case(label, tag, expect_exit, expect_verify_ran, **kw):
+            cc = make_pack_case(tag, **kw)
+            rcc = run_pack_case(cc)
+            o = pobj(cc, "pack-outcome.json") if (cc["root"] / "pack-outcome.json").exists() else {}
+            case("%s: exit 0, accepted false, ran true, no .apr uploaded and none in the bucket" % label,
+                 rcc == 0 and o.get("accepted") is False and o.get("ran") is True and no_apr(cc)
+                 and not (cc["root"] / "motiv-1.apr").exists() and o.get("apr_sha256") is None and o.get("waived") is None,
+                 "rc=%s %s" % (rcc, cc["stderr"][-80:]))
+            case("%s: exit_code %s, verify %s, pack-outcome is the last upload" % (
+                label, expect_exit, "ran" if expect_verify_ran else "did not run"),
+                 o.get("exit_code") == expect_exit and (o.get("verify_seconds") is not None) == expect_verify_ran
+                 and puts(cc)[-1]["key"].endswith("/pack-outcome.json") and len(fake_calls(cc)) == (2 if expect_verify_ran else 1),
+                 str(o.get("exit_code")))
+            return cc, o
+
+        cc, o = refused_case("pack-gate-failed", "gate3", 3, False, pack_rc=3)
+        case("pack-gate-failed: the REFUSED line is recorded, pack_seconds is a number, verify_seconds null, pack.log uploaded",
+             str(o.get("packed_line")).startswith("REFUSED GateFailed") and isinstance(o.get("pack_seconds"), float)
+             and o.get("verify_seconds") is None and "pack.log" in put_keys(cc) and "verify.log" not in put_keys(cc))
+        cc, o = refused_case("pack-refused", "refused2", 2, False, pack_rc=2)
+        case("pack-timings: a pack that refused has pack_seconds and a null verify_seconds",
+             isinstance(o["pack_seconds"], (int, float)) and o["verify_seconds"] is None)
+        cc, o = refused_case("verify-refused", "verify2", 2, True, verify_rc=2)
+        case("verify-refused: the verify REFUSED line is recorded and deploy_eligible is false; pack ran and exited 0",
+             str(o.get("verify_line")).startswith("REFUSED ") and o.get("deploy_eligible") is False
+             and str(o.get("packed_line")).startswith("PACKED "))
+        cc, o = refused_case("verify-not-eligible", "noteligible", 0, True, eligible=False)
+        case("verify-not-eligible: verify exit 0 with deploy_eligible false is accepted false", o.get("deploy_eligible") is False)
+        cc, o = refused_case("sha-mismatch", "shamismatch", 0, True, packed_sha="f" * 64)
+        case("sha-mismatch: a PACKED sha256 that differs from the written file's hash is accepted false",
+             str(o.get("packed_line")).count("f" * 64) == 1 and o.get("apr_sha256") is None)
+
+        print("pack-skip:")
+        skips = [("gate_fail without a claim", dict(exit_class="gate_fail"), "gate_fail"),
+                 ("refused", dict(exit_class="refused", device_ok=False), "refused"),
+                 ("crash", dict(exit_class="crash", device_ok=False), "crash"),
+                 ("timeout", dict(exit_class="timeout", device_ok=False), "timeout"),
+                 ("pass with device_ok false", dict(exit_class="pass", device_ok=False), "pass"),
+                 ("gate_fail with a claim but device_ok false", dict(exit_class="gate_fail", device_ok=False, claim=claim_w), "gate_fail"),
+                 ("gate_fail whose partial manifest lacks the gate report", dict(exit_class="gate_fail", partial=True, drop_gate_entry=True, claim=claim_w), "gate_fail")]
+        for i, (label, kw, want_skip) in enumerate(skips):
+            cc = make_pack_case("skip%d" % i, **kw)
+            rcc = run_pack_case(cc)
+            o = pobj(cc, "pack-outcome.json") if (cc["root"] / "pack-outcome.json").exists() else {}
+            pmn = pobj(cc, "pack-manifest.json") if (cc["root"] / "pack-manifest.json").exists() else []
+            case("pack-skip: %s -> exit 0, ran false, skipped %s, nothing packed, no base download, no .apr" % (label, want_skip),
+                 rcc == 0 and o.get("ran") is False and o.get("skipped") == want_skip and o.get("accepted") is False
+                 and pbase_key not in gets(cc) and not fake_calls(cc) and no_apr(cc)
+                 and o.get("pack_seconds") is None and o.get("verify_seconds") is None and o.get("exit_code") is None,
+                 "rc=%s %s %s" % (rcc, o.get("skipped"), cc["stderr"][-80:]))
+            case("pack-skip: %s -> pack-image-env / pack-contracts: the skip is uploaded as pack-manifest [pack-outcome.json] then pack-outcome with the image digest and both contract hashes" % label,
+                 [e["path"] for e in pmn] == ["pack-outcome.json"] and put_keys(cc) == ["pack-manifest.json", "pack-outcome.json"]
+                 and o.get("pack_image_digest") == pdigest and o.get("gate_contract_sha256") == want_gate
+                 and o.get("parity_contract_sha256") == want_parity and set(o) == set(pack_fix))
+
+        print("pack-waiver:")
+        cc = make_pack_case("waiver-claim", exit_class="gate_fail", claim=claim_w, pack_waived="W-1", verify_waived="W-1")
+        rcc = run_pack_case(cc)
+        o = pobj(cc, "pack-outcome.json") if (cc["root"] / "pack-outcome.json").exists() else {}
+        case("pack-waiver-claim: a gate_fail whose gate-report carries pilot_waiver is packed; PACKED waived=W-1 and verify waived W-1 -> accepted true, waived W-1",
+             rcc == 0 and o.get("ran") is True and o.get("accepted") is True and o.get("waived") == "W-1"
+             and o.get("deploy_eligible") is True and o.get("skipped") is None, "rc=%s %s" % (rcc, cc["stderr"][-80:]))
+        case("pack-waiver-claim: the .apr is uploaded tagged expire, the gate-report was downloaded and re-hashed before packing",
+             (cc["root"] / "motiv-1.apr").is_file() and all(x["tagging"] == "laya-retention=expire" for x in puts(cc))
+             and "run/gate-report.json" in gets(cc) and len(fake_calls(cc)) == 2)
+        cc = make_pack_case("waiver-refused", exit_class="gate_fail", claim=claim_w, pack_rc=3)
+        rcc = run_pack_case(cc)
+        o = pobj(cc, "pack-outcome.json") if (cc["root"] / "pack-outcome.json").exists() else {}
+        case("pack-waiver-refused: the same claim with pack exit 3 -> accepted false, waived null, exit_code 3, no .apr, exit 0",
+             rcc == 0 and o.get("ran") is True and o.get("accepted") is False and o.get("waived") is None
+             and o.get("exit_code") == 3 and no_apr(cc))
+        cc = make_pack_case("waiver-disagree", exit_class="gate_fail", claim=claim_w, pack_waived="W-1", verify_waived=None)
+        rcc = run_pack_case(cc)
+        o = pobj(cc, "pack-outcome.json") if (cc["root"] / "pack-outcome.json").exists() else {}
+        case("pack-waiver-disagree: PACKED waived=W-1 but verify JSON waived null -> accepted false, waived null, no .apr",
+             rcc == 0 and o.get("accepted") is False and o.get("waived") is None and no_apr(cc)
+             and o.get("deploy_eligible") is True)
+        cc = make_pack_case("waiver-disagree2", exit_class="gate_fail", claim=claim_w, pack_waived="none", verify_waived="W-1")
+        rcc = run_pack_case(cc)
+        o = pobj(cc, "pack-outcome.json") if (cc["root"] / "pack-outcome.json").exists() else {}
+        case("pack-waiver-disagree: PACKED waived=none but verify waived W-1 -> accepted false too",
+             rcc == 0 and o.get("accepted") is False and no_apr(cc))
+
+        print("pack-integrity / pack-base-pin:")
+        cc = make_pack_case("integrity", corrupt={"run/recipe.json": b'{"fake":false}'})
+        rcc = run_pack_case(cc)
+        case("pack-integrity: a run file whose sha256 differs from training-manifest -> exit 1 `integrity`, nothing packed, nothing uploaded",
+             rcc == 1 and "integrity" in cc["stderr"] and not fake_calls(cc) and not puts(cc) and pbase_key not in gets(cc),
+             cc["stderr"].strip()[:100])
+        cc = make_pack_case("integrity-gate", exit_class="gate_fail", claim=claim_w,
+                            corrupt={"run/gate-report.json": b'{"pilot_waiver":{"id":"X"}}'})
+        rcc = run_pack_case(cc)
+        case("pack-integrity: a gate-report.json whose hash differs is refused (exit 1) BEFORE its pilot_waiver is read",
+             rcc == 1 and "integrity" in cc["stderr"] and not fake_calls(cc) and not puts(cc))
+        cc = make_pack_case("integrity-size", corrupt={"data/train.jsonl": b'{"a":1}\n\n'})
+        rcc = run_pack_case(cc)
+        case("pack-integrity: a data file with the wrong size is refused too", rcc == 1 and "integrity" in cc["stderr"])
+        flip = bytearray(btar.read_bytes())
+        flip[len(flip) // 2] ^= 0xFF
+        cc = make_pack_case("base-pin", base_bytes=bytes(flip))
+        rcc = run_pack_case(cc)
+        case("pack-base-pin: a base tar whose sha256 differs from the pin -> exit 1, nothing packed, nothing uploaded, nothing extracted",
+             rcc == 1 and "base" in cc["stderr"] and not fake_calls(cc) and not puts(cc)
+             and not (cc["knobs"].work / "hf").exists(), cc["stderr"].strip()[:100])
+        cc = make_pack_case("unsafe-path")
+        man = pobj(cc, "training-manifest.json")
+        man["entries"].append({"path": "run/../../escape", "size": 1, "sha256": "a" * 64})
+        (cc["root"] / "training-manifest.json").write_text(json.dumps(man))
+        rcc = run_pack_case(cc)
+        case("pack-integrity: a manifest path with `..` is refused (exit 1), nothing downloaded to it",
+             rcc == 1 and "integrity" in cc["stderr"] and not (cc["knobs"].work.parent / "escape").exists() and not fake_calls(cc))
+        cc = make_pack_case("partial-pass", partial=True)
+        rcc = run_pack_case(cc)
+        case("pack: an outcome pass with no complete training-manifest.json (only the partial one) is exit 1, never packed",
+             rcc == 1 and "manifest" in cc["stderr"] and not fake_calls(cc) and not puts(cc))
+        cc = make_pack_case("no-outcome")
+        (cc["root"] / "outcome.json").unlink()
+        rcc = run_pack_case(cc)
+        case("pack: an absent outcome.json is exit 1 (download), nothing recorded", rcc == 1 and "download" in cc["stderr"] and not puts(cc))
+        cc = make_pack_case("apr-upload-fails", runner_kw={"fail": lambda key: key.endswith(".apr")})
+        rcc = run_pack_case(cc)
+        o = pobj(cc, "pack-outcome.json") if (cc["root"] / "pack-outcome.json").exists() else {}
+        case("pack: a failed .apr upload records accepted false (no model is claimed that is not in the bucket) and exits 1",
+             rcc == 1 and o.get("accepted") is False and o.get("apr_sha256") is None and not (cc["root"] / "motiv-1.apr").exists())
+
+        print("pack-image-env:")
+        for label, mutate in (("missing", lambda e: e.pop("LAYA_PACK_IMAGE_DIGEST")),
+                              ("uppercase hex", lambda e: e.update(LAYA_PACK_IMAGE_DIGEST="sha256:" + "AB" * 32)),
+                              ("short", lambda e: e.update(LAYA_PACK_IMAGE_DIGEST="sha256:" + "ab" * 31)),
+                              ("no prefix", lambda e: e.update(LAYA_PACK_IMAGE_DIGEST="ab" * 32)),
+                              ("run prefix mismatch", lambda e: e.update(LAYA_RUN_PREFIX="runs/other/%s/" % task)),
+                              ("missing LAYA_BUCKET", lambda e: e.pop("LAYA_BUCKET"))):
+            cc = make_pack_case("env-" + re.sub(r"\W", "", label))
+            mutate(cc["env"])
+            rcc = run_pack_case(cc)
+            case("pack-image-env: %s -> REFUSED env:, exit 2, no download and no upload" % label,
+                 rcc == 2 and "REFUSED env:" in cc["stderr"] and not cc["runner"].calls and pdigest not in cc["stderr"],
+                 cc["stderr"].strip()[:90])
+        cc = make_pack_case("env-contracts")
+        cc["knobs"] = PackKnobs(**{**cc["knobs"].__dict__, "contracts_dir": Path(tmp) / "no-contracts"})
+        rcc = run_pack_case(cc)
+        case("pack-image-env: a pack image without its contracts is REFUSED contracts: (exit 2) before any download",
+             rcc == 2 and "REFUSED contracts:" in cc["stderr"] and not cc["runner"].calls)
+        errbuf = io.StringIO()
+        with Env(LAYA_STEP="pack"), contextlib.redirect_stderr(errbuf):
+            saved = {k: os.environ.pop(k, None) for k in ("LAYA_TASK_ID", "LAYA_NAME", "LAYA_BUCKET", "LAYA_RUN_PREFIX", "LAYA_PACK_IMAGE_DIGEST")}
+            try:
+                mrc = main(["run_step.py", "pack"])
+            finally:
+                for k, v in saved.items():
+                    if v is not None:
+                        os.environ[k] = v
+        case("pack: `run_step.py pack` dispatches to pack mode (an empty env is REFUSED env:, exit 2)",
+             mrc == 2 and "REFUSED env:" in errbuf.getvalue())
+        rust_layout = ROOT / "crates" / "aprender-mcp-laya-train" / "src" / "layout.rs"
+        real_key = base_key_from_pin(json.loads((HERE / "base-stage.json").read_text()))
+        if rust_layout.is_file():
+            m_key = re.search(r'pub const BASE_KEY: &str = "([^"]+)";', rust_layout.read_text(encoding="utf-8"))
+            case("pack: the base key derived from base-stage.json equals layout::BASE_KEY in the Rust crate",
+                 bool(m_key) and m_key.group(1) == real_key, real_key)
+        else:
+            case("pack: the base key derived from base-stage.json has the base/laya-<8 hex>/<tar> shape (Rust source absent)",
+                 re.fullmatch(r"base/laya-[0-9a-f]{8}/laya-base\.tar", real_key) is not None, real_key)
+        case("pack: parse_packed_line reads the real PACKED shape and refuses a malformed one",
+             parse_packed_line("PACKED /w/x.apr sha256=%s rescore_max_abs=1 shipped_seed=20260927 argmax=3/3 waived=W-1" % ("a" * 64))
+             == ("a" * 64, 20260927, "W-1")
+             and parse_packed_line("PACKED /w/x.apr sha256=%s shipped_seed=null argmax=3/3 waived=none" % ("b" * 64))
+             == ("b" * 64, None, None)
+             and parse_packed_line("PACKED waived=none") is None and parse_packed_line("REFUSED X y") is None)
+
         print("no network:")
         case("the default aws Runner was never called", DEFAULT_RUNNER_CALLS == 0, "calls=%d" % DEFAULT_RUNNER_CALLS)
 
@@ -1730,10 +2546,12 @@ def main(argv):
         return selftest()
     if len(argv) == 3 and argv[1] == "--selftest-child":
         return selftest_child(json.loads(argv[2]))
-    if len(argv) != 2 or argv[1] != "train":
-        print("usage: run_step.py train | --selftest", file=sys.stderr)
+    if len(argv) != 2 or argv[1] not in ("train", "pack"):
+        print("usage: run_step.py train | pack | --selftest", file=sys.stderr)
         return 2
-    step = os.environ.get("LAYA_STEP", "") or "train"
+    step = os.environ.get("LAYA_STEP", "") or argv[1]
+    if step == "pack":
+        return entry_pack(os.environ, aws_runner, PackKnobs())
     paths = Paths()
     knobs = Knobs(prepare_base=lambda: stage_channel_base(paths.base_tar, HERE / "base-stage.json", paths.hf_home))
     if step == "train":
