@@ -1,0 +1,80 @@
+{
+  "schema": "laya-shared-table-evidence-v1",
+  "plan": "14-02",
+  "table_sha256": "ca3ed48a7360d68e1a2a50e995275e9c0646785cd90820bbcc7ae56a53682632",
+  "cases": 89,
+  "rules": 29,
+  "deferred_cases": 1,
+  "python_replay_last_line": "DATA SELFTEST OK",
+  "rust_tests": [
+    "shared_case_table",
+    "contract_mirror",
+    "deferrable_rules_mirror",
+    "no_false_refusal",
+    "inspect_never_refuses_epochs",
+    "validate_bound_timing"
+  ],
+  "bound_timing_seconds": 4.825,
+  "bound_timing_note": "200,000 synthetic train rows + 2,000 eval rows through validate_files, debug test build; limit 20 s",
+  "stricter_rules": [
+    "task-serving-limit"
+  ],
+  "table_gap_found_by_remutation": "P1 (shift checked before the eval overlap) SURVIVED the first 85-case table; commit 612f593fe added four ordering cases, after which P1 is RED",
+  "mutations": [
+    {
+      "id": "R1",
+      "file": "crates/aprender-mcp-laya-train/src/validate.rs",
+      "change": "Rust skips eval-class-coverage",
+      "command": "CARGO_INCREMENTAL=0 rtk proxy cargo test -p aprender-mcp-laya-train --lib shared_case_table",
+      "red": true,
+      "red_line": "eval-class-coverage: python Some(String(\"eval-class-coverage\")) / None, rust Ok((DatasetSummary { labels: [\"a\", \"b\", \"c\"], class_counts: {\"a\": 4, \"b\": 4, \"c\": 4}, shots_per_class: 4, rows: RowCounts { train: 12, eval: 4, shift: No",
+      "restored_green": true
+    },
+    {
+      "id": "R2",
+      "file": "crates/aprender-mcp-laya-train/src/validate.rs",
+      "change": "Rust refuses train-class-too-small with < instead of <=",
+      "command": "CARGO_INCREMENTAL=0 rtk proxy cargo test -p aprender-mcp-laya-train --lib shared_case_table",
+      "red": true,
+      "red_line": "train-class-too-small-two-rows: python Some(String(\"train-class-too-small\")) / None, rust Ok((DatasetSummary { labels: [\"a\", \"b\", \"c\"], class_counts: {\"a\": 4, \"b\": 4, \"c\": 2}, shots_per_class: 4, rows: RowCounts { train: 10, eval:",
+      "restored_green": true
+    },
+    {
+      "id": "R3",
+      "file": "crates/aprender-mcp-laya-train/src/validate.rs",
+      "change": "Rust reads rows through serde_json::Value (a repeated key is lost)",
+      "command": "CARGO_INCREMENTAL=0 rtk proxy cargo test -p aprender-mcp-laya-train --lib shared_case_table",
+      "red": true,
+      "red_line": "train-row-schema-duplicate-key: python Some(String(\"train-row-schema\")) / None, rust Ok((DatasetSummary { labels: [\"a\", \"b\", \"c\"], class_counts: {\"a\": | test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 91 filtered o",
+      "restored_green": true
+    },
+    {
+      "id": "P1",
+      "file": "scripts/laya_train/data.py",
+      "change": "validate_data_dir checks shift before the eval overlap",
+      "command": "uv run --project scripts/laya_train --frozen python scripts/laya_train/data.py --selftest",
+      "red": true,
+      "red_line": "FAIL case order-eval-overlap-before-shift-row-error expected eval-train-overlap, got shift-row-label | DATA SELFTEST FAILED: case order-eval-overlap-before-shift-row-error, case order-eval-overlap-before-shift-overlap",
+      "restored_green": true
+    },
+    {
+      "id": "P2",
+      "file": "scripts/laya_train/data.py",
+      "change": "validate_data_dir skips refuse_overlap for shift",
+      "command": "uv run --project scripts/laya_train --frozen python scripts/laya_train/data.py --selftest",
+      "red": true,
+      "red_line": "FAIL case shift-train-overlap expected shift-train-overlap, got accepted | DATA SELFTEST FAILED: case shift-train-overlap",
+      "restored_green": true
+    },
+    {
+      "id": "P3",
+      "file": "scripts/laya_train/data.py",
+      "change": "compare_case compares only refusal presence, not the rule name",
+      "command": "uv run --project scripts/laya_train --frozen python scripts/laya_train/data.py --selftest",
+      "red": true,
+      "red_line": "FAIL case-comparator-rule-mismatch a different rule, or one class count, must not compare equal | DATA SELFTEST FAILED: case-comparator-rule-mismatch",
+      "restored_green": true
+    }
+  ],
+  "lifecycle_last_line": "LAYA TRAIN SELFTEST OK"
+}
