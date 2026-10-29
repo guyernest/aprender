@@ -1425,6 +1425,29 @@ laya-trainer-infra *args:
     set -euo pipefail
     exec python3 -I scripts/laya_deploy/laya_trainer_ops.py infra "$@"
 
+# `just laya-trainer-stage base ENV PROFILE [--tar FILE]` uploads the locally built laya-base.tar (default <state-dir>/laya-base.tar) to
+# base/laya-55cf4c4e/ only when its size and sha256 equal scripts/laya_train/container/base-stage.json, then verifies the uploaded
+# object's size. `just laya-trainer-stage dataset DIR PREFIX ENV PROFILE [--expect motivation-v1]` uploads exactly task.json,
+# train.jsonl, eval.jsonl and an optional shift.jsonl to datasets/<PREFIX>/ (the trainer's prefix grammar), records each file's sha256 in
+# datasets-<env>.json, and refuses a prefix that already holds any object (dataset prefixes are immutable; a corrected dataset gets a
+# new prefix). `--expect motivation-v1` binds the three files to Phase 12's inputs_sha256. Row trainer-stage.
+[positional-arguments]
+laya-trainer-stage *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec python3 -I scripts/laya_deploy/laya_trainer_ops.py stage "$@"
+
+# `just laya-trainer-probe cuda|sigterm ENV PROFILE` creates ONE ml.g5.xlarge training job (MaxRuntime 1800 s, the base channel only):
+# `cuda` runs the CUDA/base-load/one-training-step probe, `sigterm` stops the job 120 s after InProgress (once the container is ready)
+# and measures SageMaker's SIGTERM grace from the uploaded heartbeats. A live run costs money and refuses unless
+# LAYA_TRAINER_APPROVED_SPEND=probe-<mode>. It outlasts the Bash tool's 10-minute cap: run it in the background and judge it by its
+# LAST line, `PROBE DONE <mode> <final status>` or `PROBE FAILED <mode> <detail>`. Results land in <state-dir>/probe-<id>.json. Row trainer-probe.
+[positional-arguments]
+laya-trainer-probe *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec python3 -I scripts/laya_deploy/laya_trainer_ops.py probe "$@"
+
 # Fine-tune Laya on <data> (task.json + train.jsonl + a REQUIRED eval.jsonl + an OPTIONAL shift.jsonl),
 # calibrate and gate into the run dir <out>. Exit 0 = GATE PASS, 3 = GATE FAIL, 2 = input refused.
 # Production (laya-finetune-gate-v1 1.4.0) trains the three gate seeds 13/17/23 and ships the MEDIAN-ECE
@@ -5845,6 +5868,54 @@ laya-gates-selftest:
         must_pass outputs-images-dry '^AWS CALLS: 0$' just laya-trainer-infra outputs-images dev ze-kasher-dev --state-dir "$TS"
         must_pass outputs-dry '^AWS CALLS: 0$' just laya-trainer-infra outputs dev ze-kasher-dev --state-dir "$TS"
         [ "$(wc -l < "$REC" | tr -d ' ')" -eq 0 ] || red "the aws recorder was called by a dry run"
+    }
+    row_trainer_stage() {
+        # D-03 / D-07 (plan 14-09): a wrong base tar, an extra dataset file and a bad prefix are refused before any command; dry runs
+        # against placeholder state reach no aws.
+        local TS="$W/ops-state-stage" DS="$W/ops-ds" DSX="$W/ops-ds-extra" TAR="$W/ops-base.tar" PIN="$W/ops-base-stage.json"
+        python3 -I scripts/laya_deploy/laya_trainer_ops.py --write-placeholder-state "$TS" > /dev/null || { red "the placeholder state could not be written"; return; }
+        mkdir -p "$DS" "$DSX"
+        printf '{"task":"x"}\n' > "$DS/task.json"; printf '{"text":"a","label":0}\n' > "$DS/train.jsonl"; printf '{"text":"b","label":1}\n' > "$DS/eval.jsonl"
+        cp "$DS"/*.jsonl "$DS/task.json" "$DSX/"; printf 'x\n' > "$DSX/notes.txt"
+        printf 'a tiny stand-in for the base tar\n' > "$TAR"
+        python3 -I - "$PIN" "$TAR" <<'PYS'
+    import hashlib, json, sys
+    pin, tar = sys.argv[1:3]
+    d = json.load(open("scripts/laya_train/container/base-stage.json"))
+    b = open(tar, "rb").read()
+    d.update({"tar_sha256": hashlib.sha256(b).hexdigest(), "tar_bytes": len(b)})
+    json.dump(d, open(pin, "w"))
+    PYS
+        must_fail foreign-profile '^REFUSED profile: ' just laya-trainer-stage base dev augury-dev
+        [ "$RC" -eq 2 ] || red "foreign-profile: exit $RC, not 2"
+        must_fail wrong-tar '^REFUSED stage: ' just laya-trainer-stage base dev ze-kasher-dev --tar "$TAR" --state-dir "$TS"
+        [ "$RC" -eq 2 ] || red "wrong-tar: exit $RC, not 2"
+        must_fail extra-file '^REFUSED stage: DIR holds' just laya-trainer-stage dataset "$DSX" p1 dev ze-kasher-dev --state-dir "$TS"
+        [ "$RC" -eq 2 ] || red "extra-file: exit $RC, not 2"
+        must_fail bad-prefix '^REFUSED stage: PREFIX' just laya-trainer-stage dataset "$DS" Upper dev ze-kasher-dev --state-dir "$TS"
+        [ "$RC" -eq 2 ] || red "bad-prefix: exit $RC, not 2"
+        must_pass base-dry '^AWS CALLS: 0$' just laya-trainer-stage base dev ze-kasher-dev --tar "$TAR" --stage-json "$PIN" --state-dir "$TS"
+        grep -q '^+ aws s3 cp .* s3://.*/base/laya-55cf4c4e/laya-base.tar ' "$(logof base-dry)" || red "base-dry: no s3 cp to base/laya-55cf4c4e/laya-base.tar"
+        must_pass dataset-dry '^AWS CALLS: 0$' just laya-trainer-stage dataset "$DS" p1 dev ze-kasher-dev --state-dir "$TS"
+        grep -q '^+ aws s3 cp .*/train.jsonl s3://.*/datasets/p1/train.jsonl ' "$(logof dataset-dry)" || red "dataset-dry: no s3 cp of train.jsonl to datasets/p1/"
+        [ "$(wc -l < "$REC" | tr -d ' ')" -eq 0 ] || red "the aws recorder was called by a dry run"
+    }
+    row_trainer_probe() {
+        # D-13 / D-16 (plan 14-09): an unapproved live probe is refused before any call; dry runs print the one request and reach no aws.
+        local TS="$W/ops-state-probe"
+        python3 -I scripts/laya_deploy/laya_trainer_ops.py --write-placeholder-state "$TS" > /dev/null || { red "the placeholder state could not be written"; return; }
+        must_fail foreign-profile '^REFUSED profile: ' just laya-trainer-probe cuda dev augury-dev
+        [ "$RC" -eq 2 ] || red "foreign-profile: exit $RC, not 2"
+        must_fail unknown-mode '^REFUSED usage: ' just laya-trainer-probe gpu dev ze-kasher-dev
+        [ "$RC" -eq 2 ] || red "unknown-mode: exit $RC, not 2"
+        must_fail unapproved-spend '^REFUSED spend: ' env -u LAYA_TRAINER_APPROVED_SPEND DRY_RUN=0 just laya-trainer-probe cuda dev ze-kasher-dev --state-dir "$TS"
+        [ "$RC" -eq 2 ] || red "unapproved-spend: exit $RC, not 2"
+        must_pass cuda-dry '^AWS CALLS: 0$' just laya-trainer-probe cuda dev ze-kasher-dev --state-dir "$TS"
+        grep -q '"LAYA_STEP": "probe"' "$(logof cuda-dry)" || red "cuda-dry: the request does not carry LAYA_STEP probe"
+        grep -q '"MaxRuntimeInSeconds": 1800' "$(logof cuda-dry)" || red "cuda-dry: the request does not carry MaxRuntimeInSeconds 1800"
+        must_pass sigterm-dry '^AWS CALLS: 0$' just laya-trainer-probe sigterm dev ze-kasher-dev --state-dir "$TS"
+        grep -q '"LAYA_STEP": "probe-sigterm"' "$(logof sigterm-dry)" || red "sigterm-dry: the request does not carry LAYA_STEP probe-sigterm"
+        [ "$(wc -l < "$REC" | tr -d ' ')" -eq 0 ] || red "the aws recorder was called"
     }
     # The deployment triple (plan 13-04, D-06): the four pure helpers and their selftest.
     row_target_check() {

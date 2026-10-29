@@ -206,6 +206,7 @@ class Ctx:
         self.repo_root = Path(repo_root) if repo_root else REPO_ROOT
         self.is_ignored = is_ignored or self._git_ignored
         self.file_exists = file_exists or os.path.isfile
+        self.base_stage = str(self.repo_root / BASE_STAGE_JSON)
         self.state = None
 
     def say(self, line):
@@ -685,12 +686,374 @@ def cmd_infra(ctx, pos, opts):
     return 0
 
 
+# ---- stage ---------------------------------------------------------------------------------------------------
+
+BASE_STAGE_JSON = "scripts/laya_train/container/base-stage.json"
+DATASET_FILES = ("task.json", "train.jsonl", "eval.jsonl", "shift.jsonl")
+DATASET_REQUIRED = ("task.json", "train.jsonl", "eval.jsonl")
+SEGMENT_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
+# Phase 12's inputs (12-GATE-RUN-EVIDENCE.json inputs_sha256): --expect motivation-v1 binds a staged dataset to them.
+EXPECT = {
+    "motivation-v1": {
+        "task.json": "f74a3ad3cfc00c160cc2959d95beb219aec859b394b883e87577a56dc14e7ea3",
+        "train.jsonl": "f1d84f19ec38ed85356bcbcd1eae6ef8ad07fb97e014f61a17d37adc0d68d378",
+        "eval.jsonl": "ee95d71fcb5d90d515b9fc6741e5df51087e763fa7f251ace83d9f11d5ccd575",
+    },
+}
+
+
+def read_outputs(ctx, env, profile, keys):
+    out = read_state(ctx, "outputs-%s.json" % env, "run `just laya-trainer-infra outputs %s %s` first" % (env, profile))
+    t = out.get("trainer") if isinstance(out.get("trainer"), dict) else {}
+    missing = [k for k in keys if not isinstance(t.get(k), str) or not t.get(k)]
+    if missing:
+        refuse("state", "outputs-%s.json lacks %s" % (env, ", ".join(missing)))
+    if "BucketName" in keys and not BUCKET_RE.fullmatch(t["BucketName"]):
+        refuse("state", "outputs-%s.json BucketName is not a bucket name" % env)
+    return t
+
+
+def read_base_stage(ctx):
+    path = ctx.base_stage
+    try:
+        d = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        refuse("stage", "the base stage record %s cannot be read" % Path(path).name)
+    if (not isinstance(d, dict) or d.get("schema") != "laya-base-stage-v1" or not SHA_RE.fullmatch(str(d.get("tar_sha256", "")))
+            or not isinstance(d.get("tar_bytes"), int) or d["tar_bytes"] <= 0 or not COMMIT_RE.fullmatch(str(d.get("revision", "")))
+            or not re.fullmatch(r"[A-Za-z0-9._-]+", str(d.get("tar_name", "")))):
+        refuse("stage", "the base stage record %s is not a laya-base-stage-v1 with a sha256, a size, a revision and a tar name" % Path(path).name)
+    return d
+
+
+def check_dataset_prefix(prefix):
+    """Mirror of crates/aprender-mcp-laya-train parse_dataset_uri: 1 to 4 segments of [a-z0-9._-], each starting with a
+    letter or digit, at most 64 characters, no `%`. Returns the normalized segments."""
+    p = prefix[:-1] if prefix.endswith("/") else prefix
+    parts = p.split("/")
+    if "%" in prefix or not p or not (1 <= len(parts) <= 4) or not all(SEGMENT_RE.fullmatch(x) for x in parts):
+        refuse("stage", "PREFIX %r must be 1 to 4 segments of [a-z0-9._-], each starting with a letter or digit and at most 64 "
+                        "characters (the trainer's dataset_uri grammar)" % prefix[:60])
+    return parts
+
+
+def head_size(ctx, profile, region, bucket, key):
+    r = aws(ctx, profile, region, "s3api", "head-object", "--bucket", bucket, "--key", key, "--query", "ContentLength",
+            "--output", "text", dry_out="0\n")
+    try:
+        return int(r.out.strip()) if r.rc == 0 else None
+    except ValueError:
+        return None
+
+
+def stage_base(ctx, rest, opts):
+    if len(rest) != 2:
+        refuse("usage", "stage base ENV PROFILE [--tar FILE]")
+    env, profile = rest
+    check_profile_env(profile, env)
+    if opts.get("expect"):
+        refuse("usage", "--expect is for `stage dataset`")
+    if opts.get("stage_json"):
+        if not ctx.dry:
+            refuse("usage", "--stage-json is honoured only under DRY_RUN=1 (the live pin is the committed base-stage.json)")
+        ctx.base_stage = opts["stage_json"]
+    pin = read_base_stage(ctx)
+    state_dir(ctx, opts.get("state_dir"), create=not ctx.dry)
+    tar = Path(opts["tar"]) if opts.get("tar") else ctx.state / "laya-base.tar"
+    try:
+        size = tar.stat().st_size
+    except OSError:
+        refuse("stage", "the base tar %s does not exist; build it with `stage_base.py build --out %s`" % (tar, tar))
+    if size != pin["tar_bytes"]:
+        refuse("stage", "%s is %d bytes, base-stage.json pins %d" % (tar.name, size, pin["tar_bytes"]))
+    got = sha256_file(tar)
+    if got != pin["tar_sha256"]:
+        refuse("stage", "%s sha256 %s... is not base-stage.json's %s..." % (tar.name, got[:12], pin["tar_sha256"][:12]))
+    bucket = read_outputs(ctx, env, profile, ("BucketName",))["BucketName"]
+    key = "base/laya-%s/%s" % (pin["revision"][:8], pin["tar_name"])
+    region = connect(ctx, profile)
+    cp = aws(ctx, profile, region, "s3", "cp", str(tar), "s3://%s/%s" % (bucket, key), "--only-show-errors")
+    if cp.rc != 0:
+        raise Failure("the base upload failed: %s" % first_line(cp.err), "STAGE FAILED base UPLOAD")
+    up = head_size(ctx, profile, region, bucket, key)
+    if ctx.dry:
+        finish_dry(ctx, "stage base")
+        return 0
+    if up != pin["tar_bytes"]:
+        raise Failure("the uploaded object is %s bytes, expected %d" % (up, pin["tar_bytes"]), "STAGE FAILED base SIZE")
+    ctx.say("staged %s (%d bytes, sha256 %s) at %s" % (pin["tar_name"], up, got, key))
+    ctx.say("STAGE OK base %s" % key)
+    return 0
+
+
+def stage_dataset(ctx, rest, opts):
+    if len(rest) != 4:
+        refuse("usage", "stage dataset DIR PREFIX ENV PROFILE [--expect motivation-v1]")
+    src, prefix, env, profile = rest
+    check_profile_env(profile, env)
+    if opts.get("tar") or opts.get("stage_json"):
+        refuse("usage", "--tar and --stage-json are for `stage base`")
+    expect = opts.get("expect")
+    if expect is not None and expect not in EXPECT:
+        refuse("usage", "--expect names %r; the only pin is %s" % (expect[:40], ", ".join(EXPECT)))
+    parts = check_dataset_prefix(prefix)
+    norm = "/".join(parts)
+    d = Path(src)
+    if not d.is_dir() or d.is_symlink():
+        refuse("stage", "DIR %r is not a directory" % src[:80])
+    names = sorted(os.listdir(d))
+    for n in names:
+        if n not in DATASET_FILES:
+            refuse("stage", "DIR holds %r, which is not one of %s (nothing else is staged)" % (n[:60], ", ".join(DATASET_FILES)))
+        st = os.lstat(d / n)
+        if not stat.S_ISREG(st.st_mode):
+            refuse("stage", "%s is not a regular file" % n)
+    for n in DATASET_REQUIRED:
+        if n not in names:
+            refuse("stage", "DIR lacks the required %s" % n)
+    hashes = {n: sha256_file(d / n) for n in names}
+    if expect:
+        for n, want in EXPECT[expect].items():
+            if hashes.get(n) != want:
+                refuse("stage", "%s is not Phase 12's (sha256 %s... instead of %s...); --expect %s binds the three files to the "
+                                "inputs the gate run passed on" % (n, hashes.get(n, "?")[:12], want[:12], expect))
+    state_dir(ctx, opts.get("state_dir"), create=not ctx.dry)
+    bucket = read_outputs(ctx, env, profile, ("BucketName",))["BucketName"]
+    region = connect(ctx, profile)
+    base = "datasets/%s/" % norm
+    ls = aws(ctx, profile, region, "s3api", "list-objects-v2", "--bucket", bucket, "--prefix", base, "--max-keys", "1", "--query",
+             "length(Contents || `[]`)", "--output", "text", dry_out="0\n")
+    try:
+        held = int(ls.out.strip()) if ls.rc == 0 else None
+    except ValueError:
+        held = None
+    if held is None:
+        raise Failure("could not list %s: %s" % (base, first_line(ls.err)), "STAGE FAILED dataset LIST")
+    if held > 0:
+        refuse("stage", "datasets/%s/ already holds objects; use a new prefix (a dataset prefix is immutable, so a restage can "
+                        "never leave a stale file behind)" % norm)
+    for n in names:
+        cp = aws(ctx, profile, region, "s3", "cp", str(d / n), "s3://%s/%s%s" % (bucket, base, n), "--only-show-errors")
+        if cp.rc != 0:
+            raise Failure("upload of %s failed: %s; %s now holds a partial dataset, use a NEW prefix" % (n, first_line(cp.err), base),
+                          "STAGE FAILED dataset UPLOAD")
+    for n in names:
+        got = head_size(ctx, profile, region, bucket, base + n)
+        if not ctx.dry and got != (d / n).stat().st_size:
+            raise Failure("%s is %s bytes in S3, expected %d; %s is now unusable, use a NEW prefix" % (n, got, (d / n).stat().st_size, base),
+                          "STAGE FAILED dataset SIZE")
+    if ctx.dry:
+        ctx.say("would record datasets/%s in datasets-%s.json with the sha256 of %s" % (norm, env, ", ".join(names)))
+        finish_dry(ctx, "stage dataset")
+        return 0
+    rec = read_state_optional(ctx, "datasets-%s.json" % env) or {}
+    rec.update({"schema": "laya-trainer-datasets-v1", "env": env})
+    rec.setdefault("datasets", {})[norm] = {"prefix": base, "files": hashes, "staged_at": ctx.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")}
+    write_state(ctx, "datasets-%s.json" % env, rec)
+    for n in names:
+        ctx.say("  %s sha256 %s" % (n, hashes[n]))
+    ctx.say("STAGE OK dataset %s" % norm)
+    return 0
+
+
+def cmd_stage(ctx, pos, opts):
+    if not pos or pos[0] not in ("base", "dataset"):
+        refuse("usage", "stage base ENV PROFILE | stage dataset DIR PREFIX ENV PROFILE")
+    return (stage_base if pos[0] == "base" else stage_dataset)(ctx, pos[1:], opts)
+
+
+# ---- probe ---------------------------------------------------------------------------------------------------
+
+PROBE_INSTANCE = "ml.g5.xlarge"
+PROBE_MAX_RUNTIME_S = 1800
+PROBE_VOLUME_GB = 100
+PROBE_POLL_S = 30
+PROBE_CAP_S = 3600            # create to a terminal status, start-up included; past it the job is stopped
+SIGTERM_AFTER_S = 120
+SIGTERM_READY_CAP_S = 1200
+JOB_TERMINAL = ("Completed", "Failed", "Stopped")
+PROBE_MODES = {"cuda": "probe", "sigterm": "probe-sigterm"}
+
+
+def build_probe_request(mode, probe_id, bucket, role_arn, image, base_prefix):
+    """The one create-training-job request of a probe: one instance, MaxRuntime 1800, the base channel only."""
+    return {
+        "TrainingJobName": "laya-probe-%s" % probe_id,
+        "RoleArn": role_arn,
+        "AlgorithmSpecification": {"TrainingImage": image, "TrainingInputMode": "File"},
+        "InputDataConfig": [{
+            "ChannelName": "base",
+            "DataSource": {"S3DataSource": {"S3DataType": "S3Prefix", "S3Uri": "s3://%s/%s" % (bucket, base_prefix),
+                                            "S3DataDistributionType": "FullyReplicated"}},
+        }],
+        "OutputDataConfig": {"S3OutputPath": "s3://%s/sagemaker-output/" % bucket},
+        "ResourceConfig": {"InstanceType": PROBE_INSTANCE, "InstanceCount": 1, "VolumeSizeInGB": PROBE_VOLUME_GB},
+        "StoppingCondition": {"MaxRuntimeInSeconds": PROBE_MAX_RUNTIME_S},
+        "Environment": {"LAYA_STEP": PROBE_MODES[mode], "LAYA_BUCKET": bucket, "LAYA_PROBE_ID": probe_id},
+    }
+
+
+def int_or_float(x):
+    return int(x) if isinstance(x, (int, float)) and float(x).is_integer() else x
+
+
+def describe_job(ctx, profile, region, name):
+    bad = 0
+    while True:
+        r = aws(ctx, profile, region, "sagemaker", "describe-training-job", "--training-job-name", name, "--output", "json",
+                dry_out="{}")
+        try:
+            job = json.loads(r.out) if r.rc == 0 else None
+        except ValueError:
+            job = None
+        if isinstance(job, dict):
+            return job
+        bad += 1
+        if bad >= 3:
+            raise Failure("describe-training-job failed three times: %s" % first_line(r.err), "PROBE FAILED probe DESCRIBE")
+        ctx.sleep(PROBE_POLL_S)
+
+
+def fetch_json(ctx, profile, region, bucket, key):
+    """get-object into a private temp file, parsed; None when the object is absent or not a JSON object."""
+    tmp = Path(tempfile.mkdtemp(prefix=".probe-get-", dir=str(ctx.state)))
+    try:
+        out = tmp / "obj"
+        r = aws(ctx, profile, region, "s3api", "get-object", "--bucket", bucket, "--key", key, str(out), "--output", "json")
+        if r.rc != 0 or not out.exists():
+            return None
+        try:
+            v = json.loads(out.read_text(encoding="utf-8"))
+        except ValueError:
+            return None
+        return v if isinstance(v, dict) else None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def cmd_probe(ctx, pos, opts):
+    if len(pos) != 3:
+        refuse("usage", "probe cuda|sigterm ENV PROFILE")
+    mode, env, profile = pos
+    check_profile_env(profile, env)
+    if mode not in PROBE_MODES:
+        refuse("usage", "probe MODE must be cuda or sigterm, got %r" % mode[:40])
+    if not ctx.dry and ctx.env.get("LAYA_TRAINER_APPROVED_SPEND", "") != "probe-%s" % mode:
+        refuse("spend", "a live probe creates one %s training job (up to %d s, billed); set LAYA_TRAINER_APPROVED_SPEND=probe-%s to approve it"
+               % (PROBE_INSTANCE, PROBE_MAX_RUNTIME_S, mode))
+    state_dir(ctx, opts.get("state_dir"), create=not ctx.dry)
+    t = read_outputs(ctx, env, profile, ("BucketName", "SageMakerRoleArn", "TrainRepoUri"))
+    imgs = read_state_optional(ctx, "images-%s.json" % env)
+    train = imgs.get("train") if isinstance(imgs, dict) and isinstance(imgs.get("train"), dict) else {}
+    digest = train.get("digest")
+    if not isinstance(digest, str) or not DIGEST_RE.fullmatch(digest) or digest == ZERO_DIGEST:
+        refuse("probe", "images-%s.json holds no real train image digest (run `just laya-trainer-image train %s %s` first)" % (env, env, profile))
+    if train.get("repo_uri") not in (None, t["TrainRepoUri"]):
+        refuse("probe", "images-%s.json names another train repository than the trainer stack's TrainRepoUri" % env)
+    pin = read_base_stage(ctx)
+    base_prefix = "base/laya-%s/" % pin["revision"][:8]
+    probe_id = "%s-%s" % (mode, ctx.utcnow().strftime("%Y%m%d%H%M%S"))
+    req = build_probe_request(mode, probe_id, t["BucketName"], t["SageMakerRoleArn"], "%s@%s" % (t["TrainRepoUri"], digest), base_prefix)
+    name = req["TrainingJobName"]
+    region = connect(ctx, profile)
+    ctx.say("probe %s: one %s job %s, MaxRuntimeInSeconds %d, the base channel only" % (mode, PROBE_INSTANCE, name, PROBE_MAX_RUNTIME_S))
+    ctx.say("request: " + json.dumps(req, indent=2, sort_keys=True))
+    bucket = t["BucketName"]
+    prefix = "runs/probe/%s/" % probe_id
+    create = aws(ctx, profile, region, "sagemaker", "create-training-job", "--cli-input-json", json.dumps(req, sort_keys=True))
+    if create.rc != 0:
+        raise Failure("create-training-job failed: %s" % first_line(create.err), "PROBE FAILED %s CREATE" % mode)
+    if ctx.dry:
+        describe_job(ctx, profile, region, name)
+        if mode == "sigterm":
+            aws(ctx, profile, region, "s3api", "head-object", "--bucket", bucket, "--key", prefix + "sigterm-ready.json")
+            aws(ctx, profile, region, "sagemaker", "stop-training-job", "--training-job-name", name)
+            aws(ctx, profile, region, "s3api", "list-objects-v2", "--bucket", bucket, "--prefix", prefix + "sigterm-heartbeat-",
+                "--query", "Contents[].Key", "--output", "json")
+        else:
+            aws(ctx, profile, region, "s3api", "get-object", "--bucket", bucket, "--key", prefix + "probe.json", "<probe.json>")
+        ctx.say("would poll every %d s (cap %d s)%s and record probe-%s.json" % (
+            PROBE_POLL_S, PROBE_CAP_S, ", stop the job %d s after InProgress once the container is ready" % SIGTERM_AFTER_S if mode == "sigterm" else "", probe_id))
+        finish_dry(ctx, "probe %s" % mode)
+        return 0
+    ctx.say("created %s; polling every %d s" % (name, PROBE_POLL_S))
+    t0 = ctx.clock()
+    in_progress_at = stop_at = None
+    ready = False
+    last = None
+    while True:
+        job = describe_job(ctx, profile, region, name)
+        status, sec = job.get("TrainingJobStatus"), job.get("SecondaryStatus")
+        if (status, sec) != last:
+            ctx.say("job %s: %s / %s (%d s)" % (name, status, sec, ctx.clock() - t0))
+            last = (status, sec)
+        if status in JOB_TERMINAL:
+            break
+        now = ctx.clock()
+        if status == "InProgress" and in_progress_at is None:
+            in_progress_at = now
+        if mode == "sigterm" and stop_at is None and in_progress_at is not None and now - in_progress_at >= SIGTERM_AFTER_S:
+            h = aws(ctx, profile, region, "s3api", "head-object", "--bucket", bucket, "--key", prefix + "sigterm-ready.json")
+            ready = h.rc == 0
+            if ready or now - in_progress_at >= SIGTERM_AFTER_S + SIGTERM_READY_CAP_S:
+                sp = aws(ctx, profile, region, "sagemaker", "stop-training-job", "--training-job-name", name)
+                if sp.rc != 0:
+                    raise Failure("stop-training-job failed: %s" % first_line(sp.err), "PROBE FAILED sigterm STOP")
+                stop_at = now
+                ctx.say("stop requested %d s after InProgress (container ready: %s)" % (now - in_progress_at, ready))
+        if now - t0 > PROBE_CAP_S:
+            aws(ctx, profile, region, "sagemaker", "stop-training-job", "--training-job-name", name)
+            ctx.say("job %s did not finish within %d s; a stop was requested" % (name, PROBE_CAP_S))
+            ctx.say("PROBE FAILED %s POLL_TIMEOUT" % mode)
+            return 1
+        ctx.sleep(PROBE_POLL_S)
+    final = describe_job(ctx, profile, region, name)
+    status = final.get("TrainingJobStatus")
+    rec = {
+        "schema": "laya-trainer-probe-record-v1", "mode": mode, "probe_id": probe_id, "job_name": name, "instance_type": PROBE_INSTANCE,
+        "max_runtime_seconds": PROBE_MAX_RUNTIME_S, "final_status": status, "failure_reason": final.get("FailureReason"),
+        "secondary_status": final.get("SecondaryStatus"), "training_time_seconds": final.get("TrainingTimeInSeconds"),
+        "billable_seconds": final.get("BillableTimeInSeconds"),
+        "secondary_status_transitions": final.get("SecondaryStatusTransitions", []),
+        "recorded_at": ctx.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"), "probe": None,
+    }
+    if mode == "cuda":
+        probe = fetch_json(ctx, profile, region, bucket, prefix + "probe.json")
+        rec["probe"] = probe
+        ctx.say("probe.json: %s" % ("downloaded (train_step_ok %s)" % probe.get("train_step_ok") if probe else "absent (the container wrote none)"))
+    else:
+        keys = []
+        ls = aws(ctx, profile, region, "s3api", "list-objects-v2", "--bucket", bucket, "--prefix", prefix + "sigterm-heartbeat-",
+                 "--query", "Contents[].Key", "--output", "json")
+        try:
+            keys = [k for k in (json.loads(ls.out) or []) if isinstance(k, str)] if ls.rc == 0 else []
+        except ValueError:
+            keys = []
+        secs = []
+        for k in keys[:200]:
+            hb = fetch_json(ctx, profile, region, bucket, k)
+            v = hb.get("seconds_since_sigterm") if hb else None
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                secs.append(float(v))
+        rec["heartbeats"] = len(secs)
+        rec["grace_seconds"] = int_or_float(max(secs)) if secs else 0
+        rec["sigterm_ready"] = ready
+        rec["stop_requested_after_in_progress_seconds"] = int_or_float(stop_at - in_progress_at) if stop_at is not None else None
+        ctx.say("grace: %s s from %d heartbeats" % (rec["grace_seconds"], len(secs)))
+    write_state(ctx, "probe-%s.json" % probe_id, rec)
+    ctx.say("billable seconds: %s; failure reason: %s" % (rec["billable_seconds"], rec["failure_reason"]))
+    ctx.say("recorded probe-%s.json" % probe_id)
+    ctx.say("PROBE DONE %s %s" % (mode, status))
+    return 0
+
+
 # ---- dispatch ------------------------------------------------------------------------------------------------
 
 VALUE_OPTS = {"--state-dir": "state_dir", "--tar": "tar", "--expect": "expect", "--stage-json": "stage_json", "--env": "env"}
 FLAG_OPTS = {"--list-files": "list_files"}
-COMMANDS = {"image": cmd_image, "infra": cmd_infra}
-SUBCOMMAND_OPTS = {"image": ("state_dir", "list_files"), "infra": ("state_dir",)}
+COMMANDS = {"image": cmd_image, "infra": cmd_infra, "stage": cmd_stage, "probe": cmd_probe}
+SUBCOMMAND_OPTS = {"image": ("state_dir", "list_files"), "infra": ("state_dir",), "stage": ("state_dir", "tar", "expect", "stage_json"),
+                   "probe": ("state_dir",)}
 
 
 def parse_args(argv):
@@ -782,6 +1145,18 @@ class Sim:
         self.copied = {}
         self.cdk_rc = {}
         self.extra = {}
+        self.existing = set()
+        self.head_override = {}
+        self.job = None
+        self.job_create_rc = 0
+        self.cuda_end = ("Completed", None, 600.0)
+        self.hb_max = 28
+        self.ready_after = 200.0
+        self.ready_never = False
+        self.probe_json = {"schema": "laya-train-probe-v1", "train_step_ok": True, "train_step_peak_bytes": 12345678901,
+                           "train_step_batch": 4, "train_step_tokens": 1024, "host_rss_peak_bytes": 987654321,
+                           "torch_cuda_available": True, "matmul_ok": True, "base_load_ok": True, "tiny_fixture_rc": 0,
+                           "tiny_fixture_device_used": "cuda"}
 
     # -- helpers
     @staticmethod
@@ -862,10 +1237,90 @@ class Sim:
             if name not in self.stacks:
                 return Result(254, "", "An error occurred (ValidationError) when calling the DescribeStacks operation: Stack with id %s does not exist" % name)
             return Result(0, json.dumps([{"OutputKey": k, "OutputValue": v} for k, v in self.stacks[name].items()]), "")
+        if svc == "s3api":
+            return self.s3api(op, argv)
+        if svc == "sagemaker":
+            return self.sagemaker(op, argv)
         h = self.extra.get((svc, op))
         if h:
             return h(argv)
         return Result(97, "", "fake aws: unexpected call: %s" % shlex.join(argv))
+
+    def probe_id(self):
+        return self.job["req"]["Environment"]["LAYA_PROBE_ID"]
+
+    def ready_now(self):
+        return self.job is not None and not self.ready_never and self.clock[0] - self.job["t0"] >= self.ready_after
+
+    def s3api(self, op, argv):
+        bucket, key = self.opt(argv, "--bucket"), self.opt(argv, "--key")
+        if op == "head-object":
+            if key.endswith("sigterm-ready.json"):
+                return Result(0, "", "") if self.ready_now() else Result(254, "", "An error occurred (404) when calling the HeadObject operation: Not Found")
+            uri = "s3://%s/%s" % (bucket, key)
+            if key in self.head_override:
+                return Result(0, "%d\n" % self.head_override[key], "")
+            if uri in self.objects:
+                return Result(0, "%d\n" % self.objects[uri], "")
+            return Result(254, "", "An error occurred (404) when calling the HeadObject operation: Not Found")
+        if op == "list-objects-v2":
+            prefix = self.opt(argv, "--prefix")
+            if "sigterm-heartbeat-" in prefix:
+                if self.job is None or self.job.get("stop_at") is None:
+                    return Result(0, "null\n", "")
+                base = prefix[:-len("sigterm-heartbeat-")]
+                return Result(0, json.dumps([base + "sigterm-heartbeat-%d.json" % n for n in range(0, self.hb_max // 2 + 1)]), "")
+            held = {k for k in self.existing if k.startswith(prefix)} | {k[len("s3://%s/" % bucket):] for k in self.objects
+                                                                       if k.startswith("s3://%s/%s" % (bucket, prefix))}
+            return Result(0, "%d\n" % min(1, len(held)), "")
+        if op == "get-object":
+            out = argv[argv.index(key) + 1]
+            if key.endswith("/probe.json"):
+                if self.probe_json is None:
+                    return Result(254, "", "An error occurred (NoSuchKey) when calling the GetObject operation")
+                Path(out).write_text(json.dumps(self.probe_json))
+                return Result(0, "{}", "")
+            m = re.search(r"sigterm-heartbeat-(\d+)\.json$", key)
+            if m:
+                Path(out).write_text(json.dumps({"schema": "laya-train-probe-sigterm-v1", "n": int(m.group(1)),
+                                                 "seconds_since_sigterm": 2.0 * int(m.group(1))}))
+                return Result(0, "{}", "")
+            return Result(254, "", "An error occurred (NoSuchKey) when calling the GetObject operation")
+        return Result(97, "", "fake aws: unexpected s3api call: %s" % op)
+
+    def sagemaker(self, op, argv):
+        if op == "create-training-job":
+            if self.job_create_rc:
+                return Result(self.job_create_rc, "", "An error occurred (ResourceLimitExceeded) when calling the CreateTrainingJob operation")
+            self.job = {"req": json.loads(self.opt(argv, "--cli-input-json")), "t0": self.clock[0], "stop_at": None}
+            return Result(0, json.dumps({"TrainingJobArn": "arn:aws:sagemaker:us-east-1:000000000001:training-job/x"}), "")
+        if op == "stop-training-job":
+            if self.job is not None and self.job["stop_at"] is None:
+                self.job["stop_at"] = self.clock[0]
+            return Result(0, "", "")
+        if op == "describe-training-job":
+            j = self.job
+            if j is None:
+                return Result(254, "", "An error occurred (ValidationException): Requested resource not found")
+            t = self.clock[0] - j["t0"]
+            reason = None
+            if j["req"]["Environment"]["LAYA_STEP"] == "probe-sigterm":
+                done = j["stop_at"] is not None and self.clock[0] - j["stop_at"] >= self.hb_max + 2
+                status = "Stopped" if done else "InProgress"
+            else:
+                end_status, end_reason, end_s = self.cuda_end
+                done = t >= end_s
+                status = end_status if done else "InProgress"
+                reason = end_reason if done else None
+            doc = {"TrainingJobName": j["req"]["TrainingJobName"], "TrainingJobStatus": status,
+                   "SecondaryStatus": status if done else "Training", "TrainingTimeInSeconds": int(t) if done else None,
+                   "BillableTimeInSeconds": int(t) + 60 if done else None,
+                   "SecondaryStatusTransitions": [{"Status": "Starting", "StatusMessage": "Preparing the instances"},
+                                                  {"Status": "Training", "StatusMessage": "Training image download completed"}]}
+            if reason:
+                doc["FailureReason"] = reason
+            return Result(0, json.dumps(doc), "")
+        return Result(97, "", "fake aws: unexpected sagemaker call: %s" % op)
 
 
 class FakeRunner(Runner):
@@ -928,7 +1383,7 @@ def selftest():
                     (sdir / name).write_text(json.dumps(data))
         return sim, sdir
 
-    def go(sim, sdir, argv, dry=False, env_extra=None, file_exists=None, state_opt=True):
+    def go(sim, sdir, argv, dry=False, env_extra=None, file_exists=None, state_opt=True, base_stage=None):
         out, err = io.StringIO(), io.StringIO()
         env = {"DRY_RUN": "1" if dry else "0"}
         env.update(env_extra or {})
@@ -941,6 +1396,8 @@ def selftest():
         ctx = Ctx(runner=runner, env=env, stdout=out, stderr=err, sleep=lambda s: sim.clock.__setitem__(0, sim.clock[0] + s),
                   file_exists=file_exists or (lambda p: True))
         ctx.clock = lambda: sim.clock[0]
+        if base_stage:
+            ctx.base_stage = str(base_stage)
         ctx.utcnow = lambda: datetime(2026, 10, 29, 12, 34, 56, tzinfo=timezone.utc)
         args = (["--state-dir", str(sdir)] if state_opt else []) + list(argv)
         rc = main(args, ctx)
@@ -1162,7 +1619,11 @@ def selftest():
     # ---- profile-env
     bad_calls = 0
     results = []
-    for argv in (["image", "train"], ["image", "pack"], ["infra", "diff"], ["infra", "deploy"], ["infra", "outputs"], ["infra", "outputs-images"]):
+    ds_good = fresh("ds-profile")
+    for n_ in DATASET_REQUIRED:
+        (ds_good / n_).write_text("x\n")
+    for argv in (["image", "train"], ["image", "pack"], ["infra", "diff"], ["infra", "deploy"], ["infra", "outputs"], ["infra", "outputs-images"],
+                 ["stage", "base"], ["stage", "dataset", str(ds_good), "p1"], ["probe", "cuda"], ["probe", "sigterm"]):
         for dry in (True, False):
             sim, sdir = world()
             rp = go(sim, sdir, argv + ["dev", "augury-dev"], dry=dry)
@@ -1178,6 +1639,228 @@ def selftest():
     ry = go(sim, sdir, ["image", "train", "dev", PROFILE, "--tar", "x"])
     case("usage", all(x["rc"] == 2 and "REFUSED usage: " in x["err"] for x in (ru, rv, rw, rx, ry)) and not sim.calls,
          "an unknown image, action, subcommand, argument count or option is `REFUSED usage:`")
+
+
+    # ---- stage base
+    def sha_of(b):
+        return hashlib.sha256(b).hexdigest()
+
+    tiny = work / "tiny-base.tar"
+    tiny.write_bytes(b"a tiny stand-in for the base tar\n" * 50)
+    wrong_same_size = work / "wrong-base.tar"
+    wrong_same_size.write_bytes(b"b" * tiny.stat().st_size)
+    real_pin = json.loads((REPO_ROOT / BASE_STAGE_JSON).read_text())
+    pin_ok = work / "base-stage-ok.json"
+    pin_ok.write_text(json.dumps(dict(real_pin, tar_sha256=sha_of(tiny.read_bytes()), tar_bytes=tiny.stat().st_size)))
+    base_key = "base/laya-%s/laya-base.tar" % real_pin["revision"][:8]
+
+    sim, sdir = world()
+    r = go(sim, sdir, ["stage", "base", "dev", PROFILE, "--tar", str(tiny), "--stage-json", str(pin_ok)], dry=True)
+    cmds = [ln for ln in r["out"].splitlines() if ln.startswith("+ ")]
+    a = (r["rc"] == 0 and r["out"].rstrip().endswith("AWS CALLS: 0") and not aws_calls(sim)
+         and any(re.match(r"\+ aws s3 cp \S+\.tar s3://\S+/%s --only-show-errors" % re.escape(base_key), ln) for ln in cmds)
+         and any(ln.startswith("+ aws s3api head-object ") and base_key in ln for ln in cmds))
+    sim, sdir = world()
+    r_b = go(sim, sdir, ["stage", "base", "dev", PROFILE, "--tar", str(wrong_same_size), "--stage-json", str(pin_ok)], dry=True)
+    r_c = go(sim, sdir, ["stage", "base", "dev", PROFILE, "--tar", str(tiny)], dry=True)
+    r_d = go(sim, sdir, ["stage", "base", "dev", PROFILE, "--tar", str(tiny), "--stage-json", str(pin_ok)])
+    r_e = go(sim, sdir, ["stage", "base", "dev", PROFILE])
+    sim2, sdir2 = world()
+    r_f = go(sim2, sdir2, ["stage", "base", "dev", PROFILE, "--tar", str(tiny)], base_stage=pin_ok)
+    calls_f = [c for c in sim2.calls if c[0] == "aws"]
+    sim3, sdir3 = world()
+    sim3.head_override[base_key] = 5
+    r_g = go(sim3, sdir3, ["stage", "base", "dev", PROFILE, "--tar", str(tiny)], base_stage=pin_ok)
+    case("stage-base", a and r_b["rc"] == 2 and "REFUSED stage: " in r_b["err"] and "is not base-stage.json's" in r_b["err"]
+         and r_c["rc"] == 2 and "REFUSED stage: " in r_c["err"] and "bytes, base-stage.json pins" in r_c["err"]
+         and r_d["rc"] == 2 and "REFUSED usage: --stage-json is honoured only under DRY_RUN=1" in r_d["err"]
+         and r_e["rc"] == 2 and "does not exist" in r_e["err"] and not [c for c in sim.calls if c[0] == "aws"]
+         and r_f["rc"] == 0 and [c[2] for c in calls_f] == ["cp", "head-object"] and r_f["out"].rstrip().endswith("STAGE OK base " + base_key)
+         and r_g["rc"] == 1 and r_g["out"].rstrip().endswith("STAGE FAILED base SIZE"),
+         "a wrong tar is refused (sha256 and size) before any call; the right one is copied to %s and its size verified; --stage-json is dry-run only" % base_key)
+
+    # ---- stage dataset
+    GOOD = {"task.json": b'{"task":"x"}\n', "train.jsonl": b'{"text":"a","label":0}\n', "eval.jsonl": b'{"text":"b","label":1}\n'}
+
+    def mkds(files, links=None):
+        d = fresh("ds")
+        for n_, b_ in files.items():
+            (d / n_).write_bytes(b_)
+        for n_, tgt in (links or {}).items():
+            os.symlink(tgt, d / n_)
+        return d
+
+    def stage_cmd(d, prefix, extra=()):
+        return ["stage", "dataset", str(d), prefix, "dev", PROFILE, *extra]
+
+    sim, sdir = world()
+    d1 = mkds(GOOD)
+    r = go(sim, sdir, stage_cmd(d1, "stance-64"))
+    puts = [c for c in sim.calls if c[:3] == ["aws", "s3", "cp"]]
+    rec = json.loads((sdir / "datasets-dev.json").read_text()) if (sdir / "datasets-dev.json").exists() else {}
+    e = rec.get("datasets", {}).get("stance-64", {})
+    a = (r["rc"] == 0 and len(puts) == 3 and all("/datasets/stance-64/" in c[4] for c in puts)
+         and e.get("prefix") == "datasets/stance-64/" and e.get("files") == {n_: sha_of(b_) for n_, b_ in GOOD.items()}
+         and r["out"].rstrip().endswith("STAGE OK dataset stance-64") and not ACCT_RE.search(r["out"]))
+    d2 = mkds(dict(GOOD, **{"shift.jsonl": b'{"text":"c","label":1}\n'}))
+    r2 = go(sim, sdir, stage_cmd(d2, "stance-64-shift/"))
+    puts2 = [c for c in sim.calls if c[:3] == ["aws", "s3", "cp"]][3:]
+    rec2 = json.loads((sdir / "datasets-dev.json").read_text())
+    b = (r2["rc"] == 0 and len(puts2) == 4 and sorted(rec2["datasets"]) == ["stance-64", "stance-64-shift"]
+         and "shift.jsonl" in rec2["datasets"]["stance-64-shift"]["files"])
+    sim_x, sdir_x = world()
+    refusals = []
+    for label, files, links in (("extra file", dict(GOOD, **{"notes.txt": b"x"}), None), ("hidden file", dict(GOOD, **{".DS_Store": b"x"}), None),
+                                ("missing eval", {k: v for k, v in GOOD.items() if k != "eval.jsonl"}, None),
+                                ("symlinked train", {k: v for k, v in GOOD.items() if k != "train.jsonl"}, {"train.jsonl": str(d1 / "train.jsonl")})):
+        rr = go(sim_x, sdir_x, stage_cmd(mkds(files, links), "ok-prefix"))
+        refusals.append(rr["rc"] == 2 and "REFUSED stage: " in rr["err"])
+    sub = mkds(GOOD)
+    (sub / "task.json").unlink()
+    (sub / "task.json").mkdir()
+    refusals.append(go(sim_x, sdir_x, stage_cmd(sub, "ok-prefix"))["rc"] == 2)
+    bad_prefixes = ["Upper", "a/../b", "a/b/c/d/e", "", "a%b", "/abs", "a//b", "-x", "a" * 65, ".hidden", "a/B"]
+    pref = [go(sim_x, sdir_x, stage_cmd(d1, bp))["rc"] == 2 for bp in bad_prefixes]
+    good_pref = go(sim_x, sdir_x, stage_cmd(d1, "x/y.z_1-2/"))
+    case("stage-dataset", a and b and all(refusals) and all(pref) and good_pref["rc"] == 0
+         and not [c for c in sim_x.calls if c[:2] == ["aws", "s3"] and "datasets/ok-prefix" in " ".join(c)] and "datasets/x/y.z_1-2/" in good_pref["out"].replace("\\", ""),
+         "three or four files are put under datasets/<prefix>/ and recorded with their sha256; an extra, hidden, missing, symlinked or directory entry and %d bad prefixes are refused" % len(bad_prefixes))
+
+    sim_z, sdir_z = world()
+    sim_z.head_override["datasets/stance-64/train.jsonl"] = 3
+    r_z = go(sim_z, sdir_z, stage_cmd(d1, "stance-64"))
+    case("stage-dataset-size", r_z["rc"] == 1 and r_z["out"].rstrip().endswith("STAGE FAILED dataset SIZE") and not (sdir_z / "datasets-dev.json").exists()
+         and "use a NEW prefix" in r_z["err"], "an uploaded file whose size differs from the local one fails the stage, records nothing and says to use a new prefix")
+
+    # ---- stage-expect
+    pins = {n_: sha_of(b_) for n_, b_ in GOOD.items()}
+    sim, sdir = world()
+    saved = EXPECT["motivation-v1"]
+    try:
+        # task.json and eval.jsonl are the pinned ones, train.jsonl is not: the refusal must name train.jsonl
+        EXPECT["motivation-v1"] = dict(saved, **{"task.json": pins["task.json"], "eval.jsonl": pins["eval.jsonl"]})
+        r_bad = go(sim, sdir, stage_cmd(d1, "motivation-v1", ("--expect", "motivation-v1")))
+    finally:
+        EXPECT["motivation-v1"] = saved
+    r_unk = go(sim, sdir, stage_cmd(d1, "motivation-v1", ("--expect", "nope")))
+    r_none = go(sim, sdir, stage_cmd(d1, "motivation-v1", ("--expect", "motivation-v1")))
+    try:
+        EXPECT["motivation-v1"] = pins
+        r_ok = go(sim, sdir, stage_cmd(d1, "motivation-v1", ("--expect", "motivation-v1")))
+    finally:
+        EXPECT["motivation-v1"] = saved
+    case("stage-expect", r_bad["rc"] == 2 and "REFUSED stage: train.jsonl is not Phase 12's" in r_bad["err"] and r_unk["rc"] == 2 and "REFUSED usage" in r_unk["err"]
+         and r_none["rc"] == 2 and "is not Phase 12's" in r_none["err"] and r_ok["rc"] == 0 and saved["train.jsonl"].startswith("f1d84f19")
+         and saved["task.json"].startswith("f74a3ad3") and saved["eval.jsonl"].startswith("ee95d71f") and not [c for c in sim.calls if c[:3] == ["aws", "s3", "cp"]][3:],
+         "--expect motivation-v1 refuses a train.jsonl that is not Phase 12's before any call, and passes the files that are (pins f74a3ad3, f1d84f19, ee95d71f)")
+
+    # ---- stage-immutable
+    sim, sdir = world()
+    sim.existing = {"datasets/stance-64/train.jsonl"}
+    r = go(sim, sdir, stage_cmd(d1, "stance-64"))
+    first = aws_calls(sim)[0] if aws_calls(sim) else []
+    a = (r["rc"] == 2 and "REFUSED stage: datasets/stance-64/ already holds objects" in r["err"] and first[:3] == ["aws", "s3api", "list-objects-v2"]
+         and not [c for c in sim.calls if c[:3] == ["aws", "s3", "cp"]] and "--max-keys 1" in " ".join(first))
+    sim, sdir = world()
+    r1 = go(sim, sdir, stage_cmd(d1, "stance-64"))
+    r2 = go(sim, sdir, stage_cmd(d2, "stance-64"))
+    n_puts = len([c for c in sim.calls if c[:3] == ["aws", "s3", "cp"]])
+    case("stage-immutable", a and r1["rc"] == 0 and r2["rc"] == 2 and "already holds objects; use a new prefix" in r2["err"] and n_puts == 3,
+         "an existing key under datasets/<prefix>/ refuses with no put (the listing is the first call after the account check); a restage of a staged prefix is refused")
+
+    # ---- probe
+    sim, sdir = world()
+    r = go(sim, sdir, ["probe", "cuda", "dev", PROFILE], dry=True)
+    o = r["out"]
+    printed = json.JSONDecoder().raw_decode(o[o.index("request: ") + len("request: "):])[0] if "request: " in o else {}
+    st = placeholder_state("dev")
+    tr = st["outputs-dev.json"]["trainer"]
+    want_req = build_probe_request("cuda", "cuda-20261029123456", tr["BucketName"], tr["SageMakerRoleArn"],
+                                   "%s@%s" % (tr["TrainRepoUri"], st["images-dev.json"]["train"]["digest"]), "base/laya-%s/" % real_pin["revision"][:8])
+    want_printed = json.loads(redact(json.dumps(want_req)))
+    ch = printed.get("InputDataConfig", [{}])
+    rs = printed.get("ResourceConfig", {})
+    case("probe-request", r["rc"] == 0 and printed == want_printed and printed.get("TrainingJobName") == "laya-probe-cuda-20261029123456"
+         and rs == {"InstanceType": "ml.g5.xlarge", "InstanceCount": 1, "VolumeSizeInGB": 100} and printed["StoppingCondition"] == {"MaxRuntimeInSeconds": 1800}
+         and len(ch) == 1 and ch[0]["ChannelName"] == "base" and ch[0]["DataSource"]["S3DataSource"]["S3Uri"].endswith("/base/laya-55cf4c4e/")
+         and printed["AlgorithmSpecification"]["TrainingImage"].endswith("@sha256:" + "a" * 64) and printed["RoleArn"].endswith(":role/aprender-laya-sagemaker-dev")
+         and printed["Environment"]["LAYA_STEP"] == "probe" and printed["Environment"]["LAYA_PROBE_ID"] == "cuda-20261029123456" and "LAYA_BUCKET" in printed["Environment"]
+         and o.rstrip().endswith("AWS CALLS: 0") and not aws_calls(sim) and any(ln.startswith("+ aws sagemaker create-training-job ") for ln in o.splitlines()),
+         "dry run prints the one create-training-job request (ml.g5.xlarge x1, MaxRuntime 1800, the base channel only, the image by digest, LAYA_STEP probe); AWS CALLS: 0")
+    sim_s, sdir_s = world()
+    r_s = go(sim_s, sdir_s, ["probe", "sigterm", "dev", PROFILE], dry=True)
+    ps = json.JSONDecoder().raw_decode(r_s["out"][r_s["out"].index("request: ") + len("request: "):])[0]
+    case("probe-request-sigterm", ps["Environment"]["LAYA_STEP"] == "probe-sigterm" and ps["TrainingJobName"] == "laya-probe-sigterm-20261029123456"
+         and len(ps["InputDataConfig"]) == 1 and not aws_calls(sim_s) and any(ln.startswith("+ aws sagemaker stop-training-job ") for ln in r_s["out"].splitlines()),
+         "the sigterm dry run prints LAYA_STEP probe-sigterm, its job name and the stop-training-job command")
+
+    # ---- probe-spend-guard
+    sim, sdir = world()
+    r1 = go(sim, sdir, ["probe", "cuda", "dev", PROFILE])
+    r2 = go(sim, sdir, ["probe", "cuda", "dev", PROFILE], env_extra={"LAYA_TRAINER_APPROVED_SPEND": "probe-sigterm"})
+    r3 = go(sim, sdir, ["probe", "sigterm", "dev", PROFILE], env_extra={"LAYA_TRAINER_APPROVED_SPEND": "probe-cuda"})
+    r4 = go(sim, sdir, ["probe", "cuda", "dev", PROFILE], env_extra={"LAYA_TRAINER_APPROVED_SPEND": "probe-cuda "})
+    refused_calls = len(sim.calls)
+    sim2, sdir2 = world()
+    r5 = go(sim2, sdir2, ["probe", "cuda", "dev", PROFILE], env_extra={"LAYA_TRAINER_APPROVED_SPEND": "probe-cuda"})
+    case("probe-spend-guard", all(x["rc"] == 2 and "REFUSED spend: " in x["err"] for x in (r1, r2, r3, r4)) and refused_calls == 0
+         and r5["rc"] == 0 and any(c[:3] == ["aws", "sagemaker", "create-training-job"] for c in sim2.calls),
+         "a live probe without LAYA_TRAINER_APPROVED_SPEND=probe-<mode> (or with another probe's, or a padded value) is refused with no call; the exact value proceeds")
+
+    # ---- probe-cuda-completed, probe-train-step
+    sim, sdir = world()
+    sim.cuda_end = ("Completed", None, 600.0)
+    r = go(sim, sdir, ["probe", "cuda", "dev", PROFILE], env_extra={"LAYA_TRAINER_APPROVED_SPEND": "probe-cuda"})
+    recf = sdir / "probe-cuda-20261029123456.json"
+    rec = json.loads(recf.read_text()) if recf.exists() else {}
+    pj = rec.get("probe") or {}
+    keys5 = ("train_step_ok", "train_step_peak_bytes", "train_step_batch", "train_step_tokens", "host_rss_peak_bytes")
+    case("probe-cuda-completed", r["rc"] == 0 and r["out"].rstrip().endswith("PROBE DONE cuda Completed") and rec.get("final_status") == "Completed"
+         and rec.get("failure_reason") is None and rec.get("billable_seconds") == 660 and recf.stat().st_mode & 0o777 == 0o600
+         and sim.job["req"]["TrainingJobName"] == "laya-probe-cuda-20261029123456" and sim.clock[0] == 600.0 and not ACCT_RE.search(r["out"]),
+         "a Completed cuda probe is polled every 30 s, recorded (mode 600) and ends %r" % r["out"].rstrip().splitlines()[-1])
+    case("probe-train-step", all(pj.get(k) == sim.probe_json[k] for k in keys5) and pj == sim.probe_json,
+         "probe-<id>.json carries probe.json's train_step_ok, train_step_peak_bytes, train_step_batch, train_step_tokens and host_rss_peak_bytes unchanged")
+
+    # ---- probe-maxruntime
+    sim, sdir = world()
+    sim.cuda_end = ("Stopped", "MaxRuntimeExceeded: Training job runtime exceeded MaxRuntimeInSeconds provided", 1800.0)
+    r = go(sim, sdir, ["probe", "cuda", "dev", PROFILE], env_extra={"LAYA_TRAINER_APPROVED_SPEND": "probe-cuda"})
+    rec = json.loads((sdir / "probe-cuda-20261029123456.json").read_text())
+    sim_n, sdir_n = world()
+    sim_n.cuda_end = ("Stopped", "MaxRuntimeExceeded: x", 1800.0)
+    sim_n.probe_json = None
+    r_n = go(sim_n, sdir_n, ["probe", "cuda", "dev", PROFILE], env_extra={"LAYA_TRAINER_APPROVED_SPEND": "probe-cuda"})
+    rec_n = json.loads((sdir_n / "probe-cuda-20261029123456.json").read_text())
+    case("probe-maxruntime", r["rc"] == 0 and r["out"].rstrip().endswith("PROBE DONE cuda Stopped") and rec["final_status"] == "Stopped"
+         and rec["failure_reason"].startswith("MaxRuntimeExceeded") and rec["probe"] is not None
+         and r_n["rc"] == 0 and r_n["out"].rstrip().endswith("PROBE DONE cuda Stopped") and rec_n["probe"] is None and rec_n["failure_reason"],
+         "a cuda probe that ends Stopped with MaxRuntimeExceeded is recorded with its reason and the partial probe.json (or none), exit 0, last line PROBE DONE cuda Stopped")
+
+    # ---- probe-sigterm-grace
+    sim, sdir = world()
+    r = go(sim, sdir, ["probe", "sigterm", "dev", PROFILE], env_extra={"LAYA_TRAINER_APPROVED_SPEND": "probe-sigterm"})
+    rec = json.loads((sdir / "probe-sigterm-20261029123456.json").read_text())
+    stop = [c for c in sim.calls if c[:3] == ["aws", "sagemaker", "stop-training-job"]]
+    case("probe-sigterm-grace", r["rc"] == 0 and rec["grace_seconds"] == 28 and rec["final_status"] == "Stopped" and rec["heartbeats"] == 15
+         and r["out"].rstrip().endswith("PROBE DONE sigterm Stopped") and len(stop) == 1 and rec["sigterm_ready"] is True
+         and rec["stop_requested_after_in_progress_seconds"] >= 120 and sim.job["stop_at"] >= 200.0 and rec["probe"] is None,
+         "heartbeats at 0, 2, ..., 28 s -> grace_seconds %s, final Stopped; the stop waited for the container's ready marker (stop at %d s)" % (rec["grace_seconds"], sim.job["stop_at"]))
+    sim, sdir = world()
+    sim.ready_never = True
+    r = go(sim, sdir, ["probe", "sigterm", "dev", PROFILE], env_extra={"LAYA_TRAINER_APPROVED_SPEND": "probe-sigterm"})
+    rec = json.loads((sdir / "probe-sigterm-20261029123456.json").read_text())
+    case("probe-sigterm-noready", r["rc"] == 0 and rec["sigterm_ready"] is False and sim.job["stop_at"] >= SIGTERM_AFTER_S + SIGTERM_READY_CAP_S
+         and rec["final_status"] == "Stopped", "a container that never shows its ready marker is still stopped, after %d s, and the record says it was not ready" % (SIGTERM_AFTER_S + SIGTERM_READY_CAP_S))
+    sim, sdir = world()
+    sim.job_create_rc = 254
+    r = go(sim, sdir, ["probe", "cuda", "dev", PROFILE], env_extra={"LAYA_TRAINER_APPROVED_SPEND": "probe-cuda"})
+    sim2, sdir2 = world()
+    sim2.cuda_end = ("Completed", None, 10 ** 9)
+    r2 = go(sim2, sdir2, ["probe", "cuda", "dev", PROFILE], env_extra={"LAYA_TRAINER_APPROVED_SPEND": "probe-cuda"})
+    case("probe-failures", r["rc"] == 1 and r["out"].rstrip().endswith("PROBE FAILED cuda CREATE") and r2["rc"] == 1
+         and r2["out"].rstrip().endswith("PROBE FAILED cuda POLL_TIMEOUT") and any(c[:3] == ["aws", "sagemaker", "stop-training-job"] for c in sim2.calls)
+         and not list(sdir2.glob("probe-*.json")), "a failed create and a job that outlasts the cap end PROBE FAILED (the latter stops the job); nothing is recorded as a result")
 
     # ---- placeholder state
     sim, sdir = world(stateless=True)
