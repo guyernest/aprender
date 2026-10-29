@@ -30,7 +30,13 @@
     },
     "root_cause_observed": "RuntimeError: Failed to find C compiler. Please specify via CC environment variable or set triton.knobs.build.impl. Raised by triton (torch/_native/ops/bmm_outer_product/triton_kernels.py -> triton/backends/nvidia/driver.py CudaUtils compile of driver.c) on the first CUDA forward through the ModernBERT encoder, in the probe helper's base load AND in the tiny fixture's train.py run (same traceback). The image's base is nvidia/cuda:13.0.3-base-ubuntu24.04 and the apt line installs only ca-certificates curl unzip git: no gcc/cc is present.",
     "logs": "runs/probe/cuda-<id>/{helper.log,tiny-fixture.log,probe.json,nvidia-smi.txt} in the trainer bucket (fetched to the gitignored scratchpad, not committed)",
-    "what_this_is_not": "not a driver or CUDA-13 compat failure: driver 595.91.07 >= 580 so no compat libraries were used, torch.cuda.is_available() is true, the 4096x4096 matmul ran on the A10G, and the tiny fixture's DEVICE line printed requested=cuda used=cuda:0 torch=2.14.0+cu130"
+    "what_this_is_not": "not a driver or CUDA-13 compat failure: driver 595.91.07 >= 580 so no compat libraries were used, torch.cuda.is_available() is true, the 4096x4096 matmul ran on the A10G, and the tiny fixture's DEVICE line printed requested=cuda used=cuda:0 torch=2.14.0+cu130",
+    "verdict": "fail",
+    "fail_reasons": [
+      "base_load_ok false: triton could not find a C compiler in the train image",
+      "train_step_ok false: not reached (the helper stops at the base load)",
+      "tiny_fixture_rc 1 with no device_used: same missing-compiler traceback in train.py's first CUDA forward"
+    ]
   },
   "sigterm": {
     "job_name": "laya-probe-sigterm-20261029174509",
@@ -44,12 +50,7 @@
     "finding": null,
     "note": "grace 118 s (lower bound, 60 heartbeats at 2 s) is well above run_step's 25 s SHUTDOWN_DEADLINE_S; RESEARCH A6 holds"
   },
-  "verdict": "fail",
-  "fail_reasons": [
-    "base_load_ok false: triton could not find a C compiler in the train image",
-    "train_step_ok false: not reached (the helper stops at the base load)",
-    "tiny_fixture_rc 1 with no device_used: same missing-compiler traceback in train.py's first CUDA forward"
-  ],
+  "verdict": "pass",
   "spend": {
     "probe_jobs": 2,
     "billable_seconds_total": 460,
@@ -96,11 +97,9 @@
       },
       "logs": "runs/probe/cuda-20261029181151/{helper.log,tiny-fixture.log,probe.json,nvidia-smi.txt} in the trainer bucket (fetched to the gitignored scratchpad, not committed)"
     },
-    "verdict": "fail",
-    "verdict_basis": "the plan's literal rule: tiny_fixture_rc must be 0 (14-12 Task 3 verify). Measured 3.",
-    "fail_reasons": [
-      "tiny_fixture_rc 3 (not 0): train.py exit 3 is EXIT_GATE_FAIL; the fixture ran to completion on cuda:0 and printed 'GATE FAIL' because its fixed-epoch margin is 0.0000 against the 0.05 bar"
-    ],
+    "verdict": "pass",
+    "verdict_basis": "amended rule (owner decision amend-criterion): tiny_fixture_rc in {0,3} with a cuda device_used; rc 2 stays a failure. Recomputed from the recorded measurements, no new paid probe. Under the plan's original rule (rc == 0) the same measurements read fail; the amendment is justified by the CPU control_measurement (the identical fixture command exits 3 on cpu with the same numbers).",
+    "fail_reasons": [],
     "what_the_fix_resolved": "the compiler was the only missing piece for the first probe's failure: the base load and the real-model training step now run on the GPU",
     "control_measurement": {
       "what": "the identical train.py command run locally on CPU (laya_tiny fixture, --variant synthetic-fixture, --epochs 1 --stopping fixed_epochs, --device cpu)",
@@ -134,6 +133,18 @@
       "scope": "The CUDA pass rule becomes tiny_fixture_rc in {0,3} with tiny_fixture_device_used starting with cuda; rc 2 (a refusal) stays a failure. IAM and the S3 ListBucket condition were not part of this approval."
     },
     "proposed_resolution": "amend the probe's pass criterion to tiny_fixture_rc in {0, 3} with tiny_fixture_device_used starting with cuda (2 = refused stays a failure), keeping the CPU control above as the evidence; with that amendment every other measurement passes and the verdict would be pass. NOT applied by the executor: the owner decides.",
-    "sigterm_reprobe": "not re-run (out of the approved scope; the first sigterm record stands: grace 118 s)"
-  }
+    "sigterm_reprobe": "not re-run (out of the approved scope; the first sigterm record stands: grace 118 s)",
+    "verdict_by_the_original_rule": "fail",
+    "follow_ups": [
+      {
+        "id": "train-step-memory-headroom",
+        "action": "check the production run's batch size and sequence length against the 24 GB A10G ceiling before the first real (non-probe) training run",
+        "measured": "train_step_peak_bytes 22,908,016,640 of 23,686,938,624 device bytes (96.7%) at batch 8 x 1024 tokens; helper.log shows a CUDACachingAllocator OOM retry (207,618,048 bytes requested, 93,782,016 free) that the step recovered from",
+        "owner": "open; not decided in plan 14-12 (the probe step proves the real model can take one step, not that the production batch has margin)"
+      }
+    ]
+  },
+  "deciding_probe": "reprobe_1",
+  "fail_reasons": [],
+  "verdict_basis": "recomputed 2026-10-29 from the recorded measurements of reprobe_1.cuda (job laya-probe-cuda-20261029181151) with probe_verdict() in scripts/laya_deploy/laya_trainer_ops.py, the amended rule (owner decision amend-criterion): torch_cuda_available, matmul_ok, base_load_ok and train_step_ok all true, tiny_fixture_rc 3 in {0,3}, tiny_fixture_device_used cuda:0. No new probe was run. The first attempt (cuda) stays fail: no C compiler in the image."
 }
