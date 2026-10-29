@@ -1,0 +1,56 @@
+[package]
+name = "aprender-mcp-laya-train-lambda"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "AWS Lambda deployment of the Laya training MCP server: the request function (S3 dataset source, Step Functions dispatcher, cancel sink)"
+publish = false
+
+# Deployment unit of the Laya training server (Phase 14 D-22, the owner's
+# 2026-10-28 decision): cargo-pmcp resolves server id `aprender-mcp-laya-train`
+# to the crate `<server>-lambda`, so the request function lives here and the
+# server crate `aprender-mcp-laya-train` stays a library with no bin.
+#
+# The `bootstrap` [[bin]] is added in the same commit as its FALSIFY-MONO-011
+# register entry (deployment_unit_bins, DEPLOYMENT_UNIT_BASELINE 11) and the
+# duplicate-bin-name allowlist line; this crate is lib-only until then.
+
+[lib]
+name = "aprender_mcp_laya_train_lambda"
+path = "src/lib.rs"
+
+[dependencies]
+# The server crate owns the tool surface, the single-flight lease and the finalize
+# decision; the SetFit training crates own the task store and the DynamoDB
+# backend. This crate supplies the AWS ends of the laya seams and the transport,
+# and re-implements none of them (OPS-03).
+aprender-mcp-laya-train = { path = "../aprender-mcp-laya-train" }
+aprender-mcp-setfit-train = { path = "../aprender-mcp-setfit-train" }
+aprender-setfit-train-lambda = { path = "../aprender-setfit-train-lambda" }
+pmcp = { version = "2.19", features = ["streamable-http", "schema-generation"] }
+
+# `= "1"` matches the rest of the workspace so the smithy stack resolves once.
+aws-config = "1"
+aws-sdk-dynamodb = "1"
+aws-sdk-s3 = "1"
+aws-sdk-sfn = "1"
+
+lambda_http = "0.13"
+lambda_runtime = "0.13"
+tokio = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+once_cell = "1.19"
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+sha2 = { workspace = true }
+
+[lints]
+workspace = true
