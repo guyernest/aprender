@@ -57,5 +57,10 @@
     "no_probe_job_left_inprogress": true,
     "checked": "describe-training-job on both (Completed, Stopped) and list-training-jobs InProgress = 0"
   },
-  "owner_decision": null
+  "owner_decision": {
+    "reply": "rebuild-compat",
+    "replied_on": "2026-10-29",
+    "recorded_by": "orchestrator, from the owner's own message in the session",
+    "scope": "Add a C toolchain (gcc, libc6-dev) to the train image, rebuild it once, redeploy the trainer stack with the new digest, re-run the CUDA probe once. IAM was not part of this approval."
+  }
 }
