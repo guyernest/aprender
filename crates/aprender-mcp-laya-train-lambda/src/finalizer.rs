@@ -2957,6 +2957,8 @@ mod tests {
         const HOSTILE_ARN: &str = "arn:aws:iam::987654321098:role/laya-train-execution-dev";
         /// An ECR host that embeds [`HOSTILE_ACCOUNT`].
         const HOSTILE_ECR: &str = "987654321098.dkr.ecr.us-east-1.amazonaws.com";
+        /// Every planted constant I4 looks for in caller-readable bytes.
+        const HOSTILE: [&str; 3] = [HOSTILE_ACCOUNT, HOSTILE_ARN, HOSTILE_ECR];
 
         /// The trainer's own refusal rule (the part of the line a caller must see).
         const REFUSED_OTHER_RULE: &str = "REFUSED shots-per-class";
@@ -3009,6 +3011,50 @@ mod tests {
         }
 
         // ------------------------------------------------------------- the axes
+
+        /// The surface's axes, one quoted value per entry. The sweep runs their full
+        /// cross product and binds every enum below to this list; the checker
+        /// `scripts/laya_deploy/laya_failure_surface.py --check` parses it and
+        /// demands equality with `axes` in `fixtures/failure-surface-v1.json`.
+        const SURFACE_AXES: &[(&str, &[&str])] = &[
+            (
+                "trigger",
+                &[
+                    "sm_clean",
+                    "sm_caught",
+                    "event_failed",
+                    "event_timed_out",
+                    "reconcile_failed",
+                ],
+            ),
+            (
+                "outcome",
+                &[
+                    "absent",
+                    "malformed",
+                    "foreign_task",
+                    "pass",
+                    "gate_fail",
+                    "refused_other",
+                    "refused_inputs_changed",
+                    "crash",
+                    "timeout",
+                    "cpu_fallback",
+                ],
+            ),
+            ("gate_report", &["ok", "absent"]),
+            ("pack", &["absent", "accepted", "refused", "malformed"]),
+            ("listing", &["complete", "partial_only", "none"]),
+            (
+                "absent_listed",
+                &["none", "outcome", "pack_outcome", "gate_report"],
+            ),
+        ];
+
+        /// The exit classes whose training job exits 1 (run_step.py `job_exit_code`),
+        /// so the machine delivers them ONLY through `train.addCatch` with a populated
+        /// stage error. The checker re-derives this by running `job_exit_code`.
+        const CATCH_FED: &[&str] = &["refused", "crash", "timeout"];
 
         /// One axis of the surface: a closed enum whose wire names are the values
         /// `SURFACE_AXES` lists (the sweep binds the two).
@@ -3167,7 +3213,8 @@ mod tests {
                     p["exit_code"] = json!(3);
                     p["deploy_eligible"] = json!(false);
                     p["shipped_seed"] = Value::Null;
-                    p["packed_line"] = json!(format!("REFUSED RescoreDrift: pack read {HOSTILE_ECR}"));
+                    p["packed_line"] =
+                        json!(format!("REFUSED RescoreDrift: pack read {HOSTILE_ECR}"));
                     p["verify_line"] = Value::Null;
                 }
             }
@@ -3230,6 +3277,18 @@ mod tests {
                 pack_outcome: pack_outcome_json(cell.pack),
                 pack_manifest: pack_manifest_for(cell.pack),
                 extra_objects: Vec::new(),
+            }
+        }
+
+        /// The exit class `outcome.json` records for this kind, when it parses.
+        fn exit_class(kind: OutcomeKind) -> Option<&'static str> {
+            match kind {
+                OutcomeKind::Absent | OutcomeKind::Malformed | OutcomeKind::ForeignTask => None,
+                OutcomeKind::Pass => Some("pass"),
+                OutcomeKind::GateFail => Some("gate_fail"),
+                OutcomeKind::RefusedOther | OutcomeKind::RefusedInputsChanged => Some("refused"),
+                OutcomeKind::Crash | OutcomeKind::CpuFallback => Some("crash"),
+                OutcomeKind::Timeout => Some("timeout"),
             }
         }
 
@@ -3506,7 +3565,10 @@ mod tests {
                     .as_ref()
                     .is_some_and(|r| r.task.status.is_terminal());
                 if !(classified && terminal) {
-                    out.push((Invariant::I1, "Ok without a terminal classified record".into()));
+                    out.push((
+                        Invariant::I1,
+                        "Ok without a terminal classified record".into(),
+                    ));
                 }
             }
 
@@ -3541,7 +3603,10 @@ mod tests {
                         payload.prefilter_disagreement
                     ));
                 }
-                if want.error_contains.is_some_and(|needle| !error.contains(needle)) {
+                if want
+                    .error_contains
+                    .is_some_and(|needle| !error.contains(needle))
+                {
                     wrong.push(format!("error lacks {:?}", want.error_contains));
                 }
                 if want.error_nonempty && error.is_empty() {
@@ -3551,11 +3616,200 @@ mod tests {
                     out.push((Invariant::I3, wrong.join("; ")));
                 }
             }
+
+            // I4: no planted constant in anything a caller can read.
+            if let Some(leaks) = hostile_leaks(obs, &HOSTILE) {
+                out.push((Invariant::I4, leaks));
+            }
+
+            // I5: no `.apr` listed unless the phase is completed.
+            if let Some(why) = apr_unless_completed(obs) {
+                out.push((Invariant::I5, why));
+            }
+
+            // I7: every key the finalizer inventories or names carries the run's
+            // retention tag, read back from the bucket state (D-19).
+            if obs.first.is_ok() {
+                if let Some(why) = retention_mismatch(obs) {
+                    out.push((Invariant::I7, why));
+                }
+            }
+            out
+        }
+
+        /// The caller-readable surfaces: the stored payload, verdict.json, manifest.json.
+        fn caller_surfaces(obs: &Observed) -> [(&'static str, Option<&[u8]>); 3] {
+            [
+                (
+                    "stored payload",
+                    obs.payload_text.as_deref().map(str::as_bytes),
+                ),
+                ("verdict.json", obs.verdict.as_deref()),
+                ("manifest.json", obs.manifest.as_deref()),
+            ]
+        }
+
+        fn hostile_leaks(obs: &Observed, needles: &[&str]) -> Option<String> {
+            let leaks: Vec<String> = caller_surfaces(obs)
+                .into_iter()
+                .filter_map(|(name, bytes)| {
+                    let text = String::from_utf8_lossy(bytes?);
+                    let found: Vec<&str> = needles
+                        .iter()
+                        .copied()
+                        .filter(|n| text.contains(n))
+                        .collect();
+                    (!found.is_empty()).then(|| format!("{name} carries {found:?}"))
+                })
+                .collect();
+            (!leaks.is_empty()).then(|| leaks.join("; "))
+        }
+
+        fn apr_unless_completed(obs: &Observed) -> Option<String> {
+            let phase = obs.payload.as_ref()?.phase;
+            if phase == Phase::Completed {
+                return None;
+            }
+            let in_payload = obs
+                .payload
+                .as_ref()
+                .is_some_and(|p| p.manifest.iter().any(|l| l.path.ends_with(".apr")));
+            let in_manifest = obs
+                .manifest
+                .as_deref()
+                .and_then(|b| serde_json::from_slice::<Manifest>(b).ok())
+                .is_some_and(|m| m.entries.iter().any(|e| e.path.ends_with(".apr")));
+            (in_payload || in_manifest).then(|| format!("{phase:?} lists an .apr"))
+        }
+
+        /// The keys D-19 retains together: every manifest.json entry, manifest.json
+        /// itself, and every self-listing inventory that exists.
+        fn retention_mismatch(obs: &Observed) -> Option<String> {
+            let payload = obs.payload.as_ref()?;
+            let keep = payload.phase == Phase::Completed
+                && payload.verdict.as_ref().is_some_and(|v| v.pass);
+            let want = if keep {
+                RETENTION_KEEP
+            } else {
+                RETENTION_EXPIRE
+            };
+            let manifest: Manifest = serde_json::from_slice(obs.manifest.as_deref()?).ok()?;
+            let mut keys: Vec<String> =
+                manifest.entries.iter().map(|e| Rig::key(&e.path)).collect();
+            keys.push(Rig::key(layout::MANIFEST));
+            for name in [
+                layout::TRAINING_MANIFEST,
+                layout::PARTIAL_MANIFEST,
+                layout::PACK_MANIFEST,
+            ] {
+                keys.push(Rig::key(name));
+            }
+            let wrong: Vec<String> = keys
+                .iter()
+                // A key the bucket does not hold cannot carry a tag (I2's concern).
+                .filter_map(|key| obs.tags.get(key).map(|tag| (key, tag)))
+                .filter(|(_, tag)| tag.as_deref() != Some(want))
+                .map(|(key, tag)| format!("{key}={tag:?}"))
+                .collect();
+            (!wrong.is_empty()).then(|| format!("want {want}: {}", wrong.join(", ")))
+        }
+
+        /// What I8 compares across deliveries of the same records.
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        struct Delivered {
+            phase: Phase,
+            is_error: bool,
+            prefilter_disagreement: bool,
+            keep: bool,
+        }
+
+        fn delivered(obs: &Observed) -> Option<Delivered> {
+            let report = obs.first.as_ref().ok()?;
+            let payload = obs.payload.as_ref()?;
+            Some(Delivered {
+                phase: payload.phase,
+                is_error: obs.record.as_ref()?.result.as_ref()?.is_error,
+                prefilter_disagreement: payload.prefilter_disagreement,
+                keep: report.keep,
+            })
+        }
+
+        /// The cell with its trigger erased: the records a group of deliveries share.
+        fn records_of(cell: &Cell) -> Cell {
+            Cell {
+                trigger: Via::SmClean,
+                ..*cell
+            }
+        }
+
+        /// I8: every non-aborted trigger that returned Ok reaches the same phase,
+        /// is_error, prefilter_disagreement and keep for the same records. Returns
+        /// the first offending cell of the group and why.
+        fn delivery_findings(group: &[(Cell, Option<Delivered>)]) -> Option<(Cell, String)> {
+            let mut ok = group.iter().filter_map(|(c, d)| d.as_ref().map(|d| (c, d)));
+            let (_, first) = ok.next()?;
+            let (cell, _) = ok.find(|(_, d)| *d != first)?;
+            let all: Vec<String> = group
+                .iter()
+                .map(|(c, d)| format!("{}={d:?}", c.trigger.name()))
+                .collect();
+            Some((*cell, all.join(" | ")))
+        }
+
+        /// I6 and I5 for an ABORTED execution: the Event path yields cancelled.
+        async fn aborted_findings(cell: &Cell) -> Vec<(Invariant, String)> {
+            let rig = setup(cell).await;
+            rig.set_execution("ABORTED");
+            rig.jobs.set(&training_job_name(TASK_ID), "Stopped");
+            let first = rig.event("ABORTED").await;
+            let rec = rig.backend.get(&rig.owner, TASK_ID).await.expect("get");
+            let payload_text = rec
+                .as_ref()
+                .and_then(|r| r.result.as_ref())
+                .and_then(result_text)
+                .map(str::to_string);
+            let payload = payload_text
+                .as_deref()
+                .and_then(|t| serde_json::from_str::<StatusPayload>(t).ok());
+            let mut out = Vec::new();
+            let cancelled = payload
+                .as_ref()
+                .is_some_and(|p| p.phase == Phase::Cancelled)
+                && rec
+                    .as_ref()
+                    .is_some_and(|r| r.task.status == TaskStatus::Cancelled);
+            if !cancelled {
+                out.push((
+                    Invariant::I6,
+                    format!(
+                        "phase {:?}, first {}",
+                        payload.as_ref().map(|p| p.phase),
+                        clip_debug(&first.as_ref().err())
+                    ),
+                ));
+            }
+            let obs = Observed {
+                first,
+                record: rec,
+                payload_text,
+                payload,
+                verdict: rig.objects.bytes(&Rig::key(layout::VERDICT)),
+                manifest: rig.objects.bytes(&Rig::key(layout::MANIFEST)),
+                tags: BTreeMap::new(),
+                released: rig.lock_released().await,
+                second: Ok(ReconcileReport::default()),
+            };
+            if let Some(why) = apr_unless_completed(&obs) {
+                out.push((Invariant::I5, why));
+            }
             out
         }
 
         fn violations(cell: &Cell, obs: &Observed) -> Vec<Invariant> {
-            findings(cell, obs).into_iter().map(|(inv, _)| inv).collect()
+            findings(cell, obs)
+                .into_iter()
+                .map(|(inv, _)| inv)
+                .collect()
         }
 
         // ------------------------------------------------------------ the tracer
@@ -3593,14 +3847,270 @@ mod tests {
             );
             assert!(!payload.prefilter_disagreement);
 
+            // The tracer models a delivery the machine really makes.
+            assert!(exit_class(cell.outcome).is_some_and(|c| CATCH_FED.contains(&c)));
+
+            // Its scope is WR-01's: I1 and I2 hold and I3 is the defect. The planted
+            // Cause also leaks (I4, WR-03); whatever else the cell violates must be
+            // a pinned defect, so the tracer cannot hide an unpinned one.
+            let all = violations(&cell, &obs);
+            let scoped: Vec<Invariant> = all
+                .iter()
+                .copied()
+                .filter(|inv| TRACER_SCOPE.contains(inv))
+                .collect();
             assert_eq!(
-                violations(&cell, &obs),
+                scoped,
                 [Invariant::I3],
                 "{} {:?}",
                 cell.label(),
                 findings(&cell, &obs)
             );
             assert!(KNOWN_DEFECTS.contains(&Invariant::I3));
+            assert!(
+                all.iter().all(|inv| KNOWN_DEFECTS.contains(inv)),
+                "{all:?} outside {KNOWN_DEFECTS:?}"
+            );
+        }
+
+        /// The invariants the WR-01 tracer is about.
+        const TRACER_SCOPE: [Invariant; 3] = [Invariant::I1, Invariant::I2, Invariant::I3];
+
+        fn all_cells() -> Vec<Cell> {
+            let mut cells = Vec::new();
+            for &outcome in OutcomeKind::ALL {
+                for &gate_report in GateKind::ALL {
+                    for &pack in PackKind::ALL {
+                        for &listing in ListingKind::ALL {
+                            for &absent_listed in AbsentKind::ALL {
+                                for &trigger in Via::ALL {
+                                    cells.push(Cell {
+                                        trigger,
+                                        outcome,
+                                        gate_report,
+                                        pack,
+                                        listing,
+                                        absent_listed,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            cells
+        }
+
+        /// The enums ARE the axes: each one's wire names equal its SURFACE_AXES row.
+        fn assert_axes_bound() {
+            let names = |all: &[&'static str]| all.to_vec();
+            let bound: [(&str, Vec<&str>); 6] = [
+                ("trigger", Via::ALL.iter().map(|v| v.name()).collect()),
+                (
+                    "outcome",
+                    OutcomeKind::ALL.iter().map(|v| v.name()).collect(),
+                ),
+                (
+                    "gate_report",
+                    GateKind::ALL.iter().map(|v| v.name()).collect(),
+                ),
+                ("pack", PackKind::ALL.iter().map(|v| v.name()).collect()),
+                (
+                    "listing",
+                    ListingKind::ALL.iter().map(|v| v.name()).collect(),
+                ),
+                (
+                    "absent_listed",
+                    AbsentKind::ALL.iter().map(|v| v.name()).collect(),
+                ),
+            ];
+            assert_eq!(SURFACE_AXES.len(), bound.len());
+            for ((axis, values), (name, enum_values)) in SURFACE_AXES.iter().zip(bound) {
+                assert_eq!(*axis, name);
+                assert_eq!(names(values), enum_values, "axis {axis}");
+            }
+        }
+
+        /// THE gate of the class: every cell of the cross product through the real
+        /// entry point, I1..I8 per cell, and the violated set must equal the ratchet
+        /// exactly (a pinned entry nothing violates fails it, as does a new one).
+        #[tokio::test]
+        async fn failure_surface_sweep_known_defects_only() {
+            assert_axes_bound();
+            let product: usize = SURFACE_AXES.iter().map(|(_, v)| v.len()).product();
+            let started = std::time::Instant::now();
+
+            let mut first_offender: BTreeMap<Invariant, (Cell, String)> = BTreeMap::new();
+            let mut counts: BTreeMap<Invariant, BTreeMap<&'static str, usize>> = BTreeMap::new();
+            let mut note = |inv: Invariant, cell: Cell, why: String| {
+                *counts
+                    .entry(inv)
+                    .or_default()
+                    .entry(cell.trigger.name())
+                    .or_default() += 1;
+                first_offender.entry(inv).or_insert((cell, why));
+            };
+            let mut groups: BTreeMap<Cell, Vec<(Cell, Option<Delivered>)>> = BTreeMap::new();
+            let cells = all_cells();
+            let mut ran = 0_usize;
+            for cell in &cells {
+                let obs = run(cell).await;
+                ran += 1;
+                for (inv, why) in findings(cell, &obs) {
+                    note(inv, *cell, why);
+                }
+                groups
+                    .entry(records_of(cell))
+                    .or_default()
+                    .push((*cell, delivered(&obs)));
+            }
+            assert_eq!(ran, product, "the cross product was truncated");
+            assert_eq!(cells.len(), product);
+
+            for group in groups.values() {
+                if let Some((cell, why)) = delivery_findings(group) {
+                    note(Invariant::I8, cell, why);
+                }
+            }
+
+            // An ABORTED execution, over every outcome: the Event path's own table.
+            let mut aborted = 0_usize;
+            for &outcome in OutcomeKind::ALL {
+                let cell = Cell {
+                    outcome,
+                    ..Cell::default()
+                };
+                aborted += 1;
+                for (inv, why) in aborted_findings(&cell).await {
+                    note(inv, cell, format!("ABORTED: {why}"));
+                }
+            }
+
+            println!(
+                "FAILURE SURFACE SWEEP: {ran} cells ({} axes) + {aborted} aborted cells in {:.1}s",
+                SURFACE_AXES.len(),
+                started.elapsed().as_secs_f64()
+            );
+            for inv in Invariant::ALL {
+                match first_offender.get(&inv) {
+                    Some((cell, why)) => println!(
+                        "  {inv:?} violated in {} cells {:?}; first: {} -- {why}",
+                        counts[&inv].values().sum::<usize>(),
+                        counts[&inv],
+                        cell.label()
+                    ),
+                    None => println!("  {inv:?} holds"),
+                }
+            }
+
+            let violated: BTreeSet<Invariant> = first_offender.keys().copied().collect();
+            let pinned: BTreeSet<Invariant> = KNOWN_DEFECTS.iter().copied().collect();
+            assert_eq!(
+                pinned.len(),
+                KNOWN_DEFECTS.len(),
+                "a ratchet entry is duplicated"
+            );
+            let stale: Vec<&Invariant> = pinned.difference(&violated).collect();
+            let unpinned: Vec<&Invariant> = violated.difference(&pinned).collect();
+            assert!(
+                stale.is_empty(),
+                "ratchet entries no cell violates (delete them): {stale:?}"
+            );
+            assert!(
+                unpinned.is_empty(),
+                "violations outside the ratchet: {:?}",
+                unpinned
+                    .iter()
+                    .map(|inv| (inv, &first_offender[inv].1, first_offender[inv].0.label()))
+                    .collect::<Vec<_>>()
+            );
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(60),
+                "the sweep must stay under 60 s"
+            );
+        }
+
+        /// Every single S3 call of a passing run failing once (with planted hostile
+        /// text) is healed by the next pass: Ok, the lock released, and the same
+        /// objects, tags and record as an uninjected run.
+        #[tokio::test]
+        async fn failure_surface_transient_faults() {
+            let nominal = Cell::default();
+            let reference = setup(&nominal).await;
+            let report = deliver(&reference, &nominal)
+                .await
+                .expect("the uninjected run");
+            assert!(report.released);
+            let want_objects = reference.objects.snapshot();
+            let want_record = reference.record().await;
+            let want_text = result_text(want_record.result.as_ref().expect("result"))
+                .expect("text")
+                .to_string();
+
+            let mut failures: Vec<String> = Vec::new();
+            let mut cases = 0_usize;
+            for op in Op::ALL {
+                let calls = reference.objects.calls(op);
+                assert!(
+                    calls > 0 || op == Op::List,
+                    "{op:?}: a passing run makes no such call"
+                );
+                for n in 1..=calls {
+                    cases += 1;
+                    let marker = format!("injected-store-fault-{op:?}-{n}");
+                    let message =
+                        format!("{marker}: AccessDenied for {HOSTILE_ARN} in {HOSTILE_ACCOUNT}");
+                    let rig = setup(&nominal).await;
+                    rig.objects.fail_nth_with(op, n, &message);
+                    let first = deliver(&rig, &nominal).await;
+                    rig.set_execution(end_status(nominal.trigger));
+                    let second = rig.sweep().await;
+                    let released = rig.lock_released().await;
+                    let record = rig.record().await;
+                    let text = record
+                        .result
+                        .as_ref()
+                        .and_then(result_text)
+                        .map(str::to_string);
+                    let case = format!("{op:?}#{n}");
+                    if rig.objects.calls(op) < n {
+                        failures.push(format!("{case}: the fault was never reached"));
+                    }
+                    if second.is_err() || !released {
+                        failures.push(format!(
+                            "{case}: not healed (first {}, second {}, released {released})",
+                            clip_debug(&first.as_ref().err()),
+                            clip_debug(&second.as_ref().err())
+                        ));
+                        continue;
+                    }
+                    if rig.objects.snapshot() != want_objects {
+                        failures.push(format!("{case}: objects or tags differ"));
+                    }
+                    if record.task.status != want_record.task.status
+                        || text.as_deref() != Some(want_text.as_str())
+                    {
+                        failures.push(format!("{case}: the record differs"));
+                    }
+                    let obs = Observed {
+                        first,
+                        record: Some(record),
+                        payload_text: text,
+                        payload: None,
+                        verdict: rig.objects.bytes(&Rig::key(layout::VERDICT)),
+                        manifest: rig.objects.bytes(&Rig::key(layout::MANIFEST)),
+                        tags: BTreeMap::new(),
+                        released,
+                        second: second.map(|_| ReconcileReport::default()),
+                    };
+                    if let Some(leak) = hostile_leaks(&obs, &[marker.as_str()]) {
+                        failures.push(format!("{case}: store error text reached a caller: {leak}"));
+                    }
+                }
+            }
+            println!("FAILURE SURFACE TRANSIENT: {cases} single-fault cases");
+            assert!(cases >= 20, "the table is too small: {cases}");
+            assert!(failures.is_empty(), "{failures:#?}");
         }
     }
 }
