@@ -1,0 +1,81 @@
+{
+  "schema": "laya-gap-redeploy-evidence-v1",
+  "phase": "14-laya-training-mcp-server-s3-dataset-in-apr-and-reports-out",
+  "plan": "14-22",
+  "status": "awaiting-owner",
+  "note": "Task 1 (offline readiness) is filled by the executor. finalizer.* is filled after the owner runs runbook Section A. request_function.* is filled after the owner's Task 3 decision. owner_replies is written by the orchestrator only. No account id, ARN, presigned URL, token or M2M material is recorded here.",
+  "readiness": {
+    "executed_utc": "2026-10-30T22:21:00Z",
+    "checkout": "main",
+    "aws_calls_by_executor": 0,
+    "head_at_synth": "275ad9611a39f8838c698361e50acedc755f8c9c",
+    "offline_suite": [
+      {"cmd": "cargo test -p aprender-mcp-laya-train --lib", "rc": 0, "result": "test result: ok. 113 passed; 0 failed"},
+      {"cmd": "cargo test -p aprender-mcp-laya-train-lambda --lib", "rc": 0, "result": "test result: ok. 70 passed; 0 failed"},
+      {"cmd": "cargo test -p aprender-core --test monorepo_invariants", "rc": 0, "result": "test result: ok. 15 passed; 0 failed"},
+      {"cmd": "cargo clippy -p aprender-mcp-laya-train --lib --no-deps -- -D warnings", "rc": 0, "result": "clean (the two unused-variable warnings printed come from the aprender-compute dependency build, pre-existing, out of scope)"},
+      {"cmd": "cargo clippy -p aprender-mcp-laya-train-lambda --lib --no-deps -- -D warnings", "rc": 0, "result": "clean (same pre-existing aprender-compute dependency warnings)"},
+      {"cmd": "python3 -I scripts/laya_deploy/laya_failure_surface.py --check", "rc": 0, "result": "FAILURE SURFACE OK rows=69 (untested at HEAD 1) invariants=8 sinks=26 (hits 102) axes=6 cells=4800 known_defects=none assertions=302"},
+      {"cmd": "python3 -I scripts/laya_deploy/laya_failure_surface.py --sweep", "rc": 0, "result": "FAILURE SURFACE SWEEP OK 19/19 named tests ok in 4 runs, 19 passed (minimum 19)"},
+      {"cmd": "python3 -I scripts/laya_deploy/laya_failure_surface.py --mutations", "rc": 0, "result": "FAILURE SURFACE MUTATIONS OK 17/17 (every mutation restored; closure clean afterwards)"},
+      {"cmd": "python3 -I scripts/laya_deploy/laya_trainer_stack_check.py --selftest", "rc": 0, "result": "STACK CHECK SELFTEST OK"},
+      {"cmd": "python3 -I scripts/laya_deploy/laya_trainer_ops.py --selftest", "rc": 0, "result": "65 ok, 0 FAIL; LAYA TRAINER OPS SELFTEST OK"},
+      {"cmd": "plan 14-22 Task 1 verify 1 (the seven-command offline suite)", "rc": 0, "result": "OFFLINE SUITE OK 7"}
+    ],
+    "synth": {
+      "cmd": "just laya-trainer-synth dev",
+      "rc": 0,
+      "lines": [
+        "PLACEHOLDER DIGESTS (synth only): both images are the all-zero digest; a deploy refuses them",
+        "glibc floor: aprender-laya-train-finalizer needs <= 2.30",
+        "FINALIZER PROVENANCE WRITTEN commit=275ad9611a39 closure=15 paths (12 crates) clean=true sha256=fc796b8b47be559f",
+        "TRAINER STACK CHECK OK trainer=216 images=105 assertions",
+        "TRAINER SYNTH OK env=dev"
+      ]
+    },
+    "sidecar_commit": "275ad9611a39f8838c698361e50acedc755f8c9c",
+    "sidecar_sha256": "fc796b8b47be559f6bc3a067f0b294b9fe5a1b4ef1594763eaa7d695fcf13fab",
+    "sidecar_built_at": "2026-10-30T22:20:28Z",
+    "sidecar_closure_clean": true,
+    "sidecar_closure_paths": 15,
+    "sidecar_closure_crates": 12,
+    "sidecar_target": "aarch64-unknown-linux-gnu",
+    "asset_bootstrap_sha256_on_disk": "fc796b8b47be559f6bc3a067f0b294b9fe5a1b4ef1594763eaa7d695fcf13fab",
+    "provenance_verify": "FINALIZER PROVENANCE OK",
+    "working_tree_outside_closure": "only .planning/config.json and .planning/state.json are modified (pre-existing, outside the closure, not staged); 0 dirty closure entries",
+    "dry_runs": {
+      "diff": {"cmd": "DRY_RUN=1 just laya-trainer-infra diff dev ze-kasher-dev", "rc": 0, "provenance": "accepted (merge-base, closure diff and closure status ran; no DRY RUN NOTE refusal)", "last_lines": ["DRY RUN infra diff: every command above was printed, none was executed", "AWS CALLS: 0"]},
+      "deploy": {"cmd": "DRY_RUN=1 just laya-trainer-infra deploy dev ze-kasher-dev", "rc": 0, "provenance": "accepted (same checks; no DRY RUN NOTE refusal)", "last_lines": ["DRY RUN infra deploy: every command above was printed, none was executed", "AWS CALLS: 0"]}
+    },
+    "helper": {
+      "path": "models/laya-trainer/redeploy-finalizer-check.sh",
+      "gitignored": true,
+      "first_command": "set -euo pipefail",
+      "aws_verbs": ["lambda get-function"],
+      "writes_to_account": false,
+      "prints_url": false,
+      "deletion_form": "rm -f -- \"${PKG:?}\" inside a non-empty check, also by the EXIT trap",
+      "date_command": false,
+      "bashrs_gate": "BASHRS GATE PASS models/laya-trainer/redeploy-finalizer-check.sh (bashrs-gate: PASS 1 file(s) linted, receipt matched, 0 SEC/DET/IDEM errors (8 SC10xx suppressed - bashrs#226; 8 other))",
+      "bashrs_version": "6.66.3"
+    },
+    "runbook": ".planning/phases/14-laya-training-mcp-server-s3-dataset-in-apr-and-reports-out/14-REDEPLOY-RUNBOOK.md"
+  },
+  "finalizer": {
+    "function": "aprender-laya-train-finalizer-dev",
+    "diff_file": "models/laya-trainer/redeploy-finalizer-diff.txt",
+    "diff_verdict": null,
+    "deploy_last_line": null,
+    "deployed_sha256": null,
+    "sidecar_sha256": "fc796b8b47be559f6bc3a067f0b294b9fe5a1b4ef1594763eaa7d695fcf13fab",
+    "equal": null
+  },
+  "request_function": {
+    "server_id": "aprender-mcp-laya-train",
+    "endpoint": "https://aprender-mcp-laya-train.us-east.true-mcp.com/mcp",
+    "decision": null,
+    "steps": [],
+    "open_item_if_deferred": "request-side WR-03 sinks still on old code in production: the dispatch error text (AWS SDK message with ARNs on a denied or throttled StartExecution), the backend error text inside train and train_status, and the task-store errors of the Tasks protocol"
+  },
+  "owner_replies": []
+}
