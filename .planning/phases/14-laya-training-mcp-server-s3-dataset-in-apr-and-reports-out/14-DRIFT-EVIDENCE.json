@@ -1900,6 +1900,14 @@
       "command": "assume ze-kasher-dev && LAYA_DRIFT_APPROVED=graviton bash models/laya-trainer/drift-graviton.sh smoke:2 motivation:3",
       "reply": "owner ran it in-session (bang prefix); last line 'DRIFT GRAVITON DONE smoke:2 motivation:3', five legs container_exit 0",
       "recorded_by": "orchestrator"
+    },
+    {
+      "date": "2026-10-30",
+      "stage": "Task 3 D-15 decision",
+      "reply": "amend-per-study",
+      "parameters": "not specified by the owner in the reply; to be argued per set in the separate planned change set",
+      "recorded_by": "orchestrator",
+      "channel": "AskUserQuestion answer in the orchestrating session"
     }
   ],
   "owner_script": {
