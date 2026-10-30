@@ -2,7 +2,7 @@
   "schema": "laya-gap-redeploy-evidence-v1",
   "phase": "14-laya-training-mcp-server-s3-dataset-in-apr-and-reports-out",
   "plan": "14-22",
-  "status": "awaiting-owner",
+  "status": "complete",
   "note": "Task 1 (offline readiness) is filled by the executor. finalizer.* is filled after the owner runs runbook Section A. request_function.* is filled after the owner's Task 3 decision. owner_replies is written by the orchestrator only. No account id, ARN, presigned URL, token or M2M material is recorded here.",
   "readiness": {
     "executed_utc": "2026-10-30T22:21:00Z",
@@ -126,18 +126,100 @@
   "finalizer": {
     "function": "aprender-laya-train-finalizer-dev",
     "diff_file": "models/laya-trainer/redeploy-finalizer-diff.txt",
-    "diff_verdict": null,
-    "deploy_last_line": null,
-    "deployed_sha256": null,
+    "diff_verdict": {
+      "verdict": "go",
+      "read_from": "models/laya-trainer/redeploy-finalizer-diff.txt (gitignored)",
+      "last_line": "INFRA OK diff",
+      "resources_changed": 1,
+      "change": "[~] AWS::Lambda::Function Finalizer: Code.S3Key 7288da6d0a45...cd14.zip -> c367d4719270...7b2a.zip (the expected sidecar-driven asset change)",
+      "iam_sections": 0,
+      "resources_added_or_removed": 0,
+      "other_properties_changed": 0
+    },
+    "deploy_last_line": "INFRA OK deploy",
+    "deployed_sha256": "fc796b8b47be559f6bc3a067f0b294b9fe5a1b4ef1594763eaa7d695fcf13fab",
     "sidecar_sha256": "fc796b8b47be559f6bc3a067f0b294b9fe5a1b4ef1594763eaa7d695fcf13fab",
-    "equal": null
+    "equal": true,
+    "deploy_log": "models/laya-trainer/redeploy-finalizer-deploy.log (gitignored)",
+    "deploy_diff_equals_saved_diff": true,
+    "deploy_stack_time_s": 47.86,
+    "sha_file": "models/laya-trainer/redeploy-finalizer-sha.txt (gitignored)",
+    "check_last_line": "FINALIZER REDEPLOY CHECK OK sha256=fc796b8b47be559f6bc3a067f0b294b9fe5a1b4ef1594763eaa7d695fcf13fab",
+    "code_sha256_matches_download": true,
+    "deployed_sidecar_sha256": "fc796b8b47be559f6bc3a067f0b294b9fe5a1b4ef1594763eaa7d695fcf13fab",
+    "deployed_sidecar_commit": "275ad9611a39f8838c698361e50acedc755f8c9c",
+    "deployed_sidecar_built_at": "2026-10-30T22:20:28Z",
+    "live_fixes": [
+      "WR-01",
+      "WR-02",
+      "IN-01",
+      "WR-03 (Catch reduction)"
+    ]
   },
   "request_function": {
     "server_id": "aprender-mcp-laya-train",
     "endpoint": "https://aprender-mcp-laya-train.us-east.true-mcp.com/mcp",
-    "decision": null,
-    "steps": [],
-    "open_item_if_deferred": "request-side WR-03 sinks still on old code in production: the dispatch error text (AWS SDK message with ARNs on a denied or throttled StartExecution), the backend error text inside train and train_status, and the task-store errors of the Tasks protocol"
+    "decision": "redeploy-now",
+    "steps": [
+      {
+        "step": "B0",
+        "last_line": "0",
+        "ok": true,
+        "note": "no run in flight; the single-flight lock was free"
+      },
+      {
+        "step": "B1",
+        "last_line": "CONFIG OK deploy-config-dev.toml",
+        "ok": true
+      },
+      {
+        "step": "B2 attempt 1",
+        "last_line": "DEPLOY FAILED rc=1",
+        "ok": false,
+        "note": "GRANT REVOKED for redeploy ran first, then cargo pmcp deploy failed 'Token refresh failed: invalid_grant' (expired pmcp.run login) before any upload; crates root restored byte-identical; nothing published. The grant-absent window opened here without a publish (deviation: the runbook has no pmcp.run login precondition)."
+      },
+      {
+        "step": "B2 attempt 2",
+        "last_line": "DEPLOY OK aprender-mcp-laya-train",
+        "ok": true,
+        "note": "grant step: nothing to revoke (attempt 1 had revoked it); output oauth_enabled: true, so this --no-oauth publish did NOT reset OAuth (unlike 14-13); RESTORED crates byte-identical exit 0; deploy-dev.json deployed_at 2026-10-30T23:07:43Z"
+      },
+      {
+        "step": "B3",
+        "last_line": "auth-refusal ok: tools/list 401, tools/call 401 after 1 poll(s) (2 s); first_401_utc 2026-10-30T23:35:22Z",
+        "ok": true
+      },
+      {
+        "step": "B4",
+        "last_line": "GRANT OK role <execution role of aprender-mcp-laya-train>",
+        "ok": true,
+        "note": "the grant recipe saw the 401 in its own invocation before the IAM call (D-10 ordering)"
+      },
+      {
+        "step": "B5",
+        "last_line": "tools/list ok:true naming exactly train, train_status, validate_dataset (mint HTTP 200, auth form)",
+        "ok": true
+      }
+    ],
+    "open_item_if_deferred": null,
+    "live_fixes": [
+      "WR-03 (request-side sinks: dispatch error text, backend error text in train/train_status, task-store errors)"
+    ],
+    "windows": {
+      "grant_absent": {
+        "measured": false,
+        "start": "attempt 1 GRANT REVOKED: no in-file timestamp (attempt 1's log was overwritten by attempt 2 at the same path); file mtime of deploy-config-dev.toml (B1, 22:42:05Z) only bounds it from below, and an mtime is not an in-file record",
+        "end": "B4 GRANT OK: no in-file timestamp",
+        "lower_bound_s": 1659,
+        "lower_bound_basis": "the grant was absent at least from deploy-dev.json deployed_at 2026-10-30T23:07:43Z (attempt 2 found nothing to revoke) to first_401_utc 2026-10-30T23:35:22Z (B4 ran after B3); 1659 s = 27 min 39 s",
+        "upper_bound": "3664 s (61 min 4 s) from git commit times, not from a file: commit 1f0b2a591 (22:36:40Z) recorded the redeploy-now decision before B0, so attempt 1's revoke came later; commit 43700e889 (23:37:44Z) recorded B4 GRANT OK, so the grant was back by then",
+        "upper_bound_s": 3664,
+        "summary": "between 1659 s and 3664 s; the exact interval is unmeasured (no in-file timestamp for attempt 1's revoke or for B4)"
+      },
+      "publish_to_first_401_s": 1659,
+      "publish_to_first_401_basis": "deploy-dev.json deployed_at 23:07:43Z to B3 first_401_utc 23:35:22Z; an upper bound on any open-endpoint interval, and the publish itself reported oauth_enabled: true, so the endpoint may never have been open (14-13 measured 10114 s)"
+    },
+    "open_item_closed_by": "redeploy-now; B0-B5 all ok on the final attempt"
   },
   "owner_replies": [
     {
@@ -213,5 +295,6 @@
       "reply": "m2m-token HTTP 200 (auth form); tools/list ok:true naming exactly train, train_status, validate_dataset",
       "recorded_by": "orchestrator"
     }
-  ]
+  ],
+  "completed_utc": "2026-10-30T23:41:20Z"
 }
