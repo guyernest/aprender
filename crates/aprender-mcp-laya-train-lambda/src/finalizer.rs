@@ -2935,4 +2935,672 @@ mod tests {
         )
         .await;
     }
+
+    // ============================================================ failure surface
+    //
+    // Plan 14-16. The finalizer and state-machine boundary is ONE class: at every
+    // failure point the finalizer must reach one classified terminal phase decided
+    // by the most specific record, release the lock (or hold it only for a cause the
+    // next pass provably clears), and expose only caller-safe text. The section
+    // drives the REAL entry point (`handle`) over the cross product of the surface's
+    // axes and computes the invariants I1..I8 per cell with an oracle that never
+    // calls the implementation's own rules. The enumeration it is bound to is
+    // `fixtures/failure-surface-v1.json` and `14-FAILURE-SURFACE.md`.
+    mod failure_surface {
+        use super::*;
+
+        // -------------------------------------------------- planted hostile text
+
+        /// An account-id-shaped digit string. Planted, never a real account.
+        const HOSTILE_ACCOUNT: &str = "987654321098";
+        /// An ARN that embeds [`HOSTILE_ACCOUNT`].
+        const HOSTILE_ARN: &str = "arn:aws:iam::987654321098:role/laya-train-execution-dev";
+        /// An ECR host that embeds [`HOSTILE_ACCOUNT`].
+        const HOSTILE_ECR: &str = "987654321098.dkr.ecr.us-east-1.amazonaws.com";
+
+        /// The trainer's own refusal rule (the part of the line a caller must see).
+        const REFUSED_OTHER_RULE: &str = "REFUSED shots-per-class";
+        /// The dataset-changed refusal rule (D-08: not a pre-filter disagreement).
+        const REFUSED_INPUTS_RULE: &str = "REFUSED inputs-changed";
+
+        /// `$$.Execution.StartTime` of the rig's execution, as the CDK passes it.
+        const T0_RFC3339: &str = "2027-01-15T08:00:00Z";
+        /// A task id that is not the rig's.
+        const FOREIGN_TASK_ID: &str = "00000000-0000-4000-8000-0000000000ff";
+        /// Bytes that are no JSON value.
+        const MALFORMED: &[u8] = b"{\"schema\": \"laya-train-";
+
+        fn refused_other_line() -> String {
+            format!(
+                "{REFUSED_OTHER_RULE}: label `other` has 3 shots, the floor is 8 \
+                 (image {HOSTILE_ECR}/aprender-laya-train)"
+            )
+        }
+
+        fn refused_inputs_line() -> String {
+            format!(
+                "{REFUSED_INPUTS_RULE}: train.jsonl no longer hashes to the validated \
+                 digest (read by {HOSTILE_ARN})"
+            )
+        }
+
+        /// A `Cause` shaped like the SageMaker `DescribeTrainingJob` answer a
+        /// `.sync` task failure carries: the ECR image, the role ARN and a
+        /// `FailureReason` that names both. It contains no class word (crash,
+        /// runtime cap, REFUSED), so only the records can supply the class.
+        fn catch_cause() -> String {
+            json!({
+                "AlgorithmSpecification": {
+                    "TrainingImage": format!("{HOSTILE_ECR}/aprender-laya-train@sha256:{}", sha("image")),
+                    "TrainingInputMode": "File",
+                },
+                "RoleArn": HOSTILE_ARN,
+                "TrainingJobName": format!("laya-{TASK_ID}"),
+                "TrainingJobArn": format!(
+                    "arn:aws:sagemaker:us-east-1:{HOSTILE_ACCOUNT}:training-job/laya-{TASK_ID}"
+                ),
+                "TrainingJobStatus": "Failed",
+                "SecondaryStatus": "Failed",
+                "FailureReason": format!(
+                    "AlgorithmError: the job exited 1; see {HOSTILE_ARN} in account {HOSTILE_ACCOUNT}"
+                ),
+            })
+            .to_string()
+        }
+
+        // ------------------------------------------------------------- the axes
+
+        /// One axis of the surface: a closed enum whose wire names are the values
+        /// `SURFACE_AXES` lists (the sweep binds the two).
+        macro_rules! axis {
+            ($name:ident { $($variant:ident => $text:literal),+ $(,)? }) => {
+                #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+                enum $name { $($variant),+ }
+                impl $name {
+                    const ALL: &'static [Self] = &[$(Self::$variant),+];
+                    fn name(self) -> &'static str {
+                        match self { $(Self::$variant => $text),+ }
+                    }
+                }
+            };
+        }
+
+        axis!(Via {
+            SmClean => "sm_clean",
+            SmCaught => "sm_caught",
+            EventFailed => "event_failed",
+            EventTimedOut => "event_timed_out",
+            ReconcileFailed => "reconcile_failed",
+        });
+        axis!(OutcomeKind {
+            Absent => "absent",
+            Malformed => "malformed",
+            ForeignTask => "foreign_task",
+            Pass => "pass",
+            GateFail => "gate_fail",
+            RefusedOther => "refused_other",
+            RefusedInputsChanged => "refused_inputs_changed",
+            Crash => "crash",
+            Timeout => "timeout",
+            CpuFallback => "cpu_fallback",
+        });
+        axis!(GateKind {
+            Ok => "ok",
+            Absent => "absent",
+        });
+        axis!(PackKind {
+            Absent => "absent",
+            Accepted => "accepted",
+            Refused => "refused",
+            Malformed => "malformed",
+        });
+        axis!(ListingKind {
+            Complete => "complete",
+            PartialOnly => "partial_only",
+            None => "none",
+        });
+        axis!(AbsentKind {
+            None => "none",
+            Outcome => "outcome",
+            PackOutcome => "pack_outcome",
+            GateReport => "gate_report",
+        });
+
+        /// One point of the surface: how the finalizer is reached, and what the jobs
+        /// left under the run prefix.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        struct Cell {
+            trigger: Via,
+            outcome: OutcomeKind,
+            gate_report: GateKind,
+            pack: PackKind,
+            listing: ListingKind,
+            /// An object a writer manifest lists that S3 does not hold (WR-02).
+            absent_listed: AbsentKind,
+        }
+
+        impl Default for Cell {
+            /// The nominal passing run, delivered by the machine's own Finalize.
+            fn default() -> Self {
+                Self {
+                    trigger: Via::SmClean,
+                    outcome: OutcomeKind::Pass,
+                    gate_report: GateKind::Ok,
+                    pack: PackKind::Accepted,
+                    listing: ListingKind::Complete,
+                    absent_listed: AbsentKind::None,
+                }
+            }
+        }
+
+        impl Cell {
+            fn label(&self) -> String {
+                format!(
+                    "trigger={} outcome={} gate_report={} pack={} listing={} absent_listed={}",
+                    self.trigger.name(),
+                    self.outcome.name(),
+                    self.gate_report.name(),
+                    self.pack.name(),
+                    self.listing.name(),
+                    self.absent_listed.name()
+                )
+            }
+        }
+
+        // ------------------------------------------------------------ the files
+
+        fn outcome_json(kind: OutcomeKind) -> Option<Value> {
+            let mut o = parse(OUTCOME);
+            match kind {
+                // Malformed bytes are planted raw by `setup`.
+                OutcomeKind::Absent | OutcomeKind::Malformed => return None,
+                OutcomeKind::ForeignTask => o["task_id"] = json!(FOREIGN_TASK_ID),
+                OutcomeKind::Pass => {}
+                OutcomeKind::GateFail => {
+                    o["exit_class"] = json!("gate_fail");
+                    o["train_rc"] = json!(3);
+                }
+                OutcomeKind::RefusedOther | OutcomeKind::RefusedInputsChanged => {
+                    o["exit_class"] = json!("refused");
+                    o["train_rc"] = json!(2);
+                    o["device_used"] = json!("none");
+                    o["device_ok"] = json!(false);
+                    o["refused_line"] = json!(if kind == OutcomeKind::RefusedOther {
+                        refused_other_line()
+                    } else {
+                        refused_inputs_line()
+                    });
+                }
+                OutcomeKind::Crash => {
+                    o["exit_class"] = json!("crash");
+                    o["train_rc"] = json!(1);
+                }
+                OutcomeKind::Timeout => {
+                    o["exit_class"] = json!("timeout");
+                    o["train_rc"] = Value::Null;
+                    o["device_ok"] = json!(false);
+                }
+                // run_step.py: a CPU fallback is classified crash with device_ok false.
+                OutcomeKind::CpuFallback => {
+                    o["exit_class"] = json!("crash");
+                    o["train_rc"] = Value::Null;
+                    o["device_used"] = json!("cpu");
+                    o["device_ok"] = json!(false);
+                }
+            }
+            Some(o)
+        }
+
+        fn pack_outcome_json(kind: PackKind) -> Option<Value> {
+            let mut p = parse(PACK_OUTCOME);
+            match kind {
+                PackKind::Absent | PackKind::Malformed => return None,
+                PackKind::Accepted => {
+                    p["packed_line"] = json!(format!("PACKED waived=none image={HOSTILE_ECR}"));
+                    p["verify_line"] = json!(format!(
+                        "{{\"deploy_eligible\":true,\"waived\":null,\"role\":\"{HOSTILE_ARN}\"}}"
+                    ));
+                }
+                PackKind::Refused => {
+                    p["accepted"] = json!(false);
+                    p["apr_sha256"] = Value::Null;
+                    p["exit_code"] = json!(3);
+                    p["deploy_eligible"] = json!(false);
+                    p["shipped_seed"] = Value::Null;
+                    p["packed_line"] = json!(format!("REFUSED RescoreDrift: pack read {HOSTILE_ECR}"));
+                    p["verify_line"] = Value::Null;
+                }
+            }
+            Some(p)
+        }
+
+        /// The pack inventory: the `.apr` only for an accepted pack.
+        fn pack_manifest_for(kind: PackKind) -> Option<Value> {
+            match kind {
+                PackKind::Absent => None,
+                PackKind::Accepted => Some(pack_manifest_json()),
+                PackKind::Refused | PackKind::Malformed => {
+                    let mut m = pack_manifest_json();
+                    if let Some(rows) = m.as_array_mut() {
+                        rows.retain(|r| r["path"] != "fixture-model.apr");
+                    }
+                    Some(m)
+                }
+            }
+        }
+
+        /// The files a cell's jobs wrote. An `absent` record is neither written nor
+        /// listed; a listed-but-absent object is listed here and removed by `setup`.
+        fn files_for(cell: &Cell) -> Files {
+            let mut manifest = parse(TRAINING_MANIFEST);
+            if let Some(rows) = manifest["entries"].as_array_mut() {
+                rows.retain(|r| {
+                    let path = r["path"].as_str().unwrap_or_default();
+                    !(path == layout::OUTCOME
+                        && cell.outcome == OutcomeKind::Absent
+                        && cell.absent_listed != AbsentKind::Outcome)
+                        && !(path == "run/gate-report.json"
+                            && cell.gate_report == GateKind::Absent
+                            && cell.absent_listed != AbsentKind::GateReport)
+                });
+            }
+            let (training_manifest, partial_manifest) = match cell.listing {
+                ListingKind::Complete => (Some(manifest), None),
+                ListingKind::PartialOnly => {
+                    manifest["complete"] = json!(false);
+                    (None, Some(manifest))
+                }
+                ListingKind::None => (None, None),
+            };
+            let gate_report = match cell.gate_report {
+                GateKind::Absent => None,
+                GateKind::Ok => {
+                    let mut report = parse(GATE_REPORT);
+                    if cell.outcome == OutcomeKind::GateFail {
+                        report["pass"] = json!(false);
+                    }
+                    Some(report)
+                }
+            };
+            Files {
+                outcome: outcome_json(cell.outcome),
+                gate_report,
+                training_manifest,
+                partial_manifest,
+                pack_outcome: pack_outcome_json(cell.pack),
+                pack_manifest: pack_manifest_for(cell.pack),
+                extra_objects: Vec::new(),
+            }
+        }
+
+        fn job_status(outcome: OutcomeKind) -> &'static str {
+            match outcome {
+                OutcomeKind::Pass | OutcomeKind::GateFail => "Completed",
+                OutcomeKind::Timeout => "Stopped",
+                _ => "Failed",
+            }
+        }
+
+        /// A rig whose run is started, whose objects are the cell's, and whose
+        /// compute is over (the gate the cross product does not vary).
+        async fn setup(cell: &Cell) -> Rig {
+            let rig = Rig::new();
+            rig.start().await;
+            rig.seed(&files_for(cell));
+            match cell.outcome {
+                OutcomeKind::Absent => rig.objects.remove(&Rig::key(layout::OUTCOME)),
+                OutcomeKind::Malformed => rig.objects.seed(&Rig::key(layout::OUTCOME), MALFORMED),
+                _ => {}
+            }
+            if cell.gate_report == GateKind::Absent {
+                rig.objects.remove(&Rig::key("run/gate-report.json"));
+            }
+            match cell.pack {
+                PackKind::Absent => rig.objects.remove(&Rig::key(layout::PACK_OUTCOME)),
+                PackKind::Malformed => {
+                    rig.objects.seed(&Rig::key(layout::PACK_OUTCOME), MALFORMED);
+                }
+                PackKind::Accepted | PackKind::Refused => {}
+            }
+            match cell.absent_listed {
+                AbsentKind::None => {}
+                AbsentKind::Outcome => rig.objects.remove(&Rig::key(layout::OUTCOME)),
+                AbsentKind::PackOutcome => rig.objects.remove(&Rig::key(layout::PACK_OUTCOME)),
+                AbsentKind::GateReport => rig.objects.remove(&Rig::key("run/gate-report.json")),
+            }
+            rig.jobs
+                .set(&training_job_name(TASK_ID), job_status(cell.outcome));
+            rig.set_execution("RUNNING");
+            rig
+        }
+
+        // ---------------------------------------------------------- the delivery
+
+        /// The Finalize / CatchFinalize payload exactly as the CDK builds it
+        /// (`executionRef`, plus `error: $.error` for the Catch).
+        fn machine_payload(rig: &Rig, error: Option<Value>) -> Value {
+            let mut value = json!({
+                "source": "state-machine",
+                "execution_arn": Rig::arn(),
+                "start_time": T0_RFC3339,
+                "input": rig.exec_input(),
+            });
+            if let Some(error) = error {
+                value["error"] = error;
+            }
+            value
+        }
+
+        /// Drive the REAL entry point the way the trigger reaches it: payload parse,
+        /// check_execution, finalize_task, read_run_objects, finalize_run,
+        /// settle_record, publish, tags, lock release.
+        async fn deliver(rig: &Rig, cell: &Cell) -> Result<FinalizeReport, FinalizerError> {
+            let value = match cell.trigger {
+                Via::SmClean => machine_payload(rig, None),
+                Via::SmCaught => machine_payload(
+                    rig,
+                    Some(json!({"Error": "States.TaskFailed", "Cause": catch_cause()})),
+                ),
+                Via::EventFailed => {
+                    rig.set_execution("FAILED");
+                    event_json("FAILED", MACHINE)
+                }
+                Via::EventTimedOut => {
+                    rig.set_execution("TIMED_OUT");
+                    event_json("TIMED_OUT", MACHINE)
+                }
+                Via::ReconcileFailed => {
+                    rig.set_execution("FAILED");
+                    json!({"source": "reconcile"})
+                }
+            };
+            handle(&rig.ctx, FinalizerInput::parse(&value)?).await
+        }
+
+        /// How the execution ends after the delivery (what a later sweep describes).
+        fn end_status(trigger: Via) -> &'static str {
+            match trigger {
+                // Finalize and CatchFinalize both succeed, so the machine SUCCEEDS.
+                Via::SmClean | Via::SmCaught => "SUCCEEDED",
+                Via::EventFailed | Via::ReconcileFailed => "FAILED",
+                Via::EventTimedOut => "TIMED_OUT",
+            }
+        }
+
+        /// What one delivery left behind, read from the records (never a log line).
+        struct Observed {
+            first: Result<FinalizeReport, FinalizerError>,
+            record: Option<StoredTask>,
+            payload_text: Option<String>,
+            payload: Option<StatusPayload>,
+            verdict: Option<Vec<u8>>,
+            manifest: Option<Vec<u8>>,
+            /// Every object's retention tag after the first delivery.
+            tags: BTreeMap<String, Option<String>>,
+            /// The lock after the first delivery.
+            released: bool,
+            /// A reconcile sweep after the execution ended.
+            second: Result<ReconcileReport, FinalizerError>,
+        }
+
+        async fn observe(
+            rig: &Rig,
+            cell: &Cell,
+            first: Result<FinalizeReport, FinalizerError>,
+        ) -> Observed {
+            let record = rig.backend.get(&rig.owner, TASK_ID).await.expect("get");
+            let payload_text = record
+                .as_ref()
+                .and_then(|r| r.result.as_ref())
+                .and_then(result_text)
+                .map(str::to_string);
+            let payload = payload_text
+                .as_deref()
+                .and_then(|t| serde_json::from_str::<StatusPayload>(t).ok());
+            let tags = rig
+                .objects
+                .snapshot()
+                .into_iter()
+                .map(|(key, (_, tag))| (key, tag))
+                .collect();
+            let released = rig.lock_released().await;
+            rig.set_execution(end_status(cell.trigger));
+            let second = rig.sweep().await;
+            Observed {
+                first,
+                record,
+                payload_text,
+                payload,
+                verdict: rig.objects.bytes(&Rig::key(layout::VERDICT)),
+                manifest: rig.objects.bytes(&Rig::key(layout::MANIFEST)),
+                tags,
+                released,
+                second,
+            }
+        }
+
+        async fn run(cell: &Cell) -> Observed {
+            let rig = setup(cell).await;
+            let first = deliver(&rig, cell).await;
+            observe(&rig, cell, first).await
+        }
+
+        // ------------------------------------------------------- the invariants
+
+        /// The class invariant, as eight numbered clauses (14-FAILURE-SURFACE.md).
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        enum Invariant {
+            /// Terminal and classified.
+            I1,
+            /// Finalization is total and the lock is released.
+            I2,
+            /// The class is decided from the records.
+            I3,
+            /// Caller-safe text.
+            I4,
+            /// No `.apr` unless completed.
+            I5,
+            /// Aborted means cancelled.
+            I6,
+            /// Retention tags.
+            I7,
+            /// Delivery-path independence.
+            I8,
+        }
+
+        impl Invariant {
+            const ALL: [Self; 8] = [
+                Self::I1,
+                Self::I2,
+                Self::I3,
+                Self::I4,
+                Self::I5,
+                Self::I6,
+                Self::I7,
+                Self::I8,
+            ];
+        }
+
+        /// The shrink-only ratchet: the invariants the sweep finds violated at HEAD
+        /// 359788182. The sweep must detect EVERY entry at least once (a stale entry
+        /// fails it) and nothing outside it. 14-17 deletes I2, I3, I7 and I8; 14-18
+        /// deletes I4. Never add an entry to make the sweep pass.
+        const KNOWN_DEFECTS: &[Invariant] = &[
+            Invariant::I2, // WR-02: a listed-but-absent object wedges tagging and the lock
+            Invariant::I3, // WR-01: the Catch's stage error is read before outcome.json
+            Invariant::I4, // WR-03: AWS text reaches the stored payload
+            Invariant::I7, // IN-01: the self-listing manifests keep `expire` on a kept run
+            Invariant::I8, // WR-01: the Catch delivery decides differently from the others
+        ];
+
+        /// What the records alone decide, by the class table (not by `finalize_run`).
+        struct Expected {
+            phase: Phase,
+            /// `Some` where D-08 fixes the disagreement flag.
+            disagreement: Option<bool>,
+            /// Text the error must carry (the class's own words).
+            error_contains: Option<&'static str>,
+            /// True when the error must be non-empty.
+            error_nonempty: bool,
+        }
+
+        fn expected(cell: &Cell) -> Expected {
+            let failed = |disagreement, error_contains| Expected {
+                phase: Phase::Failed,
+                disagreement,
+                error_contains,
+                error_nonempty: true,
+            };
+            let outcome_parses = !matches!(
+                cell.outcome,
+                OutcomeKind::Absent | OutcomeKind::Malformed | OutcomeKind::ForeignTask
+            ) && cell.absent_listed != AbsentKind::Outcome;
+            if !outcome_parses {
+                return failed(None, None);
+            }
+            let gate_present =
+                cell.gate_report == GateKind::Ok && cell.absent_listed != AbsentKind::GateReport;
+            let pack_accepted =
+                cell.pack == PackKind::Accepted && cell.absent_listed != AbsentKind::PackOutcome;
+            match cell.outcome {
+                OutcomeKind::RefusedOther => failed(Some(true), Some(REFUSED_OTHER_RULE)),
+                OutcomeKind::RefusedInputsChanged => failed(Some(false), Some(REFUSED_INPUTS_RULE)),
+                OutcomeKind::Crash => failed(None, Some("crash")),
+                OutcomeKind::Timeout => failed(None, Some("runtime cap")),
+                OutcomeKind::CpuFallback => failed(None, None),
+                OutcomeKind::Pass if gate_present && pack_accepted => Expected {
+                    phase: Phase::Completed,
+                    disagreement: Some(false),
+                    error_contains: None,
+                    error_nonempty: false,
+                },
+                OutcomeKind::GateFail if gate_present => Expected {
+                    phase: Phase::GateFailed,
+                    disagreement: Some(false),
+                    error_contains: None,
+                    error_nonempty: false,
+                },
+                _ => failed(None, None),
+            }
+        }
+
+        fn clip_debug(value: &impl std::fmt::Debug) -> String {
+            format!("{value:?}").chars().take(240).collect()
+        }
+
+        /// Every invariant `obs` violates, with the reason. Computed from the
+        /// records the finalizer left, never from its own rules or a log line.
+        fn findings(cell: &Cell, obs: &Observed) -> Vec<(Invariant, String)> {
+            let mut out = Vec::new();
+
+            // I1: an Ok finalization left a terminal record with a classified result.
+            if obs.first.is_ok() {
+                let classified = obs.payload.as_ref().is_some_and(|p| {
+                    matches!(
+                        p.phase,
+                        Phase::Completed | Phase::GateFailed | Phase::Failed | Phase::Cancelled
+                    )
+                });
+                let terminal = obs
+                    .record
+                    .as_ref()
+                    .is_some_and(|r| r.task.status.is_terminal());
+                if !(classified && terminal) {
+                    out.push((Invariant::I1, "Ok without a terminal classified record".into()));
+                }
+            }
+
+            // I2: with no injected fault the first pass is Ok and releases the lock,
+            // and a later sweep is Ok too.
+            if !(obs.first.is_ok() && obs.released && obs.second.is_ok()) {
+                out.push((
+                    Invariant::I2,
+                    format!(
+                        "first={} released={} sweep={}",
+                        clip_debug(&obs.first.as_ref().err()),
+                        obs.released,
+                        clip_debug(&obs.second.as_ref().err())
+                    ),
+                ));
+            }
+
+            // I3: the phase follows the records' class table, not the delivery path.
+            if let Some(payload) = &obs.payload {
+                let want = expected(cell);
+                let error = payload.error.as_deref().unwrap_or_default();
+                let mut wrong = Vec::new();
+                if payload.phase != want.phase {
+                    wrong.push(format!("phase {:?} not {:?}", payload.phase, want.phase));
+                }
+                if want
+                    .disagreement
+                    .is_some_and(|flag| payload.prefilter_disagreement != flag)
+                {
+                    wrong.push(format!(
+                        "prefilter_disagreement {}",
+                        payload.prefilter_disagreement
+                    ));
+                }
+                if want.error_contains.is_some_and(|needle| !error.contains(needle)) {
+                    wrong.push(format!("error lacks {:?}", want.error_contains));
+                }
+                if want.error_nonempty && error.is_empty() {
+                    wrong.push("error is empty".into());
+                }
+                if !wrong.is_empty() {
+                    out.push((Invariant::I3, wrong.join("; ")));
+                }
+            }
+            out
+        }
+
+        fn violations(cell: &Cell, obs: &Observed) -> Vec<Invariant> {
+            findings(cell, obs).into_iter().map(|(inv, _)| inv).collect()
+        }
+
+        // ------------------------------------------------------------ the tracer
+
+        /// One caught-refused cell through every layer: the machine's Catch hands
+        /// the finalizer a stage error for a trainer refusal the pre-filter
+        /// accepted, and the harness must see the WR-01 defect (I3) while I1 and I2
+        /// hold.
+        #[tokio::test]
+        async fn failure_surface_tracer_wr01() {
+            assert_eq!(parse_time_secs(&json!(T0_RFC3339)), Some(T0));
+            assert_eq!(Invariant::ALL.len(), 8);
+            let cell = Cell {
+                trigger: Via::SmCaught,
+                outcome: OutcomeKind::RefusedOther,
+                ..Cell::default()
+            };
+            let obs = run(&cell).await;
+
+            assert!(obs.first.is_ok(), "{:?}", obs.first);
+            let record = obs.record.as_ref().expect("a record");
+            assert_eq!(record.task.status, TaskStatus::Failed);
+            assert!(record.result.is_some(), "a stored result");
+            assert!(obs.released, "the lock is released");
+            let payload = obs.payload.as_ref().expect("a stored payload");
+            // The defect, named: the Catch's text decided, the trainer's line and the
+            // D-08 flag were never read.
+            assert!(
+                payload
+                    .error
+                    .as_deref()
+                    .is_some_and(|e| e.starts_with("States.TaskFailed")),
+                "{:?}",
+                payload.error
+            );
+            assert!(!payload.prefilter_disagreement);
+
+            assert_eq!(
+                violations(&cell, &obs),
+                [Invariant::I3],
+                "{} {:?}",
+                cell.label(),
+                findings(&cell, &obs)
+            );
+            assert!(KNOWN_DEFECTS.contains(&Invariant::I3));
+        }
+    }
 }

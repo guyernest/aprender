@@ -220,7 +220,7 @@ pub(crate) mod fakes {
     use super::{ObjectError, ObjectStore};
 
     /// The operations a fault can be aimed at.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
     pub enum Op {
         Get,
         Put,
@@ -229,14 +229,20 @@ pub(crate) mod fakes {
         List,
     }
 
+    impl Op {
+        /// Every operation, so a fault table can walk all of them.
+        pub const ALL: [Self; 5] = [Self::Get, Self::Put, Self::PutTag, Self::GetTag, Self::List];
+    }
+
     #[derive(Default)]
     struct Inner {
         /// key -> (bytes, retention tag).
         objects: BTreeMap<String, (Vec<u8>, Option<String>)>,
         /// Calls seen so far, per operation.
         calls: HashMap<Op, usize>,
-        /// `(op, n)`: fail the n-th call (1-based) of `op` exactly once.
-        faults: Vec<(Op, usize)>,
+        /// `(op, n, message)`: fail the n-th call (1-based) of `op` exactly once,
+        /// with `message` as the store's error text.
+        faults: Vec<(Op, usize, String)>,
     }
 
     /// An in-memory bucket that can fail the n-th call of an operation once.
@@ -280,9 +286,29 @@ pub(crate) mod fakes {
 
         /// Fail the `n`-th (1-based, counted from now) call of `op`, once.
         pub fn fail_nth(&self, op: Op, n: usize) {
+            let at = self.calls(op) + n;
+            self.fail_nth_with(op, n, &format!("injected {op:?} failure #{at}"));
+        }
+
+        /// Fail the `n`-th (1-based, counted from now) call of `op`, once, with
+        /// `message` as the error text: how a test plants hostile infrastructure
+        /// text in a store error.
+        pub fn fail_nth_with(&self, op: Op, n: usize, message: &str) {
             let mut inner = self.inner();
             let base = inner.calls.get(&op).copied().unwrap_or(0);
-            inner.faults.push((op, base + n));
+            inner.faults.push((op, base + n, message.to_string()));
+        }
+
+        /// How many calls of `op` were seen so far (failed ones included).
+        pub fn calls(&self, op: Op) -> usize {
+            self.inner().calls.get(&op).copied().unwrap_or(0)
+        }
+
+        /// Delete an object: how a manifest entry becomes listed-but-absent (the
+        /// shape a job leaves when its last upload fails after the manifest
+        /// already listed the object). The trait itself has no delete.
+        pub fn remove(&self, key: &str) {
+            self.inner().objects.remove(key);
         }
 
         pub fn bytes(&self, key: &str) -> Option<Vec<u8>> {
@@ -311,9 +337,9 @@ pub(crate) mod fakes {
             let n = inner.calls.entry(op).or_insert(0);
             *n += 1;
             let n = *n;
-            if let Some(at) = inner.faults.iter().position(|f| *f == (op, n)) {
-                inner.faults.remove(at);
-                return Err(format!("injected {op:?} failure #{n}"));
+            if let Some(at) = inner.faults.iter().position(|f| f.0 == op && f.1 == n) {
+                let (_, _, message) = inner.faults.remove(at);
+                return Err(message);
             }
             Ok(())
         }
