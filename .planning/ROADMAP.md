@@ -1058,7 +1058,7 @@ Owner decisions already made (2026-10-28), to be recorded in this phase's CONTEX
 Known constraints: Laya training does not fit Lambda (CPU, 900 s cap) — Phase 10's gate run took 16,822 s on Apple MPS for three seeds and Phase 12's pilot 752 s; SageMaker GPU instances are x86_64 + CUDA while every Laya parity and pack-tolerance number is aarch64 (`contracts/laya-parity-v1.yaml` A1; `--device cuda` exists and the noise record is written per run), so a one-cell probe comes before any gate run is trusted there; `pack_laya` is a cargo example, not a shipped binary, and no `apr decide` subcommand exists (Phase 8 D-02); the base snapshot (`convaiinnovations/laya` @ 55cf4c4e, 0.84 GB, sha-pinned) must reach the job from S3, never baked into the image; the Lambda crate's `bootstrap` bin needs a FALSIFY-MONO-011 allowlist entry (baseline 27); reading a prefix needs prefix-scoped `s3:ListBucket` or a missing key answers 403, not 404 (the SetFit server's lesson); CI never installs torch, so the container's lifecycle check is local-only like `laya-verify-suite`; no AWS call without the owner.
 **Requirements**: none mapped; the plans implement CONTEXT decisions
 **Depends on:** Phase 13
-**Plans:** 19/22 plans executed
+**Plans:** 20/22 plans executed
 
 Plans:
 **Wave 1**
@@ -1098,7 +1098,7 @@ Plans:
 - [x] 14-16-PLAN.md — failure-surface enumeration (inspection-derived), one swept finalizer gate with a shrink-only ratchet, WR-01 tracer (wave 1)
 - [x] 14-17-PLAN.md — WR-01 class from records, WR-02 total finalization, IN-01 retention, red-side mutations (wave 2)
 - [x] 14-19-PLAN.md — WR-04 finalizer asset provenance sidecar and deploy refusal, state-machine rows bound to the template (wave 2)
-- [ ] 14-18-PLAN.md — WR-03 caller-safe text at three boundaries (serializer, backend wrapper, dispatch label), clean ratchet (wave 3)
+- [x] 14-18-PLAN.md — WR-03 caller-safe text at three boundaries (serializer, backend wrapper, dispatch label), clean ratchet (wave 3)
 - [x] 14-20-PLAN.md — cross-CPU re-score drift measurement: harness, free local legs, controls, Graviton script generator (wave 3)
 - [ ] 14-21-PLAN.md — owner-run Graviton legs, decision brief, D-15 owner decision; no contract edit (wave 4, owner-gated)
 - [ ] 14-22-PLAN.md — owner-run finalizer redeploy with hash check; request-function redeploy decision (wave 4, owner-gated)
