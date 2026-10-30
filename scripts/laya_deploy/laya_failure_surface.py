@@ -28,7 +28,9 @@ silently:
 `--selftest` mutates in-memory copies once per case and requires exactly that case's own rule to refuse it, and the
 unmutated inputs to pass; it ends `FAILURE SURFACE SELFTEST OK <n> cases`. `--sweep` runs the finalizer sweep tests with cargo
 and refuses unless every expected test is reported ok and at least the expected minimum passed; it ends
-`FAILURE SURFACE SWEEP OK`. `--mutations` is the source-mutation runner plans 14-17 and 14-18 register cases in.
+`FAILURE SURFACE SWEEP OK`. `--mutations` is the source-mutation runner plans 14-17 and 14-18 register cases in: each
+case rewrites one anchor of the fixed source on disk, requires the named tests or invariants to turn red, and restores
+the file byte for byte (in a finally block, re-read to prove it); it ends `FAILURE SURFACE MUTATIONS OK <n>/<n>`.
 
 Standard library only; run with `python3 -I`. It makes no network call.
 """
@@ -38,6 +40,7 @@ import importlib.util
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 
@@ -75,6 +78,7 @@ SINK_PATTERNS = {
     "start-error": r"\bStartError\s*\{",
     "stage-error": r"\bstage_error\b",
     "log": r"\btracing::(?:error|warn|info|debug)!|\beprintln!|\bprintln!",
+    "payload-notes": r"\.notes\.push\(",
 }
 SINK_CLASSES = ("caller", "log-only", "static")
 
@@ -90,10 +94,87 @@ SWEEP = {
     "min_passed": 3,
 }
 
-# --mutations: (id, file, old text, new text, test filter, expected failing test or invariant id). Plans 14-17 and
-# 14-18 register their red-side proofs here; 14-16 registers none (it changes no production behaviour).
-MUTATIONS = []
+# --mutations: the red-side proofs. One case is (id, file, old text, new text, runs): `old` must occur in `file`
+# EXACTLY once (taken verbatim from the fixed source), `new` replaces it, and every run (crate, test filter, expected)
+# must then exit non-zero with output naming every expected token. A token is either a test function name (its
+# `test ...::<name> ... FAILED` line) or an invariant id (the sweep's `violations outside the ratchet: [...(<id>, ...`).
+# Before any mutation each distinct (crate, filter) runs unmutated and must be green with every expected test reported
+# ok (the control: a filter that matches nothing exits 0 with zero tests run). Plans 14-17 and 14-18 register cases.
+SERVER = "aprender-mcp-laya-train"
+LAMBDA = "aprender-mcp-laya-train-lambda"
+FINALIZE_RS = "crates/aprender-mcp-laya-train/src/finalize.rs"
+SWEEP_TEST = "failure_surface_sweep_known_defects_only"
+TRACER_TEST = "failure_surface_tracer_wr01"
 
+MUTATIONS = [
+    # WR-01: the class comes from the records, the stage error is detail (plan 14-17 Task 1).
+    ("M-WR01-a", FINALIZE_RS,
+     "    let Some(outcome) = input.outcome.as_ref() else {\n",
+     "    if let Some(error) = &input.stage_error {\n"
+     "        return b.failed(error, None, false);\n"
+     "    }\n"
+     "    let Some(outcome) = input.outcome.as_ref() else {\n",
+     [(LAMBDA, "failure_surface", ["I3", "I8", TRACER_TEST, SWEEP_TEST])]),
+    ("M-WR01-b", FINALIZE_RS,
+     '            &b.with_stage("pack-outcome.json is missing: the pack stage left no record"),\n',
+     '            "pack-outcome.json is missing: the pack stage left no record",\n',
+     [(SERVER, "finalize_pack_missing", ["finalize_pack_missing"])]),
+    ("M-WR01-c", FINALIZE_RS,
+     '                    &format!("the trainer refused a dataset the pre-filter accepted: {line}"),\n'
+     "                    None,\n"
+     "                    true,\n",
+     '                    &format!("the trainer refused a dataset the pre-filter accepted: {line}"),\n'
+     "                    None,\n"
+     "                    false,\n",
+     [(SERVER, "finalize_refused", ["finalize_refused_with_stage_error"])]),
+    ("M-WR01-d", FINALIZE_RS,
+     "            payload.notes.push(NOTE_STAGE_ERROR_OVERRIDDEN.to_string());\n",
+     "            let _ = NOTE_STAGE_ERROR_OVERRIDDEN;\n",
+     [(SERVER, "finalize_stage_error_overridden", ["finalize_stage_error_overridden"]),
+      (LAMBDA, SWEEP_TEST, ["I3"])]),
+    # WR-02 and IN-01: finalization is total over the run's objects, every inventory is tagged (Task 2).
+    ("M-WR02-a", FINALIZER,
+     "        drop_absent_entries(ctx, &subject.run_prefix, &mut objects).await?;\n",
+     "        let _ = &mut objects;\n",
+     [(LAMBDA, SWEEP_TEST, ["I2"])]),
+    ("M-WR02-b", FINALIZER,
+     "    targets.retain(|key| present.contains(key));\n",
+     "    let _ = &present;\n",
+     [(LAMBDA, SWEEP_TEST, ["I2"])]),
+    ("M-WR02-c", FINALIZER,
+     '    targets.extend(SELF_LISTING.iter().map(|name| format!("{prefix}{name}")));\n',
+     "",
+     [(LAMBDA, SWEEP_TEST, ["I7"])]),
+    # The wrong fix for an adopted manifest that names a gone object: rebuild its entries from the listing, which
+    # tags keys no inventory names.
+    ("M-WR02-d", FINALIZER,
+     "    let manifest = if let Some(existing) = adopted {\n"
+     "        existing\n",
+     "    let manifest = if let Some(mut existing) = adopted {\n"
+     "        existing.entries = ctx\n"
+     "            .objects\n"
+     "            .list(prefix)\n"
+     "            .await\n"
+     '            .map_err(|e| store_err(format!("listing {prefix}: {e}")))?\n'
+     "            .into_iter()\n"
+     "            .filter_map(|(key, size)| {\n"
+     "                Some(ManifestEntry {\n"
+     "                    path: key.strip_prefix(prefix.as_str())?.to_string(),\n"
+     "                    size,\n"
+     "                    sha256: String::new(),\n"
+     "                })\n"
+     "            })\n"
+     "            .collect();\n"
+     "        existing\n",
+     [(LAMBDA, "fin_adopted_manifest_with_absent_entry", ["fin_adopted_manifest_with_absent_entry"])]),
+    ("M-WR02-e", FINALIZE_RS,
+     "        if let Some(note) = dropped_note(&self.input.dropped) {\n"
+     "            payload.notes.push(note);\n"
+     "        }\n",
+     "        let _ = dropped_note(&self.input.dropped);\n",
+     [(SERVER, "finalize_dropped_note", ["finalize_dropped_note"]),
+      (LAMBDA, SWEEP_TEST, ["I2"])]),
+]
 
 def read(rel, root=ROOT):
     with open(os.path.join(root, rel), encoding="utf-8") as f:
@@ -559,17 +640,127 @@ def sweep():
     return 0
 
 
+INVARIANT_TOKEN = re.compile(r"^I[0-9]+$")
+
+
+def cargo_test(crate, filt):
+    cmd = ["cargo", "test", "-p", crate, "--lib", filt]
+    r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
+    # stderr (the build) first, so a diagnostic tail shows the test lines.
+    return r.returncode, r.stderr + "\n" + r.stdout
+
+
+def names_token(out, token, outcome):
+    """True when `out` reports `token` with `outcome` (FAILED or ok); an invariant id is named by the sweep's ratchet
+    assertion (only a failing sweep prints it)."""
+    if INVARIANT_TOKEN.match(token):
+        return outcome == "FAILED" and re.search(r"violations outside the ratchet: .*\(%s," % token, out) is not None
+    return re.search(r"^test \S*::%s \.\.\. %s$" % (re.escape(token), outcome), out, re.M) is not None
+
+
+class Interrupted(Exception):
+    """A SIGTERM or SIGHUP, raised so the restoring finally block runs."""
+
+
+def _interrupt(signum, _frame):
+    raise Interrupted("signal %d" % signum)
+
+
+def restore(path, original):
+    with open(path, "wb") as f:
+        f.write(original)
+    with open(path, "rb") as f:
+        back = f.read()
+    if back != original:
+        raise RuntimeError("%s was NOT restored byte for byte" % path)
+
+
 def mutations(only):
-    known = {m[0] for m in MUTATIONS}
-    unknown = sorted(set(only) - known)
+    known = [m[0] for m in MUTATIONS]
+    unknown = sorted(set(only) - set(known))
     if unknown:
         print("REFUSED usage: --only names mutations that are not registered: %s" % ", ".join(unknown), file=sys.stderr)
         return 2
     if not MUTATIONS:
         print("FAILURE SURFACE MUTATIONS: none registered yet (plans 14-17 and 14-18 register them); nothing was run")
         return 0
-    print("REFUSED mutations: the runner is not implemented yet (plan 14-17 adds it with its cases)", file=sys.stderr)
-    return 1
+    if len(set(known)) != len(known):
+        print("REFUSED mutations: a mutation id is registered twice", file=sys.stderr)
+        return 1
+    cases = [m for m in MUTATIONS if not only or m[0] in only]
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, _interrupt)
+
+    # Every file the selected cases touch, as it is now: the run must end with each one byte-identical to this.
+    before = {}
+    for _, rel, _, _, _ in cases:
+        with open(os.path.join(ROOT, rel), "rb") as f:
+            before.setdefault(rel, f.read())
+
+    # The controls: each distinct (crate, filter), unmutated, green, with every expected test reported ok.
+    controls = {}
+    for _, _, _, _, runs in cases:
+        for crate, filt, tokens in runs:
+            controls.setdefault((crate, filt), set()).update(t for t in tokens if not INVARIANT_TOKEN.match(t))
+    failures = []
+    for (crate, filt), tests in sorted(controls.items()):
+        rc, out = cargo_test(crate, filt)
+        missing = sorted(t for t in tests if not names_token(out, t, "ok"))
+        passed = sum(int(n) for n in re.findall(r"^test result: \w+\. (\d+) passed", out, re.M))
+        ok = rc == 0 and not missing and passed > 0
+        print("CONTROL %s %s: %s" % (crate, filt, "green, %d passed" % passed if ok else
+                                    "NOT green (rc %d, %d passed, not reported ok: %s)" % (rc, passed, missing)))
+        if not ok:
+            failures.append("control %s %s" % (crate, filt))
+    if failures:
+        print("FAILURE SURFACE MUTATIONS FAILED: a control run is not green, so no mutation can prove anything")
+        return 1
+
+    refused = 0
+    for mid, rel, old, new, runs in cases:
+        path = os.path.join(ROOT, rel)
+        with open(path, "rb") as f:
+            original = f.read()
+        text = original.decode("utf-8")
+        hits = text.count(old)
+        if hits != 1:
+            print("MUTATION %s INVALID: the old text occurs %d times in %s (it must occur exactly once)" % (mid, hits, rel))
+            failures.append(mid)
+            continue
+        verdicts = []
+        try:
+            with open(path, "wb") as f:
+                f.write(text.replace(old, new, 1).encode("utf-8"))
+            for crate, filt, tokens in runs:
+                rc, out = cargo_test(crate, filt)
+                unnamed = [t for t in tokens if not names_token(out, t, "FAILED")]
+                verdicts.append((crate, filt, rc, tokens, unnamed, out))
+        finally:
+            restore(path, original)
+        bad = [v for v in verdicts if v[2] == 0 or v[4]]
+        if bad:
+            failures.append(mid)
+            for crate, filt, rc, tokens, unnamed, out in bad:
+                print("MUTATION %s SURVIVED in %s %s: rc %d, expected red %s, not named %s"
+                      % (mid, crate, filt, rc, tokens, unnamed))
+                for line in out.strip().splitlines()[-8:]:
+                    print("  | " + line)
+            continue
+        refused += 1
+        print("MUTATION %s %s: refused by %s; restored" % (
+            mid, rel, "; ".join("%s %s -> %s" % (c, f, ", ".join(t)) for c, f, _, t, _, _ in verdicts)))
+
+    # The tree the runner found is the tree it leaves.
+    for rel, original in sorted(before.items()):
+        with open(os.path.join(ROOT, rel), "rb") as f:
+            if f.read() != original:
+                print("FAILURE SURFACE MUTATIONS FAILED: %s differs from the pre-run bytes" % rel)
+                return 1
+    if failures:
+        print("FAILURE SURFACE MUTATIONS FAILED %d/%d refused; failed: %s" % (refused, len(cases), ", ".join(failures)))
+        return 1
+    print("FAILURE SURFACE MUTATIONS OK %d/%d" % (refused, len(cases)))
+    return 0
 
 
 # ---------------------------------------------------------------------------------------------------- main

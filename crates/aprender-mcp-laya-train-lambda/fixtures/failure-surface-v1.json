@@ -73,6 +73,14 @@
       "result": "finalize.rs: finalize_refused, finalize_inputs_changed, finalize_crash, finalize_timeout, finalize_cpu, finalize_partial_manifest; finalizer.rs: fin_partial_inventory, fin_timeout_event, fin_reconcile_lost_event, fin_first_writer_wins; plus fin_catch_error (a Cause, no outcome)",
       "date": "2026-10-30",
       "head": "327d9cdb2"
+    },
+    {
+      "id": "D-j",
+      "what": "the sweep after plan 14-17",
+      "command": "python3 -I scripts/laya_deploy/laya_failure_surface.py --sweep; the sweep test binary with --nocapture",
+      "result": "4800 cells + 10 aborted: I1, I2, I3, I5, I6, I7 and I8 hold; I4 is violated in 1536 cells (sm_caught 936, each other delivery 150), the one remaining ratchet entry (14-18). The transient-fault table grew to 58 single-fault cases (the drop listing and the post-write listing are two more calls)",
+      "date": "2026-10-30",
+      "head": "736eacdb6"
     }
   ],
   "state_machine": {
@@ -298,7 +306,7 @@
     },
     {
       "step": 5,
-      "what": "read the run objects and decide (finalize_run)"
+      "what": "read the run objects, drop every writer-manifest entry S3 does not hold (one listing, D-11), and decide (finalize_run)"
     },
     {
       "step": 6,
@@ -314,8 +322,7 @@
     },
     {
       "step": 9,
-      "what": "retention tags on every manifest entry and manifest.json, each read back",
-      "defect": "WR-02, IN-01"
+      "what": "retention tags on every manifest.json entry, manifest.json and every self-listing inventory that exists, restricted to a listing taken after the writes, each read back"
     },
     {
       "step": 10,
@@ -341,7 +348,8 @@
     "dispatch-error": "\\bDispatchError\\s*\\{|DispatchError::[A-Z]",
     "start-error": "\\bStartError\\s*\\{",
     "stage-error": "\\bstage_error\\b",
-    "log": "\\btracing::(?:error|warn|info|debug)!|\\beprintln!|\\bprintln!"
+    "log": "\\btracing::(?:error|warn|info|debug)!|\\beprintln!|\\bprintln!",
+    "payload-notes": "\\.notes\\.push\\("
   },
   "sinks": [
     {
@@ -402,9 +410,9 @@
     {
       "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
       "pattern": "log",
-      "count": 5,
+      "count": 7,
       "classes": {
-        "log-only": 5
+        "log-only": 7
       },
       "rows": [
         "SK-10"
@@ -509,13 +517,25 @@
     {
       "file": "crates/aprender-mcp-laya-train/src/finalize.rs",
       "pattern": "stage-error",
-      "count": 2,
+      "count": 7,
       "classes": {
-        "caller": 1,
-        "static": 1
+        "caller": 3,
+        "static": 4
       },
       "rows": [
-        "SK-02"
+        "SK-02",
+        "SK-11"
+      ]
+    },
+    {
+      "file": "crates/aprender-mcp-laya-train/src/finalize.rs",
+      "pattern": "payload-notes",
+      "count": 2,
+      "classes": {
+        "caller": 2
+      },
+      "rows": [
+        "SK-NOTES"
       ]
     },
     {
@@ -614,11 +634,11 @@
     },
     {
       "id": "I2",
-      "text": "finalization total and lock released: with no injected fault the first pass returns Ok and releases the single-flight lock, and a later reconcile sweep returns Ok; a held lock is allowed only for compute still billing or one injected transient S3 or backend fault the next pass clears"
+      "text": "finalization total and lock released: with no injected fault the first pass returns Ok and releases the single-flight lock, and a later reconcile sweep returns Ok; a held lock is allowed only for compute still billing or one injected transient S3 or backend fault the next pass clears; and an object a writer manifest lists but S3 does not hold is listed by neither the stored payload nor manifest.json, and the stored payload names it in exactly one listed-but-absent note (no such note when nothing listed is absent)"
     },
     {
       "id": "I3",
-      "text": "class decided from the records: when outcome.json parses and names the task, the phase follows the class table whatever the delivery path (refused_other failed with prefilter_disagreement true and the REFUSED line; inputs-changed failed with the flag false; crash and timeout failed with their class text; cpu fallback failed; pass and gate_fail follow the gate report and the pack record); an absent, malformed, foreign or removed outcome is failed with a non-empty error"
+      "text": "class decided from the records: when outcome.json parses and names the task, the phase follows the class table whatever the delivery path (refused_other failed with prefilter_disagreement true and the REFUSED line; inputs-changed failed with the flag false; crash and timeout failed with their class text; cpu fallback failed; pass and gate_fail follow the gate report and the pack record); an absent, malformed, foreign or removed outcome is failed with a non-empty error; a completed or gate_failed run delivered through the Catch (a stage error the records overrode) carries the stage-error-overridden note in the stored payload, and no other delivery of the same records and no failed phase does"
     },
     {
       "id": "I4",
@@ -708,29 +728,9 @@
   ],
   "known_defects": [
     {
-      "id": "I2",
-      "ref": "WR-02",
-      "closes": "14-17"
-    },
-    {
-      "id": "I3",
-      "ref": "WR-01",
-      "closes": "14-17"
-    },
-    {
       "id": "I4",
       "ref": "WR-03",
       "closes": "14-18"
-    },
-    {
-      "id": "I7",
-      "ref": "IN-01",
-      "closes": "14-17"
-    },
-    {
-      "id": "I8",
-      "ref": "WR-01",
-      "closes": "14-17"
     }
   ],
   "rows": [
@@ -767,7 +767,7 @@
       "id": "FS-SM-03",
       "group": "state-machine",
       "what": "Train fails (job exit 1: refused, crash, timeout, cpu fallback, or any upload failure) -> Catch States.ALL -> CatchFinalize, resultPath $.error: the finalizer gets a stage error for EVERY catch-fed class",
-      "status": "defect",
+      "status": "closed",
       "ref": "WR-01",
       "closes": "14-17",
       "test": {
@@ -778,13 +778,14 @@
         "I3",
         "I4",
         "I8"
-      ]
+      ],
+      "note": "closed by 14-17: the Catch still supplies the stage error, but finalize_run reads outcome.json first: the class, the REFUSED line and the D-08 flag come from the records (I3 and I8 hold over the sweep)"
     },
     {
       "id": "FS-SM-04",
       "group": "state-machine",
       "what": "PackVerify fails (PackError exit 1 with no pack-outcome.json, env/contracts refusal exit 2, an upload failure exit 1, the 3 h task timeout) -> Catch States.ALL -> CatchFinalize, resultPath $.error",
-      "status": "defect",
+      "status": "closed",
       "ref": "WR-01",
       "closes": "14-17",
       "test": {
@@ -794,7 +795,8 @@
       "invariants": [
         "I3",
         "I8"
-      ]
+      ],
+      "note": "closed by 14-17: a missing pack record under a stage error fails 'pack-outcome.json is missing; stage error: ...' and decides as the event and reconcile deliveries do"
     },
     {
       "id": "FS-SM-05",
@@ -919,7 +921,7 @@
       "id": "FS-EX-03",
       "group": "exit-class",
       "what": "refused -> train job exit 1 -> CatchFinalize only",
-      "status": "defect",
+      "status": "closed",
       "ref": "WR-01",
       "closes": "14-17",
       "test": {
@@ -929,61 +931,65 @@
       "invariants": [
         "I3",
         "I8"
-      ]
+      ],
+      "note": "closed by 14-17: a caught refusal keeps prefilter_disagreement true and the trainer's REFUSED line"
     },
     {
       "id": "FS-EX-04",
       "group": "exit-class",
       "what": "crash -> train job exit 1 -> CatchFinalize only",
-      "status": "defect",
+      "status": "closed",
       "ref": "WR-01",
       "closes": "14-17",
       "test": {
-        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
-        "name": "failure_surface_sweep_known_defects_only"
+        "file": "crates/aprender-mcp-laya-train/src/finalize.rs",
+        "name": "finalize_crash"
       },
       "invariants": [
         "I3",
         "I8"
-      ]
+      ],
+      "note": "closed by 14-17: crash keeps its class text on both deliveries; the stage error is appended as detail"
     },
     {
       "id": "FS-EX-05",
       "group": "exit-class",
       "what": "timeout -> train job exit 1 -> CatchFinalize only",
-      "status": "defect",
+      "status": "closed",
       "ref": "WR-01",
       "closes": "14-17",
       "test": {
-        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
-        "name": "failure_surface_sweep_known_defects_only"
+        "file": "crates/aprender-mcp-laya-train/src/finalize.rs",
+        "name": "finalize_timeout"
       },
       "invariants": [
         "I3",
         "I8"
-      ]
+      ],
+      "note": "closed by 14-17: timeout keeps 'runtime cap' on both deliveries; the stage error is appended as detail"
     },
     {
       "id": "FS-EX-06",
       "group": "exit-class",
       "what": "a failed upload forces exit 1 for ANY class (Run.finish: code = 1 if failed and code == 0), so pass and gate_fail can arrive through the Catch too, with outcome.json possibly listed but absent",
-      "status": "defect",
+      "status": "closed",
       "ref": "WR-02",
       "closes": "14-17",
       "test": {
         "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
-        "name": "failure_surface_sweep_known_defects_only"
+        "name": "fin_override_note_reaches_verdict"
       },
       "invariants": [
         "I2",
         "I3"
-      ]
+      ],
+      "note": "closed by 14-17: a pass or gate_fail that exited 1 only because an upload failed is decided by its records and carries the stage-error-overridden note; an outcome.json listed but absent is dropped (fin_listed_but_absent_outcome)"
     },
     {
       "id": "FS-EX-07",
       "group": "exit-class",
       "what": "a CPU fallback is classified crash with device_ok false (finish_after_trainer), so it is catch-fed",
-      "status": "defect",
+      "status": "closed",
       "ref": "WR-01",
       "closes": "14-17",
       "test": {
@@ -992,7 +998,8 @@
       },
       "invariants": [
         "I3"
-      ]
+      ],
+      "note": "closed by 14-17: the cpu_fallback cells fail on every delivery with the crash class"
     },
     {
       "id": "FS-PK-01",
@@ -1043,23 +1050,24 @@
       "id": "FS-PK-04",
       "group": "pack",
       "what": "PackError (outcome, manifest, download, integrity, base, child) -> exit 1 with NO pack-outcome.json -> PackVerify Catch: stage error plus a missing pack record",
-      "status": "defect",
+      "status": "closed",
       "ref": "WR-01",
       "closes": "14-17",
       "test": {
-        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
-        "name": "failure_surface_sweep_known_defects_only"
+        "file": "crates/aprender-mcp-laya-train/src/finalize.rs",
+        "name": "finalize_pack_missing"
       },
       "invariants": [
         "I3",
         "I8"
-      ]
+      ],
+      "note": "closed by 14-17: the pack-record-missing failure carries the stage error as detail"
     },
     {
       "id": "FS-PK-05",
       "group": "pack",
       "what": "entry_pack env or contracts refusal -> exit 2 before any download, no pack-outcome.json -> PackVerify Catch",
-      "status": "defect",
+      "status": "closed",
       "ref": "WR-01",
       "closes": "14-17",
       "test": {
@@ -1068,22 +1076,24 @@
       },
       "invariants": [
         "I3"
-      ]
+      ],
+      "note": "closed by 14-17: an env or contracts refusal leaves no pack record: failed on every delivery, the same class"
     },
     {
       "id": "FS-PK-06",
       "group": "pack",
       "what": "publish_pack lists pack-outcome.json in pack-manifest.json BEFORE uploading it; a failed last upload leaves it listed but absent (exit 1)",
-      "status": "defect",
+      "status": "closed",
       "ref": "WR-02",
       "closes": "14-17",
       "test": {
         "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
-        "name": "failure_surface_sweep_known_defects_only"
+        "name": "fin_listed_but_absent_pack_outcome"
       },
       "invariants": [
         "I2"
-      ]
+      ],
+      "note": "closed by 14-17: pack-outcome.json listed but absent is dropped at read; the lock is released on the first pass"
     },
     {
       "id": "FS-RO-01",
@@ -1210,16 +1220,17 @@
       "id": "FS-RO-09",
       "group": "run-object",
       "what": "a manifest entry listed but absent in S3 (FS-EX-06, FS-PK-06): read_run_objects keeps the entry",
-      "status": "defect",
+      "status": "closed",
       "ref": "WR-02",
       "closes": "14-17",
       "test": {
         "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
-        "name": "failure_surface_sweep_known_defects_only"
+        "name": "fin_listed_but_absent_outcome"
       },
       "invariants": [
         "I2"
-      ]
+      ],
+      "note": "closed by 14-17: drop_absent_entries removes every entry S3 does not hold, from one listing of the run prefix; FinalizeReport.dropped and one listed-but-absent note name them"
     },
     {
       "id": "FS-DP-01",
@@ -1256,18 +1267,19 @@
       "id": "FS-DP-03",
       "group": "decision",
       "what": "no outcome -> failed with the stage error text when one was supplied (else 'outcome.json is missing'); since 14-17 a parsed outcome.json decides the class whatever the delivery path, and the stage error is detail only (appended '; stage error: ...' to crash, timeout, device, missing gate-report and missing pack-record failures)",
-      "status": "defect",
+      "status": "closed",
       "ref": "WR-01",
       "closes": "14-17",
       "test": {
-        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
-        "name": "failure_surface_tracer_wr01"
+        "file": "crates/aprender-mcp-laya-train/src/finalize.rs",
+        "name": "finalize_catch_fed_both_deliveries"
       },
       "invariants": [
         "I3",
         "I4",
         "I8"
-      ]
+      ],
+      "note": "closed by 14-17: every catch-fed class is decided from its records through fixtures::through_catch and with no stage error, to the same class"
     },
     {
       "id": "FS-DP-04",
@@ -1303,17 +1315,18 @@
       "id": "FS-DP-06",
       "group": "decision",
       "what": "any other refusal -> failed, prefilter_disagreement TRUE, the trainer's REFUSED line (D-08), on every delivery path including the Catch (stage error not appended)",
-      "status": "defect",
+      "status": "closed",
       "ref": "WR-01",
       "closes": "14-17",
       "test": {
-        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
-        "name": "failure_surface_tracer_wr01"
+        "file": "crates/aprender-mcp-laya-train/src/finalize.rs",
+        "name": "finalize_refused_with_stage_error"
       },
       "invariants": [
         "I3",
         "I8"
-      ]
+      ],
+      "note": "closed by 14-17: a stage error plus a refusal the pre-filter accepted gives prefilter_disagreement true and the REFUSED line"
     },
     {
       "id": "FS-DP-07",
@@ -1485,31 +1498,33 @@
       "id": "FS-PB-05",
       "group": "publication",
       "what": "tag targets = every manifest.json entry plus manifest.json: a listed-but-absent key fails GetObjectTagging (NoSuchKey) and wedges the lock",
-      "status": "defect",
+      "status": "closed",
       "ref": "WR-02",
       "closes": "14-17",
       "test": {
         "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
-        "name": "failure_surface_sweep_known_defects_only"
+        "name": "fin_adopted_manifest_with_absent_entry"
       },
       "invariants": [
         "I2"
-      ]
+      ],
+      "note": "closed by 14-17: tag targets are intersected with a listing taken after verdict.json and manifest.json are written; an adopted manifest.json that names a gone object no longer wedges the lock, and no unlisted key is ever tagged"
     },
     {
       "id": "FS-PB-06",
       "group": "publication",
       "what": "the self-listing inventories (training-, partial-, pack-manifest.json) are never tag targets: a kept run's inventories keep 'expire'",
-      "status": "defect",
+      "status": "closed",
       "ref": "IN-01",
       "closes": "14-17",
       "test": {
         "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
-        "name": "failure_surface_sweep_known_defects_only"
+        "name": "fin_kept_run_retags_inventories"
       },
       "invariants": [
         "I7"
-      ]
+      ],
+      "note": "closed by 14-17: every self-listing inventory that exists carries the run's retention tag: keep for a kept GATE PASS, expire otherwise"
     },
     {
       "id": "FS-PB-07",
@@ -1710,6 +1725,21 @@
       "note": "classified a handle, not a leak: the caller names this bucket in dataset_uri; the planted I4 constants deliberately exclude it. 14-18 must state the exclusion in I4 (its redactor would otherwise break the s3:// handle)"
     },
     {
+      "id": "SK-NOTES",
+      "group": "sink",
+      "what": "finalize.rs Builder::decide pushes StatusPayload.notes: stage-error-overridden (one fixed sentence) and listed-but-absent (the count and at most eight job-written manifest paths, each clipped to 128 characters) -> the stored payload, verdict.json, tasks/result and train_status. No stage error or infrastructure text by construction, but the paths are job-written, so 14-18 extends its serializer redaction to notes",
+      "status": "defect",
+      "ref": "WR-03",
+      "closes": "14-18",
+      "test": {
+        "file": "crates/aprender-mcp-laya-train/src/finalize.rs",
+        "name": "finalize_dropped_note"
+      },
+      "invariants": [
+        "I4"
+      ]
+    },
+    {
       "id": "FS-AS-01",
       "group": "asset",
       "what": "the finalizer Lambda asset (deploy-extensions/assets/laya-finalizer/bootstrap) is deployed with an existence check only: no commit, clean-tree or sha256 provenance",
@@ -1727,64 +1757,36 @@
       "id": "FS-UT-01",
       "group": "unit-tests",
       "what": "finalize.rs tests hand finalize_run stage_error None for catch-fed classes (refused, inputs-changed, crash, timeout, cpu, partial-manifest timeout): a delivery the machine never makes for those classes",
-      "status": "defect",
+      "status": "closed",
       "ref": "WR-01",
       "closes": "14-17",
       "test": {
         "file": "crates/aprender-mcp-laya-train/src/finalize.rs",
-        "name": "finalize_refused"
+        "name": "finalize_catch_fed_both_deliveries"
       },
       "invariants": [
         "I3"
-      ]
+      ],
+      "note": "closed by 14-17: finalize_refused, finalize_inputs_changed, finalize_crash, finalize_timeout and finalize_cpu are one table over the two deliveries (fixtures::through_catch and None)"
     },
     {
       "id": "FS-UT-02",
       "group": "unit-tests",
       "what": "finalizer.rs tests deliver catch-fed classes with stage_error None (payload(None), status events, reconcile), and fin_catch_error carries a Cause but no outcome",
-      "status": "defect",
+      "status": "closed",
       "ref": "WR-01",
       "closes": "14-17",
       "test": {
         "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
-        "name": "fin_catch_error"
+        "name": "failure_surface_sweep_known_defects_only"
       },
       "invariants": [
         "I3"
-      ]
+      ],
+      "note": "closed by 14-17: I8 now holds, so a stage_error None delivery (event, reconcile) decides as the Catch does and those tests model a real delivery; fin_listed_but_absent_* and fin_override_note_reaches_verdict deliver with and without the stage error"
     }
   ],
   "tests_not_modelling_catch": [
-    {
-      "file": "crates/aprender-mcp-laya-train/src/finalize.rs",
-      "name": "finalize_refused",
-      "delivery": "finalize_run direct, stage_error None",
-      "why": "refused exits 1: the machine always supplies a stage error"
-    },
-    {
-      "file": "crates/aprender-mcp-laya-train/src/finalize.rs",
-      "name": "finalize_inputs_changed",
-      "delivery": "finalize_run direct, stage_error None",
-      "why": "refused exits 1"
-    },
-    {
-      "file": "crates/aprender-mcp-laya-train/src/finalize.rs",
-      "name": "finalize_crash",
-      "delivery": "finalize_run direct, stage_error None",
-      "why": "crash exits 1"
-    },
-    {
-      "file": "crates/aprender-mcp-laya-train/src/finalize.rs",
-      "name": "finalize_timeout",
-      "delivery": "finalize_run direct, stage_error None",
-      "why": "timeout exits 1"
-    },
-    {
-      "file": "crates/aprender-mcp-laya-train/src/finalize.rs",
-      "name": "finalize_cpu",
-      "delivery": "finalize_run direct, stage_error None",
-      "why": "it builds exit_class pass with device_ok false; run_step.py writes a CPU fallback as crash (exit 1)"
-    },
     {
       "file": "crates/aprender-mcp-laya-train/src/finalize.rs",
       "name": "finalize_partial_manifest",

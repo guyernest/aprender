@@ -7,6 +7,8 @@ json: crates/aprender-mcp-laya-train-lambda/fixtures/failure-surface-v1.json
 checker: scripts/laya_deploy/laya_failure_surface.py
 derived_at_head: 327d9cdb2
 derived_on: 2026-10-30
+updated_by: 14-17
+updated_at_head: 736eacdb6
 ---
 
 # Phase 14: the finalizer and state-machine failure surface
@@ -24,6 +26,13 @@ it describes is byte-identical to the verification HEAD `359788182` (`git diff 3
 crates/aprender-mcp-laya-train-lambda/src/{compute,dataset,lib,sfn}.rs` is empty, and the non-test prefix of
 `finalizer.rs` is unchanged; `objects.rs` gained test-only fakes).
 
+**Plan 14-17 (2026-10-30)** then changed production code to close WR-01, WR-02 and IN-01 against this surface:
+`finalize.rs` (outcome-first classification, the stage error as detail, the `notes` it writes), `layout.rs`
+(`StatusPayload.notes`, absent from the JSON when empty) and `finalizer.rs` (the listed-but-absent drop and the tag
+targets). The rows it closed have status `closed`, their fix and the test that now covers them. Its nine source mutations
+(`--mutations`, M-WR01-a..d and M-WR02-a..e) each turn a named test or invariant red. Only I4 (WR-03, 14-18) remains in the
+ratchet.
+
 ## The class invariant
 
 Eight numbered invariants. The sweep (`finalizer.rs` tests, section `failure_surface`) computes every one per cell with
@@ -32,19 +41,20 @@ an oracle that never calls the implementation's own rules, and reads locks and t
 | Id | Invariant |
 |----|-----------|
 | I1 | terminal and classified: after an Ok finalization the task record is terminal and holds a stored result whose phase is completed, gate_failed, failed or cancelled |
-| I2 | finalization total and lock released: with no injected fault the first pass returns Ok and releases the single-flight lock, and a later reconcile sweep returns Ok; a held lock is allowed only for compute still billing or one injected transient S3 or backend fault the next pass clears |
-| I3 | class decided from the records: when outcome.json parses and names the task, the phase follows the class table whatever the delivery path (refused_other failed with prefilter_disagreement true and the REFUSED line; inputs-changed failed with the flag false; crash and timeout failed with their class text; cpu fallback failed; pass and gate_fail follow the gate report and the pack record); an absent, malformed, foreign or removed outcome is failed with a non-empty error |
+| I2 | finalization total and lock released: with no injected fault the first pass returns Ok and releases the single-flight lock, and a later reconcile sweep returns Ok; a held lock is allowed only for compute still billing or one injected transient S3 or backend fault the next pass clears; and an object a writer manifest lists but S3 does not hold is listed by neither the stored payload nor manifest.json, and the stored payload names it in exactly one listed-but-absent note (no such note when nothing listed is absent) |
+| I3 | class decided from the records: when outcome.json parses and names the task, the phase follows the class table whatever the delivery path (refused_other failed with prefilter_disagreement true and the REFUSED line; inputs-changed failed with the flag false; crash and timeout failed with their class text; cpu fallback failed; pass and gate_fail follow the gate report and the pack record); an absent, malformed, foreign or removed outcome is failed with a non-empty error; a completed or gate_failed run delivered through the Catch (a stage error the records overrode) carries the stage-error-overridden note in the stored payload, and no other delivery of the same records and no failed phase does |
 | I4 | caller-safe text: the stored payload, verdict.json and manifest.json carry none of the planted hostile constants (an account-id-shaped digit string, an ARN and an ECR host containing it) planted in the Catch Cause, the trainer's refused line, the pack verify and packed lines and an injected S3 error |
 | I5 | no .apr unless completed: neither the stored payload's manifest nor manifest.json lists an .apr for any phase but completed |
 | I6 | aborted means cancelled: an ABORTED execution yields a cancelled record and a cancelled stored payload |
 | I7 | retention tags: every key the finalizer inventories or names (each manifest.json entry, manifest.json, and every self-listing manifest that exists) carries the run's retention tag (keep only for a completed passing run), read back from the bucket |
 | I8 | delivery-path independence: for the same records, every non-aborted trigger that returned Ok reaches the same phase, is_error, prefilter_disagreement and keep |
 
-### The sweep at HEAD (`failure_surface_sweep_known_defects_only`)
+### The sweep (`failure_surface_sweep_known_defects_only`)
 
 The cross product of the six axes is 4800 cells (5 deliveries x 10 outcomes x 2 gate reports x 4 pack records x 3
-listings x 4 listed-but-absent objects), plus 10 ABORTED cells on the Event path. It runs in about 3 s. Result at
-HEAD:
+listings x 4 listed-but-absent objects), plus 10 ABORTED cells on the Event path. It runs in about 3 s. Result after
+plan 14-17 (HEAD `736eacdb6`): I1, I2, I3, I5, I6, I7 and I8 hold everywhere; I4 is violated in 1536 cells (`sm_caught`
+936, each other delivery 150). The table below is the 14-16 result at `327d9cdb2`, kept as the record of what was found:
 
 | Invariant | Cells violating | Where | First offending cell |
 |-----------|-----------------|-------|----------------------|
@@ -57,20 +67,26 @@ HEAD:
 | I7 | 12 | the four non-Catch deliveries of the three kept-run shapes | `sm_clean, pass, accepted, complete`: training-manifest.json and pack-manifest.json read back `expire` on a kept run |
 | I8 | 56 | `sm_caught` against the other four | `sm_caught, pass, accepted`: failed / is_error true / keep false where the others complete and keep |
 
-The violated set is exactly `KNOWN_DEFECTS = [I2, I3, I4, I7, I8]`: a shrink-only ratchet. The sweep fails when a pinned
-entry is no longer violated (delete it) and when anything outside it is (a regression). The tracer
-`failure_surface_tracer_wr01` pins the WR-01 cell (Catch delivery of a trainer refusal the pre-filter accepted): I1 and
-I2 hold, I3 is violated because `finalize_run` returns on the stage error before `outcome.json` is read
-(`prefilter_disagreement` false, the error is the Cause text). `failure_surface_transient_faults` fails each of the 50 S3
-calls of a passing run once, with hostile error text, and requires the next sweep to heal to the uninjected end state.
+At 14-16 the violated set was exactly `KNOWN_DEFECTS = [I2, I3, I4, I7, I8]`; after 14-17 it is `[I4]`. The ratchet is
+shrink-only: the sweep fails when a pinned entry is no longer violated (delete it) and when anything outside it is (a
+regression). The tracer `failure_surface_tracer_wr01` runs the WR-01 cell (Catch delivery of a trainer refusal the
+pre-filter accepted). At 14-16, I3 was violated there because `finalize_run` returned on the stage error before it read
+`outcome.json` (`prefilter_disagreement` false, the error the Cause text). Since 14-17 the cell has no violation in its
+scope (I1..I3): the REFUSED line and the D-08 flag reach the caller, and the Cause's leak (I4) stays pinned for 14-18.
+`failure_surface_transient_faults` fails each S3 call of a passing run once, with hostile error text, and requires the
+next sweep to heal to the uninjected end state. There were 50 calls at 14-16 and 58 since 14-17, which added the drop
+listing and the post-write listing.
+
+Two oracle clauses were added by 14-17. **I3:** the `stage-error-overridden` note appears exactly on a Catch delivery the
+records decided `completed` or `gate_failed`. **I2:** an object the cell's manifests list but S3 does not hold is listed
+by neither the stored payload nor manifest.json, and is named in exactly one `listed-but-absent` note. I8 compares phase,
+is_error, prefilter_disagreement and keep, and leaves `notes` out on purpose: only the Catch delivers a stage error.
 
 | Known defect | Finding | Closed by |
 |--------------|---------|-----------|
-| I2 | WR-02 | 14-17 |
-| I3 | WR-01 | 14-17 |
 | I4 | WR-03 | 14-18 |
-| I7 | IN-01 | 14-17 |
-| I8 | WR-01 | 14-17 |
+
+Closed by 14-17 and deleted from the ratchet: I2 (WR-02), I3 (WR-01), I7 (IN-01) and I8 (WR-01).
 
 ## Derivation (commands run, 2026-10-30, HEAD `327d9cdb2`)
 
@@ -87,6 +103,7 @@ derived result is used and the correction is listed afterwards.
 | D-f | publication steps | `read finalizer.rs finalize_task, settle_record and publish ((3)..(6) comments)` | owner check; record or TTL; ABORTED cancels the record; compute gate; read objects; decide; settle the record (arbiter); verdict.json; manifest.json (adopt or write, list for unlisted); tags = manifest entries + manifest.json, each read back; lock release LAST |
 | D-g | sinks | `python3 -I scripts/laya_deploy/laya_failure_surface.py --check (scan(): SINK_PATTERNS over the text before the first #[cfg(test)] of every .rs under sink_scope)` | 77 hits in 22 (file, pattern) groups, each classified (sinks) |
 | D-h | finalizer asset provenance | `grep -n 'FINALIZER_ASSET\\|finalizerAssetPath' scripts/laya_deploy/laya_trainer_ops.py deploy-extensions/bin/app.ts` | cmd_infra and app.ts check only that deploy-extensions/assets/laya-finalizer/bootstrap exists |
+| D-j | the sweep after plan 14-17 (HEAD `736eacdb6`) | `python3 -I scripts/laya_deploy/laya_failure_surface.py --sweep`; the sweep test binary with `--nocapture` | 4800 cells + 10 aborted: I1, I2, I3, I5, I6, I7 and I8 hold; I4 violated in 1536 cells (sm_caught 936, each other delivery 150), the one remaining ratchet entry (14-18); 58 single-fault transient cases |
 | D-i | tests that do not model the always-catching machine | `scan the test modules of finalize.rs and finalizer.rs for catch-fed classes built with stage_error None` | finalize.rs: finalize_refused, finalize_inputs_changed, finalize_crash, finalize_timeout, finalize_cpu, finalize_partial_manifest; finalizer.rs: fin_partial_inventory, fin_timeout_event, fin_reconcile_lost_event, fin_first_writer_wins; plus fin_catch_error (a Cause, no outcome) |
 
 Exit classes (D-b), by running `job_exit_code` for every class of `EXIT_CLASSES`:
@@ -134,8 +151,8 @@ covers the row (the checker proves it exists).
 |----|------|--------|---------|--------|---------------|------------|
 | FS-SM-01 | Train succeeds (SageMaker job Completed; run_step exit 0 for pass and gate_fail) -> PackVerify | ok |  |  | `laya_trainer_stack_check.py::check_machine` |  |
 | FS-SM-02 | PackVerify succeeds (pack exit 0: skipped, accepted or refused recorded) -> Finalize, payload without error | ok |  |  | `finalizer.rs::tracer_completed` | I3, I8 |
-| FS-SM-03 | Train fails (job exit 1: refused, crash, timeout, cpu fallback, or any upload failure) -> Catch States.ALL -> CatchFinalize, resultPath $.error: the finalizer gets a stage error for EVERY catch-fed class | defect | WR-01 | 14-17 | `finalizer.rs::failure_surface_tracer_wr01` | I3, I4, I8 |
-| FS-SM-04 | PackVerify fails (PackError exit 1 with no pack-outcome.json, env/contracts refusal exit 2, an upload failure exit 1, the 3 h task timeout) -> Catch States.ALL -> CatchFinalize, resultPath $.error | defect | WR-01 | 14-17 | `finalizer.rs::failure_surface_sweep_known_defects_only` | I3, I8 |
+| FS-SM-03 | Train fails (job exit 1: refused, crash, timeout, cpu fallback, or any upload failure) -> Catch States.ALL -> CatchFinalize, resultPath $.error: the finalizer gets a stage error for EVERY catch-fed class; closed by 14-17: the Catch still supplies the stage error, but finalize_run reads outcome.json first: the class, the REFUSED line and the D-08 flag come from the records (I3 and I8 hold over the sweep) | closed | WR-01 | 14-17 | `finalizer.rs::failure_surface_tracer_wr01` | I3, I4, I8 |
+| FS-SM-04 | PackVerify fails (PackError exit 1 with no pack-outcome.json, env/contracts refusal exit 2, an upload failure exit 1, the 3 h task timeout) -> Catch States.ALL -> CatchFinalize, resultPath $.error; closed by 14-17: a missing pack record under a stage error fails 'pack-outcome.json is missing; stage error: ...' and decides as the event and reconcile deliveries do | closed | WR-01 | 14-17 | `finalizer.rs::failure_surface_sweep_known_defects_only` | I3, I8 |
 | FS-SM-05 | Finalize has no Catch (only the CDK Lambda service-exception Retry, 6 attempts): a finalizer Err ends the execution FAILED, which falls to the status rule and the 10-minute reconcile (both deliver stage_error None) | ok |  |  | `finalizer.rs::fin_reconcile_lost_event` | I2, I8 |
 | FS-SM-06 | CatchFinalize has no Catch (same Retry): its Err ends the execution FAILED; the status event and the reconcile then re-drive it WITHOUT the stage error | ok |  |  | `finalizer.rs::fin_reconcile_lost_event` | I2, I8 |
 | FS-SM-07 | machine TimeoutSeconds 36000 (MACHINE_TIMEOUT_SECS) -> TIMED_OUT -> status rule (and reconcile) | ok |  |  | `finalizer.rs::fin_timeout_event` | I1, I8 |
@@ -149,11 +166,11 @@ covers the row (the checker proves it exists).
 |----|------|--------|---------|--------|---------------|------------|
 | FS-EX-01 | pass -> train job exit 0 -> Finalize path | ok |  |  | `run_step.py::selftest` |  |
 | FS-EX-02 | gate_fail -> train job exit 0 (the pack stage runs on a gate_fail) | ok |  |  | `run_step.py::selftest` |  |
-| FS-EX-03 | refused -> train job exit 1 -> CatchFinalize only | defect | WR-01 | 14-17 | `finalizer.rs::failure_surface_tracer_wr01` | I3, I8 |
-| FS-EX-04 | crash -> train job exit 1 -> CatchFinalize only | defect | WR-01 | 14-17 | `finalizer.rs::failure_surface_sweep_known_defects_only` | I3, I8 |
-| FS-EX-05 | timeout -> train job exit 1 -> CatchFinalize only | defect | WR-01 | 14-17 | `finalizer.rs::failure_surface_sweep_known_defects_only` | I3, I8 |
-| FS-EX-06 | a failed upload forces exit 1 for ANY class (Run.finish: code = 1 if failed and code == 0), so pass and gate_fail can arrive through the Catch too, with outcome.json possibly listed but absent | defect | WR-02 | 14-17 | `finalizer.rs::failure_surface_sweep_known_defects_only` | I2, I3 |
-| FS-EX-07 | a CPU fallback is classified crash with device_ok false (finish_after_trainer), so it is catch-fed | defect | WR-01 | 14-17 | `finalizer.rs::failure_surface_sweep_known_defects_only` | I3 |
+| FS-EX-03 | refused -> train job exit 1 -> CatchFinalize only; closed by 14-17: a caught refusal keeps prefilter_disagreement true and the trainer's REFUSED line | closed | WR-01 | 14-17 | `finalizer.rs::failure_surface_tracer_wr01` | I3, I8 |
+| FS-EX-04 | crash -> train job exit 1 -> CatchFinalize only; closed by 14-17: crash keeps its class text on both deliveries; the stage error is appended as detail | closed | WR-01 | 14-17 | `finalize.rs::finalize_crash` | I3, I8 |
+| FS-EX-05 | timeout -> train job exit 1 -> CatchFinalize only; closed by 14-17: timeout keeps 'runtime cap' on both deliveries; the stage error is appended as detail | closed | WR-01 | 14-17 | `finalize.rs::finalize_timeout` | I3, I8 |
+| FS-EX-06 | a failed upload forces exit 1 for ANY class (Run.finish: code = 1 if failed and code == 0), so pass and gate_fail can arrive through the Catch too, with outcome.json possibly listed but absent; closed by 14-17: a pass or gate_fail that exited 1 only because an upload failed is decided by its records and carries the stage-error-overridden note; an outcome.json listed but absent is dropped (fin_listed_but_absent_outcome) | closed | WR-02 | 14-17 | `finalizer.rs::fin_override_note_reaches_verdict` | I2, I3 |
+| FS-EX-07 | a CPU fallback is classified crash with device_ok false (finish_after_trainer), so it is catch-fed; closed by 14-17: the cpu_fallback cells fail on every delivery with the crash class | closed | WR-01 | 14-17 | `finalizer.rs::failure_surface_sweep_known_defects_only` | I3 |
 
 ### Pack exit paths (FS-PK)
 
@@ -162,9 +179,9 @@ covers the row (the checker proves it exists).
 | FS-PK-01 | decide_skip: a non-pass/gate_fail outcome, device_ok false, or a gate_fail without a waiver claim -> pack-outcome skipped, exit 0 when published | ok |  |  | `run_step.py::selftest` |  |
 | FS-PK-02 | pack and verify accept -> .apr uploaded, accepted pack-outcome, exit 0 | ok |  |  | `finalizer.rs::tracer_completed` | I5, I7 |
 | FS-PK-03 | pack or verify refuse (rc 3) -> accepted false recorded, exit 0 (PackVerify succeeds) | ok |  |  | `finalizer.rs::fin_pack_refused` | I3, I5 |
-| FS-PK-04 | PackError (outcome, manifest, download, integrity, base, child) -> exit 1 with NO pack-outcome.json -> PackVerify Catch: stage error plus a missing pack record | defect | WR-01 | 14-17 | `finalizer.rs::failure_surface_sweep_known_defects_only` | I3, I8 |
-| FS-PK-05 | entry_pack env or contracts refusal -> exit 2 before any download, no pack-outcome.json -> PackVerify Catch | defect | WR-01 | 14-17 | `finalizer.rs::failure_surface_sweep_known_defects_only` | I3 |
-| FS-PK-06 | publish_pack lists pack-outcome.json in pack-manifest.json BEFORE uploading it; a failed last upload leaves it listed but absent (exit 1) | defect | WR-02 | 14-17 | `finalizer.rs::failure_surface_sweep_known_defects_only` | I2 |
+| FS-PK-04 | PackError (outcome, manifest, download, integrity, base, child) -> exit 1 with NO pack-outcome.json -> PackVerify Catch: stage error plus a missing pack record; closed by 14-17: the pack-record-missing failure carries the stage error as detail | closed | WR-01 | 14-17 | `finalize.rs::finalize_pack_missing` | I3, I8 |
+| FS-PK-05 | entry_pack env or contracts refusal -> exit 2 before any download, no pack-outcome.json -> PackVerify Catch; closed by 14-17: an env or contracts refusal leaves no pack record: failed on every delivery, the same class | closed | WR-01 | 14-17 | `finalizer.rs::failure_surface_sweep_known_defects_only` | I3 |
+| FS-PK-06 | publish_pack lists pack-outcome.json in pack-manifest.json BEFORE uploading it; a failed last upload leaves it listed but absent (exit 1); closed by 14-17: pack-outcome.json listed but absent is dropped at read; the lock is released on the first pass | closed | WR-02 | 14-17 | `finalizer.rs::fin_listed_but_absent_pack_outcome` | I2 |
 
 ### Run objects (FS-RO)
 
@@ -178,7 +195,7 @@ covers the row (the checker proves it exists).
 | FS-RO-06 | training-manifest.json absent or foreign -> partial-manifest.json is read; both absent -> no training entries | ok |  |  | `finalizer.rs::fin_partial_inventory` | I3, I7 |
 | FS-RO-07 | pack-manifest.json absent or malformed -> empty (no task-id check: it is a bare array) | ok |  |  | `finalizer.rs::failure_surface_sweep_known_defects_only` | I3 |
 | FS-RO-08 | any read failing for another reason (5xx, denied, a broken body) -> Store error, nothing settled or the publish resumes; the lock is held and the next pass heals | ok |  |  | `finalizer.rs::failure_surface_transient_faults` | I2 |
-| FS-RO-09 | a manifest entry listed but absent in S3 (FS-EX-06, FS-PK-06): read_run_objects keeps the entry | defect | WR-02 | 14-17 | `finalizer.rs::failure_surface_sweep_known_defects_only` | I2 |
+| FS-RO-09 | a manifest entry listed but absent in S3 (FS-EX-06, FS-PK-06): read_run_objects keeps the entry; closed by 14-17: drop_absent_entries removes every entry S3 does not hold, from one listing of the run prefix; FinalizeReport.dropped and one listed-but-absent note name them | closed | WR-02 | 14-17 | `finalizer.rs::fin_listed_but_absent_outcome` | I2 |
 
 ### Decision precedence of finalize_run (FS-DP)
 
@@ -186,10 +203,10 @@ covers the row (the checker proves it exists).
 |----|------|--------|---------|--------|---------------|------------|
 | FS-DP-01 | aborted -> cancelled, entries minus the .apr | ok |  |  | `finalizer.rs::fin_abort_event` | I5, I6 |
 | FS-DP-02 | a path listed by two writers with different content -> failed integrity | ok |  |  | `finalize.rs::finalize_integrity` | I3 |
-| FS-DP-03 | no outcome -> failed with the stage error text when one was supplied (else 'outcome.json is missing'); since 14-17 a parsed outcome.json decides the class whatever the delivery path, and the stage error is detail only (appended '; stage error: ...' to crash, timeout, device, missing gate-report and missing pack-record failures) | defect | WR-01 | 14-17 | `finalizer.rs::failure_surface_tracer_wr01` | I3, I4, I8 |
+| FS-DP-03 | no outcome -> failed with the stage error text when one was supplied (else 'outcome.json is missing'); since 14-17 a parsed outcome.json decides the class whatever the delivery path, and the stage error is detail only (appended '; stage error: ...' to crash, timeout, device, missing gate-report and missing pack-record failures); closed by 14-17: every catch-fed class is decided from its records through fixtures::through_catch and with no stage error, to the same class | closed | WR-01 | 14-17 | `finalize.rs::finalize_catch_fed_both_deliveries` | I3, I4, I8 |
 | FS-DP-04 | no outcome -> failed 'outcome.json is missing' | ok |  |  | `finalize.rs::finalize_no_outcome` | I3 |
 | FS-DP-05 | refused inputs-changed -> failed, prefilter_disagreement false | ok |  |  | `finalize.rs::finalize_inputs_changed` | I3 |
-| FS-DP-06 | any other refusal -> failed, prefilter_disagreement TRUE, the trainer's REFUSED line (D-08), on every delivery path including the Catch (stage error not appended) | defect | WR-01 | 14-17 | `finalizer.rs::failure_surface_tracer_wr01` | I3, I8 |
+| FS-DP-06 | any other refusal -> failed, prefilter_disagreement TRUE, the trainer's REFUSED line (D-08), on every delivery path including the Catch (stage error not appended); closed by 14-17: a stage error plus a refusal the pre-filter accepted gives prefilter_disagreement true and the REFUSED line | closed | WR-01 | 14-17 | `finalize.rs::finalize_refused_with_stage_error` | I3, I8 |
 | FS-DP-07 | crash -> failed 'the trainer crashed' | ok |  |  | `finalize.rs::finalize_crash` | I3 |
 | FS-DP-08 | timeout -> failed 'runtime cap' | ok |  |  | `finalize.rs::finalize_timeout` | I3 |
 | FS-DP-09 | device_ok false (pass or gate_fail) -> failed | ok |  |  | `finalize.rs::finalize_cpu` | I3 |
@@ -206,8 +223,8 @@ covers the row (the checker proves it exists).
 | FS-PB-02 | the record settles first (first writer wins; Cancelled gets the aborted payload attached; terminal-without-result is integrity) | ok |  |  | `finalizer.rs::fin_first_writer_wins` | I1 |
 | FS-PB-03 | verdict.json = the winning payload's text, written only when different | ok |  |  | `finalizer.rs::fin_crash_resume_after_record` | I4 |
 | FS-PB-04 | manifest.json: adopted when it already lists this verdict, else written from the decision's entries plus the unlisted count | ok |  |  | `finalizer.rs::fin_crash_resume_after_verdict` | I5 |
-| FS-PB-05 | tag targets = every manifest.json entry plus manifest.json: a listed-but-absent key fails GetObjectTagging (NoSuchKey) and wedges the lock | defect | WR-02 | 14-17 | `finalizer.rs::failure_surface_sweep_known_defects_only` | I2 |
-| FS-PB-06 | the self-listing inventories (training-, partial-, pack-manifest.json) are never tag targets: a kept run's inventories keep 'expire' | defect | IN-01 | 14-17 | `finalizer.rs::failure_surface_sweep_known_defects_only` | I7 |
+| FS-PB-05 | tag targets = every manifest.json entry plus manifest.json: a listed-but-absent key fails GetObjectTagging (NoSuchKey) and wedges the lock; closed by 14-17: tag targets are intersected with a listing taken after verdict.json and manifest.json are written; an adopted manifest.json that names a gone object no longer wedges the lock, and no unlisted key is ever tagged | closed | WR-02 | 14-17 | `finalizer.rs::fin_adopted_manifest_with_absent_entry` | I2 |
+| FS-PB-06 | the self-listing inventories (training-, partial-, pack-manifest.json) are never tag targets: a kept run's inventories keep 'expire'; closed by 14-17: every self-listing inventory that exists carries the run's retention tag: keep for a kept GATE PASS, expire otherwise | closed | IN-01 | 14-17 | `finalizer.rs::fin_kept_run_retags_inventories` | I7 |
 | FS-PB-07 | every tag read back; the lock released LAST and re-read; a failure at any step returns Err with the lock held | ok |  |  | `finalizer.rs::fin_crash_resume_after_readback` | I2, I7 |
 | FS-PB-08 | record missing past the task TTL -> an existing verdict.json is the decision, else the fresh one; inside the TTL -> integrity, nothing written | ok |  |  | `finalizer.rs::fin_record_expired` | I1 |
 
@@ -227,6 +244,7 @@ covers the row (the checker proves it exists).
 | SK-10 | log calls (tracing, eprintln, println) in the two crates: server-side log only | ok |  |  | `sfn.rs::cancel_sink_logs_a_failing_stop_and_returns` |  |
 | SK-11 | static caller texts (validation refusals, single-flight, failed_payload reasons with no infrastructure text, orphan dispatch-unconfirmed, stage_error None) | ok |  |  | `lib.rs::submit_single_flight_refuses_naming_the_holder_and_mints_nothing` |  |
 | SK-12 | the run bucket is named aprender-laya-train-<env>-<account> (laya-trainer-stack.ts), so StatusPayload.run_prefix, every manifest link and the dataset refusals carry the account id BY CONSTRUCTION (classified a handle, not a leak: the caller names this bucket in dataset_uri; the planted I4 constants deliberately exclude it. 14-18 must state the exclusion in I4 (its redactor would otherwise break the s3:// handle)) | ok |  |  | `finalizer.rs::tracer_completed` | I4 |
+| SK-NOTES | finalize.rs Builder::decide pushes StatusPayload.notes: stage-error-overridden (one fixed sentence) and listed-but-absent (the count and at most eight job-written manifest paths, each clipped to 128 characters) -> the stored payload, verdict.json, tasks/result and train_status. No stage error or infrastructure text by construction, but the paths are job-written, so 14-18 extends its serializer redaction to notes | defect | WR-03 | 14-18 | `finalize.rs::finalize_dropped_note` | I4 |
 
 ### Asset provenance (FS-AS)
 
@@ -238,8 +256,8 @@ covers the row (the checker proves it exists).
 
 | Id | What | Status | Finding | Closes | Covering test | Invariants |
 |----|------|--------|---------|--------|---------------|------------|
-| FS-UT-01 | finalize.rs tests hand finalize_run stage_error None for catch-fed classes (refused, inputs-changed, crash, timeout, cpu, partial-manifest timeout): a delivery the machine never makes for those classes | defect | WR-01 | 14-17 | `finalize.rs::finalize_refused` | I3 |
-| FS-UT-02 | finalizer.rs tests deliver catch-fed classes with stage_error None (payload(None), status events, reconcile), and fin_catch_error carries a Cause but no outcome | defect | WR-01 | 14-17 | `finalizer.rs::fin_catch_error` | I3 |
+| FS-UT-01 | finalize.rs tests hand finalize_run stage_error None for catch-fed classes (refused, inputs-changed, crash, timeout, cpu, partial-manifest timeout): a delivery the machine never makes for those classes; closed by 14-17: finalize_refused, finalize_inputs_changed, finalize_crash, finalize_timeout and finalize_cpu are one table over the two deliveries (fixtures::through_catch and None) | closed | WR-01 | 14-17 | `finalize.rs::finalize_catch_fed_both_deliveries` | I3 |
+| FS-UT-02 | finalizer.rs tests deliver catch-fed classes with stage_error None (payload(None), status events, reconcile), and fin_catch_error carries a Cause but no outcome; closed by 14-17: I8 now holds, so a stage_error None delivery (event, reconcile) decides as the Catch does and those tests model a real delivery; fin_listed_but_absent_* and fin_override_note_reaches_verdict deliver with and without the stage error | closed | WR-01 | 14-17 | `finalizer.rs::failure_surface_sweep_known_defects_only` | I3 |
 
 ## Sink scan (D-g)
 
@@ -253,7 +271,7 @@ count, or appears in an unclassified (file, pattern) group, and the checker refu
 | `aprender-mcp-laya-train-lambda/src/compute.rs` | aws-renderer | 8 | log-only 8 | SK-07 |
 | `aprender-mcp-laya-train-lambda/src/dataset.rs` | aws-renderer | 4 | log-only 4 | SK-08 |
 | `aprender-mcp-laya-train-lambda/src/dataset.rs` | log | 2 | log-only 2 | SK-10 |
-| `aprender-mcp-laya-train-lambda/src/finalizer.rs` | log | 5 | log-only 5 | SK-10 |
+| `aprender-mcp-laya-train-lambda/src/finalizer.rs` | log | 7 | log-only 7 | SK-10 |
 | `aprender-mcp-laya-train-lambda/src/finalizer.rs` | payload-error-assign | 1 | static 1 | SK-11 |
 | `aprender-mcp-laya-train-lambda/src/finalizer.rs` | stage-error | 7 | caller 3, static 4 | SK-02, SK-11 |
 | `aprender-mcp-laya-train-lambda/src/objects.rs` | aws-renderer | 5 | log-only 5 | SK-07 |
@@ -262,7 +280,8 @@ count, or appears in an unclassified (file, pattern) group, and the checker refu
 | `aprender-mcp-laya-train-lambda/src/sfn.rs` | log | 6 | log-only 6 | SK-10 |
 | `aprender-mcp-laya-train-lambda/src/sfn.rs` | start-error | 2 | caller 1, static 1 | SK-01 |
 | `aprender-mcp-laya-train/src/finalize.rs` | payload-error-assign | 1 | caller 1 | SK-02, SK-06 |
-| `aprender-mcp-laya-train/src/finalize.rs` | stage-error | 2 | caller 1, static 1 | SK-02 |
+| `aprender-mcp-laya-train/src/finalize.rs` | stage-error | 7 | caller 3, static 4 | SK-02, SK-11 |
+| `aprender-mcp-laya-train/src/finalize.rs` | payload-notes | 2 | caller 2 | SK-NOTES |
 | `aprender-mcp-laya-train/src/lib.rs` | dispatch-error | 3 | caller 2, static 1 | SK-01, SK-11 |
 | `aprender-mcp-laya-train/src/lib.rs` | failed-payload | 7 | caller 3, static 4 | SK-01, SK-03, SK-11 |
 | `aprender-mcp-laya-train/src/lib.rs` | log | 1 | log-only 1 | SK-10 |
@@ -282,8 +301,15 @@ Per-hit classification at HEAD (line numbers drift; the counts above are what th
   dispatch-error: 237 the type; 571 and 572 forward the reason (caller). log 578 `eprintln` log-only.
 - `finalizer.rs` stage-error: 691 (two hits) and 1072 caller (the Catch text into the decision); 603, 1102, 1217, 1264
   static (the field, and the three `None` deliveries). payload-error-assign 648 static (`dispatch-unconfirmed`).
-- `finalize.rs` payload-error-assign 291 caller (every failed decision's text, including the stage error and the job
-  lines, SK-02, SK-06); stage-error 60 the field, 430 the early return (caller, WR-01).
+- `finalize.rs` payload-error-assign caller (every failed decision's text, including the stage error and the job lines,
+  SK-02, SK-06). stage-error (since 14-17, which removed the early return): the input field, the Builder field and the
+  `is_some()` that triggers the override note are static, and so is the Builder's field name at its construction.
+  `with_stage` (the detail appended to a failure), the read of `input.stage_error` into the Builder and the no-outcome
+  fallback carry the text (caller). payload-notes (since 14-17): the two `notes.push` calls in `Builder::decide`. One
+  is a fixed sentence and the other is the count plus at most eight job-written manifest paths. Both are caller-visible
+  (SK-NOTES), and 14-18 extends its serializer redaction to them.
+- `finalizer.rs` log (since 14-17, 7 calls): two more `tracing::warn!` lines in `finalize_task`, the listed-but-absent
+  count and the stage-error override. They name the task id, never object content or the stage error.
 - `dynamodb.rs` aws-renderer 121 caller (SK-05: the backend text SK-03 and SK-04 forward).
 - `objects.rs`, `compute.rs`, `dataset.rs` renderers and every log call: log-only (SK-07, SK-08, SK-09, SK-10).
 
@@ -291,15 +317,13 @@ Per-hit classification at HEAD (line numbers drift; the counts above are what th
 
 These tests hand the decision a stage error of None for classes the machine delivers ONLY through its Catch (or a
 Cause with no outcome). They are not wrong about what they test, but none of them models the delivery the machine
-really makes. Plan 14-17 remodels them.
+really makes. Plan 14-17 remodelled the five `finalize.rs` class tests. `finalize_refused`, `finalize_inputs_changed`,
+`finalize_crash`, `finalize_timeout` and `finalize_cpu` are now one table, `finalize_catch_fed_both_deliveries`, run
+over `fixtures::through_catch` and over no stage error, so they leave `tests_not_modelling_catch`. The rest stay
+listed: since I8 holds, a stage_error None delivery (event, reconcile) decides as the Catch does.
 
 | Test | Delivery | Why it does not model the machine |
 |------|----------|-----------------------------------|
-| `finalize.rs::finalize_refused` | finalize_run direct, stage_error None | refused exits 1: the machine always supplies a stage error |
-| `finalize.rs::finalize_inputs_changed` | finalize_run direct, stage_error None | refused exits 1 |
-| `finalize.rs::finalize_crash` | finalize_run direct, stage_error None | crash exits 1 |
-| `finalize.rs::finalize_timeout` | finalize_run direct, stage_error None | timeout exits 1 |
-| `finalize.rs::finalize_cpu` | finalize_run direct, stage_error None | it builds exit_class pass with device_ok false; run_step.py writes a CPU fallback as crash (exit 1) |
 | `finalize.rs::finalize_partial_manifest` | finalize_run direct, stage_error None | timeout exits 1 (correction: not in the plan's seed) |
 | `finalizer.rs::fin_partial_inventory` | state-machine payload WITHOUT error | a timeout reaches Finalize only through CatchFinalize (correction: not in the plan's seed) |
 | `finalizer.rs::fin_timeout_event` | TIMED_OUT status event | a trainer timeout fails Train and is caught; the event re-drives it only after CatchFinalize itself failed |
@@ -310,9 +334,12 @@ really makes. Plan 14-17 remodels them.
 ## Dispositions
 
 - WR-01 (FS-SM-03, FS-SM-04, FS-EX-03..05, FS-EX-07, FS-PK-04, FS-PK-05, FS-DP-03, FS-DP-06, FS-UT-01, FS-UT-02;
-  invariants I3, I8): plan 14-17 makes a parsed `outcome.json` decide the class, with the stage error as detail.
-- WR-02 (FS-EX-06, FS-PK-06, FS-RO-09, FS-PB-05; I2) and IN-01 (FS-PB-06; I7): plan 14-17 drops listed-but-absent
-  entries when the objects are read and tags every self-listing inventory.
+  invariants I3, I8): CLOSED by plan 14-17 (`2ba21c6ee`). A parsed `outcome.json` decides the class and the stage error
+  is detail. A pass or gate failure the records decided over a stage error carries the `stage-error-overridden` note.
+- WR-02 (FS-EX-06, FS-PK-06, FS-RO-09, FS-PB-05; I2) and IN-01 (FS-PB-06; I7): CLOSED by plan 14-17 (`736eacdb6`).
+  Listed-but-absent entries are dropped when the objects are read and named in one bounded note. The tag targets are
+  intersected with a post-write listing, and every self-listing inventory is tagged.
+- The new caller sink SK-NOTES (the notes 14-17 writes) is left to 14-18's serializer redaction.
 - WR-03 (SK-01..SK-06; I4): plan 14-18 redacts at the one serializer, wraps the backend and labels the dispatch error.
 - WR-04 (FS-AS-01): plan 14-19 adds the asset provenance sidecar and binds the state-machine rows to the synthesized
   template.
