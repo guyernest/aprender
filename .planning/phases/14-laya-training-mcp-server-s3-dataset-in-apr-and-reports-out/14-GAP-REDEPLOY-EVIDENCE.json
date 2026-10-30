@@ -158,6 +158,13 @@
       "step": "A3 hash check",
       "reply": "owner ran it in-session; last line 'FINALIZER REDEPLOY CHECK OK sha256=fc796b8b47be559f6bc3a067f0b294b9fe5a1b4ef1594763eaa7d695fcf13fab'",
       "recorded_by": "orchestrator"
+    },
+    {
+      "date": "2026-10-30",
+      "step": "Task 3 decision (request function)",
+      "reply": "redeploy-now",
+      "recorded_by": "orchestrator",
+      "channel": "AskUserQuestion answer in the orchestrating session"
     }
   ]
 }
