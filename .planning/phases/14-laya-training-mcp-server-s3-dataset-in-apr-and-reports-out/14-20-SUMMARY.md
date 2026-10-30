@@ -214,7 +214,8 @@ See key-decisions in the frontmatter.
 
 - The plan's requirement IDs (D-05, D-14, D-15, D-17) are phase decision IDs, not REQUIREMENTS.md entries, and the plan says "Requirement-ID probes: SKIPPED visibly". `requirements.mark-complete` is therefore not run.
 - Windows ledger: no stub, skipped test or unrun verify was left, so nothing was appended.
-- STATE.md and ROADMAP.md updates are recorded below after they run.
+- `roadmap.update-plan-progress 14` succeeded: Phase 14 went from 18/22 to 19/22, and 14-20 is checked.
+- `state.advance-plan`, `state.record-metric`, `state.add-decision` and `state.record-session` all failed with the known tooling error: `04-VERIFICATION.md` has status `gaps_acknowledged`, which is outside the tool's closed set. That file was deliberately not edited, so STATE.md is unchanged by this plan. `state.update-progress` answered "phase scope is unscoped". The tool also printed a milestone-lock warning naming this same session.
 
 ## User Setup Required
 
