@@ -1,7 +1,7 @@
 {
   "schema": "laya-trainer-smoke-evidence-v1",
   "plan": "14-14",
-  "status": "Task 1 done except the local verify (OPEN FINDING, owner-decided at Task 3); Task 2: the training cancel is complete and valid, the packing cancel is INCONCLUSIVE (the pack was a gate_fail skip); Task 3 not run",
+  "status": "Complete under the owner's Task 3 decisions: pack task verify authoritative (local Mac RescoreDrift is a known cross-CPU finding), the packing cancel is recorded INCONCLUSIVE (accepted limitation), the training cancel is observed and valid, the declaration is committed",
   "owner_reply": "smoke-go (recorded in 14-DEPLOY-EVIDENCE.json owner_replies)",
   "smoke": {
     "task_id": "3e964ab5-a1ca-458b-bcec-22e094f2f2a6",
@@ -254,7 +254,8 @@
     "apr_listed": false,
     "verdict_tag": "expire",
     "result_has_no_urls": true,
-    "to_get_a_valid_observation": "a run that PASSES its gate so that the pack task really packs and verifies for about 10 minutes (the smoke dataset tweet-stance-64 epochs 4 does: about 51 min of ml.g5.xlarge plus about 11 min Fargate), cancelled once its pack task has been running a minute or two"
+    "to_get_a_valid_observation": "a run that PASSES its gate so that the pack task really packs and verifies for about 10 minutes (the smoke dataset tweet-stance-64 epochs 4 does: about 51 min of ml.g5.xlarge plus about 11 min Fargate), cancelled once its pack task has been running a minute or two",
+    "pack_task_stopped_at": "2026-10-30T00:08:48Z"
   },
   "spend_measured": {
     "sagemaker_billable_seconds": {
