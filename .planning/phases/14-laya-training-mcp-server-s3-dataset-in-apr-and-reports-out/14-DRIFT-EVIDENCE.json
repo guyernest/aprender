@@ -2,141 +2,9 @@
   "schema": "laya-drift-evidence-v1",
   "kind": "merged",
   "plan": "14-21",
-  "status": "awaiting-owner-run",
-  "generated_at": "2026-10-30T20:30:33Z",
-  "question": "Does the pack bound max(1e-5, 4 x the A10G noise) hold on the CPU that runs the re-score (Graviton, in the production Fargate pack task), and how far is this Mac from it?",
-  "owner_commands": [
-    "assume ze-kasher-dev && LAYA_DRIFT_APPROVED=graviton bash models/laya-trainer/drift-graviton.sh smoke:1",
-    "assume ze-kasher-dev && LAYA_DRIFT_APPROVED=graviton bash models/laya-trainer/drift-graviton.sh smoke:2 motivation:3"
-  ],
-  "owner_commands_notes": [
-    "Run by the OWNER, in order, each with the Claude Code bang prefix (!) in the owner's own shell; no executor runs an aws command.",
-    "Stage 1 is the tracer (one smoke repeat). Run stage 2 only when models/laya-trainer/drift-graviton/smoke-1/pack-outcome.json is near the recorded Graviton figures (fine_tuned 2.7478e-5, zero_shot 1.5080e-5, accepted).",
-    "Then the executor runs: python3 -I scripts/laya_deploy/laya_drift.py collect",
-    "Run stage 2 before about 2026-11-28: the motivation-v1-sm source is tagged expire and the 30 day lifecycle rule removes it."
-  ],
-  "owner_replies": [
-    {
-      "date": "2026-10-30",
-      "stage": "stage-1 attempt 1",
-      "command": "assume ze-kasher-dev && LAYA_DRIFT_APPROVED=graviton bash models/laya-trainer/drift-graviton.sh smoke:1",
-      "reply": "owner ran it in-session (bang prefix); script refused before any copy: 'REFUSED prefix: runs/drift-smoke/974b00e8-.../ is not empty'",
-      "recorded_by": "orchestrator",
-      "note": "false refusal: aws-cli/2.29.0 prints None for KeyCount on an empty prefix; owner-run diagnostic showed 'None\\n'. Fixed in 5353b8727, script regenerated; no object written, no task run."
-    },
-    {
-      "date": "2026-10-30",
-      "stage": "stage-1",
-      "command": "assume ze-kasher-dev && LAYA_DRIFT_APPROVED=graviton bash models/laya-trainer/drift-graviton.sh smoke:1",
-      "reply": "owner ran it in-session (bang prefix); last line 'DRIFT GRAVITON DONE smoke:1', container_exit 0",
-      "recorded_by": "orchestrator"
-    },
-    {
-      "date": "2026-10-30",
-      "stage": "stage-2",
-      "command": "assume ze-kasher-dev && LAYA_DRIFT_APPROVED=graviton bash models/laya-trainer/drift-graviton.sh smoke:2 motivation:3",
-      "reply": "owner ran it in-session (bang prefix); last line 'DRIFT GRAVITON DONE smoke:2 motivation:3', five legs container_exit 0",
-      "recorded_by": "orchestrator"
-    }
-  ],
-  "owner_script": {
-    "path": "models/laya-trainer/drift-graviton.sh (gitignored: it holds the account id)",
-    "sha256": "e6917dc4d4092cdc1a313ce59459bf46a83027ff73018382e3e91aeea295c353",
-    "generated_by": "python3 -I scripts/laya_deploy/laya_drift.py aws-plan --state-dir models/laya-trainer --source smoke:3e964ab5-a1ca-458b-bcec-22e094f2f2a6 --source motivation:a2cbacae-529c-4703-a796-b6eda6742446",
-    "regenerated_identical_to_14_20": true,
-    "static_policy_table": {
-      "violations": []
-    },
-    "bashrs_gate": "BASHRS GATE PASS models/laya-trainer/drift-graviton.sh (bashrs-gate: PASS 1 file(s) linted, receipt matched, 0 SEC/DET/IDEM errors (34 SC10xx suppressed - bashrs#226; 18 other))",
-    "fake_aws_run": {
-      "copy_differs_from_real_only_in": "readonly RESULTS= (one line)",
-      "static_violations_on_real_file": [],
-      "unapproved_run": {
-        "rc": 2,
-        "aws_calls": 0,
-        "last_err": "REFUSED approval: set LAYA_DRIFT_APPROVED=graviton (each repeat starts one paid Fargate pack task)"
-      },
-      "stage1": {
-        "args": "smoke:1",
-        "rc": 0,
-        "last_line": "DRIFT GRAVITON DONE smoke:1",
-        "first_two_calls": [
-          [
-            "sts",
-            "get-caller-identity"
-          ],
-          [
-            "ecs",
-            "describe-task-definition"
-          ]
-        ]
-      },
-      "stage2": {
-        "args": "smoke:2 motivation:3",
-        "rc": 0,
-        "last_line": "DRIFT GRAVITON DONE smoke:2 motivation:3",
-        "first_two_calls": [
-          [
-            "sts",
-            "get-caller-identity"
-          ],
-          [
-            "ecs",
-            "describe-task-definition"
-          ]
-        ]
-      },
-      "aws_calls_total": 142,
-      "aws_verbs": [
-        "ecs describe-task-definition",
-        "ecs describe-tasks",
-        "ecs run-task",
-        "s3api copy-object",
-        "s3api get-object",
-        "s3api get-object-tagging",
-        "s3api list-objects-v2",
-        "s3api put-object",
-        "sts get-caller-identity"
-      ],
-      "calls_without_profile_region": [],
-      "run_tasks": 6,
-      "writes": 36,
-      "writes_outside_runs_drift": [],
-      "keys_under_runs_drift": 54,
-      "keys_under_runs_drift_not_expire": [],
-      "first_tag_readback_before_first_run_task": true,
-      "tag_oracle_violations": [],
-      "sources_byte_and_tag_identical": true,
-      "source_kept_tag_still_keep": true,
-      "result_dirs": [
-        "motivation-1",
-        "motivation-2",
-        "motivation-3",
-        "smoke-1",
-        "smoke-2",
-        "smoke-3"
-      ],
-      "every_result_dir_has_pack_outcome": true,
-      "verdict": "FAKE AWS RUN OK"
-    },
-    "real_aws_calls_by_executor": 0
-  },
-  "sources": {
-    "smoke": {
-      "run": "smoke-stance-64",
-      "task_id": "3e964ab5-a1ca-458b-bcec-22e094f2f2a6",
-      "retention": "keep",
-      "trained_on": "cuda:0 (A10G, SageMaker ml.g5.xlarge)"
-    },
-    "motivation": {
-      "run": "motivation-v1-sm",
-      "task_id": "a2cbacae-529c-4703-a796-b6eda6742446",
-      "retention": "expire",
-      "expires_about": "2026-11-28",
-      "trained_on": "cuda:0 (A10G, SageMaker ml.g5.xlarge)"
-    }
-  },
-  "cells": "measured = produced by laya_drift.py (local legs from 14-DRIFT-LOCAL-EVIDENCE.json, Graviton legs from the owner-run result directories); reference = copied from 14-SMOKE-EVIDENCE.json or 14-GATE-RUN-EVIDENCE.json",
+  "status": "measured",
+  "generated_at": "2026-10-30T21:58:10Z",
+  "cells": "measured = produced by this harness (local legs from the local evidence, Graviton legs from the result directories); reference = copied from 14-SMOKE-EVIDENCE.json or 14-GATE-RUN-EVIDENCE.json",
   "local_evidence": ".planning/phases/14-laya-training-mcp-server-s3-dataset-in-apr-and-reports-out/14-DRIFT-LOCAL-EVIDENCE.json",
   "host": {
     "os": "Darwin",
@@ -178,6 +46,913 @@
       "pack_laya",
       "--message-format=json-render-diagnostics"
     ]
+  },
+  "rows": [
+    {
+      "artifact": "smoke-stance-64",
+      "cpu": "Apple M4 Pro (arm64)",
+      "step": "local verify",
+      "set": "fine_tuned",
+      "max_abs": "0.00003439188003540039",
+      "bound": "0.00003259039634251337",
+      "noise": 8.147599085628343e-06,
+      "noise_from": "rescore-noise.json of the run (training device)",
+      "max_abs_over_bound": 1.05528,
+      "max_abs_over_noise": 4.22111,
+      "within_bound": false,
+      "cell": "measured",
+      "outcome": "drift",
+      "repeats": 3,
+      "repeats_identical": true,
+      "trained_on": "cuda:0 (A10G, SageMaker ml.g5.xlarge)"
+    },
+    {
+      "artifact": "motivation-v1-sm",
+      "cpu": "Apple M4 Pro (arm64)",
+      "step": "local pack",
+      "set": "zero_shot",
+      "max_abs": "0.000014901161193847656",
+      "bound": "0.00001",
+      "noise": 1.7265105816122173e-06,
+      "noise_from": "rescore-noise.json of the run (training device)",
+      "max_abs_over_bound": 1.49012,
+      "max_abs_over_noise": 8.6308,
+      "within_bound": false,
+      "cell": "measured",
+      "outcome": "drift",
+      "repeats": 3,
+      "repeats_identical": true,
+      "trained_on": "cuda:0 (A10G, SageMaker ml.g5.xlarge)"
+    },
+    {
+      "artifact": "laya-motivation-v1",
+      "cpu": "Apple M4 Pro (arm64)",
+      "step": "local verify",
+      "set": "fine_tuned",
+      "max_abs": "9.149312973022461e-6",
+      "bound": "0.00007283176657191248",
+      "noise": 1.820794164297812e-05,
+      "noise_from": "printed by pack_laya",
+      "max_abs_over_bound": 0.125623,
+      "max_abs_over_noise": 0.50249,
+      "within_bound": true,
+      "cell": "measured",
+      "outcome": "accepted",
+      "repeats": 1,
+      "repeats_identical": true,
+      "trained_on": "mps:0"
+    },
+    {
+      "artifact": "laya-motivation-v1",
+      "cpu": "Apple M4 Pro (arm64)",
+      "step": "local verify",
+      "set": "zero_shot",
+      "max_abs": "3.337860107421875e-6",
+      "bound": "0.000050098394043907035",
+      "noise": 1.2524598510976759e-05,
+      "noise_from": "printed by pack_laya",
+      "max_abs_over_bound": 0.0666261,
+      "max_abs_over_noise": 0.266504,
+      "within_bound": true,
+      "cell": "measured",
+      "outcome": "accepted",
+      "repeats": 1,
+      "repeats_identical": true,
+      "trained_on": "mps:0"
+    },
+    {
+      "artifact": "laya-stance-64",
+      "cpu": "Apple M4 Pro (arm64)",
+      "step": "local verify",
+      "set": "fine_tuned",
+      "max_abs": "0.000011324882507324219",
+      "bound": "0.00003335727136288824",
+      "noise": 8.33931784072206e-06,
+      "noise_from": "printed by pack_laya",
+      "max_abs_over_bound": 0.339503,
+      "max_abs_over_noise": 1.35801,
+      "within_bound": true,
+      "cell": "measured",
+      "outcome": "accepted",
+      "repeats": 1,
+      "repeats_identical": true,
+      "trained_on": "mps:0"
+    },
+    {
+      "artifact": "laya-stance-64",
+      "cpu": "Apple M4 Pro (arm64)",
+      "step": "local verify",
+      "set": "zero_shot",
+      "max_abs": "7.3462724685668945e-6",
+      "bound": "0.00005982061985720932",
+      "noise": 1.495515496430233e-05,
+      "noise_from": "printed by pack_laya",
+      "max_abs_over_bound": 0.122805,
+      "max_abs_over_noise": 0.49122,
+      "within_bound": true,
+      "cell": "measured",
+      "outcome": "accepted",
+      "repeats": 1,
+      "repeats_identical": true,
+      "trained_on": "mps:0"
+    },
+    {
+      "artifact": "laya-antisemitism-v1",
+      "cpu": "Apple M4 Pro (arm64)",
+      "step": "local verify",
+      "set": "fine_tuned",
+      "max_abs": "7.554888725280762e-6",
+      "bound": "0.000014371895413756164",
+      "noise": 3.592973853439041e-06,
+      "noise_from": "printed by pack_laya",
+      "max_abs_over_bound": 0.525671,
+      "max_abs_over_noise": 2.10268,
+      "within_bound": true,
+      "cell": "measured",
+      "outcome": "accepted",
+      "repeats": 1,
+      "repeats_identical": true,
+      "trained_on": "mps:0"
+    },
+    {
+      "artifact": "laya-antisemitism-v1",
+      "cpu": "Apple M4 Pro (arm64)",
+      "step": "local verify",
+      "set": "zero_shot",
+      "max_abs": "0.00001195073127746582",
+      "bound": "0.000060283592210108594",
+      "noise": 1.5070898052527149e-05,
+      "noise_from": "printed by pack_laya",
+      "max_abs_over_bound": 0.198242,
+      "max_abs_over_noise": 0.792967,
+      "within_bound": true,
+      "cell": "measured",
+      "outcome": "accepted",
+      "repeats": 1,
+      "repeats_identical": true,
+      "trained_on": "mps:0"
+    },
+    {
+      "artifact": "motivation-v1-sm",
+      "cpu": "AWS Graviton (ECS Fargate arm64, 8 vCPU, the pack image)",
+      "step": "pack-task pack",
+      "set": "zero_shot",
+      "max_abs": "0.00001728534698486328",
+      "bound": "0.00001",
+      "noise": 1.7265105816122173e-06,
+      "noise_from": "rescore-noise.json of the run (training device)",
+      "max_abs_over_bound": 1.72853,
+      "max_abs_over_noise": 10.0117,
+      "within_bound": false,
+      "cell": "measured",
+      "outcome": "drift",
+      "repeat": 1
+    },
+    {
+      "artifact": "motivation-v1-sm",
+      "cpu": "AWS Graviton (ECS Fargate arm64, 8 vCPU, the pack image)",
+      "step": "pack-task pack",
+      "set": "zero_shot",
+      "max_abs": "0.00001728534698486328",
+      "bound": "0.00001",
+      "noise": 1.7265105816122173e-06,
+      "noise_from": "rescore-noise.json of the run (training device)",
+      "max_abs_over_bound": 1.72853,
+      "max_abs_over_noise": 10.0117,
+      "within_bound": false,
+      "cell": "measured",
+      "outcome": "drift",
+      "repeat": 2
+    },
+    {
+      "artifact": "motivation-v1-sm",
+      "cpu": "AWS Graviton (ECS Fargate arm64, 8 vCPU, the pack image)",
+      "step": "pack-task pack",
+      "set": "zero_shot",
+      "max_abs": "0.00001728534698486328",
+      "bound": "0.00001",
+      "noise": 1.7265105816122173e-06,
+      "noise_from": "rescore-noise.json of the run (training device)",
+      "max_abs_over_bound": 1.72853,
+      "max_abs_over_noise": 10.0117,
+      "within_bound": false,
+      "cell": "measured",
+      "outcome": "drift",
+      "repeat": 3
+    },
+    {
+      "artifact": "smoke-stance-64",
+      "cpu": "AWS Graviton (ECS Fargate arm64, 8 vCPU, the pack image)",
+      "step": "pack-task pack",
+      "set": "fine_tuned",
+      "max_abs": "0.000027477741241455078",
+      "bound": "0.00003259039634251337",
+      "noise": 8.147599085628343e-06,
+      "noise_from": "printed by pack_laya",
+      "max_abs_over_bound": 0.843124,
+      "max_abs_over_noise": 3.3725,
+      "within_bound": true,
+      "cell": "measured",
+      "outcome": "accepted",
+      "repeat": 1
+    },
+    {
+      "artifact": "smoke-stance-64",
+      "cpu": "AWS Graviton (ECS Fargate arm64, 8 vCPU, the pack image)",
+      "step": "pack-task pack",
+      "set": "zero_shot",
+      "max_abs": "0.000015079975128173828",
+      "bound": "0.00001881216214005832",
+      "noise": 4.70304053501458e-06,
+      "noise_from": "printed by pack_laya",
+      "max_abs_over_bound": 0.801608,
+      "max_abs_over_noise": 3.20643,
+      "within_bound": true,
+      "cell": "measured",
+      "outcome": "accepted",
+      "repeat": 1
+    },
+    {
+      "artifact": "smoke-stance-64",
+      "cpu": "AWS Graviton (ECS Fargate arm64, 8 vCPU, the pack image)",
+      "step": "pack-task verify",
+      "set": "fine_tuned",
+      "max_abs": "0.000027477741241455078",
+      "bound": "0.00003259039634251337",
+      "noise": 8.147599085628343e-06,
+      "noise_from": "printed by pack_laya",
+      "max_abs_over_bound": 0.843124,
+      "max_abs_over_noise": 3.3725,
+      "within_bound": true,
+      "cell": "measured",
+      "outcome": "accepted",
+      "repeat": 1
+    },
+    {
+      "artifact": "smoke-stance-64",
+      "cpu": "AWS Graviton (ECS Fargate arm64, 8 vCPU, the pack image)",
+      "step": "pack-task verify",
+      "set": "zero_shot",
+      "max_abs": "0.000015079975128173828",
+      "bound": "0.00001881216214005832",
+      "noise": 4.70304053501458e-06,
+      "noise_from": "printed by pack_laya",
+      "max_abs_over_bound": 0.801608,
+      "max_abs_over_noise": 3.20643,
+      "within_bound": true,
+      "cell": "measured",
+      "outcome": "accepted",
+      "repeat": 1
+    },
+    {
+      "artifact": "smoke-stance-64",
+      "cpu": "AWS Graviton (ECS Fargate arm64, 8 vCPU, the pack image)",
+      "step": "pack-task pack",
+      "set": "fine_tuned",
+      "max_abs": "0.000027477741241455078",
+      "bound": "0.00003259039634251337",
+      "noise": 8.147599085628343e-06,
+      "noise_from": "printed by pack_laya",
+      "max_abs_over_bound": 0.843124,
+      "max_abs_over_noise": 3.3725,
+      "within_bound": true,
+      "cell": "measured",
+      "outcome": "accepted",
+      "repeat": 2
+    },
+    {
+      "artifact": "smoke-stance-64",
+      "cpu": "AWS Graviton (ECS Fargate arm64, 8 vCPU, the pack image)",
+      "step": "pack-task pack",
+      "set": "zero_shot",
+      "max_abs": "0.000015079975128173828",
+      "bound": "0.00001881216214005832",
+      "noise": 4.70304053501458e-06,
+      "noise_from": "printed by pack_laya",
+      "max_abs_over_bound": 0.801608,
+      "max_abs_over_noise": 3.20643,
+      "within_bound": true,
+      "cell": "measured",
+      "outcome": "accepted",
+      "repeat": 2
+    },
+    {
+      "artifact": "smoke-stance-64",
+      "cpu": "AWS Graviton (ECS Fargate arm64, 8 vCPU, the pack image)",
+      "step": "pack-task verify",
+      "set": "fine_tuned",
+      "max_abs": "0.000027477741241455078",
+      "bound": "0.00003259039634251337",
+      "noise": 8.147599085628343e-06,
+      "noise_from": "printed by pack_laya",
+      "max_abs_over_bound": 0.843124,
+      "max_abs_over_noise": 3.3725,
+      "within_bound": true,
+      "cell": "measured",
+      "outcome": "accepted",
+      "repeat": 2
+    },
+    {
+      "artifact": "smoke-stance-64",
+      "cpu": "AWS Graviton (ECS Fargate arm64, 8 vCPU, the pack image)",
+      "step": "pack-task verify",
+      "set": "zero_shot",
+      "max_abs": "0.000015079975128173828",
+      "bound": "0.00001881216214005832",
+      "noise": 4.70304053501458e-06,
+      "noise_from": "printed by pack_laya",
+      "max_abs_over_bound": 0.801608,
+      "max_abs_over_noise": 3.20643,
+      "within_bound": true,
+      "cell": "measured",
+      "outcome": "accepted",
+      "repeat": 2
+    },
+    {
+      "artifact": "smoke-stance-64",
+      "cpu": "AWS Graviton (ECS Fargate arm64, 8 vCPU, the pack image)",
+      "step": "pack-task pack",
+      "set": "fine_tuned",
+      "max_abs": "0.000027477741241455078",
+      "bound": "0.00003259039634251337",
+      "noise": 8.147599085628343e-06,
+      "noise_from": "printed by pack_laya",
+      "max_abs_over_bound": 0.843124,
+      "max_abs_over_noise": 3.3725,
+      "within_bound": true,
+      "cell": "measured",
+      "outcome": "accepted",
+      "repeat": 3
+    },
+    {
+      "artifact": "smoke-stance-64",
+      "cpu": "AWS Graviton (ECS Fargate arm64, 8 vCPU, the pack image)",
+      "step": "pack-task pack",
+      "set": "zero_shot",
+      "max_abs": "0.000015079975128173828",
+      "bound": "0.00001881216214005832",
+      "noise": 4.70304053501458e-06,
+      "noise_from": "printed by pack_laya",
+      "max_abs_over_bound": 0.801608,
+      "max_abs_over_noise": 3.20643,
+      "within_bound": true,
+      "cell": "measured",
+      "outcome": "accepted",
+      "repeat": 3
+    },
+    {
+      "artifact": "smoke-stance-64",
+      "cpu": "AWS Graviton (ECS Fargate arm64, 8 vCPU, the pack image)",
+      "step": "pack-task verify",
+      "set": "fine_tuned",
+      "max_abs": "0.000027477741241455078",
+      "bound": "0.00003259039634251337",
+      "noise": 8.147599085628343e-06,
+      "noise_from": "printed by pack_laya",
+      "max_abs_over_bound": 0.843124,
+      "max_abs_over_noise": 3.3725,
+      "within_bound": true,
+      "cell": "measured",
+      "outcome": "accepted",
+      "repeat": 3
+    },
+    {
+      "artifact": "smoke-stance-64",
+      "cpu": "AWS Graviton (ECS Fargate arm64, 8 vCPU, the pack image)",
+      "step": "pack-task verify",
+      "set": "zero_shot",
+      "max_abs": "0.000015079975128173828",
+      "bound": "0.00001881216214005832",
+      "noise": 4.70304053501458e-06,
+      "noise_from": "printed by pack_laya",
+      "max_abs_over_bound": 0.801608,
+      "max_abs_over_noise": 3.20643,
+      "within_bound": true,
+      "cell": "measured",
+      "outcome": "accepted",
+      "repeat": 3
+    },
+    {
+      "artifact": "smoke-stance-64",
+      "cpu": "AWS Graviton (ECS Fargate arm64, 8 vCPU, the pack image)",
+      "step": "pack-task verify (14-14)",
+      "set": "fine_tuned",
+      "max_abs": "0.000027477741241455078",
+      "bound": "0.00003259039634251337",
+      "noise": 8.147599085628343e-06,
+      "noise_from": "printed by pack_laya",
+      "max_abs_over_bound": 0.843124,
+      "max_abs_over_noise": 3.3725,
+      "within_bound": true,
+      "cell": "reference",
+      "outcome": "accepted",
+      "from": ".planning/phases/14-laya-training-mcp-server-s3-dataset-in-apr-and-reports-out/14-SMOKE-EVIDENCE.json smoke.verdict.pack.line"
+    },
+    {
+      "artifact": "smoke-stance-64",
+      "cpu": "AWS Graviton (ECS Fargate arm64, 8 vCPU, the pack image)",
+      "step": "pack-task verify (14-14)",
+      "set": "zero_shot",
+      "max_abs": "0.000015079975128173828",
+      "bound": "0.00001881216214005832",
+      "noise": 4.70304053501458e-06,
+      "noise_from": "printed by pack_laya",
+      "max_abs_over_bound": 0.801608,
+      "max_abs_over_noise": 3.20643,
+      "within_bound": true,
+      "cell": "reference",
+      "outcome": "accepted",
+      "from": ".planning/phases/14-laya-training-mcp-server-s3-dataset-in-apr-and-reports-out/14-SMOKE-EVIDENCE.json smoke.verdict.pack.line"
+    },
+    {
+      "artifact": "smoke-stance-64",
+      "cpu": "Apple M4 Pro (arm64)",
+      "step": "local verify (14-14)",
+      "set": "fine_tuned",
+      "max_abs": "0.00003439188003540039",
+      "bound": "0.00003259039634251337",
+      "noise": null,
+      "noise_from": "rescore-noise.json of the run (training device)",
+      "max_abs_over_bound": 1.05528,
+      "max_abs_over_noise": null,
+      "within_bound": false,
+      "cell": "reference",
+      "outcome": "drift",
+      "from": ".planning/phases/14-laya-training-mcp-server-s3-dataset-in-apr-and-reports-out/14-SMOKE-EVIDENCE.json local_verify.line"
+    },
+    {
+      "artifact": "motivation-v1-sm",
+      "cpu": "AWS Graviton (ECS Fargate arm64, 8 vCPU, the pack image)",
+      "step": "pack-task pack (14-15)",
+      "set": "zero_shot",
+      "max_abs": "0.00001728534698486328",
+      "bound": "0.00001",
+      "noise": 1.7265105816122173e-06,
+      "noise_from": "rescore-noise.json of the run (training device)",
+      "max_abs_over_bound": 1.72853,
+      "max_abs_over_noise": 10.0117,
+      "within_bound": false,
+      "cell": "reference",
+      "outcome": "drift",
+      "from": ".planning/phases/14-laya-training-mcp-server-s3-dataset-in-apr-and-reports-out/14-GATE-RUN-EVIDENCE.json pack.line"
+    }
+  ],
+  "graviton_legs": [
+    {
+      "leg": "motivation",
+      "n": 1,
+      "artifact": "motivation-v1-sm",
+      "dir": "models/laya-trainer/drift-graviton/motivation-1",
+      "pack": {
+        "class": "drift",
+        "which": "zero_shot",
+        "row": 17,
+        "sets": {
+          "zero_shot": {
+            "max_abs": {
+              "text": "0.00001728534698486328",
+              "value": 1.728534698486328e-05
+            },
+            "bound": {
+              "text": "0.00001",
+              "value": 1e-05
+            },
+            "noise": null
+          }
+        },
+        "rc": 2,
+        "line": "REFUSED RescoreDrift which=zero_shot row=17 max_abs=0.00001728534698486328 bound=0.00001 (nothing written)"
+      },
+      "verify": null,
+      "exit_code": 2,
+      "accepted": false,
+      "pack_seconds": 141.47,
+      "verify_seconds": null,
+      "pack_image_digest": "sha256:504084d0c254af66e01b40f9f4679ba48fc09c4bf80386cc458a9388ae3090f3",
+      "task_summary": {
+        "lastStatus": "STOPPED",
+        "stopCode": "EssentialContainerExited",
+        "stoppedReason": "Essential container in task exited",
+        "createdAt": "2026-10-30T14:40:00.442000-07:00",
+        "startedAt": "2026-10-30T14:40:28.797000-07:00",
+        "stoppingAt": "2026-10-30T14:43:38.203000-07:00",
+        "stoppedAt": "2026-10-30T14:43:53.102000-07:00",
+        "cpu": "8192",
+        "memory": "16384",
+        "container_exit_code": 0,
+        "container_reason": null
+      }
+    },
+    {
+      "leg": "motivation",
+      "n": 2,
+      "artifact": "motivation-v1-sm",
+      "dir": "models/laya-trainer/drift-graviton/motivation-2",
+      "pack": {
+        "class": "drift",
+        "which": "zero_shot",
+        "row": 17,
+        "sets": {
+          "zero_shot": {
+            "max_abs": {
+              "text": "0.00001728534698486328",
+              "value": 1.728534698486328e-05
+            },
+            "bound": {
+              "text": "0.00001",
+              "value": 1e-05
+            },
+            "noise": null
+          }
+        },
+        "rc": 2,
+        "line": "REFUSED RescoreDrift which=zero_shot row=17 max_abs=0.00001728534698486328 bound=0.00001 (nothing written)"
+      },
+      "verify": null,
+      "exit_code": 2,
+      "accepted": false,
+      "pack_seconds": 140.7,
+      "verify_seconds": null,
+      "pack_image_digest": "sha256:504084d0c254af66e01b40f9f4679ba48fc09c4bf80386cc458a9388ae3090f3",
+      "task_summary": {
+        "lastStatus": "STOPPED",
+        "stopCode": "EssentialContainerExited",
+        "stoppedReason": "Essential container in task exited",
+        "createdAt": "2026-10-30T14:44:59.640000-07:00",
+        "startedAt": "2026-10-30T14:45:20.496000-07:00",
+        "stoppingAt": "2026-10-30T14:48:28.082000-07:00",
+        "stoppedAt": "2026-10-30T14:48:43.861000-07:00",
+        "cpu": "8192",
+        "memory": "16384",
+        "container_exit_code": 0,
+        "container_reason": null
+      }
+    },
+    {
+      "leg": "motivation",
+      "n": 3,
+      "artifact": "motivation-v1-sm",
+      "dir": "models/laya-trainer/drift-graviton/motivation-3",
+      "pack": {
+        "class": "drift",
+        "which": "zero_shot",
+        "row": 17,
+        "sets": {
+          "zero_shot": {
+            "max_abs": {
+              "text": "0.00001728534698486328",
+              "value": 1.728534698486328e-05
+            },
+            "bound": {
+              "text": "0.00001",
+              "value": 1e-05
+            },
+            "noise": null
+          }
+        },
+        "rc": 2,
+        "line": "REFUSED RescoreDrift which=zero_shot row=17 max_abs=0.00001728534698486328 bound=0.00001 (nothing written)"
+      },
+      "verify": null,
+      "exit_code": 2,
+      "accepted": false,
+      "pack_seconds": 142.78,
+      "verify_seconds": null,
+      "pack_image_digest": "sha256:504084d0c254af66e01b40f9f4679ba48fc09c4bf80386cc458a9388ae3090f3",
+      "task_summary": {
+        "lastStatus": "STOPPED",
+        "stopCode": "EssentialContainerExited",
+        "stoppedReason": "Essential container in task exited",
+        "createdAt": "2026-10-30T14:50:01.492000-07:00",
+        "startedAt": "2026-10-30T14:50:40.059000-07:00",
+        "stoppingAt": "2026-10-30T14:53:53.054000-07:00",
+        "stoppedAt": "2026-10-30T14:54:09-07:00",
+        "cpu": "8192",
+        "memory": "16384",
+        "container_exit_code": 0,
+        "container_reason": null
+      }
+    },
+    {
+      "leg": "smoke",
+      "n": 1,
+      "artifact": "smoke-stance-64",
+      "dir": "models/laya-trainer/drift-graviton/smoke-1",
+      "pack": {
+        "class": "accepted",
+        "mode": "pack",
+        "artifact_sha256": "31ace8ea95ca0c750b6d007d0f4c68e4322d20363117f837673a936d6f696c85",
+        "argmax": "459/459",
+        "deploy_eligible": null,
+        "sets": {
+          "fine_tuned": {
+            "max_abs": {
+              "text": "0.000027477741241455078",
+              "value": 2.7477741241455078e-05
+            },
+            "bound": {
+              "text": "0.00003259039634251337",
+              "value": 3.259039634251337e-05
+            },
+            "noise": {
+              "text": "0.000008147599085628343",
+              "value": 8.147599085628343e-06
+            }
+          },
+          "zero_shot": {
+            "max_abs": {
+              "text": "0.000015079975128173828",
+              "value": 1.5079975128173828e-05
+            },
+            "bound": {
+              "text": "0.00001881216214005832",
+              "value": 1.881216214005832e-05
+            },
+            "noise": {
+              "text": "0.00000470304053501458",
+              "value": 4.70304053501458e-06
+            }
+          }
+        },
+        "rc": 0,
+        "line": "PACKED /work/out/drift-smoke.apr sha256=31ace8ea95ca0c750b6d007d0f4c68e4322d20363117f837673a936d6f696c85 rescore_max_abs=0.000027477741241455078 zs_rescore_max_abs=0.000015079975128173828 rescore_bound=0.00003259039634251337 zs_rescore_bound=0.00001881216214005832 noise=0.000008147599085628343 zs_noise=0.00000470304053501458 shipped_seed=23 argmax=459/459 waived=none"
+      },
+      "verify": {
+        "class": "accepted",
+        "mode": "verify",
+        "artifact_sha256": "31ace8ea95ca0c750b6d007d0f4c68e4322d20363117f837673a936d6f696c85",
+        "argmax": "459/459",
+        "deploy_eligible": true,
+        "sets": {
+          "fine_tuned": {
+            "max_abs": {
+              "text": "0.000027477741241455078",
+              "value": 2.7477741241455078e-05
+            },
+            "bound": {
+              "text": "0.00003259039634251337",
+              "value": 3.259039634251337e-05
+            },
+            "noise": {
+              "text": "8.147599085628343e-6",
+              "value": 8.147599085628343e-06
+            }
+          },
+          "zero_shot": {
+            "max_abs": {
+              "text": "0.000015079975128173828",
+              "value": 1.5079975128173828e-05
+            },
+            "bound": {
+              "text": "0.00001881216214005832",
+              "value": 1.881216214005832e-05
+            },
+            "noise": {
+              "text": "4.70304053501458e-6",
+              "value": 4.70304053501458e-06
+            }
+          }
+        },
+        "rc": 0,
+        "line": "{\"argmax\":\"459/459\",\"artifact_sha256\":\"31ace8ea95ca0c750b6d007d0f4c68e4322d20363117f837673a936d6f696c85\",\"deploy_eligible\":true,\"noise\":8.147599085628343e-6,\"recomputed\":{\"ece_post\":0.06310529497194395,\"ft_macro_f1\":0.7249874875126133,\"margin\":0.315828019529616,\"zs_macro_f1\":0.40915946798299735},\"rescore_bound\":0.00003259039634251337,\"rescore_max_abs\":0.000027477741241455078,\"shipped_seed\":23,\"waived\":null,\"zs_noise\":4.70304053501458e-6,\"zs_rescore_bound\":0.00001881216214005832,\"zs_rescore_max_abs\":0.000015079975128173828}"
+      },
+      "exit_code": 0,
+      "accepted": true,
+      "pack_seconds": 492.67,
+      "verify_seconds": 453.9,
+      "pack_image_digest": "sha256:504084d0c254af66e01b40f9f4679ba48fc09c4bf80386cc458a9388ae3090f3",
+      "task_summary": {
+        "lastStatus": "STOPPED",
+        "stopCode": "EssentialContainerExited",
+        "stoppedReason": "Essential container in task exited",
+        "createdAt": "2026-10-30T13:50:11.130000-07:00",
+        "startedAt": "2026-10-30T13:50:34.865000-07:00",
+        "stoppingAt": "2026-10-30T14:07:24.141000-07:00",
+        "stoppedAt": "2026-10-30T14:07:39.996000-07:00",
+        "cpu": "8192",
+        "memory": "16384",
+        "container_exit_code": 0,
+        "container_reason": null
+      }
+    },
+    {
+      "leg": "smoke",
+      "n": 2,
+      "artifact": "smoke-stance-64",
+      "dir": "models/laya-trainer/drift-graviton/smoke-2",
+      "pack": {
+        "class": "accepted",
+        "mode": "pack",
+        "artifact_sha256": "31ace8ea95ca0c750b6d007d0f4c68e4322d20363117f837673a936d6f696c85",
+        "argmax": "459/459",
+        "deploy_eligible": null,
+        "sets": {
+          "fine_tuned": {
+            "max_abs": {
+              "text": "0.000027477741241455078",
+              "value": 2.7477741241455078e-05
+            },
+            "bound": {
+              "text": "0.00003259039634251337",
+              "value": 3.259039634251337e-05
+            },
+            "noise": {
+              "text": "0.000008147599085628343",
+              "value": 8.147599085628343e-06
+            }
+          },
+          "zero_shot": {
+            "max_abs": {
+              "text": "0.000015079975128173828",
+              "value": 1.5079975128173828e-05
+            },
+            "bound": {
+              "text": "0.00001881216214005832",
+              "value": 1.881216214005832e-05
+            },
+            "noise": {
+              "text": "0.00000470304053501458",
+              "value": 4.70304053501458e-06
+            }
+          }
+        },
+        "rc": 0,
+        "line": "PACKED /work/out/drift-smoke.apr sha256=31ace8ea95ca0c750b6d007d0f4c68e4322d20363117f837673a936d6f696c85 rescore_max_abs=0.000027477741241455078 zs_rescore_max_abs=0.000015079975128173828 rescore_bound=0.00003259039634251337 zs_rescore_bound=0.00001881216214005832 noise=0.000008147599085628343 zs_noise=0.00000470304053501458 shipped_seed=23 argmax=459/459 waived=none"
+      },
+      "verify": {
+        "class": "accepted",
+        "mode": "verify",
+        "artifact_sha256": "31ace8ea95ca0c750b6d007d0f4c68e4322d20363117f837673a936d6f696c85",
+        "argmax": "459/459",
+        "deploy_eligible": true,
+        "sets": {
+          "fine_tuned": {
+            "max_abs": {
+              "text": "0.000027477741241455078",
+              "value": 2.7477741241455078e-05
+            },
+            "bound": {
+              "text": "0.00003259039634251337",
+              "value": 3.259039634251337e-05
+            },
+            "noise": {
+              "text": "8.147599085628343e-6",
+              "value": 8.147599085628343e-06
+            }
+          },
+          "zero_shot": {
+            "max_abs": {
+              "text": "0.000015079975128173828",
+              "value": 1.5079975128173828e-05
+            },
+            "bound": {
+              "text": "0.00001881216214005832",
+              "value": 1.881216214005832e-05
+            },
+            "noise": {
+              "text": "4.70304053501458e-6",
+              "value": 4.70304053501458e-06
+            }
+          }
+        },
+        "rc": 0,
+        "line": "{\"argmax\":\"459/459\",\"artifact_sha256\":\"31ace8ea95ca0c750b6d007d0f4c68e4322d20363117f837673a936d6f696c85\",\"deploy_eligible\":true,\"noise\":8.147599085628343e-6,\"recomputed\":{\"ece_post\":0.06310529497194395,\"ft_macro_f1\":0.7249874875126133,\"margin\":0.315828019529616,\"zs_macro_f1\":0.40915946798299735},\"rescore_bound\":0.00003259039634251337,\"rescore_max_abs\":0.000027477741241455078,\"shipped_seed\":23,\"waived\":null,\"zs_noise\":4.70304053501458e-6,\"zs_rescore_bound\":0.00001881216214005832,\"zs_rescore_max_abs\":0.000015079975128173828}"
+      },
+      "exit_code": 0,
+      "accepted": true,
+      "pack_seconds": 323.27,
+      "verify_seconds": 317.46,
+      "pack_image_digest": "sha256:504084d0c254af66e01b40f9f4679ba48fc09c4bf80386cc458a9388ae3090f3",
+      "task_summary": {
+        "lastStatus": "STOPPED",
+        "stopCode": "EssentialContainerExited",
+        "stoppedReason": "Essential container in task exited",
+        "createdAt": "2026-10-30T14:12:54.328000-07:00",
+        "startedAt": "2026-10-30T14:13:25.899000-07:00",
+        "stoppingAt": "2026-10-30T14:25:03.569000-07:00",
+        "stoppedAt": "2026-10-30T14:25:21.406000-07:00",
+        "cpu": "8192",
+        "memory": "16384",
+        "container_exit_code": 0,
+        "container_reason": null
+      }
+    },
+    {
+      "leg": "smoke",
+      "n": 3,
+      "artifact": "smoke-stance-64",
+      "dir": "models/laya-trainer/drift-graviton/smoke-3",
+      "pack": {
+        "class": "accepted",
+        "mode": "pack",
+        "artifact_sha256": "31ace8ea95ca0c750b6d007d0f4c68e4322d20363117f837673a936d6f696c85",
+        "argmax": "459/459",
+        "deploy_eligible": null,
+        "sets": {
+          "fine_tuned": {
+            "max_abs": {
+              "text": "0.000027477741241455078",
+              "value": 2.7477741241455078e-05
+            },
+            "bound": {
+              "text": "0.00003259039634251337",
+              "value": 3.259039634251337e-05
+            },
+            "noise": {
+              "text": "0.000008147599085628343",
+              "value": 8.147599085628343e-06
+            }
+          },
+          "zero_shot": {
+            "max_abs": {
+              "text": "0.000015079975128173828",
+              "value": 1.5079975128173828e-05
+            },
+            "bound": {
+              "text": "0.00001881216214005832",
+              "value": 1.881216214005832e-05
+            },
+            "noise": {
+              "text": "0.00000470304053501458",
+              "value": 4.70304053501458e-06
+            }
+          }
+        },
+        "rc": 0,
+        "line": "PACKED /work/out/drift-smoke.apr sha256=31ace8ea95ca0c750b6d007d0f4c68e4322d20363117f837673a936d6f696c85 rescore_max_abs=0.000027477741241455078 zs_rescore_max_abs=0.000015079975128173828 rescore_bound=0.00003259039634251337 zs_rescore_bound=0.00001881216214005832 noise=0.000008147599085628343 zs_noise=0.00000470304053501458 shipped_seed=23 argmax=459/459 waived=none"
+      },
+      "verify": {
+        "class": "accepted",
+        "mode": "verify",
+        "artifact_sha256": "31ace8ea95ca0c750b6d007d0f4c68e4322d20363117f837673a936d6f696c85",
+        "argmax": "459/459",
+        "deploy_eligible": true,
+        "sets": {
+          "fine_tuned": {
+            "max_abs": {
+              "text": "0.000027477741241455078",
+              "value": 2.7477741241455078e-05
+            },
+            "bound": {
+              "text": "0.00003259039634251337",
+              "value": 3.259039634251337e-05
+            },
+            "noise": {
+              "text": "8.147599085628343e-6",
+              "value": 8.147599085628343e-06
+            }
+          },
+          "zero_shot": {
+            "max_abs": {
+              "text": "0.000015079975128173828",
+              "value": 1.5079975128173828e-05
+            },
+            "bound": {
+              "text": "0.00001881216214005832",
+              "value": 1.881216214005832e-05
+            },
+            "noise": {
+              "text": "4.70304053501458e-6",
+              "value": 4.70304053501458e-06
+            }
+          }
+        },
+        "rc": 0,
+        "line": "{\"argmax\":\"459/459\",\"artifact_sha256\":\"31ace8ea95ca0c750b6d007d0f4c68e4322d20363117f837673a936d6f696c85\",\"deploy_eligible\":true,\"noise\":8.147599085628343e-6,\"recomputed\":{\"ece_post\":0.06310529497194395,\"ft_macro_f1\":0.7249874875126133,\"margin\":0.315828019529616,\"zs_macro_f1\":0.40915946798299735},\"rescore_bound\":0.00003259039634251337,\"rescore_max_abs\":0.000027477741241455078,\"shipped_seed\":23,\"waived\":null,\"zs_noise\":4.70304053501458e-6,\"zs_rescore_bound\":0.00001881216214005832,\"zs_rescore_max_abs\":0.000015079975128173828}"
+      },
+      "exit_code": 0,
+      "accepted": true,
+      "pack_seconds": 318.72,
+      "verify_seconds": 312.66,
+      "pack_image_digest": "sha256:504084d0c254af66e01b40f9f4679ba48fc09c4bf80386cc458a9388ae3090f3",
+      "task_summary": {
+        "lastStatus": "STOPPED",
+        "stopCode": "EssentialContainerExited",
+        "stoppedReason": "Essential container in task exited",
+        "createdAt": "2026-10-30T14:26:44.684000-07:00",
+        "startedAt": "2026-10-30T14:27:03.861000-07:00",
+        "stoppingAt": "2026-10-30T14:38:30.988000-07:00",
+        "stoppedAt": "2026-10-30T14:38:47.594000-07:00",
+        "cpu": "8192",
+        "memory": "16384",
+        "container_exit_code": 0,
+        "container_reason": null
+      }
+    }
+  ],
+  "graviton_determinism": {
+    "motivation-v1-sm pack": {
+      "distinct_results": 1,
+      "identical": true
+    },
+    "smoke-stance-64 pack": {
+      "distinct_results": 1,
+      "identical": true
+    },
+    "smoke-stance-64 verify": {
+      "distinct_results": 1,
+      "identical": true
+    }
   },
   "local_legs": [
     {
@@ -1022,18 +1797,67 @@
       }
     }
   },
-  "graviton_legs": [],
-  "graviton_determinism": {},
+  "a10g_noise": {
+    "smoke-stance-64": {
+      "device_used": "cuda:0",
+      "torch_version": "2.14.0+cu130",
+      "rescore_noise_sha256_matches_gate_report": true,
+      "reference": "float64",
+      "k": 4.0,
+      "floor_abs": 1e-05,
+      "sets": {
+        "fine_tuned": {
+          "n": 459,
+          "max_abs": 8.147599085628343e-06,
+          "bound": 3.259039634251337e-05,
+          "argmax_agree": 459
+        },
+        "zero_shot": {
+          "n": 459,
+          "max_abs": 4.70304053501458e-06,
+          "bound": 1.881216214005832e-05,
+          "argmax_agree": 459
+        }
+      },
+      "read_from": [
+        "models/decide/smoke-stance-64/run/rescore-noise.json",
+        "models/decide/smoke-stance-64/run/gate-report.json"
+      ],
+      "how": "read from the CUDA run's own records, not re-measured"
+    },
+    "motivation-v1-sm": {
+      "device_used": "cuda:0",
+      "torch_version": "2.14.0+cu130",
+      "rescore_noise_sha256_matches_gate_report": true,
+      "reference": "float64",
+      "k": 4.0,
+      "floor_abs": 1e-05,
+      "sets": {
+        "fine_tuned": {
+          "n": 100,
+          "max_abs": 3.255285573489086e-06,
+          "bound": 1.3021142293956345e-05,
+          "argmax_agree": 100
+        },
+        "zero_shot": {
+          "n": 100,
+          "max_abs": 1.7265105816122173e-06,
+          "bound": 1e-05,
+          "argmax_agree": 100
+        }
+      },
+      "read_from": [
+        "models/decide/motivation-v1-sm/run/rescore-noise.json",
+        "models/decide/motivation-v1-sm/run/gate-report.json"
+      ],
+      "how": "read from the CUDA run's own records, not re-measured"
+    }
+  },
   "unmeasured": [
     "x86_64 CPU: there is no x86_64 pack binary or image (new infrastructure, not planned)",
     "Graviton generation split: the production pack image cannot print its CPU generation, so host heterogeneity on Fargate is observable only as run-to-run spread across repeats",
     "a fresh A10G run: the A10G noise is already recorded in each run's rescore-noise.json; no GPU job is started",
     "the second set of a refused leg: pack_laya reports only the FIRST drifted set (exposing it is a decide-crate change, D-15)"
-  ],
-  "not_planned": [
-    "D-16 (a second reproduction or a waiver): an owner decision, open in 14-VERIFICATION human_verification",
-    "the packing-cancel live check: open in 14-VERIFICATION human_verification",
-    "any contract edit (D-15): contracts/ and crates/aprender-decide stay equal to HEAD"
   ],
   "notes": [
     "Every number in legs and controls was produced on this host by the pinned binary named in `binary`; references are copied from the files their `from` / `read_from` fields name.",
@@ -1042,5 +1866,234 @@
     "The noise reference of a CUDA run is the A10G figure from its rescore-noise.json; of an MPS run, the MPS figure from its rescore-noise.json. The bound is max(floor, k x that noise), so the ratio max_abs / noise is the drift in units of the training-device noise the bound was built from.",
     "Wall times are from a desktop machine running the legs one at a time; other load was not controlled.",
     "No x86_64 CPU is measured: there is no x86_64 pack binary or image. The Graviton legs are generated by aws-plan and run by the owner in 14-21. No contract was amended (D-15)."
+  ],
+  "question": "Does the pack bound max(1e-5, 4 x the A10G noise) hold on the CPU that runs the re-score (Graviton, in the production Fargate pack task), and how far is this Mac from it?",
+  "owner_commands": [
+    "assume ze-kasher-dev && LAYA_DRIFT_APPROVED=graviton bash models/laya-trainer/drift-graviton.sh smoke:1",
+    "assume ze-kasher-dev && LAYA_DRIFT_APPROVED=graviton bash models/laya-trainer/drift-graviton.sh smoke:2 motivation:3"
+  ],
+  "owner_commands_notes": [
+    "Run by the OWNER, in order, each with the Claude Code bang prefix (!) in the owner's own shell; no executor runs an aws command.",
+    "Stage 1 is the tracer (one smoke repeat). Run stage 2 only when models/laya-trainer/drift-graviton/smoke-1/pack-outcome.json is near the recorded Graviton figures (fine_tuned 2.7478e-5, zero_shot 1.5080e-5, accepted).",
+    "Then the executor runs: python3 -I scripts/laya_deploy/laya_drift.py collect",
+    "Run stage 2 before about 2026-11-28: the motivation-v1-sm source is tagged expire and the 30 day lifecycle rule removes it."
+  ],
+  "owner_replies": [
+    {
+      "date": "2026-10-30",
+      "stage": "stage-1 attempt 1",
+      "command": "assume ze-kasher-dev && LAYA_DRIFT_APPROVED=graviton bash models/laya-trainer/drift-graviton.sh smoke:1",
+      "reply": "owner ran it in-session (bang prefix); script refused before any copy: 'REFUSED prefix: runs/drift-smoke/974b00e8-.../ is not empty'",
+      "recorded_by": "orchestrator",
+      "note": "false refusal: aws-cli/2.29.0 prints None for KeyCount on an empty prefix; owner-run diagnostic showed 'None\\n'. Fixed in 5353b8727, script regenerated; no object written, no task run."
+    },
+    {
+      "date": "2026-10-30",
+      "stage": "stage-1",
+      "command": "assume ze-kasher-dev && LAYA_DRIFT_APPROVED=graviton bash models/laya-trainer/drift-graviton.sh smoke:1",
+      "reply": "owner ran it in-session (bang prefix); last line 'DRIFT GRAVITON DONE smoke:1', container_exit 0",
+      "recorded_by": "orchestrator"
+    },
+    {
+      "date": "2026-10-30",
+      "stage": "stage-2",
+      "command": "assume ze-kasher-dev && LAYA_DRIFT_APPROVED=graviton bash models/laya-trainer/drift-graviton.sh smoke:2 motivation:3",
+      "reply": "owner ran it in-session (bang prefix); last line 'DRIFT GRAVITON DONE smoke:2 motivation:3', five legs container_exit 0",
+      "recorded_by": "orchestrator"
+    }
+  ],
+  "owner_script": {
+    "path": "models/laya-trainer/drift-graviton.sh (gitignored: it holds the account id)",
+    "sha256": "10b6ed1177165814e235816ff59aa3e7bca9daf528ee150220a9861012637d6f",
+    "generated_by": "python3 -I scripts/laya_deploy/laya_drift.py aws-plan --state-dir models/laya-trainer --source smoke:3e964ab5-a1ca-458b-bcec-22e094f2f2a6 --source motivation:a2cbacae-529c-4703-a796-b6eda6742446",
+    "regenerated_identical_to_14_20": false,
+    "static_policy_table": {
+      "violations": []
+    },
+    "bashrs_gate": "BASHRS GATE PASS models/laya-trainer/drift-graviton.sh (bashrs-gate: PASS 1 file(s) linted, receipt matched, 0 SEC/DET/IDEM errors (34 SC10xx suppressed - bashrs#226; 18 other)) - re-run on this file after collect",
+    "fake_aws_run": {
+      "copy_differs_from_real_only_in": "readonly RESULTS= (one line)",
+      "static_violations_on_real_file": [],
+      "unapproved_run": {
+        "rc": 2,
+        "aws_calls": 0,
+        "last_err": "REFUSED approval: set LAYA_DRIFT_APPROVED=graviton (each repeat starts one paid Fargate pack task)"
+      },
+      "stage1": {
+        "args": "smoke:1",
+        "rc": 0,
+        "last_line": "DRIFT GRAVITON DONE smoke:1",
+        "first_two_calls": [
+          [
+            "sts",
+            "get-caller-identity"
+          ],
+          [
+            "ecs",
+            "describe-task-definition"
+          ]
+        ]
+      },
+      "stage2": {
+        "args": "smoke:2 motivation:3",
+        "rc": 0,
+        "last_line": "DRIFT GRAVITON DONE smoke:2 motivation:3",
+        "first_two_calls": [
+          [
+            "sts",
+            "get-caller-identity"
+          ],
+          [
+            "ecs",
+            "describe-task-definition"
+          ]
+        ]
+      },
+      "aws_calls_total": 142,
+      "aws_verbs": [
+        "ecs describe-task-definition",
+        "ecs describe-tasks",
+        "ecs run-task",
+        "s3api copy-object",
+        "s3api get-object",
+        "s3api get-object-tagging",
+        "s3api list-objects-v2",
+        "s3api put-object",
+        "sts get-caller-identity"
+      ],
+      "calls_without_profile_region": [],
+      "run_tasks": 6,
+      "writes": 36,
+      "writes_outside_runs_drift": [],
+      "keys_under_runs_drift": 54,
+      "keys_under_runs_drift_not_expire": [],
+      "first_tag_readback_before_first_run_task": true,
+      "tag_oracle_violations": [],
+      "sources_byte_and_tag_identical": true,
+      "source_kept_tag_still_keep": true,
+      "result_dirs": [
+        "motivation-1",
+        "motivation-2",
+        "motivation-3",
+        "smoke-1",
+        "smoke-2",
+        "smoke-3"
+      ],
+      "every_result_dir_has_pack_outcome": true,
+      "verdict": "FAKE AWS RUN OK"
+    },
+    "real_aws_calls_by_executor": 0,
+    "regenerated_at_commit": "5353b8727",
+    "regenerated_identical_to_head_generator": true,
+    "ran_by_owner": "stage-1 (retry) and stage-2 both ran this file; it was written at 13:47:31 local, before the first successful task (created 13:50:11)",
+    "superseded": {
+      "sha256": "e6917dc4d4092cdc1a313ce59459bf46a83027ff73018382e3e91aeea295c353",
+      "what": "the script as first generated in Task 1 (752dc884d), identical to the 14-20 generator",
+      "outcome": "stage-1 attempt 1 refused before any copy: its emptiness check accepted only KeyCount 0, and aws-cli/2.29.0 prints None on an empty prefix. Nothing was written and no task ran (owner_replies[0]).",
+      "fixed_in": "5353b8727 (accept 0|None, refuse anything else; the fake aws now prints None)"
+    },
+    "fake_aws_run_note": "fake_aws_run was recorded against the superseded script in Task 1; the regenerated script differs only in the KeyCount check, and the 5353b8727 selftest covers the None shape"
+  },
+  "sources": {
+    "smoke": {
+      "run": "smoke-stance-64",
+      "task_id": "3e964ab5-a1ca-458b-bcec-22e094f2f2a6",
+      "retention": "keep",
+      "trained_on": "cuda:0 (A10G, SageMaker ml.g5.xlarge)"
+    },
+    "motivation": {
+      "run": "motivation-v1-sm",
+      "task_id": "a2cbacae-529c-4703-a796-b6eda6742446",
+      "retention": "expire",
+      "expires_about": "2026-11-28",
+      "trained_on": "cuda:0 (A10G, SageMaker ml.g5.xlarge)"
+    }
+  },
+  "not_planned": [
+    "D-16 (a second reproduction or a waiver): an owner decision, open in 14-VERIFICATION human_verification",
+    "the packing-cancel live check: open in 14-VERIFICATION human_verification",
+    "any contract edit (D-15): contracts/ and crates/aprender-decide stay equal to HEAD"
+  ],
+  "graviton_spread": [
+    {
+      "artifact": "motivation-v1-sm",
+      "step": "pack-task pack",
+      "set": "zero_shot",
+      "repeats": 3,
+      "min": 1.728534698486328e-05,
+      "max": 1.728534698486328e-05,
+      "max_minus_min": 0.0,
+      "relative_spread": 0.0,
+      "distinct_values": 1,
+      "within_bound": 0,
+      "bound": "0.00001"
+    },
+    {
+      "artifact": "smoke-stance-64",
+      "step": "pack-task pack",
+      "set": "fine_tuned",
+      "repeats": 3,
+      "min": 2.7477741241455078e-05,
+      "max": 2.7477741241455078e-05,
+      "max_minus_min": 0.0,
+      "relative_spread": 0.0,
+      "distinct_values": 1,
+      "within_bound": 3,
+      "bound": "0.00003259039634251337"
+    },
+    {
+      "artifact": "smoke-stance-64",
+      "step": "pack-task pack",
+      "set": "zero_shot",
+      "repeats": 3,
+      "min": 1.5079975128173828e-05,
+      "max": 1.5079975128173828e-05,
+      "max_minus_min": 0.0,
+      "relative_spread": 0.0,
+      "distinct_values": 1,
+      "within_bound": 3,
+      "bound": "0.00001881216214005832"
+    },
+    {
+      "artifact": "smoke-stance-64",
+      "step": "pack-task verify",
+      "set": "fine_tuned",
+      "repeats": 3,
+      "min": 2.7477741241455078e-05,
+      "max": 2.7477741241455078e-05,
+      "max_minus_min": 0.0,
+      "relative_spread": 0.0,
+      "distinct_values": 1,
+      "within_bound": 3,
+      "bound": "0.00003259039634251337"
+    },
+    {
+      "artifact": "smoke-stance-64",
+      "step": "pack-task verify",
+      "set": "zero_shot",
+      "repeats": 3,
+      "min": 1.5079975128173828e-05,
+      "max": 1.5079975128173828e-05,
+      "max_minus_min": 0.0,
+      "relative_spread": 0.0,
+      "distinct_values": 1,
+      "within_bound": 3,
+      "bound": "0.00001881216214005832"
+    }
+  ],
+  "facts": [
+    "motivation-v1-sm on Graviton: 0 of 3 pack tasks recorded accepted=true in pack-outcome.json; 0 of 3 printed PACKED.",
+    "smoke-stance-64 on Graviton: 3 of 3 pack tasks recorded accepted=true in pack-outcome.json; 3 of 3 printed PACKED.",
+    "motivation-v1-sm pack-task pack zero_shot on Graviton over 3 repeats: max_abs 1.7285e-05 to 1.7285e-05 (1 distinct value), 0 of 3 within the bound 0.00001.",
+    "smoke-stance-64 pack-task pack fine_tuned on Graviton over 3 repeats: max_abs 2.7478e-05 to 2.7478e-05 (1 distinct value), 3 of 3 within the bound 0.00003259039634251337.",
+    "smoke-stance-64 pack-task pack zero_shot on Graviton over 3 repeats: max_abs 1.5080e-05 to 1.5080e-05 (1 distinct value), 3 of 3 within the bound 0.00001881216214005832.",
+    "smoke-stance-64 pack-task verify fine_tuned on Graviton over 3 repeats: max_abs 2.7478e-05 to 2.7478e-05 (1 distinct value), 3 of 3 within the bound 0.00003259039634251337.",
+    "smoke-stance-64 pack-task verify zero_shot on Graviton over 3 repeats: max_abs 1.5080e-05 to 1.5080e-05 (1 distinct value), 3 of 3 within the bound 0.00001881216214005832.",
+    "motivation-v1-sm zero_shot on this Mac (local pack): 1.4901e-05, below the Graviton range of pack-task pack (1.7285e-05 to 1.7285e-05).",
+    "smoke-stance-64 fine_tuned on this Mac (local verify): 3.4392e-05, above the Graviton range of pack-task pack (2.7478e-05 to 2.7478e-05).",
+    "smoke-stance-64 fine_tuned on this Mac (local verify): 3.4392e-05, above the Graviton range of pack-task verify (2.7478e-05 to 2.7478e-05).",
+    "The MPS-trained artifacts (laya-antisemitism-v1, laya-motivation-v1, laya-stance-64) are within the bound on this Mac; the largest max_abs / bound among them is 0.525671 (laya-antisemitism-v1 fine_tuned).",
+    "CUDA-trained, fine_tuned: the largest observed max_abs / A10G noise is 4.22111 (smoke-stance-64, Apple M4 Pro, local verify). This is an observation, not a proposed multiplier: the bound's k is 4 and the floor is 1e-5.",
+    "CUDA-trained, zero_shot: the largest observed max_abs / A10G noise is 10.0117 (motivation-v1-sm, AWS Graviton, pack-task pack). This is an observation, not a proposed multiplier: the bound's k is 4 and the floor is 1e-5."
   ]
 }
