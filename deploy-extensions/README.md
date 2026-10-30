@@ -235,6 +235,61 @@ count 1, `MaxRuntimeInSeconds` 21600, the 36,000 s machine timeout, the 8 vCPU /
 the exact `data` and `base` SageMaker channels, and digest-pinned images. None is read from the
 execution input.
 
+## Finalizer provenance (plan 14-19, WR-04)
+
+The finalizer is the one writer of a run's terminal record, verdict, manifest and tags, and the one that
+releases the single-flight lock. Its Lambda package, `deploy-extensions/assets/laya-finalizer/`, is
+untracked (`deploy-extensions/assets/` is gitignored) and holds whatever the working tree compiled to. So
+`just laya-trainer-synth` writes a build record beside the binary, `bootstrap.build.json`, holding:
+
+- the commit (`git rev-parse HEAD`);
+- the source closure. These are the workspace directories that `cargo tree -p aprender-mcp-laya-train-lambda
+  -e normal --prefix none --format '{p}' --target aarch64-unknown-linux-gnu` names with a local path, plus
+  `Cargo.lock`, `Cargo.toml` and `rust-toolchain.toml`;
+- `closure_clean` and the dirty closure paths at synth time;
+- the binary's sha256, the target triple and the UTC time.
+
+A synth from a dirty closure still succeeds and records `closure_clean: false`, so an offline synth of
+work in progress stays possible.
+
+`just laya-trainer-infra diff` and `deploy` then refuse with `REFUSED infra: finalizer provenance:
+<reason>`. Under `DRY_RUN=1` they print the same words as a `DRY RUN NOTE`. They refuse unless all of
+these hold:
+
+| Reason (as printed) | What it means |
+|---------------------|---------------|
+| `sidecar absent` / `schema` | there is no record, or it is not a `laya-finalizer-build-v1` record |
+| `sha mismatch` | the binary is not the one the synth recorded |
+| `built from a dirty closure: <path>` | the synth compiled uncommitted closure changes |
+| `commit not an ancestor of HEAD` | the binary was built on another branch, or on rewritten history |
+| `closure path changed since the build: <path>` | a closure file differs between the build commit and HEAD |
+| `closure path dirty: <path>` | a closure file is modified or untracked now |
+
+The check runs after the account check and before any `cdk` call. `python3 -I
+scripts/laya_deploy/laya_trainer_ops.py finalizer-provenance verify deploy-extensions/assets/laya-finalizer`
+runs the same rule on its own. **The order is synth, then diff, then deploy**, all from one commit.
+
+**What it proves, and what it does not.** It attests what was built from what: this binary is the one the
+synth produced, from this commit, with this closure clean and unchanged since. It is **not** byte
+reproducibility (14-SECURITY W-3 stays open). A re-synth of unchanged source writes a different binary, so
+the sha256, the sidecar and the CDK asset hash all change. Nothing attests the gitignored
+`.cargo/config.toml`, and nothing attests a path dependency outside the checkout: `write` refuses one. A
+dependency added after the synth is caught, because adding it changes `Cargo.lock` and a closure crate's
+`Cargo.toml`.
+
+Two operational facts, so neither is a surprise at deploy time:
+
+1. **The record ships inside the deployed function.** `bin/app.ts` hands the whole asset directory to
+   `Code.fromAsset`, so `bootstrap.build.json` is zipped into the finalizer's Lambda package. Anyone who
+   can read the function's code can read it. It carries no secret: a commit, closure path names, a sha256,
+   a target triple and a UTC time. Because it holds the UTC time, **every synth changes the CDK asset
+   hash**, even from unchanged source.
+2. **The closure is wide.** It is about a dozen workspace crates (12 when derived with the command above on
+   2026-10-30; re-derive it, don't quote it), `aprender-core` and `aprender-compute` among them. So a
+   commit after a synth that touches ANY closure path makes `diff` and `deploy` refuse, with the changed
+   path named, even if the change has nothing to do with Laya. The cure is to re-run `just
+   laya-trainer-synth <env>`. Commits outside the closure, such as planning documents, never refuse.
+
 ## Order of the first deployment
 
 1. **Images stack.** `diff` then `deploy` the images stack (`just laya-trainer-infra diff-images`,
@@ -245,8 +300,9 @@ execution input.
 3. **CodeBuild image builds.** `just laya-trainer-image train` and `pack` upload a context assembled from
    `HEAD`, start the matching project, and record the `IMAGE DIGEST sha256:...` line each build prints.
    Tags are the 40-hex commit and are immutable; the digests are what the stack pins.
-4. **Trainer stack with those digests.** `just laya-trainer-infra diff` then `deploy`; the deploy refuses
-   placeholder digests.
+4. **Trainer stack with those digests.** `just laya-trainer-synth <env>` on a clean, committed closure, then
+   `just laya-trainer-infra diff` then `deploy`. The deploy refuses placeholder digests and a finalizer asset
+   whose provenance record does not attribute it (see Finalizer provenance above).
 5. **Trainer stack outputs.** `BucketName`, `TableName`, `StateMachineArn`, `FinalizerName`,
    `SageMakerRoleArn`, `TrainRepoUri`, `PackTaskDefinitionArn`, `ClusterArn`, `SubnetIds`,
    `SecurityGroupId`, `FinalizerDlqUrl` and `RequestLambdaPolicy`.

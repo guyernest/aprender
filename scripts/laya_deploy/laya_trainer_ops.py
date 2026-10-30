@@ -821,6 +821,8 @@ def derive_closure(ctx, target):
 
 
 def write_provenance(ctx, asset_dir, target):
+    if not (Path(asset_dir) / "bootstrap").is_file():
+        refuse("provenance", "no finalizer binary at %s; the synth must copy it there first" % (Path(asset_dir) / "bootstrap"))
     sc = build_sidecar(ctx, asset_dir, target, derive_closure(ctx, target))
     path = Path(asset_dir) / FINALIZER_SIDECAR
     tmp = Path(asset_dir) / (".%s.tmp-%d" % (FINALIZER_SIDECAR, os.getpid()))
@@ -1815,6 +1817,7 @@ class Sim:
         self.tree = []
         self.ancestor = True
         self.changed = []
+        self.cargo_tree_out = None
         self.asset_dir = None
         self.real_git = False
         self.build_statuses = ["IN_PROGRESS", "IN_PROGRESS", "SUCCEEDED"]
@@ -1860,6 +1863,8 @@ class Sim:
             return self.aws(argv)
         if exe == "touch":
             return Result(0, "", "")
+        if exe == "cargo" and argv[1:2] == ["tree"] and self.cargo_tree_out is not None:
+            return Result(0, self.cargo_tree_out, "")
         if exe == "curl":
             if self.health["rc"]:
                 return Result(self.health["rc"], "", "curl: (7) Failed to connect")
@@ -2299,6 +2304,185 @@ def selftest():
     case("infra-provenance-tracer", benign and tampered and dirty_built,
          "a matching sidecar deploys (dry: AWS CALLS: 0); a changed asset byte (sha mismatch) and a dirty-closure build are refused live with no "
          "cdk call and noted under DRY_RUN (benign=%s tampered=%s dirty=%s)" % (benign, tampered, dirty_built))
+
+    # ---- provenance table (plan 14-19, Task 2): every refusal for its own reason, every accept for the right one
+    # A captured sample of `cargo tree -p aprender-mcp-laya-train-lambda -e normal --prefix none --format {p}` (2026-10-30), the
+    # checkout root replaced by {ROOT}; plus the markers the parser must not mistake for crates: a duplicate line, `(*)`,
+    # `(proc-macro)`, a git source, a `[build-dependencies]` header (printed under --prefix indent) and a registry crate.
+    # The real closure is DERIVED by the synth (12 crates on 2026-10-30); this sample proves the parser, never the count.
+    TREE_SAMPLE = """aprender-mcp-laya-train-lambda v0.69.3 ({ROOT}/crates/aprender-mcp-laya-train-lambda)
+aprender-mcp-laya-train v0.69.3 ({ROOT}/crates/aprender-mcp-laya-train)
+aprender-mcp-setfit-train v0.69.3 ({ROOT}/crates/aprender-mcp-setfit-train)
+aprender-mcp-setfit-train v0.69.3 ({ROOT}/crates/aprender-mcp-setfit-train) (*)
+aprender-setfit-train-lambda v0.69.3 ({ROOT}/crates/aprender-setfit-train-lambda)
+aprender-decide v0.69.3 ({ROOT}/crates/aprender-decide)
+aprender-core v0.69.3 ({ROOT}/crates/aprender-core)
+aprender-compute v0.69.3 ({ROOT}/crates/aprender-compute)
+aprender-contracts-macros v0.69.3 (proc-macro) ({ROOT}/crates/aprender-contracts-macros)
+aprender-contracts-macros v0.69.3 (proc-macro) ({ROOT}/crates/aprender-contracts-macros) (*)
+serde v1.0.228
+serde_derive v1.0.228 (proc-macro)
+serde v1.0.228 (*)
+aws-config v1.8.18 (*)
+pmcp v2.19.3 (https://github.com/paiml/rust-mcp-sdk#0123abcd)
+[build-dependencies]
+cc v1.2.0
+"""
+    MUST_CRATES = ("aprender-mcp-laya-train-lambda", "aprender-mcp-laya-train", "aprender-mcp-setfit-train", "aprender-setfit-train-lambda",
+                   "aprender-decide", "aprender-core", "aprender-compute")
+    crates_s, outside_s = parse_closure(TREE_SAMPLE.replace("{ROOT}", "/w/aprender"), "/w/aprender")
+    cr_out, out_out = parse_closure(TREE_SAMPLE.replace("{ROOT}", "/w/aprender") + "zz-ext v0.1.0 (/elsewhere/zz-ext)\n", "/w/aprender")
+    case("provenance-closure-parse", all(crates_s.get(n) == "crates/" + n for n in MUST_CRATES) and not outside_s
+         and not ({"serde", "serde_derive", "aws-config", "pmcp", "cc", "[build-dependencies]"} & set(crates_s))
+         and sorted(crates_s) == sorted(MUST_CRATES + ("aprender-contracts-macros",)) and out_out == ["/elsewhere/zz-ext"]
+         and closure_paths(crates_s)[:2] == ["Cargo.lock", "Cargo.toml"] and closure_paths(crates_s)[-1] == "rust-toolchain.toml",
+         "the four finalizer crates, aprender-decide, -core and -compute are named, no registry/git crate, duplicates and markers collapse; "
+         "a path dependency outside the checkout is reported (the closure size is derived by the synth, never quoted)")
+
+    GOOD = {"schema": FINALIZER_SCHEMA, "commit": "a" * 40, "closure": ["Cargo.lock", "Cargo.toml", "crates/x", "rust-toolchain.toml"],
+            "closure_crates": ["x"], "closure_clean": True, "dirty": [], "bootstrap_sha256": "b" * 64, "target": FINALIZER_TARGET,
+            "built_at": "2026-10-30T00:00:00Z"}
+    FACTS = {"asset_sha256": "b" * 64, "is_ancestor": True, "changed": [], "dirty": []}
+
+    def pv(sc_over=None, facts_over=None, sidecar="keep"):
+        sc = dict(GOOD, **(sc_over or {})) if sidecar == "keep" else sidecar
+        return check_provenance(sc, dict(FACTS, **(facts_over or {})))
+
+    pure = [  # (label, reason, the phrase it must OPEN with, a fragment it must name)
+        ("absent", pv(sidecar=None), "sidecar absent", FINALIZER_SIDECAR),
+        ("not-json", pv(sidecar="<not JSON>"), "schema", FINALIZER_SCHEMA),
+        ("wrong-schema", pv({"schema": "laya-finalizer-build-v0"}), "schema", FINALIZER_SCHEMA),
+        ("bad-commit", pv({"commit": "HEAD"}), "schema", "commit"),
+        ("traversal", pv({"closure": ["crates/x", "../outside"]}), "schema", "closure"),
+        ("sha-mismatch", pv(facts_over={"asset_sha256": "c" * 64}), "sha mismatch", "cccccccccccccccc"),
+        ("asset-gone", pv(facts_over={"asset_sha256": None}), "sha mismatch", "None"),
+        ("dirty-build", pv({"closure_clean": False, "dirty": ["crates/x/src/a.rs"]}), "built from a dirty closure", "crates/x/src/a.rs"),
+        ("not-ancestor", pv(facts_over={"is_ancestor": False}), "commit not an ancestor of HEAD", "a" * 12),
+        ("changed", pv(facts_over={"changed": ["crates/x/src/a.rs", "Cargo.lock"]}), "closure path changed since the build", "crates/x/src/a.rs (and 1 more)"),
+        ("diff-failed", pv(facts_over={"changed": None}), "closure path changed since the build", "could not diff"),
+        ("dirty-now", pv(facts_over={"dirty": ["crates/x/src/b.rs"]}), "closure path dirty", "crates/x/src/b.rs"),
+        ("status-failed", pv(facts_over={"dirty": None}), "closure path dirty", "could not answer"),
+    ]
+    bad_pure = [lbl for lbl, why, phrase, frag in pure if not (why and why.startswith(phrase) and frag in why)]
+    case("provenance-pure", not bad_pure and pv() is None,
+         "%d single-field mutations of an accepted record each refused by their own rule, the record itself accepted%s"
+         % (len(pure), "; WRONG: " + ", ".join(bad_pure) if bad_pure else ""))
+
+    # write through go(): the Runner seam, a dirty closure RECORDED (not refused) at write time, then refused by infra
+    sim, sdir = world()
+    sim.cargo_tree_out = TREE_SAMPLE.replace("{ROOT}", str(REPO_ROOT))
+    sim.dirty = [(" M", "crates/aprender-core/src/lib.rs"), (" M", ".planning/STATE.md")]
+    rw = go(sim, sdir, ["finalizer-provenance", "write", str(sim.asset_dir), "--target", FINALIZER_TARGET], state_opt=False)
+    scw = json.loads((sim.asset_dir / FINALIZER_SIDECAR).read_text())
+    tree_call = [c for c in sim.calls if c[:2] == ["cargo", "tree"]]
+    ri = go(sim, sdir, ["infra", "deploy", "dev", PROFILE])
+    sim.dirty = []
+    rw2 = go(sim, sdir, ["finalizer-provenance", "write", str(sim.asset_dir)], state_opt=False)
+    ri2 = go(sim, sdir, ["infra", "deploy", "dev", PROFILE])
+    case("provenance-write", rw["rc"] == 0 and "FINALIZER PROVENANCE WRITTEN commit=%s" % Sim.HEAD[:12] in rw["out"] and "clean=false" in rw["out"]
+         and "WARNING: built from a dirty closure (crates/aprender-core/src/lib.rs)" in rw["err"] and tree_call == [cargo_tree_argv(FINALIZER_TARGET)]
+         and scw["closure_clean"] is False and scw["dirty"] == ["crates/aprender-core/src/lib.rs"] and scw["commit"] == Sim.HEAD
+         and scw["bootstrap_sha256"] == sha256_file(sim.asset_dir / "bootstrap") and "crates/aprender-core" in scw["closure"]
+         and ".planning/STATE.md" not in scw["dirty"] and scw["built_at"] == "2026-10-29T12:34:56Z"
+         and ri["rc"] == 2 and "finalizer provenance: built from a dirty closure: crates/aprender-core/src/lib.rs" in ri["err"]
+         and rw2["rc"] == 0 and "clean=true" in rw2["out"] and ri2["rc"] == 0 and ri2["out"].rstrip().endswith("INFRA OK deploy"),
+         "write derives the closure with cargo tree, records a dirty closure (only its own paths) without refusing, infra refuses that "
+         "record naming the path; a clean re-write deploys")
+    sim, sdir = world()
+    sim.cargo_tree_out = TREE_SAMPLE.replace("{ROOT}", str(REPO_ROOT)) + "zz-ext v0.1.0 (/elsewhere/zz-ext)\n"
+    rw3 = go(sim, sdir, ["finalizer-provenance", "write", str(sim.asset_dir)], state_opt=False)
+    sim.cargo_tree_out = TREE_SAMPLE.replace("{ROOT}", str(REPO_ROOT))
+    (sim.asset_dir / "bootstrap").unlink()
+    n_before = len(sim.calls)
+    rw4 = go(sim, sdir, ["finalizer-provenance", "write", str(sim.asset_dir)], state_opt=False)
+    rw4_calls = sim.calls[n_before:]
+    rw5 = go(sim, sdir, ["finalizer-provenance", "write", str(sim.asset_dir), "--target", "x86"], state_opt=False)
+    case("provenance-write-refusals", rw3["rc"] == 2 and "REFUSED provenance: the closure has a path dependency outside the repository (/elsewhere/zz-ext)" in rw3["err"]
+         and rw4["rc"] == 2 and "REFUSED provenance: no finalizer binary" in rw4["err"] and rw4_calls == []
+         and rw5["rc"] == 2 and "REFUSED usage: --target" in rw5["err"],
+         "an out-of-repository path dependency (git cannot attest it), an absent binary and a malformed target are refused at write time")
+
+    # real git, in a temporary repository (never the real one): the semantics the pure rule relies on
+    grepo = fresh("git") / "repo"
+    gasset = grepo.parent / "asset"
+    gasset.mkdir()
+    genv = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1", GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@e",
+                GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@e")
+
+    def g(*a):
+        return subprocess.run(["git", "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null", *a], cwd=str(grepo), env=genv,
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True)
+
+    def put(rel, text):
+        f = grepo / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(text)
+
+    def commit_all(msg):
+        g("add", "-A")
+        return g("commit", "-q", "-m", msg).returncode == 0
+
+    grepo.mkdir()
+    g("init", "-q", "-b", "main")
+    for rel, text in (("Cargo.toml", "[workspace]\n"), ("Cargo.lock", "# lock\n"), ("rust-toolchain.toml", "[toolchain]\n"),
+                      ("crates/fin/src/lib.rs", "pub fn f() {}\n"), ("crates/other/src/lib.rs", "pub fn o() {}\n"), (".planning/STATE.md", "s\n")):
+        put(rel, text)
+    built = commit_all("build")
+    (gasset / "bootstrap").write_bytes(b"\x7fELF real-git finalizer\n")
+    gctx = Ctx(env={"DRY_RUN": "0"}, stdout=io.StringIO(), stderr=io.StringIO(), repo_root=grepo)
+    GCRATES = {"fin": "crates/fin"}
+
+    def gbuild():
+        sc = build_sidecar(gctx, gasset, FINALIZER_TARGET, GCRATES)
+        (gasset / FINALIZER_SIDECAR).write_text(json.dumps(sc))
+        return sc
+
+    gres = []
+
+    def gcase(label, phrase, frag=""):
+        why = verify_provenance(gctx, gasset)
+        good = why is None if phrase is None else bool(why and why.startswith(phrase) and frag in why)
+        gres.append((label, good, why))
+
+    gbuild()
+    gcase("built", None)
+    put(".planning/STATE.md", "s2\n")
+    put("crates/other/src/lib.rs", "pub fn o2() {}\n")
+    unrelated = commit_all("planning and an unrelated crate")
+    gcase("unrelated-commit", None)
+    put("crates/fin/src/lib.rs", "pub fn f() { /* edited */ }\n")
+    gcase("closure-dirty", "closure path dirty", "crates/fin/src/lib.rs")
+    g("checkout", "-q", "--", "crates/fin/src/lib.rs")
+    put("crates/fin/src/new.rs", "pub fn n() {}\n")
+    gcase("closure-untracked", "closure path dirty", "crates/fin/src/new.rs")
+    (grepo / "crates/fin/src/new.rs").unlink()
+    gcase("clean-again", None)
+    put("crates/fin/src/lib.rs", "pub fn f() { /* committed */ }\n")
+    commit_all("touch the closure")
+    gcase("closure-committed", "closure path changed since the build", "crates/fin/src/lib.rs")
+    gbuild()
+    gcase("re-synth", None)
+    put("Cargo.lock", "# lock 2\n")
+    commit_all("bump the lock")
+    gcase("lock-committed", "closure path changed since the build", "Cargo.lock")
+    gbuild()
+    g("checkout", "-q", "-b", "side")
+    put(".planning/side.md", "x\n")
+    commit_all("side")
+    gbuild()
+    g("checkout", "-q", "main")
+    gcase("other-branch", "commit not an ancestor of HEAD")
+    gbuild()
+    put("crates/fin/src/lib.rs", "pub fn f() { /* dirty at synth */ }\n")
+    scd = gbuild()
+    g("checkout", "-q", "--", "crates/fin/src/lib.rs")
+    gcase("dirty-at-synth", "built from a dirty closure", "crates/fin/src/lib.rs")
+    gbad = [lbl for lbl, good, _w in gres if not good]
+    case("provenance-real-git", built and unrelated and not gbad and len(gres) == 10 and scd["closure_clean"] is False
+         and scd["dirty"] == ["crates/fin/src/lib.rs"],
+         "a temp repository: an unrelated (planning + non-closure crate) commit is ACCEPTED; an uncommitted and an untracked closure edit, "
+         "a committed closure edit, a committed Cargo.lock, a build on another branch and a dirty-at-synth build each refused for their "
+         "own reason%s" % ("; WRONG: " + "; ".join("%s -> %s" % (lbl, w) for lbl, good, w in gres if not good) if gbad else ""))
 
     # ---- infra-order
     sim, sdir = world()
