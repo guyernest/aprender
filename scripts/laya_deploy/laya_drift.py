@@ -4,7 +4,8 @@
     python3 -I scripts/laya_deploy/laya_drift.py local [--only LEG[,LEG...]] [--repeats N] [--out DIR]
     python3 -I scripts/laya_deploy/laya_drift.py aws-plan --source smoke:TASK_ID [--source motivation:TASK_ID]
                                                   [--state-dir DIR] [--script FILE] [--results DIR]
-    python3 -I scripts/laya_deploy/laya_drift.py collect [--local FILE] [--graviton DIR] [--out FILE] [--draft FILE]
+    python3 -I scripts/laya_deploy/laya_drift.py collect [--local FILE] [--graviton DIR] [--out FILE] [--brief FILE]
+                                                 [--draft FILE]
     python3 -I scripts/laya_deploy/laya_drift.py bashrs-gate FILE [FILE...]
     python3 -I scripts/laya_deploy/laya_drift.py --selftest
 
@@ -26,8 +27,11 @@ repository holding a copy (that gate enumerates git ls-files). Exit 0 pass, 1 fi
 an empty or unreadable file, the gate's own vacuity). A bare `bashrs lint` exit is not the verdict.
 
 `collect` merges the local evidence, the Graviton result directories (pack-outcome.json packed_line and verify_line,
-read by the same parser) and the recorded references into 14-DRIFT-EVIDENCE.json and a table for the 14-21 brief;
-it scrubs twelve-digit runs and ARNs from every string and refuses to write when one remains.
+read by the same parser) and the recorded references into 14-DRIFT-EVIDENCE.json and the D-15 decision brief
+14-DRIFT-DECISION-BRIEF.md (a bare table too with --draft). An existing 14-DRIFT-EVIDENCE.json (the 14-21 skeleton) is
+merged into, never replaced: its owner_commands, owner_replies, owner_script, sources and not_planned are carried over
+and status is recomputed (awaiting-owner-run, measured, incomplete). It scrubs twelve-digit runs and ARNs from every
+string and refuses to write when one remains.
 
 `local` runs legs on THIS machine. A leg is one retained run, measured by the pack_laya example binary:
 
@@ -1285,7 +1289,6 @@ def cmd_bashrs_gate(argv, ctx):
 GATE_RUN_EVIDENCE = PHASE_DIR + "/14-GATE-RUN-EVIDENCE.json"
 LOCAL_EVIDENCE = PHASE_DIR + "/14-DRIFT-LOCAL-EVIDENCE.json"
 MERGED_EVIDENCE = PHASE_DIR + "/14-DRIFT-EVIDENCE.json"
-MERGED_DRAFT = PHASE_DIR + "/14-DRIFT-TABLE.md"
 GRAVITON_CPU = "AWS Graviton (ECS Fargate arm64, 8 vCPU, the pack image)"
 ID_RE = re.compile(r"\b[0-9]{12}\b")
 ARN_RE = re.compile(r"arn:aws[a-zA-Z-]*:[^\s\"',]*")
@@ -1433,11 +1436,161 @@ def draft_table(rows):
             "set, so a refused leg has one row.\n\n" + head + body)
 
 
+MERGED_BRIEF = PHASE_DIR + "/14-DRIFT-DECISION-BRIEF.md"
+# keys of an existing 14-DRIFT-EVIDENCE.json (the 14-21 skeleton) that collect carries over rather than recomputes:
+# what the owner was asked to run and what the owner replied are records, never regenerated
+PRESERVED = ("question", "owner_commands", "owner_commands_notes", "owner_replies", "owner_script", "sources", "not_planned")
+UNMEASURED_BASE = ["x86_64 CPU: there is no x86_64 pack binary or image (new infrastructure, not planned)"]
+
+
+def graviton_status(glegs):
+    """awaiting-owner-run (no leg directory), measured (every leg parsed to accepted or drift), incomplete (otherwise)."""
+    if not glegs:
+        return "awaiting-owner-run"
+    for g in glegs:
+        recs = [g.get("pack"), g.get("verify")]
+        if g.get("error") or not any(r and r["class"] in ("accepted", "drift") for r in recs):
+            return "incomplete"
+    return "measured"
+
+
+def graviton_spread(rows):
+    """Run-to-run spread of every (artifact, step, set) over the measured Graviton repeats."""
+    groups = {}
+    for r in rows:
+        if r["cell"] == "measured" and r["cpu"] == GRAVITON_CPU:
+            groups.setdefault((r["artifact"], r["step"], r["set"]), []).append(r)
+    out = []
+    for (art, step, which), rs in sorted(groups.items()):
+        vals = [float(r["max_abs"]) for r in rs]
+        lo, hi = min(vals), max(vals)
+        out.append({"artifact": art, "step": step, "set": which, "repeats": len(rs), "min": lo, "max": hi,
+                    "max_minus_min": hi - lo, "relative_spread": ratio(hi - lo, lo), "distinct_values": len(set(vals)),
+                    "within_bound": sum(1 for r in rs if r["within_bound"]), "bound": rs[0]["bound"]})
+    return out
+
+
+def brief_facts(m):
+    """Statements the numbers force, each computed from the merged evidence (no recommendation)."""
+    facts, rows = [], m["rows"]
+    by_art = {}
+    for g in m["graviton_legs"]:
+        by_art.setdefault(g["artifact"], []).append(g)
+    for art, gs in sorted(by_art.items()):
+        acc = sum(1 for g in gs if g.get("accepted") is True)
+        packed = sum(1 for g in gs if (g.get("pack") or {}).get("class") == "accepted")
+        facts.append("%s on Graviton: %d of %d pack tasks recorded accepted=true in pack-outcome.json; %d of %d printed "
+                     "PACKED." % (art, acc, len(gs), packed, len(gs)))
+    for s in m["graviton_spread"]:
+        facts.append("%s %s %s on Graviton over %d repeats: max_abs %.4e to %.4e (%d distinct value%s), %d of %d within the "
+                     "bound %s." % (s["artifact"], s["step"], s["set"], s["repeats"], s["min"], s["max"], s["distinct_values"],
+                                    "" if s["distinct_values"] == 1 else "s", s["within_bound"], s["repeats"], s["bound"]))
+    loc = {(r["artifact"], r["set"]): r for r in rows if r["cell"] == "measured" and r["cpu"] != GRAVITON_CPU}
+    for s in m["graviton_spread"]:
+        r = loc.get((s["artifact"], s["set"]))
+        if r is None:
+            continue
+        v = float(r["max_abs"])
+        where = "inside" if s["min"] <= v <= s["max"] else ("above" if v > s["max"] else "below")
+        facts.append("%s %s on this Mac (%s): %.4e, %s the Graviton range of %s (%.4e to %.4e)." % (
+            s["artifact"], s["set"], r["step"], v, where, s["step"], s["min"], s["max"]))
+    cuda = {g["artifact"] for g in m["graviton_legs"]} | {r["artifact"] for r in rows if "cuda" in str(r.get("trained_on", ""))}
+    mps = sorted({r["artifact"] for r in rows if str(r.get("trained_on", "")).startswith("mps")})
+    if mps:
+        worst = max((r for r in rows if r["artifact"] in mps and r["cell"] == "measured"), key=lambda r: r["max_abs_over_bound"] or 0)
+        facts.append("The MPS-trained artifacts (%s) are within the bound on this Mac; the largest max_abs / bound among them "
+                     "is %s (%s %s)." % (", ".join(mps), worst["max_abs_over_bound"], worst["artifact"], worst["set"]))
+    for which in ("fine_tuned", "zero_shot"):
+        rs = [r for r in rows if r["artifact"] in cuda and r["set"] == which and r["cell"] == "measured"
+              and isinstance(r.get("max_abs_over_noise"), float)]
+        if rs:
+            w = max(rs, key=lambda r: r["max_abs_over_noise"])
+            facts.append("CUDA-trained, %s: the largest observed max_abs / A10G noise is %s (%s, %s, %s). This is an "
+                         "observation, not a proposed multiplier: the bound's k is 4 and the floor is 1e-5." % (
+                             which, w["max_abs_over_noise"], w["artifact"], w["cpu"].split(" (")[0], w["step"]))
+    return facts
+
+
+def fmt(x):
+    return "%.4g" % x if isinstance(x, float) else ("-" if x is None else str(x))
+
+
+def render_brief(m):
+    L = ["# D-15 decision brief: the pack bound on the CPU that runs the re-score", "",
+         "Generated by `python3 -I scripts/laya_deploy/laya_drift.py collect` from `14-DRIFT-EVIDENCE.json` (%s). "
+         "Status: **%s**. Every number here is copied from that file. The brief states facts and the consequences of each "
+         "option; it recommends nothing the numbers do not force. D-15 is the owner's decision alone." % (m["generated_at"], m["status"]), "",
+         "## The question", "", m.get("question") or "Does the pack bound hold on the CPU that runs the re-score?", "",
+         "The bound under test is laya-parity-v1 amendment A1, per set: max(1e-5, 4 x the noise measured on the TRAINING "
+         "device). For the two CUDA-trained runs the training device is an A10G; the re-score runs on a CPU.", ""]
+    if m["status"] != "measured":
+        L += ["**The Graviton legs are %s.** The Graviton rows below are the recorded references only; the decision "
+              "should wait for the owner-run legs." % ("not yet run" if m["status"] == "awaiting-owner-run" else "incomplete"), ""]
+    L += ["## Per artifact, CPU and set", "",
+          "`measured` cells were produced by this harness (local legs on this Mac, Graviton legs from the owner-run pack "
+          "tasks); `reference` cells are copied from 14-SMOKE-EVIDENCE.json or 14-GATE-RUN-EVIDENCE.json. A refusal "
+          "reports only the FIRST drifted set, so a refused leg has one row.", "",
+          "| artifact | cpu | step | set | repeat | max_abs | bound | max_abs / bound | noise | max_abs / noise | within | cell |",
+          "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    for r in m["rows"]:
+        L.append("| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |" % (
+            r["artifact"], r["cpu"], r["step"], r["set"], r.get("repeat", r.get("repeats", "-")), r["max_abs"], r["bound"],
+            fmt(r["max_abs_over_bound"]), fmt(r["noise"]), fmt(r["max_abs_over_noise"]),
+            "yes" if r["within_bound"] else "NO", r["cell"]))
+    L += ["", "## Graviton run-to-run spread", "",
+          "Fargate does not let the production pack image print its CPU generation, so whether repeats landed on "
+          "different Graviton generations cannot be observed directly. Host heterogeneity shows only as spread across "
+          "repeats.", ""]
+    if m["graviton_spread"]:
+        L += ["| artifact | step | set | repeats | min | max | max - min | relative | distinct | within bound |",
+              "|---|---|---|---|---|---|---|---|---|---|"]
+        for s in m["graviton_spread"]:
+            L.append("| %s | %s | %s | %d | %.4e | %.4e | %.3e | %s | %d | %d of %d |" % (
+                s["artifact"], s["step"], s["set"], s["repeats"], s["min"], s["max"], s["max_minus_min"],
+                fmt(s["relative_spread"]), s["distinct_values"], s["within_bound"], s["repeats"]))
+    else:
+        L.append("No Graviton leg has been measured yet.")
+    L += ["", "## Determinism", ""]
+    for leg in m.get("local_legs") or []:
+        sm = leg.get("summary") or {}
+        L.append("- this Mac, %s: %s repeat(s), %s distinct result(s), identical: %s." % (
+            leg["leg"], sm.get("measured_repeats"), sm.get("distinct_results"), sm.get("repeats_identical")))
+    for k, v in sorted((m.get("graviton_determinism") or {}).items()):
+        L.append("- Graviton, %s: %d distinct result(s), identical: %s." % (k, v["distinct_results"], v["identical"]))
+    tc = (m.get("local_controls") or {}).get("thread") or {}
+    L += ["", "## Thread-count control (this Mac)", "",
+          "%s (knob %s, leg %s, engaged threshold x%s). It rules out the rayon thread count as the cause of the Mac / "
+          "Graviton difference on this CPU only; it names no other cause." % (
+              tc.get("verdict", "not recorded"), tc.get("knob"), tc.get("leg"), tc.get("engaged_threshold")), ""]
+    L += ["## What the numbers show", ""] + ["- " + f for f in m["facts"]] + [""]
+    L += ["## Options", "",
+          "Either way: the pack task's verify stays the authoritative eligibility check (the earlier owner decision), nothing "
+          "is deployed by plan 14-21, contracts/ and crates/aprender-decide are unchanged by it, and D-16 stays open in "
+          "14-VERIFICATION human_verification.", "",
+          "### keep-bound: keep the bound and accept the refusals", "",
+          "- Consequence: no contract change. The bound stays the one every Phase 8, 10 and 12 artifact was judged by. A "
+          "refusal is fail-closed and visible.",
+          "- Consequence: a gate-passing CUDA run can end with no .apr; the Graviton acceptance counts above are the "
+          "observed rate. A rerun costs about an hour of A10G.",
+          "- Consequence: the cross-CPU gap stays a known, measured finding rather than a resolved one.", "",
+          "### amend-per-study: amend the parity contract according to this study (owner-only)", "",
+          "- Consequence: it removes the structural mismatch documented above (a bound derived from GPU noise judging a "
+          "CPU re-score), with numbers taken from this study rather than from argument.",
+          "- Consequence: one-way. It changes what every later pack accepts and what every decide server's eligibility "
+          "means. It must be argued per set (fine_tuned and zero_shot) with the Graviton spread in view.",
+          "- Consequence: this Mac and Graviton disagree on the same bytes, so the local laya-verify may need a stated role.",
+          "- Consequence: it needs its own planned change set and review; plan 14-21 contains neither.", ""]
+    L += ["## Not measured", ""] + ["- " + u for u in m["unmeasured"]] + [""]
+    if m.get("not_planned"):
+        L += ["## Not planned here", ""] + ["- " + u for u in m["not_planned"]] + [""]
+    return "\n".join(L)
+
+
 def cmd_collect(argv, ctx):
-    local, gdir, out, draft = LOCAL_EVIDENCE, STATE_DIR_DEFAULT + "/drift-graviton", MERGED_EVIDENCE, MERGED_DRAFT
+    local, gdir, out, draft, brief = LOCAL_EVIDENCE, STATE_DIR_DEFAULT + "/drift-graviton", MERGED_EVIDENCE, None, MERGED_BRIEF
     it = iter(argv)
     for a in it:
-        v = next(it, None) if a in ("--local", "--graviton", "--out", "--draft") else None
+        v = next(it, None) if a in ("--local", "--graviton", "--out", "--draft", "--brief") else None
         if a == "--local" and v:
             local = v
         elif a == "--graviton" and v:
@@ -1446,8 +1599,10 @@ def cmd_collect(argv, ctx):
             out = v
         elif a == "--draft" and v:
             draft = v
+        elif a == "--brief" and v:
+            brief = v
         else:
-            refuse("usage", "collect [--local FILE] [--graviton DIR] [--out FILE] [--draft FILE]")
+            refuse("usage", "collect [--local FILE] [--graviton DIR] [--out FILE] [--brief FILE] [--draft FILE]")
     absp = lambda p: Path(p) if os.path.isabs(p) else ctx.root / p
     try:
         loc = json.loads(absp(local).read_text(encoding="utf-8"))
@@ -1455,26 +1610,49 @@ def cmd_collect(argv, ctx):
         refuse("evidence", "the local evidence %s cannot be read (%s)" % (local, type(e).__name__))
     if loc.get("schema") != EVIDENCE_SCHEMA:
         refuse("evidence", "%s is not a %s file" % (local, EVIDENCE_SCHEMA))
+    prev = {}
+    if absp(out).is_file():
+        try:
+            prev = json.loads(absp(out).read_text(encoding="utf-8"))
+        except ValueError as e:
+            refuse("evidence", "the existing %s is not JSON (%s); it holds the owner's records, so it is not overwritten" % (out, type(e).__name__))
+        if not isinstance(prev, dict) or prev.get("schema") != EVIDENCE_SCHEMA:
+            refuse("evidence", "the existing %s is not a %s file; it is not overwritten" % (out, EVIDENCE_SCHEMA))
     noise_refs = {leg["leg"]: leg.get("noise_reference") for leg in loc.get("legs", [])}
     glegs = graviton_legs(absp(gdir))
     rows = local_rows(loc) + graviton_rows(glegs, noise_refs) + references(ctx.root)
-    merged = {"schema": EVIDENCE_SCHEMA, "kind": "merged", "plan": "14-20 collect",
+    unmeasured = list(UNMEASURED_BASE) + [n.get("leg") + ": " + n.get("reason", "") for n in loc.get("not_measurable", [])]
+    unmeasured += [u for u in prev.get("unmeasured", []) if u not in unmeasured]
+    merged = {"schema": EVIDENCE_SCHEMA, "kind": "merged", "plan": prev.get("plan", "14-20 collect"),
+              "status": graviton_status(glegs),
               "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
               "cells": "measured = produced by this harness (local legs from the local evidence, Graviton legs from the "
                        "result directories); reference = copied from 14-SMOKE-EVIDENCE.json or 14-GATE-RUN-EVIDENCE.json",
               "local_evidence": tidy_path(absp(local)), "host": loc.get("host"), "binary": loc.get("binary"),
               "rows": rows, "graviton_legs": glegs, "graviton_determinism": determinism(glegs),
-              "local_controls": loc.get("controls"), "a10g_noise": loc.get("references", {}).get("a10g_noise"),
-              "not_measured": ["x86_64 CPU: there is no x86_64 pack binary or image (new infrastructure, not planned)"]
-              + [n.get("leg") + ": " + n.get("reason", "") for n in loc.get("not_measurable", [])]}
+              "local_legs": loc.get("legs"), "local_controls": loc.get("controls"),
+              "local_not_measurable": loc.get("not_measurable"), "references": loc.get("references"),
+              "a10g_noise": loc.get("references", {}).get("a10g_noise"), "unmeasured": unmeasured,
+              "notes": loc.get("notes")}
+    for k in PRESERVED:
+        if k in prev:
+            merged[k] = prev[k]
+    merged.setdefault("owner_replies", [])
+    merged["graviton_spread"] = graviton_spread(rows)
+    merged["facts"] = brief_facts(merged)
     merged = scrub(merged)
     text = json.dumps(merged, indent=2, default=lambda o: sorted(o) if isinstance(o, set) else str(o)) + "\n"
-    table = draft_table(merged["rows"])
+    brief_text = render_brief(merged) + "\n"
+    table = draft_table(merged["rows"]) if draft else None
     assert_clean(text, out)
-    assert_clean(table, draft)
+    assert_clean(brief_text, brief)
+    if table is not None:
+        assert_clean(table, draft)
     absp(out).write_text(text)
-    absp(draft).write_text(table)
-    ctx.emit("DRIFT COLLECT OK rows=%d graviton_legs=%d -> %s, %s" % (len(rows), len(glegs), out, draft))
+    absp(brief).write_text(brief_text)
+    if table is not None:
+        absp(draft).write_text(table)
+    ctx.emit("DRIFT COLLECT OK status=%s rows=%d graviton_legs=%d -> %s, %s" % (merged["status"], len(rows), len(glegs), out, brief))
     return 0
 
 
@@ -1909,7 +2087,13 @@ def selftest_collect(case, work):
     (g / "smoke-1" / "task-summary.json").write_text(json.dumps({
         "stoppedReason": "task arn:aws:ecs:us-east-1:%s:task/c/abc exited" % FIX_ACCOUNT,
         "container_reason": "account %s" % FIX_ACCOUNT, "container_exit_code": 0}))
-    args = ["collect", "--local", str(d / "local.json"), "--graviton", str(g), "--out", str(d / "merged.json"), "--draft", str(d / "table.md")]
+    args = ["collect", "--local", str(d / "local.json"), "--graviton", str(g), "--out", str(d / "merged.json"), "--draft", str(d / "table.md"),
+            "--brief", str(d / "brief.md")]
+    skeleton = {"schema": EVIDENCE_SCHEMA, "kind": "merged", "plan": "14-21", "status": "awaiting-owner-run",
+                "owner_commands": ["LAYA_DRIFT_APPROVED=graviton bash x.sh smoke:1"], "owner_replies": [{"reply": "done"}],
+                "owner_script": {"sha256": "a" * 64}, "unmeasured": ["Graviton generation split: not observable"],
+                "graviton_legs": []}
+    (d / "merged.json").write_text(json.dumps(skeleton))
     out_lines, errs = [], []
     rc = main(args, Ctx(emit=out_lines.append, err=errs.append))
     merged = (d / "merged.json").read_text() if (d / "merged.json").is_file() else ""
@@ -1924,12 +2108,45 @@ def selftest_collect(case, work):
              and ("AWS", "pack-task pack (14-15)", "zero_shot", "reference") in cells, str(sorted(cells))[:300])
         case("collect states which cells are measured and which are references", "reference = copied" in m["cells"]
              and "measured" in (d / "table.md").read_text())
+        brief = (d / "brief.md").read_text() if (d / "brief.md").is_file() else ""
+        case("collect merges INTO the skeleton: owner commands, replies and script carried over, status measured, plan kept",
+             m.get("owner_commands") == skeleton["owner_commands"] and m.get("owner_replies") == skeleton["owner_replies"]
+             and m.get("owner_script") == skeleton["owner_script"] and m.get("status") == "measured" and m.get("plan") == "14-21"
+             and "Graviton generation split: not observable" in m.get("unmeasured", []) and m["unmeasured"][0].startswith("x86_64"),
+             str({k: m.get(k) for k in ("status", "plan", "owner_replies")}))
+        case("collect writes the brief from the evidence: tables, spread, thread control, facts, both options, unmeasured, no id",
+             all(s in brief for s in ("## Options", "keep-bound", "amend-per-study", "## Graviton run-to-run spread",
+                                      "## Thread-count control", "## Not measured", "x86_64", "Status: **measured**"))
+             and m.get("graviton_spread") and m.get("facts") and not ID_RE.search(brief) and "arn:aws" not in brief, brief[:160])
     (g / "smoke-1" / "task-summary.json").write_text(json.dumps({FIX_ACCOUNT: "an identifier planted as a key"}))
     (d / "merged.json").unlink()
     errs.clear()
     rc = main(args, Ctx(emit=lambda s: None, err=errs.append))
+    (d / "brief.md").unlink()
     case("collect refuses to write when an identifier survives the scrub (planted as a key), nothing written",
-         rc == 2 and errs and errs[-1].startswith("REFUSED drift-evidence") and not (d / "merged.json").exists())
+         rc == 2 and errs and errs[-1].startswith("REFUSED drift-evidence") and not (d / "merged.json").exists()
+         and not (d / "brief.md").exists())
+    # status: no leg directory -> awaiting-owner-run; an unreadable pack-outcome.json -> incomplete
+    (g / "smoke-1" / "task-summary.json").write_text("{}")
+    empty = d / "empty-graviton"
+    empty.mkdir()
+    a2 = list(args)
+    a2[a2.index("--graviton") + 1] = str(empty)
+    rc = main(a2, Ctx(emit=lambda s: None, err=errs.append))
+    m2 = json.loads((d / "merged.json").read_text()) if rc == 0 else {}
+    case("collect with no Graviton leg: status awaiting-owner-run, and the brief says the legs are not yet run",
+         rc == 0 and m2.get("status") == "awaiting-owner-run" and "not yet run" in (d / "brief.md").read_text())
+    (g / "smoke-2").mkdir()
+    (g / "smoke-2" / "pack-outcome.json").write_text("{trunc")
+    rc = main(args, Ctx(emit=lambda s: None, err=errs.append))
+    m3 = json.loads((d / "merged.json").read_text()) if rc == 0 else {}
+    case("collect with an unreadable pack-outcome.json: status incomplete, never measured", rc == 0 and m3.get("status") == "incomplete")
+    (d / "merged.json").write_text('{"schema": "something-else"}')
+    errs.clear()
+    rc = main(args, Ctx(emit=lambda s: None, err=errs.append))
+    case("collect refuses to replace an existing --out that is not a laya-drift-evidence-v1 file (the owner's records)",
+         rc == 2 and errs and errs[-1].startswith("REFUSED drift-evidence") and json.loads((d / "merged.json").read_text())
+         == {"schema": "something-else"})
 
 
 def selftest():
