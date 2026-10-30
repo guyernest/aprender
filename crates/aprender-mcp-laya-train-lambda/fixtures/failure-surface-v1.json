@@ -1,0 +1,1826 @@
+{
+  "schema": "laya-failure-surface-v1",
+  "about": "The finalizer and state-machine boundary of the Laya training server (Phase 14, plan 14-16): every failure point, enumerated by inspection, bound to the sweep in finalizer.rs (failure_surface) and checked by scripts/laya_deploy/laya_failure_surface.py. Human record: 14-FAILURE-SURFACE.md.",
+  "derivation": [
+    {
+      "id": "D-a",
+      "what": "state-machine edges",
+      "command": "grep -n \"stateName:\\|addCatch\\|\\.next(\\|MACHINE_TIMEOUT_SECS =\\|status: \\[\\|Schedule.rate\" deploy-extensions/lib/laya-trainer-stack.ts; and the synthesized ASL via laya_trainer_stack_check.asl_of",
+      "result": "states Train, PackVerify, Finalize, CatchFinalize; Train and PackVerify each Catch States.ALL -> CatchFinalize ResultPath $.error; Finalize and CatchFinalize: no Catch, the CDK Lambda service-exception Retry only; TimeoutSeconds 36000; status rule FAILED/TIMED_OUT/ABORTED; reconcile rate(10 minutes). The gitignored cdk.out template (synthesized 2026-10-29) agrees",
+      "date": "2026-10-30",
+      "head": "327d9cdb2"
+    },
+    {
+      "id": "D-b",
+      "what": "exit-class map",
+      "command": "python3 -I -c 'importlib-load scripts/laya_train/container/run_step.py; {c: job_exit_code(c) for c in EXIT_CLASSES}'",
+      "result": "{\"pass\": 0, \"gate_fail\": 0, \"refused\": 1, \"crash\": 1, \"timeout\": 1}; Run.finish: code = 1 if any upload failed and code == 0; finish_after_trainer: a CPU fallback is exit_class crash",
+      "date": "2026-10-30",
+      "head": "327d9cdb2"
+    },
+    {
+      "id": "D-c",
+      "what": "pack exit paths",
+      "command": "sed -n '/^def run_pack/,/^# ---.*selftest/p' scripts/laya_train/container/run_step.py (run_pack, decide_skip, publish_pack, entry_pack)",
+      "result": "skip recorded exit 0 if published; accepted or refused recorded exit 0 if published and no upload failed; PackError -> 'ERROR <kind>' exit 1 with NO pack-outcome.json; env / contracts refusal exit 2 before any download; publish_pack lists pack-outcome.json before uploading it",
+      "date": "2026-10-30",
+      "head": "327d9cdb2"
+    },
+    {
+      "id": "D-d",
+      "what": "run-object matrix",
+      "command": "read finalizer.rs read_json and read_run_objects",
+      "result": "absent, malformed and oversize (1 MiB) all read as missing; outcome, pack-outcome and both training manifests are dropped when they name another task; gate-report and pack-manifest carry no task check; any other read failure is a Store error (transient)",
+      "date": "2026-10-30",
+      "head": "327d9cdb2"
+    },
+    {
+      "id": "D-e",
+      "what": "ordered returns of finalize_run",
+      "command": "grep -n 'return b\\.\\|b\\.decide(\\|decide_packed(&b' crates/aprender-mcp-laya-train/src/finalize.rs",
+      "result": "aborted; merge conflict; stage_error (BEFORE the outcome); outcome missing; Refused (inputs-changed / other); Crash; Timeout; device_ok false; gate report missing or lacking a field; pass/gate_fail vs report integrity; pass -> decide_packed; gate_fail -> gate_failed or decide_packed with the claim",
+      "date": "2026-10-30",
+      "head": "327d9cdb2"
+    },
+    {
+      "id": "D-f",
+      "what": "publication steps",
+      "command": "read finalizer.rs finalize_task, settle_record and publish ((3)..(6) comments)",
+      "result": "owner check; record or TTL; ABORTED cancels the record; compute gate; read objects; decide; settle the record (arbiter); verdict.json; manifest.json (adopt or write, list for unlisted); tags = manifest entries + manifest.json, each read back; lock release LAST",
+      "date": "2026-10-30",
+      "head": "327d9cdb2"
+    },
+    {
+      "id": "D-g",
+      "what": "sinks",
+      "command": "python3 -I scripts/laya_deploy/laya_failure_surface.py --check (scan(): SINK_PATTERNS over the text before the first #[cfg(test)] of every .rs under sink_scope)",
+      "result": "77 hits in 22 (file, pattern) groups, each classified (sinks)",
+      "date": "2026-10-30",
+      "head": "327d9cdb2"
+    },
+    {
+      "id": "D-h",
+      "what": "finalizer asset provenance",
+      "command": "grep -n 'FINALIZER_ASSET\\|finalizerAssetPath' scripts/laya_deploy/laya_trainer_ops.py deploy-extensions/bin/app.ts",
+      "result": "cmd_infra and app.ts check only that deploy-extensions/assets/laya-finalizer/bootstrap exists",
+      "date": "2026-10-30",
+      "head": "327d9cdb2"
+    },
+    {
+      "id": "D-i",
+      "what": "tests that do not model the always-catching machine",
+      "command": "scan the test modules of finalize.rs and finalizer.rs for catch-fed classes built with stage_error None",
+      "result": "finalize.rs: finalize_refused, finalize_inputs_changed, finalize_crash, finalize_timeout, finalize_cpu, finalize_partial_manifest; finalizer.rs: fin_partial_inventory, fin_timeout_event, fin_reconcile_lost_event, fin_first_writer_wins; plus fin_catch_error (a Cause, no outcome)",
+      "date": "2026-10-30",
+      "head": "327d9cdb2"
+    }
+  ],
+  "state_machine": {
+    "states": [
+      "Train",
+      "PackVerify",
+      "Finalize",
+      "CatchFinalize"
+    ],
+    "catch": {
+      "Train": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "CatchFinalize",
+          "ResultPath": "$.error"
+        }
+      ],
+      "PackVerify": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "CatchFinalize",
+          "ResultPath": "$.error"
+        }
+      ]
+    },
+    "no_catch_states": [
+      "Finalize",
+      "CatchFinalize"
+    ],
+    "machine_timeout_secs": 36000,
+    "event_statuses": [
+      "FAILED",
+      "TIMED_OUT",
+      "ABORTED"
+    ],
+    "reconcile_rate_minutes": 10,
+    "source": "deploy-extensions/lib/laya-trainer-stack.ts",
+    "start_at": "Train",
+    "next": {
+      "Train": "PackVerify",
+      "PackVerify": "Finalize",
+      "Finalize": null,
+      "CatchFinalize": null
+    },
+    "retry": {
+      "Finalize": "CDK LambdaInvoke default: Lambda.ClientExecutionTimeoutException, ServiceException, AWSLambdaException, SdkClientException; 6 attempts, 2 s, backoff 2 (a finalizer Err is NOT retried)",
+      "CatchFinalize": "the same"
+    },
+    "train_max_runtime_secs": 21600,
+    "pack_task_timeout_secs": 10800
+  },
+  "exit_classes": {
+    "source": "scripts/laya_train/container/run_step.py job_exit_code, Run.finish, finish_after_trainer",
+    "job_exit_code": {
+      "pass": 0,
+      "gate_fail": 0,
+      "refused": 1,
+      "crash": 1,
+      "timeout": 1
+    },
+    "upload_failure_forces_exit": 1,
+    "cpu_fallback_exit_class": "crash"
+  },
+  "run_objects": [
+    {
+      "object": "outcome.json",
+      "key": "<run>/outcome.json",
+      "foreign_check": true,
+      "absent": "missing",
+      "malformed": "missing (warn)",
+      "oversize": "missing (warn)",
+      "foreign": "missing (warn)",
+      "read_error": "Store error (transient)"
+    },
+    {
+      "object": "gate-report.json",
+      "key": "<run>/run/gate-report.json",
+      "foreign_check": false,
+      "absent": "missing",
+      "malformed": "missing (warn)",
+      "oversize": "missing (warn)",
+      "foreign": "n/a (no task id)",
+      "read_error": "Store error (transient)"
+    },
+    {
+      "object": "pack-outcome.json",
+      "key": "<run>/pack-outcome.json",
+      "foreign_check": true,
+      "absent": "missing",
+      "malformed": "missing (warn)",
+      "oversize": "missing (warn)",
+      "foreign": "missing (warn)",
+      "read_error": "Store error (transient)"
+    },
+    {
+      "object": "training-manifest.json",
+      "key": "<run>/training-manifest.json",
+      "foreign_check": true,
+      "absent": "partial-manifest.json is read",
+      "malformed": "as absent",
+      "oversize": "as absent",
+      "foreign": "as absent",
+      "read_error": "Store error (transient)"
+    },
+    {
+      "object": "partial-manifest.json",
+      "key": "<run>/partial-manifest.json",
+      "foreign_check": true,
+      "absent": "no training entries",
+      "malformed": "as absent",
+      "oversize": "as absent",
+      "foreign": "as absent",
+      "read_error": "Store error (transient)"
+    },
+    {
+      "object": "pack-manifest.json",
+      "key": "<run>/pack-manifest.json",
+      "foreign_check": false,
+      "absent": "empty",
+      "malformed": "empty (warn)",
+      "oversize": "empty (warn)",
+      "foreign": "n/a (a bare array)",
+      "read_error": "Store error (transient)"
+    },
+    {
+      "object": "a listed entry",
+      "key": "<run>/<path>",
+      "foreign_check": false,
+      "absent": "STILL LISTED: tagging fails NoSuchKey (WR-02)",
+      "malformed": "n/a",
+      "oversize": "n/a",
+      "foreign": "n/a",
+      "read_error": "n/a"
+    }
+  ],
+  "decision_order": [
+    {
+      "step": 1,
+      "condition": "aborted",
+      "phase": "cancelled"
+    },
+    {
+      "step": 2,
+      "condition": "a path listed by two writers with different sha256",
+      "phase": "failed (integrity)"
+    },
+    {
+      "step": 3,
+      "condition": "stage_error Some",
+      "phase": "failed (stage text)",
+      "defect": "WR-01"
+    },
+    {
+      "step": 4,
+      "condition": "outcome missing",
+      "phase": "failed"
+    },
+    {
+      "step": 5,
+      "condition": "Refused inputs-changed",
+      "phase": "failed, disagreement false"
+    },
+    {
+      "step": 6,
+      "condition": "Refused other",
+      "phase": "failed, disagreement true"
+    },
+    {
+      "step": 7,
+      "condition": "Crash",
+      "phase": "failed"
+    },
+    {
+      "step": 8,
+      "condition": "Timeout",
+      "phase": "failed"
+    },
+    {
+      "step": 9,
+      "condition": "device_ok false",
+      "phase": "failed"
+    },
+    {
+      "step": 10,
+      "condition": "gate report missing or lacking a field",
+      "phase": "failed"
+    },
+    {
+      "step": 11,
+      "condition": "pass, report not pass / gate_fail, report passes",
+      "phase": "failed (integrity)"
+    },
+    {
+      "step": 12,
+      "condition": "pass",
+      "phase": "decide_packed: completed or failed"
+    },
+    {
+      "step": 13,
+      "condition": "gate_fail, no claim / claim",
+      "phase": "gate_failed / decide_packed waived"
+    }
+  ],
+  "publication": [
+    {
+      "step": 1,
+      "what": "the lock holder's owner equals the run's owner, else integrity"
+    },
+    {
+      "step": 2,
+      "what": "the record exists, or is expired past the task TTL; inside the TTL its absence is integrity"
+    },
+    {
+      "step": 3,
+      "what": "an ABORTED trigger cancels a still-working record first"
+    },
+    {
+      "step": 4,
+      "what": "compute terminal, else stop it and return awaiting_compute with the lock held"
+    },
+    {
+      "step": 5,
+      "what": "read the run objects and decide (finalize_run)"
+    },
+    {
+      "step": 6,
+      "what": "settle the record: the arbiter, first writer wins"
+    },
+    {
+      "step": 7,
+      "what": "verdict.json"
+    },
+    {
+      "step": 8,
+      "what": "manifest.json"
+    },
+    {
+      "step": 9,
+      "what": "retention tags on every manifest entry and manifest.json, each read back",
+      "defect": "WR-02, IN-01"
+    },
+    {
+      "step": 10,
+      "what": "release the lock LAST, then re-read it"
+    }
+  ],
+  "sink_scope": {
+    "dirs": [
+      "crates/aprender-mcp-laya-train/src",
+      "crates/aprender-mcp-laya-train-lambda/src"
+    ],
+    "files": [
+      "crates/aprender-setfit-train-lambda/src/dynamodb.rs",
+      "crates/aprender-mcp-setfit-train/src/task_store.rs"
+    ]
+  },
+  "sink_patterns": {
+    "aws-renderer": "DisplayErrorContext\\(",
+    "pmcp-validation": "Error::validation\\(",
+    "pmcp-internal": "Error::internal\\(",
+    "failed-payload": "\\bfailed_payload\\(",
+    "payload-error-assign": "\\.error\\s*=\\s*",
+    "dispatch-error": "\\bDispatchError\\s*\\{|DispatchError::[A-Z]",
+    "start-error": "\\bStartError\\s*\\{",
+    "stage-error": "\\bstage_error\\b",
+    "log": "\\btracing::(?:error|warn|info|debug)!|\\beprintln!|\\bprintln!"
+  },
+  "sinks": [
+    {
+      "file": "crates/aprender-mcp-laya-train-lambda/src/bin/aprender-laya-train-finalizer.rs",
+      "pattern": "log",
+      "count": 4,
+      "classes": {
+        "log-only": 4
+      },
+      "rows": [
+        "SK-10"
+      ]
+    },
+    {
+      "file": "crates/aprender-mcp-laya-train-lambda/src/bin/bootstrap.rs",
+      "pattern": "log",
+      "count": 2,
+      "classes": {
+        "log-only": 2
+      },
+      "rows": [
+        "SK-10"
+      ]
+    },
+    {
+      "file": "crates/aprender-mcp-laya-train-lambda/src/compute.rs",
+      "pattern": "aws-renderer",
+      "count": 8,
+      "classes": {
+        "log-only": 8
+      },
+      "rows": [
+        "SK-07"
+      ]
+    },
+    {
+      "file": "crates/aprender-mcp-laya-train-lambda/src/dataset.rs",
+      "pattern": "aws-renderer",
+      "count": 4,
+      "classes": {
+        "log-only": 4
+      },
+      "rows": [
+        "SK-08"
+      ]
+    },
+    {
+      "file": "crates/aprender-mcp-laya-train-lambda/src/dataset.rs",
+      "pattern": "log",
+      "count": 2,
+      "classes": {
+        "log-only": 2
+      },
+      "rows": [
+        "SK-10"
+      ]
+    },
+    {
+      "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+      "pattern": "log",
+      "count": 5,
+      "classes": {
+        "log-only": 5
+      },
+      "rows": [
+        "SK-10"
+      ]
+    },
+    {
+      "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+      "pattern": "payload-error-assign",
+      "count": 1,
+      "classes": {
+        "static": 1
+      },
+      "rows": [
+        "SK-11"
+      ]
+    },
+    {
+      "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+      "pattern": "stage-error",
+      "count": 7,
+      "classes": {
+        "caller": 3,
+        "static": 4
+      },
+      "rows": [
+        "SK-02",
+        "SK-11"
+      ]
+    },
+    {
+      "file": "crates/aprender-mcp-laya-train-lambda/src/objects.rs",
+      "pattern": "aws-renderer",
+      "count": 5,
+      "classes": {
+        "log-only": 5
+      },
+      "rows": [
+        "SK-07"
+      ]
+    },
+    {
+      "file": "crates/aprender-mcp-laya-train-lambda/src/sfn.rs",
+      "pattern": "aws-renderer",
+      "count": 3,
+      "classes": {
+        "caller": 1,
+        "log-only": 2
+      },
+      "rows": [
+        "SK-01",
+        "SK-09"
+      ]
+    },
+    {
+      "file": "crates/aprender-mcp-laya-train-lambda/src/sfn.rs",
+      "pattern": "dispatch-error",
+      "count": 4,
+      "classes": {
+        "caller": 2,
+        "static": 2
+      },
+      "rows": [
+        "SK-01",
+        "SK-11"
+      ]
+    },
+    {
+      "file": "crates/aprender-mcp-laya-train-lambda/src/sfn.rs",
+      "pattern": "log",
+      "count": 6,
+      "classes": {
+        "log-only": 6
+      },
+      "rows": [
+        "SK-10"
+      ]
+    },
+    {
+      "file": "crates/aprender-mcp-laya-train-lambda/src/sfn.rs",
+      "pattern": "start-error",
+      "count": 2,
+      "classes": {
+        "caller": 1,
+        "static": 1
+      },
+      "rows": [
+        "SK-01"
+      ]
+    },
+    {
+      "file": "crates/aprender-mcp-laya-train/src/finalize.rs",
+      "pattern": "payload-error-assign",
+      "count": 1,
+      "classes": {
+        "caller": 1
+      },
+      "rows": [
+        "SK-02",
+        "SK-06"
+      ]
+    },
+    {
+      "file": "crates/aprender-mcp-laya-train/src/finalize.rs",
+      "pattern": "stage-error",
+      "count": 2,
+      "classes": {
+        "caller": 1,
+        "static": 1
+      },
+      "rows": [
+        "SK-02"
+      ]
+    },
+    {
+      "file": "crates/aprender-mcp-laya-train/src/lib.rs",
+      "pattern": "dispatch-error",
+      "count": 3,
+      "classes": {
+        "caller": 2,
+        "static": 1
+      },
+      "rows": [
+        "SK-01",
+        "SK-11"
+      ]
+    },
+    {
+      "file": "crates/aprender-mcp-laya-train/src/lib.rs",
+      "pattern": "failed-payload",
+      "count": 7,
+      "classes": {
+        "caller": 3,
+        "static": 4
+      },
+      "rows": [
+        "SK-01",
+        "SK-03",
+        "SK-11"
+      ]
+    },
+    {
+      "file": "crates/aprender-mcp-laya-train/src/lib.rs",
+      "pattern": "log",
+      "count": 1,
+      "classes": {
+        "log-only": 1
+      },
+      "rows": [
+        "SK-10"
+      ]
+    },
+    {
+      "file": "crates/aprender-mcp-laya-train/src/lib.rs",
+      "pattern": "payload-error-assign",
+      "count": 1,
+      "classes": {
+        "caller": 1
+      },
+      "rows": [
+        "SK-01",
+        "SK-03"
+      ]
+    },
+    {
+      "file": "crates/aprender-mcp-laya-train/src/lib.rs",
+      "pattern": "pmcp-internal",
+      "count": 4,
+      "classes": {
+        "caller": 3,
+        "static": 1
+      },
+      "rows": [
+        "SK-03",
+        "SK-11"
+      ]
+    },
+    {
+      "file": "crates/aprender-mcp-laya-train/src/lib.rs",
+      "pattern": "pmcp-validation",
+      "count": 4,
+      "classes": {
+        "caller": 2,
+        "static": 2
+      },
+      "rows": [
+        "SK-01",
+        "SK-04",
+        "SK-11"
+      ]
+    },
+    {
+      "file": "crates/aprender-setfit-train-lambda/src/dynamodb.rs",
+      "pattern": "aws-renderer",
+      "count": 1,
+      "classes": {
+        "caller": 1
+      },
+      "rows": [
+        "SK-05"
+      ]
+    }
+  ],
+  "invariants": [
+    {
+      "id": "I1",
+      "text": "terminal and classified: after an Ok finalization the task record is terminal and holds a stored result whose phase is completed, gate_failed, failed or cancelled"
+    },
+    {
+      "id": "I2",
+      "text": "finalization total and lock released: with no injected fault the first pass returns Ok and releases the single-flight lock, and a later reconcile sweep returns Ok; a held lock is allowed only for compute still billing or one injected transient S3 or backend fault the next pass clears"
+    },
+    {
+      "id": "I3",
+      "text": "class decided from the records: when outcome.json parses and names the task, the phase follows the class table whatever the delivery path (refused_other failed with prefilter_disagreement true and the REFUSED line; inputs-changed failed with the flag false; crash and timeout failed with their class text; cpu fallback failed; pass and gate_fail follow the gate report and the pack record); an absent, malformed, foreign or removed outcome is failed with a non-empty error"
+    },
+    {
+      "id": "I4",
+      "text": "caller-safe text: the stored payload, verdict.json and manifest.json carry none of the planted hostile constants (an account-id-shaped digit string, an ARN and an ECR host containing it) planted in the Catch Cause, the trainer's refused line, the pack verify and packed lines and an injected S3 error"
+    },
+    {
+      "id": "I5",
+      "text": "no .apr unless completed: neither the stored payload's manifest nor manifest.json lists an .apr for any phase but completed"
+    },
+    {
+      "id": "I6",
+      "text": "aborted means cancelled: an ABORTED execution yields a cancelled record and a cancelled stored payload"
+    },
+    {
+      "id": "I7",
+      "text": "retention tags: every key the finalizer inventories or names (each manifest.json entry, manifest.json, and every self-listing manifest that exists) carries the run's retention tag (keep only for a completed passing run), read back from the bucket"
+    },
+    {
+      "id": "I8",
+      "text": "delivery-path independence: for the same records, every non-aborted trigger that returned Ok reaches the same phase, is_error, prefilter_disagreement and keep"
+    }
+  ],
+  "axes": [
+    [
+      "trigger",
+      [
+        "sm_clean",
+        "sm_caught",
+        "event_failed",
+        "event_timed_out",
+        "reconcile_failed"
+      ]
+    ],
+    [
+      "outcome",
+      [
+        "absent",
+        "malformed",
+        "foreign_task",
+        "pass",
+        "gate_fail",
+        "refused_other",
+        "refused_inputs_changed",
+        "crash",
+        "timeout",
+        "cpu_fallback"
+      ]
+    ],
+    [
+      "gate_report",
+      [
+        "ok",
+        "absent"
+      ]
+    ],
+    [
+      "pack",
+      [
+        "absent",
+        "accepted",
+        "refused",
+        "malformed"
+      ]
+    ],
+    [
+      "listing",
+      [
+        "complete",
+        "partial_only",
+        "none"
+      ]
+    ],
+    [
+      "absent_listed",
+      [
+        "none",
+        "outcome",
+        "pack_outcome",
+        "gate_report"
+      ]
+    ]
+  ],
+  "catch_fed": [
+    "refused",
+    "crash",
+    "timeout"
+  ],
+  "known_defects": [
+    {
+      "id": "I2",
+      "ref": "WR-02",
+      "closes": "14-17"
+    },
+    {
+      "id": "I3",
+      "ref": "WR-01",
+      "closes": "14-17"
+    },
+    {
+      "id": "I4",
+      "ref": "WR-03",
+      "closes": "14-18"
+    },
+    {
+      "id": "I7",
+      "ref": "IN-01",
+      "closes": "14-17"
+    },
+    {
+      "id": "I8",
+      "ref": "WR-01",
+      "closes": "14-17"
+    }
+  ],
+  "rows": [
+    {
+      "id": "FS-SM-01",
+      "group": "state-machine",
+      "what": "Train succeeds (SageMaker job Completed; run_step exit 0 for pass and gate_fail) -> PackVerify",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "scripts/laya_deploy/laya_trainer_stack_check.py",
+        "name": "check_machine"
+      },
+      "invariants": []
+    },
+    {
+      "id": "FS-SM-02",
+      "group": "state-machine",
+      "what": "PackVerify succeeds (pack exit 0: skipped, accepted or refused recorded) -> Finalize, payload without error",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "tracer_completed"
+      },
+      "invariants": [
+        "I3",
+        "I8"
+      ]
+    },
+    {
+      "id": "FS-SM-03",
+      "group": "state-machine",
+      "what": "Train fails (job exit 1: refused, crash, timeout, cpu fallback, or any upload failure) -> Catch States.ALL -> CatchFinalize, resultPath $.error: the finalizer gets a stage error for EVERY catch-fed class",
+      "status": "defect",
+      "ref": "WR-01",
+      "closes": "14-17",
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "failure_surface_tracer_wr01"
+      },
+      "invariants": [
+        "I3",
+        "I4",
+        "I8"
+      ]
+    },
+    {
+      "id": "FS-SM-04",
+      "group": "state-machine",
+      "what": "PackVerify fails (PackError exit 1 with no pack-outcome.json, env/contracts refusal exit 2, an upload failure exit 1, the 3 h task timeout) -> Catch States.ALL -> CatchFinalize, resultPath $.error",
+      "status": "defect",
+      "ref": "WR-01",
+      "closes": "14-17",
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "failure_surface_sweep_known_defects_only"
+      },
+      "invariants": [
+        "I3",
+        "I8"
+      ]
+    },
+    {
+      "id": "FS-SM-05",
+      "group": "state-machine",
+      "what": "Finalize has no Catch (only the CDK Lambda service-exception Retry, 6 attempts): a finalizer Err ends the execution FAILED, which falls to the status rule and the 10-minute reconcile (both deliver stage_error None)",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "fin_reconcile_lost_event"
+      },
+      "invariants": [
+        "I2",
+        "I8"
+      ]
+    },
+    {
+      "id": "FS-SM-06",
+      "group": "state-machine",
+      "what": "CatchFinalize has no Catch (same Retry): its Err ends the execution FAILED; the status event and the reconcile then re-drive it WITHOUT the stage error",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "fin_reconcile_lost_event"
+      },
+      "invariants": [
+        "I2",
+        "I8"
+      ]
+    },
+    {
+      "id": "FS-SM-07",
+      "group": "state-machine",
+      "what": "machine TimeoutSeconds 36000 (MACHINE_TIMEOUT_SECS) -> TIMED_OUT -> status rule (and reconcile)",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "fin_timeout_event"
+      },
+      "invariants": [
+        "I1",
+        "I8"
+      ]
+    },
+    {
+      "id": "FS-SM-08",
+      "group": "state-machine",
+      "what": "a client cancel -> StopExecution (cancel sink) -> ABORTED -> status rule; the finalizer cancels the record and finalizes cancelled",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "fin_abort_event"
+      },
+      "invariants": [
+        "I6"
+      ]
+    },
+    {
+      "id": "FS-SM-09",
+      "group": "state-machine",
+      "what": "a lost status-rule delivery (best effort, retryAttempts 4, DLQ) -> the 10-minute reconcile sweep is the floor",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "fin_reconcile_lost_event"
+      },
+      "invariants": [
+        "I2"
+      ]
+    },
+    {
+      "id": "FS-SM-10",
+      "group": "state-machine",
+      "what": "StartExecution rejected or ambiguous at dispatch (request side): rejected compensates and releases; ambiguous + unconfirmed leaves the lock for the reconcile's dispatch-unconfirmed path",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train/src/lib.rs",
+        "name": "submit_dispatch_unconfirmed"
+      },
+      "invariants": [
+        "I2"
+      ]
+    },
+    {
+      "id": "FS-EX-01",
+      "group": "exit-class",
+      "what": "pass -> train job exit 0 -> Finalize path",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "scripts/laya_train/container/run_step.py",
+        "name": "selftest"
+      },
+      "invariants": []
+    },
+    {
+      "id": "FS-EX-02",
+      "group": "exit-class",
+      "what": "gate_fail -> train job exit 0 (the pack stage runs on a gate_fail)",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "scripts/laya_train/container/run_step.py",
+        "name": "selftest"
+      },
+      "invariants": []
+    },
+    {
+      "id": "FS-EX-03",
+      "group": "exit-class",
+      "what": "refused -> train job exit 1 -> CatchFinalize only",
+      "status": "defect",
+      "ref": "WR-01",
+      "closes": "14-17",
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "failure_surface_tracer_wr01"
+      },
+      "invariants": [
+        "I3",
+        "I8"
+      ]
+    },
+    {
+      "id": "FS-EX-04",
+      "group": "exit-class",
+      "what": "crash -> train job exit 1 -> CatchFinalize only",
+      "status": "defect",
+      "ref": "WR-01",
+      "closes": "14-17",
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "failure_surface_sweep_known_defects_only"
+      },
+      "invariants": [
+        "I3",
+        "I8"
+      ]
+    },
+    {
+      "id": "FS-EX-05",
+      "group": "exit-class",
+      "what": "timeout -> train job exit 1 -> CatchFinalize only",
+      "status": "defect",
+      "ref": "WR-01",
+      "closes": "14-17",
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "failure_surface_sweep_known_defects_only"
+      },
+      "invariants": [
+        "I3",
+        "I8"
+      ]
+    },
+    {
+      "id": "FS-EX-06",
+      "group": "exit-class",
+      "what": "a failed upload forces exit 1 for ANY class (Run.finish: code = 1 if failed and code == 0), so pass and gate_fail can arrive through the Catch too, with outcome.json possibly listed but absent",
+      "status": "defect",
+      "ref": "WR-02",
+      "closes": "14-17",
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "failure_surface_sweep_known_defects_only"
+      },
+      "invariants": [
+        "I2",
+        "I3"
+      ]
+    },
+    {
+      "id": "FS-EX-07",
+      "group": "exit-class",
+      "what": "a CPU fallback is classified crash with device_ok false (finish_after_trainer), so it is catch-fed",
+      "status": "defect",
+      "ref": "WR-01",
+      "closes": "14-17",
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "failure_surface_sweep_known_defects_only"
+      },
+      "invariants": [
+        "I3"
+      ]
+    },
+    {
+      "id": "FS-PK-01",
+      "group": "pack",
+      "what": "decide_skip: a non-pass/gate_fail outcome, device_ok false, or a gate_fail without a waiver claim -> pack-outcome skipped, exit 0 when published",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "scripts/laya_train/container/run_step.py",
+        "name": "selftest"
+      },
+      "invariants": []
+    },
+    {
+      "id": "FS-PK-02",
+      "group": "pack",
+      "what": "pack and verify accept -> .apr uploaded, accepted pack-outcome, exit 0",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "tracer_completed"
+      },
+      "invariants": [
+        "I5",
+        "I7"
+      ]
+    },
+    {
+      "id": "FS-PK-03",
+      "group": "pack",
+      "what": "pack or verify refuse (rc 3) -> accepted false recorded, exit 0 (PackVerify succeeds)",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "fin_pack_refused"
+      },
+      "invariants": [
+        "I3",
+        "I5"
+      ]
+    },
+    {
+      "id": "FS-PK-04",
+      "group": "pack",
+      "what": "PackError (outcome, manifest, download, integrity, base, child) -> exit 1 with NO pack-outcome.json -> PackVerify Catch: stage error plus a missing pack record",
+      "status": "defect",
+      "ref": "WR-01",
+      "closes": "14-17",
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "failure_surface_sweep_known_defects_only"
+      },
+      "invariants": [
+        "I3",
+        "I8"
+      ]
+    },
+    {
+      "id": "FS-PK-05",
+      "group": "pack",
+      "what": "entry_pack env or contracts refusal -> exit 2 before any download, no pack-outcome.json -> PackVerify Catch",
+      "status": "defect",
+      "ref": "WR-01",
+      "closes": "14-17",
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "failure_surface_sweep_known_defects_only"
+      },
+      "invariants": [
+        "I3"
+      ]
+    },
+    {
+      "id": "FS-PK-06",
+      "group": "pack",
+      "what": "publish_pack lists pack-outcome.json in pack-manifest.json BEFORE uploading it; a failed last upload leaves it listed but absent (exit 1)",
+      "status": "defect",
+      "ref": "WR-02",
+      "closes": "14-17",
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "failure_surface_sweep_known_defects_only"
+      },
+      "invariants": [
+        "I2"
+      ]
+    },
+    {
+      "id": "FS-RO-01",
+      "group": "run-object",
+      "what": "outcome.json absent -> read as missing -> failed 'outcome.json is missing' (or the stage error)",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train/src/finalize.rs",
+        "name": "finalize_no_outcome"
+      },
+      "invariants": [
+        "I3"
+      ]
+    },
+    {
+      "id": "FS-RO-02",
+      "group": "run-object",
+      "what": "outcome.json malformed or over the 1 MiB cap -> warn log, read as missing",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "failure_surface_sweep_known_defects_only"
+      },
+      "invariants": [
+        "I3"
+      ]
+    },
+    {
+      "id": "FS-RO-03",
+      "group": "run-object",
+      "what": "outcome.json names another task -> warn log, read as missing",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "failure_surface_sweep_known_defects_only"
+      },
+      "invariants": [
+        "I3"
+      ]
+    },
+    {
+      "id": "FS-RO-04",
+      "group": "run-object",
+      "what": "run/gate-report.json absent, malformed or oversize -> missing (it carries no task id, so no foreign check)",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "failure_surface_sweep_known_defects_only"
+      },
+      "invariants": [
+        "I3"
+      ]
+    },
+    {
+      "id": "FS-RO-05",
+      "group": "run-object",
+      "what": "pack-outcome.json absent, malformed, oversize or foreign -> missing",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "failure_surface_sweep_known_defects_only"
+      },
+      "invariants": [
+        "I3"
+      ]
+    },
+    {
+      "id": "FS-RO-06",
+      "group": "run-object",
+      "what": "training-manifest.json absent or foreign -> partial-manifest.json is read; both absent -> no training entries",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "fin_partial_inventory"
+      },
+      "invariants": [
+        "I3",
+        "I7"
+      ]
+    },
+    {
+      "id": "FS-RO-07",
+      "group": "run-object",
+      "what": "pack-manifest.json absent or malformed -> empty (no task-id check: it is a bare array)",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "failure_surface_sweep_known_defects_only"
+      },
+      "invariants": [
+        "I3"
+      ]
+    },
+    {
+      "id": "FS-RO-08",
+      "group": "run-object",
+      "what": "any read failing for another reason (5xx, denied, a broken body) -> Store error, nothing settled or the publish resumes; the lock is held and the next pass heals",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "failure_surface_transient_faults"
+      },
+      "invariants": [
+        "I2"
+      ]
+    },
+    {
+      "id": "FS-RO-09",
+      "group": "run-object",
+      "what": "a manifest entry listed but absent in S3 (FS-EX-06, FS-PK-06): read_run_objects keeps the entry",
+      "status": "defect",
+      "ref": "WR-02",
+      "closes": "14-17",
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "failure_surface_sweep_known_defects_only"
+      },
+      "invariants": [
+        "I2"
+      ]
+    },
+    {
+      "id": "FS-DP-01",
+      "group": "decision",
+      "what": "aborted -> cancelled, entries minus the .apr",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "fin_abort_event"
+      },
+      "invariants": [
+        "I5",
+        "I6"
+      ]
+    },
+    {
+      "id": "FS-DP-02",
+      "group": "decision",
+      "what": "a path listed by two writers with different content -> failed integrity",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train/src/finalize.rs",
+        "name": "finalize_integrity"
+      },
+      "invariants": [
+        "I3"
+      ]
+    },
+    {
+      "id": "FS-DP-03",
+      "group": "decision",
+      "what": "stage_error Some -> failed with the stage text, returned BEFORE outcome.json is read",
+      "status": "defect",
+      "ref": "WR-01",
+      "closes": "14-17",
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "failure_surface_tracer_wr01"
+      },
+      "invariants": [
+        "I3",
+        "I4",
+        "I8"
+      ]
+    },
+    {
+      "id": "FS-DP-04",
+      "group": "decision",
+      "what": "no outcome -> failed 'outcome.json is missing'",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train/src/finalize.rs",
+        "name": "finalize_no_outcome"
+      },
+      "invariants": [
+        "I3"
+      ]
+    },
+    {
+      "id": "FS-DP-05",
+      "group": "decision",
+      "what": "refused inputs-changed -> failed, prefilter_disagreement false",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train/src/finalize.rs",
+        "name": "finalize_inputs_changed"
+      },
+      "invariants": [
+        "I3"
+      ]
+    },
+    {
+      "id": "FS-DP-06",
+      "group": "decision",
+      "what": "any other refusal -> failed, prefilter_disagreement TRUE, the REFUSED line (D-08); reachable only with stage_error None",
+      "status": "defect",
+      "ref": "WR-01",
+      "closes": "14-17",
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "failure_surface_tracer_wr01"
+      },
+      "invariants": [
+        "I3",
+        "I8"
+      ]
+    },
+    {
+      "id": "FS-DP-07",
+      "group": "decision",
+      "what": "crash -> failed 'the trainer crashed'",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train/src/finalize.rs",
+        "name": "finalize_crash"
+      },
+      "invariants": [
+        "I3"
+      ]
+    },
+    {
+      "id": "FS-DP-08",
+      "group": "decision",
+      "what": "timeout -> failed 'runtime cap'",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train/src/finalize.rs",
+        "name": "finalize_timeout"
+      },
+      "invariants": [
+        "I3"
+      ]
+    },
+    {
+      "id": "FS-DP-09",
+      "group": "decision",
+      "what": "device_ok false (pass or gate_fail) -> failed",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train/src/finalize.rs",
+        "name": "finalize_cpu"
+      },
+      "invariants": [
+        "I3"
+      ]
+    },
+    {
+      "id": "FS-DP-10",
+      "group": "decision",
+      "what": "gate-report.json missing, or lacking a required field -> failed",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train/src/finalize.rs",
+        "name": "finalize_malformed_report_is_refused_not_defaulted"
+      },
+      "invariants": [
+        "I3"
+      ]
+    },
+    {
+      "id": "FS-DP-11",
+      "group": "decision",
+      "what": "outcome and gate report disagree on pass -> failed integrity",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": null,
+      "invariants": [
+        "I3"
+      ],
+      "note": "untested at HEAD: no test builds an outcome that contradicts its gate report, and the sweep's gate report is always consistent with the outcome"
+    },
+    {
+      "id": "FS-DP-12",
+      "group": "decision",
+      "what": "pass -> decide_packed: pack record missing or refused -> failed (D-15); waiver mismatch or apr sha not listed -> integrity; accepted -> completed, keep",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "fin_pack_refused"
+      },
+      "invariants": [
+        "I3",
+        "I5",
+        "I7"
+      ]
+    },
+    {
+      "id": "FS-DP-13",
+      "group": "decision",
+      "what": "gate_fail without a waiver claim -> gate_failed (non-error, no pack); with a claim -> decide_packed waived",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "fin_waived"
+      },
+      "invariants": [
+        "I3",
+        "I5"
+      ]
+    },
+    {
+      "id": "FS-PB-01",
+      "group": "publication",
+      "what": "compute gate: a training job or pack task still billing -> stop it, awaiting_compute, nothing written, lock held",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "fin_awaiting_training"
+      },
+      "invariants": [
+        "I2"
+      ]
+    },
+    {
+      "id": "FS-PB-02",
+      "group": "publication",
+      "what": "the record settles first (first writer wins; Cancelled gets the aborted payload attached; terminal-without-result is integrity)",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "fin_first_writer_wins"
+      },
+      "invariants": [
+        "I1"
+      ]
+    },
+    {
+      "id": "FS-PB-03",
+      "group": "publication",
+      "what": "verdict.json = the winning payload's text, written only when different",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "fin_crash_resume_after_record"
+      },
+      "invariants": [
+        "I4"
+      ]
+    },
+    {
+      "id": "FS-PB-04",
+      "group": "publication",
+      "what": "manifest.json: adopted when it already lists this verdict, else written from the decision's entries plus the unlisted count",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "fin_crash_resume_after_verdict"
+      },
+      "invariants": [
+        "I5"
+      ]
+    },
+    {
+      "id": "FS-PB-05",
+      "group": "publication",
+      "what": "tag targets = every manifest.json entry plus manifest.json: a listed-but-absent key fails GetObjectTagging (NoSuchKey) and wedges the lock",
+      "status": "defect",
+      "ref": "WR-02",
+      "closes": "14-17",
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "failure_surface_sweep_known_defects_only"
+      },
+      "invariants": [
+        "I2"
+      ]
+    },
+    {
+      "id": "FS-PB-06",
+      "group": "publication",
+      "what": "the self-listing inventories (training-, partial-, pack-manifest.json) are never tag targets: a kept run's inventories keep 'expire'",
+      "status": "defect",
+      "ref": "IN-01",
+      "closes": "14-17",
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "failure_surface_sweep_known_defects_only"
+      },
+      "invariants": [
+        "I7"
+      ]
+    },
+    {
+      "id": "FS-PB-07",
+      "group": "publication",
+      "what": "every tag read back; the lock released LAST and re-read; a failure at any step returns Err with the lock held",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "fin_crash_resume_after_readback"
+      },
+      "invariants": [
+        "I2",
+        "I7"
+      ]
+    },
+    {
+      "id": "FS-PB-08",
+      "group": "publication",
+      "what": "record missing past the task TTL -> an existing verdict.json is the decision, else the fresh one; inside the TTL -> integrity, nothing written",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "fin_record_expired"
+      },
+      "invariants": [
+        "I1"
+      ]
+    },
+    {
+      "id": "SK-01",
+      "group": "sink",
+      "what": "sfn.rs SfnExecutions::start renders the SDK error (DisplayErrorContext) into StartError.message -> DispatchError -> lib.rs `REFUSED dispatch: {reason}` and the compensated payload's error",
+      "status": "defect",
+      "ref": "WR-03",
+      "closes": "14-18",
+      "test": {
+        "file": "crates/aprender-mcp-laya-train/src/lib.rs",
+        "name": "submit_dispatch_rejected"
+      },
+      "invariants": [
+        "I4"
+      ]
+    },
+    {
+      "id": "SK-02",
+      "group": "sink",
+      "what": "finalizer.rs bounded_error forwards the Catch `Error: Cause` (a DescribeTrainingJob JSON naming the ECR image and role ARN) as stage_error -> finalize.rs payload.error -> the stored payload, verdict.json, train_status",
+      "status": "defect",
+      "ref": "WR-03",
+      "closes": "14-18",
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "failure_surface_sweep_known_defects_only"
+      },
+      "invariants": [
+        "I4"
+      ]
+    },
+    {
+      "id": "SK-03",
+      "group": "sink",
+      "what": "lib.rs submit: the mint, lock-backend and envelope error texts reach pmcp Error::internal and the compensated payload",
+      "status": "defect",
+      "ref": "WR-03",
+      "closes": "14-18",
+      "test": null,
+      "invariants": [
+        "I4"
+      ],
+      "note": "untested at HEAD: no test exercises these error paths; 14-18 adds the request-side hostile-backend test"
+    },
+    {
+      "id": "SK-04",
+      "group": "sink",
+      "what": "lib.rs status: `no task {task_id} on this server: {e}` carries the store's error text to the caller",
+      "status": "defect",
+      "ref": "WR-03",
+      "closes": "14-18",
+      "test": null,
+      "invariants": [
+        "I4"
+      ],
+      "note": "untested at HEAD: no test exercises this error path; 14-18 adds it"
+    },
+    {
+      "id": "SK-05",
+      "group": "sink",
+      "what": "the sibling DynamoDbTaskBackend (aprender-setfit-train-lambda dynamodb.rs `aws`) renders DisplayErrorContext into BackendError: the text SK-03 and SK-04 forward",
+      "status": "defect",
+      "ref": "WR-03",
+      "closes": "14-18",
+      "test": null,
+      "invariants": [
+        "I4"
+      ],
+      "note": "untested at HEAD: no test exercises the renderer's text; 14-18 wraps the backend (RedactingBackend)"
+    },
+    {
+      "id": "SK-06",
+      "group": "sink",
+      "what": "job-written lines reach the caller verbatim: outcome.refused_line in the error, pack verify_line / packed_line in verdict.pack.line and the pack-refused error",
+      "status": "defect",
+      "ref": "WR-03",
+      "closes": "14-18",
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "failure_surface_sweep_known_defects_only"
+      },
+      "invariants": [
+        "I4"
+      ]
+    },
+    {
+      "id": "SK-07",
+      "group": "sink",
+      "what": "finalizer-side renderers (objects.rs S3, compute.rs SageMaker / ECS / Step Functions) -> FinalizerError -> the Lambda error and the execution history only, never a stored payload",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "failure_surface_transient_faults"
+      },
+      "invariants": [
+        "I4"
+      ]
+    },
+    {
+      "id": "SK-08",
+      "group": "sink",
+      "what": "dataset.rs renderers -> tracing::warn only; the refusal names the bucket and prefix, never the SDK text",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/dataset.rs",
+        "name": "dataset_denied_is_a_typed_refusal_naming_bucket_and_prefix"
+      },
+      "invariants": []
+    },
+    {
+      "id": "SK-09",
+      "group": "sink",
+      "what": "sfn.rs describe (dispatch confirm) and stop (cancel sink) renderers -> eprintln / tracing::error only",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/sfn.rs",
+        "name": "cancel_sink_logs_a_failing_stop_and_returns"
+      },
+      "invariants": []
+    },
+    {
+      "id": "SK-10",
+      "group": "sink",
+      "what": "log calls (tracing, eprintln, println) in the two crates: server-side log only",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/sfn.rs",
+        "name": "cancel_sink_logs_a_failing_stop_and_returns"
+      },
+      "invariants": []
+    },
+    {
+      "id": "SK-11",
+      "group": "sink",
+      "what": "static caller texts (validation refusals, single-flight, failed_payload reasons with no infrastructure text, orphan dispatch-unconfirmed, stage_error None)",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train/src/lib.rs",
+        "name": "submit_single_flight_refuses_naming_the_holder_and_mints_nothing"
+      },
+      "invariants": []
+    },
+    {
+      "id": "SK-12",
+      "group": "sink",
+      "what": "the run bucket is named aprender-laya-train-<env>-<account> (laya-trainer-stack.ts), so StatusPayload.run_prefix, every manifest link and the dataset refusals carry the account id BY CONSTRUCTION",
+      "status": "ok",
+      "ref": null,
+      "closes": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "tracer_completed"
+      },
+      "invariants": [
+        "I4"
+      ],
+      "note": "classified a handle, not a leak: the caller names this bucket in dataset_uri; the planted I4 constants deliberately exclude it. 14-18 must state the exclusion in I4 (its redactor would otherwise break the s3:// handle)"
+    },
+    {
+      "id": "FS-AS-01",
+      "group": "asset",
+      "what": "the finalizer Lambda asset (deploy-extensions/assets/laya-finalizer/bootstrap) is deployed with an existence check only: no commit, clean-tree or sha256 provenance",
+      "status": "defect",
+      "ref": "WR-04",
+      "closes": "14-19",
+      "test": {
+        "file": "scripts/laya_deploy/laya_trainer_ops.py",
+        "name": "selftest"
+      },
+      "invariants": [],
+      "note": "the ops selftest covers only the ABSENT-asset refusal of cmd_infra; nothing ties the binary to HEAD"
+    },
+    {
+      "id": "FS-UT-01",
+      "group": "unit-tests",
+      "what": "finalize.rs tests hand finalize_run stage_error None for catch-fed classes (refused, inputs-changed, crash, timeout, cpu, partial-manifest timeout): a delivery the machine never makes for those classes",
+      "status": "defect",
+      "ref": "WR-01",
+      "closes": "14-17",
+      "test": {
+        "file": "crates/aprender-mcp-laya-train/src/finalize.rs",
+        "name": "finalize_refused"
+      },
+      "invariants": [
+        "I3"
+      ]
+    },
+    {
+      "id": "FS-UT-02",
+      "group": "unit-tests",
+      "what": "finalizer.rs tests deliver catch-fed classes with stage_error None (payload(None), status events, reconcile), and fin_catch_error carries a Cause but no outcome",
+      "status": "defect",
+      "ref": "WR-01",
+      "closes": "14-17",
+      "test": {
+        "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+        "name": "fin_catch_error"
+      },
+      "invariants": [
+        "I3"
+      ]
+    }
+  ],
+  "tests_not_modelling_catch": [
+    {
+      "file": "crates/aprender-mcp-laya-train/src/finalize.rs",
+      "name": "finalize_refused",
+      "delivery": "finalize_run direct, stage_error None",
+      "why": "refused exits 1: the machine always supplies a stage error"
+    },
+    {
+      "file": "crates/aprender-mcp-laya-train/src/finalize.rs",
+      "name": "finalize_inputs_changed",
+      "delivery": "finalize_run direct, stage_error None",
+      "why": "refused exits 1"
+    },
+    {
+      "file": "crates/aprender-mcp-laya-train/src/finalize.rs",
+      "name": "finalize_crash",
+      "delivery": "finalize_run direct, stage_error None",
+      "why": "crash exits 1"
+    },
+    {
+      "file": "crates/aprender-mcp-laya-train/src/finalize.rs",
+      "name": "finalize_timeout",
+      "delivery": "finalize_run direct, stage_error None",
+      "why": "timeout exits 1"
+    },
+    {
+      "file": "crates/aprender-mcp-laya-train/src/finalize.rs",
+      "name": "finalize_cpu",
+      "delivery": "finalize_run direct, stage_error None",
+      "why": "it builds exit_class pass with device_ok false; run_step.py writes a CPU fallback as crash (exit 1)"
+    },
+    {
+      "file": "crates/aprender-mcp-laya-train/src/finalize.rs",
+      "name": "finalize_partial_manifest",
+      "delivery": "finalize_run direct, stage_error None",
+      "why": "timeout exits 1 (correction: not in the plan's seed)"
+    },
+    {
+      "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+      "name": "fin_partial_inventory",
+      "delivery": "state-machine payload WITHOUT error",
+      "why": "a timeout reaches Finalize only through CatchFinalize (correction: not in the plan's seed)"
+    },
+    {
+      "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+      "name": "fin_timeout_event",
+      "delivery": "TIMED_OUT status event",
+      "why": "a trainer timeout fails Train and is caught; the event re-drives it only after CatchFinalize itself failed"
+    },
+    {
+      "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+      "name": "fin_reconcile_lost_event",
+      "delivery": "reconcile sweep",
+      "why": "crash is caught; the sweep sees it only after CatchFinalize failed"
+    },
+    {
+      "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+      "name": "fin_first_writer_wins",
+      "delivery": "late FAILED status event",
+      "why": "tests first-writer-wins; its crash class is incidental"
+    },
+    {
+      "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
+      "name": "fin_catch_error",
+      "delivery": "state-machine payload WITH a Cause",
+      "why": "a Cause but no outcome.json: never a parsed outcome against a stage error"
+    }
+  ]
+}

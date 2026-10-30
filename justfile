@@ -1353,6 +1353,18 @@ laya-fetch *args:
     set -euo pipefail
     exec python3 -I scripts/laya_deploy/laya_fetch.py "$@"
 
+# The finalizer and state-machine failure surface (plan 14-16): `just laya-failure-surface --check [--artifact PATH]`
+# binds crates/aprender-mcp-laya-train-lambda/fixtures/failure-surface-v1.json and 14-FAILURE-SURFACE.md to the code
+# (axes, catch-fed classes and the KNOWN_DEFECTS ratchet out of finalizer.rs, the exit classes by running run_step.py's
+# job_exit_code, every sink count by a fresh scan, the state machine out of laya-trainer-stack.ts); `--selftest` proves
+# each rule refuses its planted mutation; `--sweep` runs the finalizer sweep tests; `--mutations` is the source-mutation
+# runner 14-17 and 14-18 fill. No AWS call. A thin wrapper: the script owns every refusal. Row failure-surface.
+[positional-arguments]
+laya-failure-surface *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec python3 -I scripts/laya_deploy/laya_failure_surface.py "$@"
+
 # Synthesize the Laya training server's two CDK stacks OFFLINE and assert their shape (Phase 14, plan 14-08; D-01, D-02,
 # D-12, D-13, D-14, D-19). Cross-builds the finalizer for aarch64 (glibc floor <= 2.34), installs it as the Lambda asset
 # deploy-extensions/assets/laya-finalizer/bootstrap, synthesizes the images stack and the trainer stack with no
@@ -5929,6 +5941,22 @@ laya-gates-selftest:
         must_fail refetch-over 'REFUSED fetch-dest' env PATH="$FA:$PATH" FETCH_RUN="$FR" just laya-fetch fixture-run "$TID" fixture-bucket --dest "$FD"
         must_fail wrong-profile 'REFUSED fetch-profile' env PATH="$FA:$PATH" FETCH_RUN="$FR" just laya-fetch fixture-run "$TID" fixture-bucket --dest "$W/fetchdest2" --profile augury-dev
         must_pass selftest '^LAYA FETCH SELFTEST OK' just laya-fetch --selftest
+    }
+    row_failure_surface() {
+        # Plan 14-16: the failure-surface enumeration is bound to the code it was derived from; a tampered copy (one
+        # exit class flipped) is refused, the real one passes, and every planted mutation is refused for its own rule.
+        local FST="$W/failure-surface-tampered.json"
+        python3 -I - crates/aprender-mcp-laya-train-lambda/fixtures/failure-surface-v1.json "$FST" <<'PYS'
+    import json, sys
+    a = json.load(open(sys.argv[1]))
+    m = a["exit_classes"]["job_exit_code"]
+    m["refused"] = 0 if m["refused"] else 1
+    json.dump(a, open(sys.argv[2], "w"))
+    PYS
+        must_fail tampered '^REFUSED surface-exit-class' just laya-failure-surface --check --artifact "$FST"
+        [ "$RC" -eq 1 ] || red "tampered: exit $RC, not 1"
+        must_pass check '^FAILURE SURFACE OK rows=' just laya-failure-surface --check
+        must_pass selftest '^FAILURE SURFACE SELFTEST OK' just laya-failure-surface --selftest
     }
     row_trainer_synth() {
         # D-01 / D-12 (plan 14-08): an unknown env is refused before any build; the real synth and the offline template check pass.
