@@ -186,10 +186,10 @@ covers the row (the checker proves it exists).
 |----|------|--------|---------|--------|---------------|------------|
 | FS-DP-01 | aborted -> cancelled, entries minus the .apr | ok |  |  | `finalizer.rs::fin_abort_event` | I5, I6 |
 | FS-DP-02 | a path listed by two writers with different content -> failed integrity | ok |  |  | `finalize.rs::finalize_integrity` | I3 |
-| FS-DP-03 | stage_error Some -> failed with the stage text, returned BEFORE outcome.json is read | defect | WR-01 | 14-17 | `finalizer.rs::failure_surface_tracer_wr01` | I3, I4, I8 |
+| FS-DP-03 | no outcome -> failed with the stage error text when one was supplied (else 'outcome.json is missing'); since 14-17 a parsed outcome.json decides the class whatever the delivery path, and the stage error is detail only (appended '; stage error: ...' to crash, timeout, device, missing gate-report and missing pack-record failures) | defect | WR-01 | 14-17 | `finalizer.rs::failure_surface_tracer_wr01` | I3, I4, I8 |
 | FS-DP-04 | no outcome -> failed 'outcome.json is missing' | ok |  |  | `finalize.rs::finalize_no_outcome` | I3 |
 | FS-DP-05 | refused inputs-changed -> failed, prefilter_disagreement false | ok |  |  | `finalize.rs::finalize_inputs_changed` | I3 |
-| FS-DP-06 | any other refusal -> failed, prefilter_disagreement TRUE, the REFUSED line (D-08); reachable only with stage_error None | defect | WR-01 | 14-17 | `finalizer.rs::failure_surface_tracer_wr01` | I3, I8 |
+| FS-DP-06 | any other refusal -> failed, prefilter_disagreement TRUE, the trainer's REFUSED line (D-08), on every delivery path including the Catch (stage error not appended) | defect | WR-01 | 14-17 | `finalizer.rs::failure_surface_tracer_wr01` | I3, I8 |
 | FS-DP-07 | crash -> failed 'the trainer crashed' | ok |  |  | `finalize.rs::finalize_crash` | I3 |
 | FS-DP-08 | timeout -> failed 'runtime cap' | ok |  |  | `finalize.rs::finalize_timeout` | I3 |
 | FS-DP-09 | device_ok false (pass or gate_fail) -> failed | ok |  |  | `finalize.rs::finalize_cpu` | I3 |

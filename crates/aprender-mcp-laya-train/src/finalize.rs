@@ -20,10 +20,11 @@
 //! |-----------|-------|-------|
 //! | aborted | `cancelled` | entries minus any `.apr`; keep false |
 //! | a manifest path with two different sha256 | `failed` | `integrity` |
-//! | stage error, or no outcome | `failed` | the stage error text |
+//! | no outcome (stage error text when present) | `failed` | the stage error, else "outcome.json is missing" |
+//! | a parsed outcome, whatever the delivery path | per the rows below | D-08: the records decide the class; a stage error is detail, never the class |
 //! | refused `inputs-changed` | `failed` | `prefilter_disagreement` FALSE: the dataset changed after validation |
-//! | any other refusal | `failed` | `prefilter_disagreement` TRUE (D-08: a defect to surface) |
-//! | crash, timeout (D-12), or `device_ok` false | `failed` | |
+//! | any other refusal | `failed` | `prefilter_disagreement` TRUE (D-08: a defect to surface), the trainer's REFUSED line |
+//! | crash, timeout (D-12), or `device_ok` false | `failed` | the class text, then `; stage error: ...` when one was supplied |
 //! | gate fail, no pilot-waiver claim | `gate_failed` | non-error result, no pack |
 //! | gate fail, claim, pack accepted with `waived` = claim | `completed` | `verdict.pass` false, `.apr` listed, keep false |
 //! | gate fail, claim, pack missing or refused | `failed` | D-15 |
@@ -34,6 +35,25 @@
 //!
 //! A refused pack can never surface an `.apr`: every non-completed phase strips
 //! the `.apr` entry from the manifest and `verdict.apr_sha256` is null.
+//!
+//! # A stage error is detail (D-08, WR-01)
+//!
+//! The state machine's Catch hands the finalizer a stage error for every Train or
+//! PackVerify failure, and a trainer refusal, crash or timeout always exits 1, so
+//! the stage error arrives on exactly the deliveries where the records matter most.
+//! The same records also arrive WITHOUT a stage error, through the status event
+//! and the reconcile sweep. So a parsed `outcome.json` decides the class on every
+//! path: the stage error is the fallback only when the outcome is absent, and is
+//! appended as `; stage error: ...` to the crash, timeout, device, missing
+//! gate-report and missing pack-record failures (never to a refusal, whose
+//! REFUSED line is the better text).
+//!
+//! When a stage error was supplied and the records still decide `completed` or
+//! `gate_failed` (a Train job that exited 1 only because an upload failed leaves
+//! complete records), the records win, [`FinalizeDecision::stage_error_overridden`]
+//! is true and the payload carries [`NOTE_STAGE_ERROR_OVERRIDDEN`] in `notes`, so
+//! the caller sees that the run was not a clean one. No stage error text is ever
+//! copied into a note.
 
 use std::collections::BTreeMap;
 
@@ -48,6 +68,17 @@ use crate::layout::{
 
 /// Longest free-text error the payload carries.
 const MAX_ERROR_CHARS: usize = 1_024;
+
+/// What joins a failure's class text and the stage error appended as its detail.
+const STAGE_DETAIL: &str = "; stage error: ";
+
+/// The note a pass or gate failure carries when the records decided it over a
+/// state-machine stage error. One fixed sentence: it embeds no part of the stage
+/// error (infrastructure text stays in the log).
+pub const NOTE_STAGE_ERROR_OVERRIDDEN: &str =
+    "stage-error-overridden: the train job exited non-zero \
+     although its records were complete, so the records decided the phase; an object the job \
+     failed to upload may be missing from the manifest";
 
 /// Everything the decision reads, already parsed.
 #[derive(Debug, Clone)]
@@ -93,6 +124,10 @@ pub struct FinalizeDecision {
     pub keep: bool,
     /// True when the inventory came from the in-run partial manifest.
     pub manifest_partial: bool,
+    /// True when a stage error was supplied and the records still decided
+    /// `completed` or `gate_failed` (the payload then carries
+    /// [`NOTE_STAGE_ERROR_OVERRIDDEN`]).
+    pub stage_error_overridden: bool,
 }
 
 /// A payload as the tool result the store persists: an error result for `failed`.
@@ -227,9 +262,20 @@ struct Builder<'a> {
     input: &'a FinalizeInput,
     entries: Vec<ManifestEntry>,
     partial: bool,
+    /// The state-machine stage error, read once here: detail for the failure arms
+    /// that append it, and the trigger of the override note. Never the class.
+    stage_error: Option<&'a str>,
 }
 
 impl Builder<'_> {
+    /// `text`, with the stage error appended as detail when one was supplied.
+    fn with_stage(&self, text: &str) -> String {
+        match self.stage_error {
+            Some(stage) => format!("{text}{STAGE_DETAIL}{stage}"),
+            None => text.to_string(),
+        }
+    }
+
     fn manifest(&self, entries: Vec<ManifestEntry>) -> Manifest {
         let input = self.input;
         Manifest {
@@ -291,6 +337,13 @@ impl Builder<'_> {
         payload.error = error.map(|e| clip(&e));
         payload.prefilter_disagreement = prefilter_disagreement;
         payload.manifest_partial = self.partial;
+        // The records decided a non-error phase over a stage error: say so in the
+        // payload itself, not only in a log line (D-18).
+        let stage_error_overridden =
+            self.stage_error.is_some() && matches!(phase, Phase::Completed | Phase::GateFailed);
+        if stage_error_overridden {
+            payload.notes.push(NOTE_STAGE_ERROR_OVERRIDDEN.to_string());
+        }
         let keep = phase == Phase::Completed && verdict.as_ref().is_some_and(|v| v.pass);
         payload.verdict = verdict;
         let (status, is_error) = match phase {
@@ -307,6 +360,7 @@ impl Builder<'_> {
             manifest: self.manifest(entries),
             keep,
             manifest_partial: self.partial,
+            stage_error_overridden,
         }
     }
 
@@ -347,7 +401,7 @@ fn decide_packed(b: &Builder<'_>, mut verdict: Verdict, claim: Option<&str>) -> 
     let Some(pack) = b.input.pack_outcome.as_ref() else {
         verdict.pack = None;
         return b.failed(
-            "pack-outcome.json is missing: the pack stage left no record",
+            &b.with_stage("pack-outcome.json is missing: the pack stage left no record"),
             Some(verdict),
             false,
         );
@@ -416,6 +470,7 @@ pub fn finalize_run(input: &FinalizeInput) -> FinalizeDecision {
             .training_manifest
             .as_ref()
             .is_some_and(|m| !m.complete),
+        stage_error: input.stage_error.as_deref(),
     };
 
     if input.aborted {
@@ -427,12 +482,14 @@ pub fn finalize_run(input: &FinalizeInput) -> FinalizeDecision {
             None,
         );
     }
-    if let Some(error) = &input.stage_error {
-        return b.failed(error, None, false);
-    }
+    // D-08: a parsed outcome decides the class whatever delivered the run; the
+    // stage error is only the fallback when there is no outcome to read.
     let Some(outcome) = input.outcome.as_ref() else {
         return b.failed(
-            "outcome.json is missing: the training stage left no record",
+            input
+                .stage_error
+                .as_deref()
+                .unwrap_or("outcome.json is missing: the training stage left no record"),
             None,
             false,
         );
@@ -458,10 +515,10 @@ pub fn finalize_run(input: &FinalizeInput) -> FinalizeDecision {
                 )
             };
         }
-        ExitClass::Crash => return b.failed("the trainer crashed", None, false),
+        ExitClass::Crash => return b.failed(&b.with_stage("the trainer crashed"), None, false),
         ExitClass::Timeout => {
             return b.failed(
-                "the training job hit its runtime cap and was stopped",
+                &b.with_stage("the training job hit its runtime cap and was stopped"),
                 None,
                 false,
             )
@@ -470,17 +527,17 @@ pub fn finalize_run(input: &FinalizeInput) -> FinalizeDecision {
     }
     if !outcome.device_ok {
         return b.failed(
-            &format!(
+            &b.with_stage(&format!(
                 "the trainer ran on {:?}, not a device the contract allows",
                 outcome.device_used
-            ),
+            )),
             None,
             false,
         );
     }
 
     let Some(report) = input.gate_report.as_ref() else {
-        return b.failed("gate-report.json is missing", None, false);
+        return b.failed(&b.with_stage("gate-report.json is missing"), None, false);
     };
     if let Some(field) = report_defect(report) {
         return b.failed(&format!("gate-report.json lacks `{field}`"), None, false);
@@ -675,6 +732,28 @@ pub(crate) mod fixtures {
             training_manifest: Some(training_manifest()),
             pack_manifest: pack_entries(),
         }
+    }
+
+    /// The Catch's `Error`, as `train.addCatch(.., { errors: [ALL] })` records it
+    /// for a failed `.sync` task.
+    pub const CATCH_ERROR: &str = "States.TaskFailed";
+
+    /// Longest stage error the finalizer hands the decision (its `bounded_error`).
+    pub const MAX_STAGE_ERROR_CHARS: usize = 2_048;
+
+    /// `input` as the state machine delivers a catch-fed class: the Train (or
+    /// PackVerify) task failed, the Catch put `{Error, Cause}` at `$.error`, and the
+    /// finalizer's `bounded_error` turned it into `<Error>: <Cause>`, bounded. The
+    /// one helper that builds that shape, so a test cannot model the Catch in a
+    /// way the machine does not.
+    pub fn through_catch(mut input: FinalizeInput, cause_text: &str) -> FinalizeInput {
+        input.stage_error = Some(
+            format!("{CATCH_ERROR}: {cause_text}")
+                .chars()
+                .take(MAX_STAGE_ERROR_CHARS)
+                .collect(),
+        );
+        input
     }
 }
 
@@ -930,78 +1009,312 @@ mod tests {
         all_report_entries_present(&d);
     }
 
-    #[test]
-    fn finalize_refused() {
+    // ------------------------------------------- catch-fed classes, both deliveries
+    //
+    // refused, crash and timeout exit 1 (run_step.py `job_exit_code`), so the machine
+    // delivers them through `train.addCatch` WITH a stage error; the status event and
+    // the reconcile sweep deliver the same records WITHOUT one. Each class is decided
+    // on both deliveries and must reach the same phase, is_error and D-08 flag.
+
+    /// A `Cause` shaped like a failed `.sync` SageMaker job's: it names no class
+    /// (no crash, runtime cap or REFUSED), so only the records can supply one.
+    const CAUSE: &str = "{\"TrainingJobStatus\":\"Failed\",\"SecondaryStatus\":\"Failed\",\
+                         \"FailureReason\":\"AlgorithmError: the job exited 1\"}";
+
+    /// The same records through the Catch, and through the event / reconcile path.
+    fn deliveries(i: &FinalizeInput) -> [(&'static str, FinalizeDecision); 2] {
+        let mut uncaught = i.clone();
+        uncaught.stage_error = None;
+        [
+            (
+                "catch",
+                finalize_run(&fixtures::through_catch(i.clone(), CAUSE)),
+            ),
+            ("event/reconcile", finalize_run(&uncaught)),
+        ]
+    }
+
+    /// One catch-fed class: its records, the text its error must carry on every
+    /// delivery, its D-08 flag, and whether the stage error is appended as detail.
+    struct CatchFed {
+        name: &'static str,
+        records: fn() -> FinalizeInput,
+        needle: &'static str,
+        disagreement: bool,
+        stage_detail: bool,
+    }
+
+    fn refused_records() -> FinalizeInput {
         let mut i = input();
         let outcome = i.outcome.as_mut().expect("outcome");
         outcome.exit_class = ExitClass::Refused;
         outcome.refused_line =
             Some("REFUSED eval-class-coverage: eval.jsonl holds no row".to_string());
-        let d = finalize_run(&i);
-        assert_eq!(d.phase, Phase::Failed);
-        assert!(d.is_error);
-        assert!(
-            d.payload.prefilter_disagreement,
-            "D-08: a defect to surface"
+        i
+    }
+
+    fn inputs_changed_records() -> FinalizeInput {
+        let mut i = input();
+        let outcome = i.outcome.as_mut().expect("outcome");
+        outcome.exit_class = ExitClass::Refused;
+        outcome.refused_line = Some("REFUSED inputs-changed: train.jsonl".to_string());
+        i
+    }
+
+    fn crash_records() -> FinalizeInput {
+        let mut i = input();
+        i.outcome.as_mut().expect("outcome").exit_class = ExitClass::Crash;
+        i
+    }
+
+    fn timeout_records() -> FinalizeInput {
+        let mut i = input();
+        i.outcome.as_mut().expect("outcome").exit_class = ExitClass::Timeout;
+        i
+    }
+
+    /// `device_ok` false on a pass: the device arm. A pass exits 0, but a failed
+    /// upload forces exit 1 for any class (Run.finish), so this too arrives through
+    /// the Catch. (run_step.py writes its own CPU fallback as `crash`, the crash row.)
+    fn cpu_records() -> FinalizeInput {
+        let mut i = input();
+        let outcome = i.outcome.as_mut().expect("outcome");
+        outcome.device_ok = false;
+        outcome.device_used = "cpu".to_string();
+        i
+    }
+
+    static CATCH_FED_CASES: [CatchFed; 5] = [
+        CatchFed {
+            name: "refused",
+            records: refused_records,
+            needle: "REFUSED eval-class-coverage",
+            disagreement: true,
+            stage_detail: false,
+        },
+        CatchFed {
+            name: "inputs-changed",
+            records: inputs_changed_records,
+            needle: "inputs-changed",
+            disagreement: false,
+            stage_detail: false,
+        },
+        CatchFed {
+            name: "crash",
+            records: crash_records,
+            needle: "the trainer crashed",
+            disagreement: false,
+            stage_detail: true,
+        },
+        CatchFed {
+            name: "timeout",
+            records: timeout_records,
+            needle: "runtime cap",
+            disagreement: false,
+            stage_detail: true,
+        },
+        CatchFed {
+            name: "cpu",
+            records: cpu_records,
+            needle: "cpu",
+            disagreement: false,
+            stage_detail: true,
+        },
+    ];
+
+    fn catch_fed(name: &str) -> &'static CatchFed {
+        CATCH_FED_CASES
+            .iter()
+            .find(|c| c.name == name)
+            .expect("a catch-fed case")
+    }
+
+    /// Decide one class on both deliveries and hold each to the class table.
+    fn assert_catch_fed(case: &CatchFed) -> [(&'static str, FinalizeDecision); 2] {
+        let decided = deliveries(&(case.records)());
+        for (via, d) in &decided {
+            let at = format!("{} via {via}", case.name);
+            assert_eq!(
+                (d.phase, d.status, d.is_error),
+                (Phase::Failed, TaskStatus::Failed, true),
+                "{at}"
+            );
+            assert_eq!(
+                d.payload.prefilter_disagreement, case.disagreement,
+                "{at}: D-08"
+            );
+            assert!(error_of(d).contains(case.needle), "{at}: {}", error_of(d));
+            assert!(!d.keep, "{at}");
+            assert!(!has_apr(d), "{at}");
+            assert!(
+                !d.stage_error_overridden,
+                "{at}: a failure is never an override"
+            );
+            assert!(d.payload.notes.is_empty(), "{at}: {:?}", d.payload.notes);
+            // The stage error is detail on the catch delivery only, and only where
+            // the class text does not already explain the failure.
+            let detail = error_of(d).contains(fixtures::CATCH_ERROR);
+            assert_eq!(
+                detail,
+                case.stage_detail && *via == "catch",
+                "{at}: {}",
+                error_of(d)
+            );
+        }
+        let class = |d: &FinalizeDecision| (d.phase, d.is_error, d.payload.prefilter_disagreement);
+        assert_eq!(
+            class(&decided[0].1),
+            class(&decided[1].1),
+            "{}: the class must not depend on the delivery path",
+            case.name
         );
+        decided
+    }
+
+    #[test]
+    fn finalize_catch_fed_both_deliveries() {
+        for case in &CATCH_FED_CASES {
+            assert_catch_fed(case);
+        }
+    }
+
+    #[test]
+    fn finalize_refused() {
+        let [(_, caught), _] = assert_catch_fed(catch_fed("refused"));
         assert!(
-            error_of(&d).contains("REFUSED eval-class-coverage"),
+            error_of(&caught).contains("the trainer refused a dataset the pre-filter accepted"),
             "{}",
-            error_of(&d)
+            error_of(&caught)
         );
     }
 
     #[test]
     fn finalize_inputs_changed() {
-        let mut i = input();
-        let outcome = i.outcome.as_mut().expect("outcome");
-        outcome.exit_class = ExitClass::Refused;
-        outcome.refused_line = Some("REFUSED inputs-changed: train.jsonl".to_string());
-        let d = finalize_run(&i);
-        assert_eq!(d.phase, Phase::Failed);
-        assert!(
-            !d.payload.prefilter_disagreement,
-            "the dataset changed after validation; the rules did not drift"
-        );
-        assert!(error_of(&d).contains("inputs-changed"), "{}", error_of(&d));
+        let [(_, caught), (_, uncaught)] = assert_catch_fed(catch_fed("inputs-changed"));
+        for d in [&caught, &uncaught] {
+            assert!(
+                !d.payload.prefilter_disagreement,
+                "the dataset changed after validation; the rules did not drift"
+            );
+        }
     }
 
     #[test]
     fn finalize_crash() {
-        let mut i = input();
-        i.outcome.as_mut().expect("outcome").exit_class = ExitClass::Crash;
-        let d = finalize_run(&i);
-        assert_eq!(
-            (d.phase, d.status, d.is_error),
-            (Phase::Failed, TaskStatus::Failed, true)
+        let [(_, caught), (_, uncaught)] = assert_catch_fed(catch_fed("crash"));
+        assert_eq!(error_of(&uncaught), "the trainer crashed");
+        assert!(
+            error_of(&caught).starts_with("the trainer crashed; stage error: States.TaskFailed: "),
+            "{}",
+            error_of(&caught)
         );
-        assert!(!d.keep);
     }
 
     #[test]
     fn finalize_timeout() {
-        let mut i = input();
-        i.outcome.as_mut().expect("outcome").exit_class = ExitClass::Timeout;
-        let d = finalize_run(&i);
-        assert_eq!(
-            (d.phase, d.status, d.is_error),
-            (Phase::Failed, TaskStatus::Failed, true)
+        let [(_, caught), _] = assert_catch_fed(catch_fed("timeout"));
+        assert!(
+            error_of(&caught).contains("runtime cap and was stopped; stage error: "),
+            "{}",
+            error_of(&caught)
         );
-        assert!(error_of(&d).contains("runtime cap"), "{}", error_of(&d));
     }
 
     #[test]
     fn finalize_cpu() {
-        let mut i = input();
-        let outcome = i.outcome.as_mut().expect("outcome");
-        outcome.device_ok = false;
-        outcome.device_used = "cpu".to_string();
-        let d = finalize_run(&i);
-        assert_eq!(
-            (d.phase, d.status, d.is_error),
-            (Phase::Failed, TaskStatus::Failed, true)
+        let [(_, caught), _] = assert_catch_fed(catch_fed("cpu"));
+        assert!(
+            error_of(&caught).contains("not a device the contract allows; stage error: "),
+            "{}",
+            error_of(&caught)
         );
-        assert!(error_of(&d).contains("cpu"), "{}", error_of(&d));
+    }
+
+    /// WR-01's own test: a stage error AND a refusal the pre-filter accepted. The
+    /// trainer's REFUSED line and the D-08 flag reach the caller, not the Cause.
+    #[test]
+    fn finalize_refused_with_stage_error() {
+        let i = fixtures::through_catch(refused_records(), CAUSE);
+        assert!(i.stage_error.is_some());
+        let d = finalize_run(&i);
+        assert_eq!(d.phase, Phase::Failed);
+        assert!(d.is_error);
+        assert!(
+            d.payload.prefilter_disagreement,
+            "D-08: a refusal the pre-filter accepted is a defect to surface"
+        );
+        assert!(
+            error_of(&d).contains("REFUSED eval-class-coverage: eval.jsonl holds no row"),
+            "{}",
+            error_of(&d)
+        );
+        assert!(
+            !error_of(&d).contains(fixtures::CATCH_ERROR),
+            "the REFUSED line is the better text: {}",
+            error_of(&d)
+        );
+        assert!(!d.stage_error_overridden);
+    }
+
+    /// The records decide a pass or gate failure over a stage error, and the payload
+    /// says so: one fixed note, the flag, and no change to phase, keep or is_error.
+    #[test]
+    fn finalize_stage_error_overridden() {
+        let overriding: [(&str, FinalizeInput, Phase, bool); 2] = [
+            ("pass", input(), Phase::Completed, true),
+            ("gate_fail", gate_fail_input(), Phase::GateFailed, false),
+        ];
+        for (name, records, phase, keep) in overriding {
+            let caught = finalize_run(&fixtures::through_catch(records.clone(), CAUSE));
+            assert_eq!(caught.phase, phase, "{name}");
+            assert_eq!(
+                caught.keep, keep,
+                "{name}: a verified GATE PASS is still kept"
+            );
+            assert!(!caught.is_error, "{name}");
+            assert_eq!(caught.payload.error, None, "{name}");
+            assert!(caught.stage_error_overridden, "{name}");
+            assert_eq!(
+                caught.payload.notes,
+                [NOTE_STAGE_ERROR_OVERRIDDEN.to_string()],
+                "{name}"
+            );
+            assert!(
+                !NOTE_STAGE_ERROR_OVERRIDDEN.contains(fixtures::CATCH_ERROR)
+                    && !caught
+                        .payload
+                        .notes
+                        .iter()
+                        .any(|n| n.contains("AlgorithmError")),
+                "{name}: no stage error text is copied into a note"
+            );
+            assert!(NOTE_STAGE_ERROR_OVERRIDDEN.starts_with("stage-error-overridden: "));
+            // The note reaches the stored text (verdict.json is that text).
+            let stored = decision_result(&caught);
+            let Some(Content::Text { text }) = stored.content.first() else {
+                panic!("{name}: no text");
+            };
+            assert!(text.contains(NOTE_STAGE_ERROR_OVERRIDDEN), "{name}: {text}");
+
+            let plain = finalize_run(&records);
+            assert_eq!((plain.phase, plain.keep), (phase, keep), "{name}");
+            assert!(!plain.stage_error_overridden, "{name}");
+            assert!(plain.payload.notes.is_empty(), "{name}");
+            assert!(
+                !decision_result(&plain).content.iter().any(|c| matches!(
+                    c,
+                    Content::Text { text } if text.contains("\"notes\"")
+                )),
+                "{name}: an empty notes list is not serialized"
+            );
+        }
+        // A failure is never an override, with or without the stage error.
+        for name in ["refused", "crash", "timeout"] {
+            let caught = finalize_run(&fixtures::through_catch((catch_fed(name).records)(), CAUSE));
+            assert_eq!(caught.phase, Phase::Failed, "{name}");
+            assert!(!caught.stage_error_overridden, "{name}");
+            assert!(caught.payload.notes.is_empty(), "{name}");
+        }
     }
 
     #[test]

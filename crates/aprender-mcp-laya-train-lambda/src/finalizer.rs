@@ -419,6 +419,10 @@ pub struct FinalizeReport {
     pub record: String,
     /// True when this call released the lock.
     pub released: bool,
+    /// True when this invocation's decision let the records decide `completed` or
+    /// `gate_failed` over a state-machine stage error (D-08); the payload then
+    /// carries the `stage-error-overridden` note.
+    pub stage_error_overridden: bool,
     /// The sweep's own account, when the input was a reconcile.
     pub reconcile: Option<Box<ReconcileReport>>,
 }
@@ -674,6 +678,7 @@ fn orphan_decision(ctx: &FinalizerCtx, subject: &Subject, aborted: bool) -> Fina
         },
         keep: false,
         manifest_partial: false,
+        stage_error_overridden: false,
     }
 }
 
@@ -989,6 +994,14 @@ async fn finalize_task(
         .is_some_and(|rec| rec.task.status == TaskStatus::Cancelled);
     let decision = decide(ctx, &trigger, &objects, trigger.aborted || cancelled);
     let aborted_decision = decide(ctx, &trigger, &objects, true);
+    report.stage_error_overridden = decision.stage_error_overridden;
+    if decision.stage_error_overridden {
+        tracing::warn!(
+            "laya finalizer: task {} reported a stage error, but its records decided {}",
+            subject.task_id,
+            decision.phase.as_str()
+        );
+    }
 
     let winner = match record {
         Some(rec) => {
@@ -2091,6 +2104,70 @@ mod tests {
         assert!(text.starts_with("States.TaskFailed"), "{text}");
         assert!(rig.record().await.result.expect("result").is_error);
         assert!(rig.lock_released().await);
+    }
+
+    /// A passing run whose Train job exited 1 (an upload failed after the records
+    /// were complete) arrives through CatchFinalize WITH a stage error: the records
+    /// decide `completed` and the kept GATE PASS is still kept, but the stored
+    /// payload and verdict.json say the run was rescued. The same records through
+    /// the status event carry no note.
+    #[tokio::test]
+    async fn fin_override_note_reaches_verdict() {
+        use aprender_mcp_laya_train::finalize::NOTE_STAGE_ERROR_OVERRIDDEN;
+
+        let rig = ready(&passing()).await;
+        let error = json!({"Error": "States.TaskFailed",
+                           "Cause": "{\"TrainingJobStatus\":\"Failed\"}"});
+        let report = rig.payload(Some(error)).await.expect("finalized");
+        assert_eq!(report.phase, Some(Phase::Completed));
+        assert!(
+            report.keep,
+            "a verified, pack-accepted GATE PASS is still kept"
+        );
+        assert!(report.stage_error_overridden);
+        assert!(report.released);
+        rig.assert_all_tagged(RETENTION_KEEP);
+        let payload = rig.stored_payload().await;
+        assert_eq!(payload.phase, Phase::Completed);
+        assert_eq!(payload.error, None);
+        assert_eq!(payload.notes, [NOTE_STAGE_ERROR_OVERRIDDEN.to_string()]);
+        let rec = rig.record().await;
+        assert!(!rec.result.as_ref().expect("result").is_error);
+        let stored = result_text(rec.result.as_ref().expect("result")).expect("text");
+        let verdict = rig
+            .objects
+            .bytes(&Rig::key("verdict.json"))
+            .expect("verdict");
+        assert_eq!(
+            verdict,
+            stored.as_bytes(),
+            "verdict.json is the stored text"
+        );
+        let verdict = String::from_utf8(verdict).expect("utf8");
+        assert!(verdict.contains(NOTE_STAGE_ERROR_OVERRIDDEN), "{verdict}");
+        assert!(
+            !verdict.contains("TrainingJobStatus"),
+            "no stage error text in a note"
+        );
+
+        // The same records through the event path, on a fresh rig: no note.
+        let rig = ready(&passing()).await;
+        rig.set_execution("FAILED");
+        let report = rig.event("FAILED").await.expect("finalized");
+        assert_eq!(report.phase, Some(Phase::Completed));
+        assert!(report.keep);
+        assert!(!report.stage_error_overridden);
+        assert!(rig.stored_payload().await.notes.is_empty());
+        let verdict = rig
+            .objects
+            .bytes(&Rig::key("verdict.json"))
+            .expect("verdict");
+        let verdict = String::from_utf8(verdict).expect("utf8");
+        assert!(!verdict.contains("stage-error-overridden"), "{verdict}");
+        assert!(
+            !verdict.contains("\"notes\""),
+            "an empty notes list is not written"
+        );
     }
 
     #[tokio::test]
@@ -3486,10 +3563,8 @@ mod tests {
         /// deletes I4. Never add an entry to make the sweep pass.
         const KNOWN_DEFECTS: &[Invariant] = &[
             Invariant::I2, // WR-02: a listed-but-absent object wedges tagging and the lock
-            Invariant::I3, // WR-01: the Catch's stage error is read before outcome.json
             Invariant::I4, // WR-03: AWS text reaches the stored payload
             Invariant::I7, // IN-01: the self-listing manifests keep `expire` on a kept run
-            Invariant::I8, // WR-01: the Catch delivery decides differently from the others
         ];
 
         /// What the records alone decide, by the class table (not by `finalize_run`).
@@ -3612,6 +3687,21 @@ mod tests {
                 if want.error_nonempty && error.is_empty() {
                     wrong.push("error is empty".into());
                 }
+                // A non-error phase the records decided over the Catch's stage error
+                // says so in the payload (D-18): the note on that delivery, and on no
+                // other delivery of the same records. Read from the stored payload by
+                // its fixed prefix, never through the implementation's constant.
+                let want_note = cell.trigger == Via::SmCaught
+                    && matches!(want.phase, Phase::Completed | Phase::GateFailed);
+                let has_note = payload
+                    .notes
+                    .iter()
+                    .any(|n| n.starts_with("stage-error-overridden"));
+                if has_note != want_note {
+                    wrong.push(format!(
+                        "stage-error-overridden note {has_note}, want {want_note}"
+                    ));
+                }
                 if !wrong.is_empty() {
                     out.push((Invariant::I3, wrong.join("; ")));
                 }
@@ -3714,7 +3804,10 @@ mod tests {
             (!wrong.is_empty()).then(|| format!("want {want}: {}", wrong.join(", ")))
         }
 
-        /// What I8 compares across deliveries of the same records.
+        /// What I8 compares across deliveries of the same records. `notes` is left
+        /// out ON PURPOSE: only the state-machine Catch delivers a stage error, so the
+        /// stage-error-overridden note legitimately differs by delivery (I3 pins
+        /// exactly where it must and must not appear).
         #[derive(Debug, Clone, PartialEq, Eq)]
         struct Delivered {
             phase: Phase,
@@ -3816,8 +3909,8 @@ mod tests {
 
         /// One caught-refused cell through every layer: the machine's Catch hands
         /// the finalizer a stage error for a trainer refusal the pre-filter
-        /// accepted, and the harness must see the WR-01 defect (I3) while I1 and I2
-        /// hold.
+        /// accepted. Plan 14-16 proved the harness saw the WR-01 defect (I3) here;
+        /// since 14-17 the records decide, so I1, I2 and I3 all hold.
         #[tokio::test]
         async fn failure_surface_tracer_wr01() {
             assert_eq!(parse_time_secs(&json!(T0_RFC3339)), Some(T0));
@@ -3835,24 +3928,24 @@ mod tests {
             assert!(record.result.is_some(), "a stored result");
             assert!(obs.released, "the lock is released");
             let payload = obs.payload.as_ref().expect("a stored payload");
-            // The defect, named: the Catch's text decided, the trainer's line and the
-            // D-08 flag were never read.
+            // WR-01 closed: the trainer's REFUSED line and the D-08 flag reach the
+            // caller, not the Catch's text.
             assert!(
-                payload
-                    .error
-                    .as_deref()
-                    .is_some_and(|e| e.starts_with("States.TaskFailed")),
+                payload.error.as_deref().is_some_and(
+                    |e| e.contains(REFUSED_OTHER_RULE) && !e.starts_with("States.TaskFailed")
+                ),
                 "{:?}",
                 payload.error
             );
-            assert!(!payload.prefilter_disagreement);
+            assert!(payload.prefilter_disagreement, "D-08");
+            assert!(payload.notes.is_empty(), "{:?}", payload.notes);
 
             // The tracer models a delivery the machine really makes.
             assert!(exit_class(cell.outcome).is_some_and(|c| CATCH_FED.contains(&c)));
 
-            // Its scope is WR-01's: I1 and I2 hold and I3 is the defect. The planted
-            // Cause also leaks (I4, WR-03); whatever else the cell violates must be
-            // a pinned defect, so the tracer cannot hide an unpinned one.
+            // Its scope is WR-01's: no violation in scope. The planted Cause still
+            // leaks (I4, WR-03, pinned for 14-18); whatever else the cell violates
+            // must be a pinned defect, so the tracer cannot hide an unpinned one.
             let all = violations(&cell, &obs);
             let scoped: Vec<Invariant> = all
                 .iter()
@@ -3861,12 +3954,12 @@ mod tests {
                 .collect();
             assert_eq!(
                 scoped,
-                [Invariant::I3],
+                Vec::<Invariant>::new(),
                 "{} {:?}",
                 cell.label(),
                 findings(&cell, &obs)
             );
-            assert!(KNOWN_DEFECTS.contains(&Invariant::I3));
+            assert!(!KNOWN_DEFECTS.contains(&Invariant::I3));
             assert!(
                 all.iter().all(|inv| KNOWN_DEFECTS.contains(inv)),
                 "{all:?} outside {KNOWN_DEFECTS:?}"

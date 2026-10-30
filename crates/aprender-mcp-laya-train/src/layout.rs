@@ -524,6 +524,13 @@ pub struct StatusPayload {
     pub prefilter_disagreement: bool,
     /// True when the inventory came from the in-run partial manifest.
     pub manifest_partial: bool,
+    /// What the finalizer overrode or dropped to reach this phase (D-18): a
+    /// fixed-shape sentence per event, such as the records deciding over a
+    /// state-machine stage error, or manifest entries S3 does not hold. It never
+    /// carries infrastructure text. Absent from the JSON when empty, so a payload
+    /// with nothing to note serializes exactly as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 impl StatusPayload {
@@ -543,6 +550,7 @@ impl StatusPayload {
             error: None,
             prefilter_disagreement: false,
             manifest_partial: false,
+            notes: Vec::new(),
         }
     }
 
@@ -633,6 +641,32 @@ mod tests {
         assert_eq!(run_prefix("m-1", "t-9"), "runs/m-1/t-9/");
         assert_eq!(apr_key("m-1", "t-9"), "runs/m-1/t-9/m-1.apr");
         assert_eq!(apr_entry_path("m-1"), "m-1.apr");
+    }
+
+    #[test]
+    fn status_payload_notes_are_optional_on_the_wire() {
+        let base = StatusPayload::base("t-1", "m-1", "s3://b/runs/m-1/t-1/", Phase::Failed);
+        let value = base.to_value();
+        assert!(
+            value.get("notes").is_none(),
+            "an empty notes list is not serialized: {value}"
+        );
+
+        let mut noted = base.clone();
+        noted.notes = vec![
+            "stage-error-overridden: fixed text".to_string(),
+            "listed-but-absent: 1 entry".to_string(),
+        ];
+        let text = noted.to_value().to_string();
+        let back: StatusPayload = serde_json::from_str(&text).expect("round trip");
+        assert_eq!(back, noted);
+
+        // A payload stored before the field existed still reads, with no notes.
+        let mut older = base.to_value();
+        older.as_object_mut().expect("object").remove("notes");
+        let back: StatusPayload = serde_json::from_value(older).expect("older payload");
+        assert!(back.notes.is_empty());
+        assert_eq!(back, base);
     }
 
     #[test]

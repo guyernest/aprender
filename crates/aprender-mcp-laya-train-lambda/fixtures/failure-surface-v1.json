@@ -225,14 +225,13 @@
     },
     {
       "step": 3,
-      "condition": "stage_error Some",
-      "phase": "failed (stage text)",
-      "defect": "WR-01"
+      "condition": "outcome missing",
+      "phase": "failed (the stage text when supplied, else outcome.json is missing)"
     },
     {
       "step": 4,
-      "condition": "outcome missing",
-      "phase": "failed"
+      "condition": "a parsed outcome decides the class on every delivery path; a stage error is detail",
+      "phase": "per steps 5..13"
     },
     {
       "step": 5,
@@ -1256,7 +1255,7 @@
     {
       "id": "FS-DP-03",
       "group": "decision",
-      "what": "stage_error Some -> failed with the stage text, returned BEFORE outcome.json is read",
+      "what": "no outcome -> failed with the stage error text when one was supplied (else 'outcome.json is missing'); since 14-17 a parsed outcome.json decides the class whatever the delivery path, and the stage error is detail only (appended '; stage error: ...' to crash, timeout, device, missing gate-report and missing pack-record failures)",
       "status": "defect",
       "ref": "WR-01",
       "closes": "14-17",
@@ -1303,7 +1302,7 @@
     {
       "id": "FS-DP-06",
       "group": "decision",
-      "what": "any other refusal -> failed, prefilter_disagreement TRUE, the REFUSED line (D-08); reachable only with stage_error None",
+      "what": "any other refusal -> failed, prefilter_disagreement TRUE, the trainer's REFUSED line (D-08), on every delivery path including the Catch (stage error not appended)",
       "status": "defect",
       "ref": "WR-01",
       "closes": "14-17",
