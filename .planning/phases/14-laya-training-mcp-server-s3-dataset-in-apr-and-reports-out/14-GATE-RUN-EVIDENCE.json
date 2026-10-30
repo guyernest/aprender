@@ -250,5 +250,14 @@
   "findings": [
     "The pack task's zero-shot bound is the 1e-5 floor because the A10G noise was 1.73e-6 (4 x = 6.9e-6 < floor); Phase 12's MPS noise was 1.25e-5 (bound 5.0e-5). The same arm64 re-score of CUDA-written probabilities moved a row by 1.73e-5, so the bound derived from GPU noise cannot hold across CPUs. This is the second observation after the 14-14 smoke (Mac 3.4e-5, Graviton 2.7e-5 against 3.26e-5).",
     "Seed 17, the median-ECE seed, shipped: its margin 0.2860 is lower than Phase 12's shipped seed 13 (0.3780); on this run seed 13 failed the gate (ece 0.1124) where on Phase 12 seed 17 did; the per-seed spread is large at 100 eval rows."
+  ],
+  "owner_replies": [
+    {
+      "reply": "not-reproduced",
+      "replied_on": "2026-10-29",
+      "recorded_by": "orchestrator, from the owner's own message in the session",
+      "meaning": "The owner accepts the verdict not-reproduced under the committed declaration; no further attempt is authorized; the accuracy difference between the MPS (Phase 12) and CUDA (this run) was not explained by measurement.",
+      "owner_note": "With only a few examples we get a mediocre model; the way forward is a mechanism to grow the dataset and improve annotation quality. Training and inference MCP servers can spin the data-quality flywheel."
+    }
   ]
 }
