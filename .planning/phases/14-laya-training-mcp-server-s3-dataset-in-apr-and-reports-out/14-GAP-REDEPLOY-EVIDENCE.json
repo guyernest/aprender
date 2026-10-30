@@ -10,17 +10,61 @@
     "aws_calls_by_executor": 0,
     "head_at_synth": "275ad9611a39f8838c698361e50acedc755f8c9c",
     "offline_suite": [
-      {"cmd": "cargo test -p aprender-mcp-laya-train --lib", "rc": 0, "result": "test result: ok. 113 passed; 0 failed"},
-      {"cmd": "cargo test -p aprender-mcp-laya-train-lambda --lib", "rc": 0, "result": "test result: ok. 70 passed; 0 failed"},
-      {"cmd": "cargo test -p aprender-core --test monorepo_invariants", "rc": 0, "result": "test result: ok. 15 passed; 0 failed"},
-      {"cmd": "cargo clippy -p aprender-mcp-laya-train --lib --no-deps -- -D warnings", "rc": 0, "result": "clean (the two unused-variable warnings printed come from the aprender-compute dependency build, pre-existing, out of scope)"},
-      {"cmd": "cargo clippy -p aprender-mcp-laya-train-lambda --lib --no-deps -- -D warnings", "rc": 0, "result": "clean (same pre-existing aprender-compute dependency warnings)"},
-      {"cmd": "python3 -I scripts/laya_deploy/laya_failure_surface.py --check", "rc": 0, "result": "FAILURE SURFACE OK rows=69 (untested at HEAD 1) invariants=8 sinks=26 (hits 102) axes=6 cells=4800 known_defects=none assertions=302"},
-      {"cmd": "python3 -I scripts/laya_deploy/laya_failure_surface.py --sweep", "rc": 0, "result": "FAILURE SURFACE SWEEP OK 19/19 named tests ok in 4 runs, 19 passed (minimum 19)"},
-      {"cmd": "python3 -I scripts/laya_deploy/laya_failure_surface.py --mutations", "rc": 0, "result": "FAILURE SURFACE MUTATIONS OK 17/17 (every mutation restored; closure clean afterwards)"},
-      {"cmd": "python3 -I scripts/laya_deploy/laya_trainer_stack_check.py --selftest", "rc": 0, "result": "STACK CHECK SELFTEST OK"},
-      {"cmd": "python3 -I scripts/laya_deploy/laya_trainer_ops.py --selftest", "rc": 0, "result": "65 ok, 0 FAIL; LAYA TRAINER OPS SELFTEST OK"},
-      {"cmd": "plan 14-22 Task 1 verify 1 (the seven-command offline suite)", "rc": 0, "result": "OFFLINE SUITE OK 7"}
+      {
+        "cmd": "cargo test -p aprender-mcp-laya-train --lib",
+        "rc": 0,
+        "result": "test result: ok. 113 passed; 0 failed"
+      },
+      {
+        "cmd": "cargo test -p aprender-mcp-laya-train-lambda --lib",
+        "rc": 0,
+        "result": "test result: ok. 70 passed; 0 failed"
+      },
+      {
+        "cmd": "cargo test -p aprender-core --test monorepo_invariants",
+        "rc": 0,
+        "result": "test result: ok. 15 passed; 0 failed"
+      },
+      {
+        "cmd": "cargo clippy -p aprender-mcp-laya-train --lib --no-deps -- -D warnings",
+        "rc": 0,
+        "result": "clean (the two unused-variable warnings printed come from the aprender-compute dependency build, pre-existing, out of scope)"
+      },
+      {
+        "cmd": "cargo clippy -p aprender-mcp-laya-train-lambda --lib --no-deps -- -D warnings",
+        "rc": 0,
+        "result": "clean (same pre-existing aprender-compute dependency warnings)"
+      },
+      {
+        "cmd": "python3 -I scripts/laya_deploy/laya_failure_surface.py --check",
+        "rc": 0,
+        "result": "FAILURE SURFACE OK rows=69 (untested at HEAD 1) invariants=8 sinks=26 (hits 102) axes=6 cells=4800 known_defects=none assertions=302"
+      },
+      {
+        "cmd": "python3 -I scripts/laya_deploy/laya_failure_surface.py --sweep",
+        "rc": 0,
+        "result": "FAILURE SURFACE SWEEP OK 19/19 named tests ok in 4 runs, 19 passed (minimum 19)"
+      },
+      {
+        "cmd": "python3 -I scripts/laya_deploy/laya_failure_surface.py --mutations",
+        "rc": 0,
+        "result": "FAILURE SURFACE MUTATIONS OK 17/17 (every mutation restored; closure clean afterwards)"
+      },
+      {
+        "cmd": "python3 -I scripts/laya_deploy/laya_trainer_stack_check.py --selftest",
+        "rc": 0,
+        "result": "STACK CHECK SELFTEST OK"
+      },
+      {
+        "cmd": "python3 -I scripts/laya_deploy/laya_trainer_ops.py --selftest",
+        "rc": 0,
+        "result": "65 ok, 0 FAIL; LAYA TRAINER OPS SELFTEST OK"
+      },
+      {
+        "cmd": "plan 14-22 Task 1 verify 1 (the seven-command offline suite)",
+        "rc": 0,
+        "result": "OFFLINE SUITE OK 7"
+      }
     ],
     "synth": {
       "cmd": "just laya-trainer-synth dev",
@@ -44,14 +88,32 @@
     "provenance_verify": "FINALIZER PROVENANCE OK",
     "working_tree_outside_closure": "only .planning/config.json and .planning/state.json are modified (pre-existing, outside the closure, not staged); 0 dirty closure entries",
     "dry_runs": {
-      "diff": {"cmd": "DRY_RUN=1 just laya-trainer-infra diff dev ze-kasher-dev", "rc": 0, "provenance": "accepted (merge-base, closure diff and closure status ran; no DRY RUN NOTE refusal)", "last_lines": ["DRY RUN infra diff: every command above was printed, none was executed", "AWS CALLS: 0"]},
-      "deploy": {"cmd": "DRY_RUN=1 just laya-trainer-infra deploy dev ze-kasher-dev", "rc": 0, "provenance": "accepted (same checks; no DRY RUN NOTE refusal)", "last_lines": ["DRY RUN infra deploy: every command above was printed, none was executed", "AWS CALLS: 0"]}
+      "diff": {
+        "cmd": "DRY_RUN=1 just laya-trainer-infra diff dev ze-kasher-dev",
+        "rc": 0,
+        "provenance": "accepted (merge-base, closure diff and closure status ran; no DRY RUN NOTE refusal)",
+        "last_lines": [
+          "DRY RUN infra diff: every command above was printed, none was executed",
+          "AWS CALLS: 0"
+        ]
+      },
+      "deploy": {
+        "cmd": "DRY_RUN=1 just laya-trainer-infra deploy dev ze-kasher-dev",
+        "rc": 0,
+        "provenance": "accepted (same checks; no DRY RUN NOTE refusal)",
+        "last_lines": [
+          "DRY RUN infra deploy: every command above was printed, none was executed",
+          "AWS CALLS: 0"
+        ]
+      }
     },
     "helper": {
       "path": "models/laya-trainer/redeploy-finalizer-check.sh",
       "gitignored": true,
       "first_command": "set -euo pipefail",
-      "aws_verbs": ["lambda get-function"],
+      "aws_verbs": [
+        "lambda get-function"
+      ],
       "writes_to_account": false,
       "prints_url": false,
       "deletion_form": "rm -f -- \"${PKG:?}\" inside a non-empty check, also by the EXIT trap",
@@ -77,5 +139,25 @@
     "steps": [],
     "open_item_if_deferred": "request-side WR-03 sinks still on old code in production: the dispatch error text (AWS SDK message with ARNs on a denied or throttled StartExecution), the backend error text inside train and train_status, and the task-store errors of the Tasks protocol"
   },
-  "owner_replies": []
+  "owner_replies": [
+    {
+      "date": "2026-10-30",
+      "step": "A1 diff",
+      "reply": "owner ran it in-session; last line 'INFRA OK diff'",
+      "orchestrator_verdict": "go: exactly one change, Finalizer Code.S3Key 7288da6d\u2026\u2192c367d471\u2026; no IAM/security change, no resource added or removed, provenance closure unchanged since 275ad9611",
+      "recorded_by": "orchestrator"
+    },
+    {
+      "date": "2026-10-30",
+      "step": "A2 deploy",
+      "reply": "owner ran it in-session; last line 'INFRA OK deploy'; the deploy's own diff equals the saved diff (same single S3Key change)",
+      "recorded_by": "orchestrator"
+    },
+    {
+      "date": "2026-10-30",
+      "step": "A3 hash check",
+      "reply": "owner ran it in-session; last line 'FINALIZER REDEPLOY CHECK OK sha256=fc796b8b47be559f6bc3a067f0b294b9fe5a1b4ef1594763eaa7d695fcf13fab'",
+      "recorded_by": "orchestrator"
+    }
+  ]
 }
