@@ -64,7 +64,10 @@ const MAX_JSON_BYTES: usize = 1_048_576;
 /// Longest stage error the finalizer hands the decision (the decision clips it again).
 const MAX_STAGE_ERROR_CHARS: usize = 2_048;
 
-/// The object names that inventory a run's other objects and so cannot list themselves.
+/// The object names that inventory a run's other objects and so cannot list
+/// themselves. None is a manifest entry, but each is a retention-tag target when it
+/// exists (D-19, IN-01): the three writer inventories are retagged with the run's
+/// retention tag, so a kept run keeps them with the objects they list.
 const SELF_LISTING: [&str; 5] = [
     layout::VERDICT,
     layout::MANIFEST,
@@ -413,6 +416,9 @@ pub struct FinalizeReport {
     pub stopped_training_job: bool,
     /// How many ECS `StopTask` calls were issued.
     pub stopped_pack_tasks: usize,
+    /// Relative paths a writer manifest listed that S3 does not hold, dropped
+    /// before the decision (D-11). Paths only, never object content.
+    pub dropped: Vec<String>,
     /// True when compute was not terminal: nothing was written, the lock is held.
     pub awaiting_compute: bool,
     /// How the record was settled: `finished`, `attached`, `reused` or `record_missing`.
@@ -455,6 +461,9 @@ struct RunObjects {
     pack_manifest: Vec<ManifestEntry>,
     /// Every path a writer manifest lists, the `.apr` included.
     writer_paths: BTreeSet<String>,
+    /// Paths a writer manifest listed that S3 does not hold, removed from the
+    /// entries above (sorted, de-duplicated).
+    dropped: Vec<String>,
 }
 
 /// Read one JSON object under the byte cap. Absent, oversize and unparseable all read
@@ -520,14 +529,7 @@ async fn read_run_objects(
         .await?
         .unwrap_or_default();
 
-    let mut writer_paths = BTreeSet::new();
-    for entry in training_manifest
-        .iter()
-        .flat_map(|m| m.entries.iter())
-        .chain(pack_manifest.iter())
-    {
-        writer_paths.insert(entry.path.clone());
-    }
+    let writer_paths = writer_paths_of(training_manifest.as_ref(), &pack_manifest);
     Ok(RunObjects {
         outcome,
         gate_report,
@@ -535,7 +537,61 @@ async fn read_run_objects(
         training_manifest,
         pack_manifest,
         writer_paths,
+        dropped: Vec::new(),
     })
+}
+
+/// Every path the writer manifests list, the `.apr` included.
+fn writer_paths_of(
+    training_manifest: Option<&TrainingManifest>,
+    pack_manifest: &[ManifestEntry],
+) -> BTreeSet<String> {
+    training_manifest
+        .iter()
+        .flat_map(|m| m.entries.iter())
+        .chain(pack_manifest.iter())
+        .map(|entry| entry.path.clone())
+        .collect()
+}
+
+/// D-11 (WR-02): finalization is total over the shapes of the run's objects. A
+/// job lists `outcome.json` and `pack-outcome.json` BEFORE it uploads them, so a
+/// failed last upload leaves an entry whose object S3 does not hold. Every such
+/// entry is dropped here, once, from one listing of the run prefix, so the
+/// decision, the stored payload, manifest.json, the read-time links and the tag
+/// targets are all built from objects that exist; the dropped paths are kept for
+/// the report and the payload's note. A listing failure is a transient store error
+/// (the lock stays held and the next pass retries), like every other call.
+async fn drop_absent_entries(
+    ctx: &FinalizerCtx,
+    prefix: &str,
+    objects: &mut RunObjects,
+) -> Result<(), FinalizerError> {
+    let listed = ctx
+        .objects
+        .list(prefix)
+        .await
+        .map_err(|e| store_err(format!("listing {prefix}: {e}")))?;
+    let present: BTreeSet<&str> = listed
+        .iter()
+        .filter_map(|(key, _)| key.strip_prefix(prefix))
+        .collect();
+    let mut dropped: BTreeSet<String> = BTreeSet::new();
+    let mut exists = |entry: &ManifestEntry| {
+        let found = present.contains(entry.path.as_str());
+        if !found {
+            dropped.insert(entry.path.clone());
+        }
+        found
+    };
+    if let Some(manifest) = objects.training_manifest.as_mut() {
+        manifest.entries.retain(&mut exists);
+    }
+    objects.pack_manifest.retain(&mut exists);
+    objects.writer_paths =
+        writer_paths_of(objects.training_manifest.as_ref(), &objects.pack_manifest);
+    objects.dropped = dropped.into_iter().collect();
+    Ok(())
 }
 
 // ------------------------------------------------------------------ helpers
@@ -700,6 +756,7 @@ fn decide(
             pack_outcome: objects.pack_outcome.clone(),
             training_manifest: objects.training_manifest.clone(),
             pack_manifest: objects.pack_manifest.clone(),
+            dropped: objects.dropped.clone(),
         }),
     }
 }
@@ -869,19 +926,34 @@ async fn publish(
         fresh
     };
 
-    // (5) retention tags, each read back (D-19).
+    // (5) retention tags, each read back (D-19). The targets are every manifest.json
+    // entry, manifest.json, and every self-listing inventory (IN-01: a kept run keeps
+    // its inventories too), restricted to what a listing taken AFTER verdict.json
+    // and manifest.json were written holds (D-11): a key S3 does not hold cannot be
+    // tagged, and an adopted manifest.json, written by an earlier pass, may name an
+    // object that has gone since. Never a key no inventory names.
     let keep = winner.keep();
     let want = if keep {
         RETENTION_KEEP
     } else {
         RETENTION_EXPIRE
     };
-    let mut targets: Vec<String> = manifest
+    let present: BTreeSet<String> = ctx
+        .objects
+        .list(prefix)
+        .await
+        .map_err(|e| store_err(format!("listing {prefix}: {e}")))?
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect();
+    let mut targets: BTreeSet<String> = manifest
         .entries
         .iter()
         .map(|e| format!("{prefix}{}", e.path))
         .collect();
-    targets.push(manifest_key);
+    targets.insert(manifest_key);
+    targets.extend(SELF_LISTING.iter().map(|name| format!("{prefix}{name}")));
+    targets.retain(|key| present.contains(key));
     for key in &targets {
         let current = ctx
             .objects
@@ -985,10 +1057,20 @@ async fn finalize_task(
     }
 
     let objects = if trigger.exec.is_some() {
-        read_run_objects(ctx, &subject.run_prefix, &subject.task_id).await?
+        let mut objects = read_run_objects(ctx, &subject.run_prefix, &subject.task_id).await?;
+        drop_absent_entries(ctx, &subject.run_prefix, &mut objects).await?;
+        objects
     } else {
         RunObjects::default()
     };
+    if !objects.dropped.is_empty() {
+        tracing::warn!(
+            "laya finalizer: task {} lists {} object(s) S3 does not hold; dropped from the inventory",
+            subject.task_id,
+            objects.dropped.len()
+        );
+    }
+    report.dropped.clone_from(&objects.dropped);
     let cancelled = record
         .as_ref()
         .is_some_and(|rec| rec.task.status == TaskStatus::Cancelled);
@@ -1865,9 +1947,21 @@ mod tests {
             .iter()
             .any(|e| e.path == "fixture-model.apr"));
 
-        // D-19: every manifest entry plus both files read back keep.
+        // D-19: every manifest entry plus both files read back keep, and so do the
+        // two writer inventories that exist (IN-01).
         rig.assert_all_tagged(RETENTION_KEEP);
-        assert_eq!(report.tagged, 13);
+        for inventory in ["training-manifest.json", "pack-manifest.json"] {
+            assert_eq!(
+                rig.objects.tag(&Rig::key(inventory)).as_deref(),
+                Some(RETENTION_KEEP),
+                "{inventory}"
+            );
+        }
+        assert_eq!(
+            report.tagged, 15,
+            "12 entries, manifest.json and two inventories"
+        );
+        assert!(report.dropped.is_empty());
 
         // The lock is free.
         assert!(rig.lock_released().await);
@@ -2168,6 +2262,252 @@ mod tests {
             !verdict.contains("\"notes\""),
             "an empty notes list is not written"
         );
+    }
+
+    // ------------------------------------------- listed but absent (D-11, WR-02)
+
+    fn catch_error() -> Value {
+        json!({"Error": "States.TaskFailed", "Cause": "{\"TrainingJobStatus\":\"Failed\"}"})
+    }
+
+    /// The listed-but-absent notes of a payload.
+    fn absent_notes(payload: &StatusPayload) -> Vec<&str> {
+        payload
+            .notes
+            .iter()
+            .filter(|n| n.starts_with("listed-but-absent"))
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// A passing run whose job listed `rel` and then failed to upload it (removed
+    /// after seeding, so the writer manifest still lists it), delivered by the
+    /// state-machine payload with and without the Catch's stage error. Every
+    /// delivery must finish on the FIRST call with the lock released, report
+    /// exactly `rel` as dropped, list it nowhere, tag the rest, and name it in one
+    /// note of the stored payload and verdict.json.
+    async fn assert_listed_but_absent(rel: &str, error_needle: &str) {
+        for error in [None, Some(catch_error())] {
+            let caught = error.is_some();
+            let rig = ready(&passing()).await;
+            assert!(
+                rig.objects.bytes(&Rig::key(rel)).is_some(),
+                "{rel} was seeded"
+            );
+            rig.objects.remove(&Rig::key(rel));
+            let report = rig
+                .payload(error)
+                .await
+                .unwrap_or_else(|e| panic!("{rel} caught={caught}: the first call failed: {e}"));
+            assert!(
+                report.released,
+                "{rel} caught={caught}: the lock is released"
+            );
+            assert!(rig.lock_released().await);
+            assert_eq!(report.dropped, [rel.to_string()], "caught={caught}");
+            assert_eq!(report.phase, Some(Phase::Failed), "{rel} caught={caught}");
+
+            let payload = rig.stored_payload().await;
+            assert!(
+                payload
+                    .error
+                    .as_deref()
+                    .is_some_and(|e| e.contains(error_needle)),
+                "{rel} caught={caught}: {:?}",
+                payload.error
+            );
+            assert!(
+                payload.manifest.iter().all(|l| l.path != rel),
+                "{rel}: the stored payload lists an object S3 does not hold"
+            );
+            assert!(
+                rig.manifest().entries.iter().all(|e| e.path != rel),
+                "{rel}: manifest.json lists an object S3 does not hold"
+            );
+            let notes = absent_notes(&payload);
+            assert_eq!(notes.len(), 1, "{rel} caught={caught}: {:?}", payload.notes);
+            assert!(
+                notes[0].ends_with(&format!("dropped: {rel}")),
+                "{}",
+                notes[0]
+            );
+
+            let stored = result_text(rig.record().await.result.as_ref().expect("result"))
+                .expect("text")
+                .to_string();
+            let verdict = rig
+                .objects
+                .bytes(&Rig::key("verdict.json"))
+                .expect("verdict");
+            assert_eq!(
+                verdict,
+                stored.as_bytes(),
+                "verdict.json is the stored text"
+            );
+            assert_eq!(stored.matches("listed-but-absent").count(), 1, "{stored}");
+
+            // Every other object is tagged with the run's retention tag.
+            rig.assert_all_tagged(RETENTION_EXPIRE);
+            assert!(!report.keep);
+            assert_eq!(
+                rig.objects.tag(&Rig::key(rel)),
+                None,
+                "{rel} was never written"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fin_listed_but_absent_outcome() {
+        assert_listed_but_absent("outcome.json", "").await;
+        // Without an outcome to read, the stage error is the text when there is one,
+        // and "outcome.json is missing" when there is none.
+        for (error, needle) in [
+            (None, "outcome.json is missing"),
+            (Some(catch_error()), "States.TaskFailed"),
+        ] {
+            let rig = ready(&passing()).await;
+            rig.objects.remove(&Rig::key("outcome.json"));
+            rig.payload(error).await.expect("finalized");
+            let text = rig.stored_payload().await.error.expect("error");
+            assert!(text.contains(needle), "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn fin_listed_but_absent_pack_outcome() {
+        assert_listed_but_absent("pack-outcome.json", "pack-outcome.json is missing").await;
+    }
+
+    #[tokio::test]
+    async fn fin_listed_but_absent_report() {
+        assert_listed_but_absent("run/gate-report.json", "gate-report.json is missing").await;
+    }
+
+    /// manifest.json was written by a first writer (an earlier pass, possibly an
+    /// earlier finalizer) and lists an object that is gone since. The adopted
+    /// branch keeps manifest.json as written, tags what exists, never a key no
+    /// inventory names, and does not fail.
+    #[tokio::test]
+    async fn fin_adopted_manifest_with_absent_entry() {
+        let mut files = passing();
+        files.extra_objects = vec!["run/stray.bin".to_string()];
+        let rig = ready(&files).await;
+        rig.payload(None).await.expect("the first writer");
+        let manifest_bytes = rig
+            .objects
+            .bytes(&Rig::key("manifest.json"))
+            .expect("manifest");
+        assert!(rig.manifest().entries.iter().any(|e| e.path == "train.log"));
+        assert_eq!(rig.manifest().unlisted, 1, "the stray object is unlisted");
+        assert_eq!(
+            rig.objects.tag(&Rig::key("run/stray.bin")).as_deref(),
+            Some(RETENTION_EXPIRE)
+        );
+
+        // The listed object goes, and a tag is lost, so the next pass has work to do.
+        rig.objects.remove(&Rig::key("train.log"));
+        rig.objects
+            .put_tag(&Rig::key("fixture-model.apr"), RETENTION_EXPIRE)
+            .await
+            .expect("lose a tag");
+        let report = rig
+            .payload(None)
+            .await
+            .expect("the adopted branch must not fail");
+        assert_eq!(report.phase, Some(Phase::Completed));
+        assert!(report.keep);
+        assert!(rig.lock_released().await);
+        assert_eq!(
+            report.dropped,
+            ["train.log".to_string()],
+            "this pass's read"
+        );
+        assert_eq!(
+            rig.objects
+                .bytes(&Rig::key("manifest.json"))
+                .expect("manifest"),
+            manifest_bytes,
+            "an adopted manifest.json is kept as written"
+        );
+        for entry in rig
+            .manifest()
+            .entries
+            .iter()
+            .filter(|e| e.path != "train.log")
+        {
+            assert_eq!(
+                rig.objects.tag(&Rig::key(&entry.path)).as_deref(),
+                Some(RETENTION_KEEP),
+                "{}",
+                entry.path
+            );
+        }
+        assert_eq!(
+            rig.objects.tag(&Rig::key("run/stray.bin")).as_deref(),
+            Some(RETENTION_EXPIRE),
+            "a key no inventory names is never a tag target"
+        );
+        assert!(rig.objects.bytes(&Rig::key("train.log")).is_none());
+    }
+
+    /// IN-01 (D-19): every self-listing inventory that exists carries the run's
+    /// retention tag: keep for a kept GATE PASS, expire otherwise (even one that was
+    /// tagged keep before).
+    #[tokio::test]
+    async fn fin_kept_run_retags_inventories() {
+        let rig = ready(&passing()).await;
+        let report = rig.payload(None).await.expect("finalized");
+        assert!(report.keep);
+        for inventory in [
+            "training-manifest.json",
+            "pack-manifest.json",
+            "manifest.json",
+            "verdict.json",
+        ] {
+            assert_eq!(
+                rig.objects.tag(&Rig::key(inventory)).as_deref(),
+                Some(RETENTION_KEEP),
+                "{inventory}"
+            );
+        }
+        assert!(rig
+            .objects
+            .bytes(&Rig::key("partial-manifest.json"))
+            .is_none());
+
+        // A partial inventory of a kept run is kept too.
+        let mut files = passing();
+        files.partial_manifest = files.training_manifest.clone();
+        let rig = ready(&files).await;
+        assert!(rig.payload(None).await.expect("finalized").keep);
+        assert_eq!(
+            rig.objects
+                .tag(&Rig::key("partial-manifest.json"))
+                .as_deref(),
+            Some(RETENTION_KEEP)
+        );
+
+        // A failed run's inventories read back expire, whatever they carried.
+        let mut files = passing();
+        files.pack_outcome.as_mut().expect("pack")["accepted"] = json!(false);
+        files.pack_outcome.as_mut().expect("pack")["apr_sha256"] = Value::Null;
+        let rig = ready(&files).await;
+        for inventory in ["training-manifest.json", "pack-manifest.json"] {
+            rig.objects
+                .put_tag(&Rig::key(inventory), RETENTION_KEEP)
+                .await
+                .expect("tag");
+        }
+        let report = rig.payload(None).await.expect("finalized");
+        assert_eq!(report.phase, Some(Phase::Failed));
+        for inventory in ["training-manifest.json", "pack-manifest.json"] {
+            assert_eq!(
+                rig.objects.tag(&Rig::key(inventory)).as_deref(),
+                Some(RETENTION_EXPIRE),
+                "{inventory}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -3562,9 +3902,7 @@ mod tests {
         /// fails it) and nothing outside it. 14-17 deletes I2, I3, I7 and I8; 14-18
         /// deletes I4. Never add an entry to make the sweep pass.
         const KNOWN_DEFECTS: &[Invariant] = &[
-            Invariant::I2, // WR-02: a listed-but-absent object wedges tagging and the lock
             Invariant::I4, // WR-03: AWS text reaches the stored payload
-            Invariant::I7, // IN-01: the self-listing manifests keep `expire` on a kept run
         ];
 
         /// What the records alone decide, by the class table (not by `finalize_run`).
@@ -3660,6 +3998,15 @@ mod tests {
                     ),
                 ));
             }
+            // I2, totality over the objects: an object the cell's manifests list but
+            // S3 does not hold is listed by neither the payload nor manifest.json, and
+            // the payload names it in exactly one listed-but-absent note (D-11, D-18);
+            // with nothing removed there is no such note.
+            if let Some(payload) = &obs.payload {
+                if let Some(why) = absent_listing_mismatch(cell, obs, payload) {
+                    out.push((Invariant::I2, why));
+                }
+            }
 
             // I3: the phase follows the records' class table, not the delivery path.
             if let Some(payload) = &obs.payload {
@@ -3725,6 +4072,64 @@ mod tests {
                 }
             }
             out
+        }
+
+        /// The relative path the cell removed although one of its manifests lists it,
+        /// derived from the cell's own files (not from the implementation).
+        fn removed_listed(cell: &Cell) -> Option<&'static str> {
+            let path = match cell.absent_listed {
+                AbsentKind::None => return None,
+                AbsentKind::Outcome => layout::OUTCOME,
+                AbsentKind::PackOutcome => layout::PACK_OUTCOME,
+                AbsentKind::GateReport => "run/gate-report.json",
+            };
+            let files = files_for(cell);
+            let listed = [
+                &files.training_manifest,
+                &files.partial_manifest,
+                &files.pack_manifest,
+            ]
+            .into_iter()
+            .flatten()
+            .flat_map(entry_paths)
+            .any(|listed| listed == path);
+            listed.then_some(path)
+        }
+
+        fn absent_listing_mismatch(
+            cell: &Cell,
+            obs: &Observed,
+            payload: &StatusPayload,
+        ) -> Option<String> {
+            let notes: Vec<&String> = payload
+                .notes
+                .iter()
+                .filter(|n| n.starts_with("listed-but-absent"))
+                .collect();
+            let Some(path) = removed_listed(cell) else {
+                return (!notes.is_empty())
+                    .then(|| format!("nothing removed, but notes {notes:?}"));
+            };
+            let mut wrong = Vec::new();
+            let named = |note: &&String| {
+                note.split_once(" dropped: ")
+                    .is_some_and(|(_, names)| names.split(", ").any(|n| n == path))
+            };
+            if notes.len() != 1 || !notes.iter().any(named) {
+                wrong.push(format!("{path} removed, notes {:?}", payload.notes));
+            }
+            if payload.manifest.iter().any(|l| l.path == path) {
+                wrong.push(format!("the stored payload lists the absent {path}"));
+            }
+            let in_manifest = obs
+                .manifest
+                .as_deref()
+                .and_then(|b| serde_json::from_slice::<Manifest>(b).ok())
+                .is_some_and(|m| m.entries.iter().any(|e| e.path == path));
+            if in_manifest {
+                wrong.push(format!("manifest.json lists the absent {path}"));
+            }
+            (!wrong.is_empty()).then(|| wrong.join("; "))
         }
 
         /// The caller-readable surfaces: the stored payload, verdict.json, manifest.json.

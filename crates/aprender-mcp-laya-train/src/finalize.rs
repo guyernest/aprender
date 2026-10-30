@@ -72,6 +72,46 @@ const MAX_ERROR_CHARS: usize = 1_024;
 /// What joins a failure's class text and the stage error appended as its detail.
 const STAGE_DETAIL: &str = "; stage error: ";
 
+/// The prefix of the note that names manifest entries S3 does not hold.
+pub const NOTE_LISTED_BUT_ABSENT: &str = "listed-but-absent";
+
+/// At most this many dropped paths are named in the note; the rest are counted.
+const MAX_NOTE_PATHS: usize = 8;
+
+/// Each named path is clipped to this many characters.
+const MAX_NOTE_PATH_CHARS: usize = 128;
+
+/// The one note for listed-but-absent entries (D-11, D-18), bounded whatever the
+/// job wrote: the count, at most [`MAX_NOTE_PATHS`] paths each clipped to
+/// [`MAX_NOTE_PATH_CHARS`] characters, and how many more there were. These are
+/// paths the job's own manifests list (and the manifest links already expose),
+/// so the note reveals nothing new.
+fn dropped_note(dropped: &[String]) -> Option<String> {
+    let count = dropped.len();
+    if count == 0 {
+        return None;
+    }
+    let named: Vec<String> = dropped
+        .iter()
+        .take(MAX_NOTE_PATHS)
+        .map(|p| p.chars().take(MAX_NOTE_PATH_CHARS).collect())
+        .collect();
+    let (entries, verb) = if count == 1 {
+        ("entry", "is not in S3 and was")
+    } else {
+        ("entries", "are not in S3 and were")
+    };
+    let mut note = format!(
+        "{NOTE_LISTED_BUT_ABSENT}: {count} manifest {entries} the job listed {verb} dropped: {}",
+        named.join(", ")
+    );
+    let rest = count - named.len();
+    if rest > 0 {
+        note.push_str(&format!(", and {rest} more"));
+    }
+    Some(note)
+}
+
 /// The note a pass or gate failure carries when the records decided it over a
 /// state-machine stage error. One fixed sentence: it embeds no part of the stage
 /// error (infrastructure text stays in the log).
@@ -103,6 +143,10 @@ pub struct FinalizeInput {
     pub training_manifest: Option<TrainingManifest>,
     /// The packer's inventory (`pack-manifest.json`).
     pub pack_manifest: Vec<ManifestEntry>,
+    /// Relative paths a writer manifest listed that S3 does not hold, already
+    /// removed from `training_manifest` and `pack_manifest` (D-11). Empty when
+    /// every listed object exists; non-empty adds one bounded note to the payload.
+    pub dropped: Vec<String>,
 }
 
 /// What the finalizer writes: the task's terminal status and result, the merged
@@ -343,6 +387,11 @@ impl Builder<'_> {
             self.stage_error.is_some() && matches!(phase, Phase::Completed | Phase::GateFailed);
         if stage_error_overridden {
             payload.notes.push(NOTE_STAGE_ERROR_OVERRIDDEN.to_string());
+        }
+        // Entries the job listed that S3 does not hold were dropped before the
+        // decision (D-11): name them once, for every phase (D-18).
+        if let Some(note) = dropped_note(&self.input.dropped) {
+            payload.notes.push(note);
         }
         let keep = phase == Phase::Completed && verdict.as_ref().is_some_and(|v| v.pass);
         payload.verdict = verdict;
@@ -731,6 +780,7 @@ pub(crate) mod fixtures {
             pack_outcome: Some(pack_outcome()),
             training_manifest: Some(training_manifest()),
             pack_manifest: pack_entries(),
+            dropped: Vec::new(),
         }
     }
 
@@ -1315,6 +1365,70 @@ mod tests {
             assert!(!caught.stage_error_overridden, "{name}");
             assert!(caught.payload.notes.is_empty(), "{name}");
         }
+    }
+
+    /// The listed-but-absent note: absent when nothing was dropped, one note naming
+    /// every path for a few, and bounded (count, eight names, clipped) for many.
+    #[test]
+    fn finalize_dropped_note() {
+        let notes_of = |dropped: Vec<String>| {
+            let mut i = input();
+            i.dropped = dropped;
+            finalize_run(&i).payload.notes
+        };
+        assert!(notes_of(Vec::new()).is_empty(), "nothing dropped, no note");
+
+        let three: Vec<String> = ["outcome.json", "run/gate-report.json", "train.log"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let notes = notes_of(three.clone());
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        let note = &notes[0];
+        assert!(note.starts_with("listed-but-absent: 3 "), "{note}");
+        let (_, names) = note.split_once(" dropped: ").expect("the named paths");
+        assert_eq!(names.split(", ").collect::<Vec<_>>(), three, "{note}");
+
+        let one = notes_of(vec!["pack-outcome.json".to_string()]);
+        assert!(
+            one[0].starts_with("listed-but-absent: 1 manifest entry ")
+                && one[0].ends_with("was dropped: pack-outcome.json"),
+            "{one:?}"
+        );
+
+        let twelve: Vec<String> = (0..12)
+            .map(|n| format!("run/seeds/s-{n:02}.json"))
+            .collect();
+        let notes = notes_of(twelve.clone());
+        assert_eq!(notes.len(), 1);
+        let note = &notes[0];
+        assert!(note.starts_with("listed-but-absent: 12 "), "{note}");
+        for (n, path) in twelve.iter().enumerate() {
+            assert_eq!(note.contains(path.as_str()), n < 8, "{path}: {note}");
+        }
+        assert!(note.ends_with(", and 4 more"), "{note}");
+
+        let long = format!("run/{}", "x".repeat(300));
+        let notes = notes_of(vec![long.clone()]);
+        let (_, named) = notes[0].split_once(" dropped: ").expect("named");
+        assert_eq!(named.chars().count(), 128, "a long path is clipped");
+        assert!(long.starts_with(named));
+
+        // Bounded whatever the job wrote: 1000 paths of 300 characters.
+        let many: Vec<String> = (0..1000)
+            .map(|n| format!("{n:04}{}", "y".repeat(296)))
+            .collect();
+        let notes = notes_of(many);
+        assert!(notes[0].len() < 8 * 130 + 200, "{} bytes", notes[0].len());
+
+        // Every phase carries it: a failed run as well as a completed one.
+        let mut failed = input();
+        failed.outcome.as_mut().expect("outcome").exit_class = ExitClass::Crash;
+        failed.dropped = vec!["outcome.json".to_string()];
+        let d = finalize_run(&failed);
+        assert_eq!(d.phase, Phase::Failed);
+        assert_eq!(d.payload.notes.len(), 1);
+        assert!(d.payload.notes[0].starts_with(NOTE_LISTED_BUT_ABSENT));
     }
 
     #[test]
