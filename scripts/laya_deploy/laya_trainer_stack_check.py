@@ -10,11 +10,17 @@ image pin, the two exact SageMaker channels, the per-principal S3 rights, the D-
 abort and reconcile paths, the request policy that is an OUTPUT only, and the ECR rules. It makes
 no AWS call and imports no network module.
 
+It also BINDS the state-machine rows of the plan 14-16 enumeration
+(crates/aprender-mcp-laya-train-lambda/fixtures/failure-surface-v1.json, its state_machine object) to the template
+(plan 14-19): the states, each state's Catch edges or their absence, the no-catch states, the flow, the machine
+timeout, the status rule's statuses and the reconcile schedule are compared both ways, each under its own
+surface-binding-<field> rule. The artifact is read, never written.
+
 Exit 0 and `TRAINER STACK CHECK OK ...` when every assertion holds; exit 1 with one
 `REFUSED <assertion>: <detail>` line per failure otherwise.
 
-`--selftest` proves each assertion can fail: it mutates a copy of the real templates once per case
-and requires that exact assertion to refuse. It ends `STACK CHECK SELFTEST OK` only if every case
+`--selftest` proves each assertion can fail: it mutates a copy of the real templates (or of the
+artifact's state_machine object) once per case and requires that exact assertion to refuse. It ends `STACK CHECK SELFTEST OK` only if every case
 was refused for the intended reason and the unmutated templates pass.
 
 Standard library only; run with `python3 -I`.
@@ -44,6 +50,9 @@ REQUIRED_OUTPUTS = {
     "PackTaskDefinitionArn", "ClusterArn", "SubnetIds", "SecurityGroupId", "FinalizerDlqUrl",
     "RequestLambdaPolicy",
 }
+SURFACE_ARTIFACT = os.path.join(ROOT, "crates", "aprender-mcp-laya-train-lambda", "fixtures", "failure-surface-v1.json")
+SURFACE_FIELDS = {"states": list, "catch": dict, "no_catch_states": list, "machine_timeout_secs": int, "event_statuses": list,
+                  "reconcile_rate_minutes": int, "start_at": str, "next": dict}
 FINALIZER_ENV_KEYS = {
     "APRENDER_LAYA_TRAIN_TABLE", "APRENDER_LAYA_TRAIN_BUCKET", "APRENDER_LAYA_TRAIN_STATE_MACHINE_ARN",
     "APRENDER_LAYA_TRAIN_CLUSTER_ARN", "APRENDER_LAYA_TRAIN_PACK_FAMILY",
@@ -498,8 +507,62 @@ def check_misc(t, rep):
     rep.check("outputs", REQUIRED_OUTPUTS <= set(t.get("Outputs", {})), "outputs lack %s" % sorted(REQUIRED_OUTPUTS - set(t.get("Outputs", {}))))
 
 
-def check_trainer(t):
+def load_surface(path=SURFACE_ARTIFACT):
+    """The 14-16 enumeration's state_machine object, or None when the artifact is absent or unreadable."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh).get("state_machine")
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def check_surface_binding(t, rep, sm):
+    """Plan 14-19: the state-machine rows of failure-surface-v1.json are BOUND to the synthesized template.
+
+    Every field the enumeration claims about the machine (its states, each state's Catch edges or their absence, the states
+    whose failure has no Catch, the machine timeout, the flow, the status rule's statuses and the reconcile schedule) is
+    compared with the real ASL and EventBridge rules, in both directions: an edge the template gained or lost without the
+    artifact following is refused, and so is an artifact claiming an edge the template lacks. Each field refuses under its
+    own name, surface-binding-<field>. This reads the artifact and never edits it (14-16 owns it)."""
+    bad = ([f for f, ty in SURFACE_FIELDS.items() if not isinstance(sm.get(f), ty) or isinstance(sm.get(f), bool)]
+           if isinstance(sm, dict) else sorted(SURFACE_FIELDS))
+    rep.check("surface-binding-artifact", not bad,
+              "%s: the state_machine object lacks or mistypes %s" % (os.path.relpath(SURFACE_ARTIFACT, ROOT), ", ".join(bad)))
+    if bad:
+        return
+    m, asl = asl_of(t)
+    states = (asl or {}).get("States", {})
+    rep.check("surface-binding-states", set(states) == set(sm["states"]) and len(sm["states"]) == len(set(sm["states"])),
+              "template states %s, artifact states %s" % (sorted(states), sm["states"]))
+    for name in sorted(set(states) | set(sm["states"]) | set(sm["catch"])):
+        have = states.get(name, {}).get("Catch")
+        claim = sm["catch"].get(name)
+        rep.check("surface-binding-catch", have == claim,
+                  "catch[%s]: the template has %r, the artifact claims %r" % (name, have, claim))
+    no_catch = sorted(n for n, st in states.items() if not st.get("Catch"))
+    rep.check("surface-binding-no-catch", sorted(sm["no_catch_states"]) == no_catch and not set(sm["no_catch_states"]) & set(sm["catch"]),
+              "no_catch_states: the template's states without a Catch are %s, the artifact lists %s" % (no_catch, sorted(sm["no_catch_states"])))
+    flow = {n: (st.get("Next") if not st.get("End") else None) for n, st in states.items()}
+    rep.check("surface-binding-flow", (asl or {}).get("StartAt") == sm["start_at"] and flow == sm["next"],
+              "StartAt %r / Next %r in the template, %r / %r in the artifact" % ((asl or {}).get("StartAt"), flow, sm["start_at"], sm["next"]))
+    rep.check("surface-binding-timeout", "TimeoutSeconds" in (asl or {}) and asl.get("TimeoutSeconds") == sm["machine_timeout_secs"],
+              "machine TimeoutSeconds is %r in the template, the artifact names %r" % ((asl or {}).get("TimeoutSeconds"), sm["machine_timeout_secs"]))
+    rules = list(resources(t, "AWS::Events::Rule").values())
+    status = [sorted(r["Properties"]["EventPattern"].get("detail", {}).get("status", [])) for r in rules if "EventPattern" in r["Properties"]]
+    rep.check("surface-binding-events", status == [sorted(sm["event_statuses"])],
+              "the status rule's statuses are %r, the artifact names %r" % (status, sorted(sm["event_statuses"])))
+    rates = []
+    for r in rules:
+        mt = re.fullmatch(r"rate\((\d+) minutes?\)", r["Properties"].get("ScheduleExpression", ""))
+        if mt and any(json.loads(x.get("Input", "null")) == {"source": "reconcile"} for x in r["Properties"].get("Targets", [])):
+            rates.append(int(mt.group(1)))
+    rep.check("surface-binding-reconcile", rates == [sm["reconcile_rate_minutes"]],
+              "reconcile schedule rules at %r minutes, the artifact names %r" % (rates, sm["reconcile_rate_minutes"]))
+
+
+def check_trainer(t, surface="load"):
     rep = Report()
+    check_surface_binding(t, rep, load_surface() if surface == "load" else surface)
     check_bucket(t, rep)
     check_machine(t, rep)
     check_roles_and_policies(t, rep)
@@ -757,6 +820,45 @@ CASES = [
     ("a policy attached to a role outside the stack", lambda t: next(iter(resources(t, "AWS::IAM::Policy").values()))["Properties"].__setitem__("Roles", ["pmcp-request-role"]), True, "no-external-grant"),
 ]
 
+def surface_edit(fn):
+    def apply(sm):
+        fn(sm)
+    return apply
+
+
+def add_finalize_catch(asl):
+    asl["States"]["Finalize"]["Catch"] = [{"ErrorEquals": ["States.ALL"], "ResultPath": "$.error", "Next": "CatchFinalize"}]
+
+
+def retarget_train_catch(asl):
+    asl["States"]["Train"]["Catch"][0]["Next"] = "Finalize"
+
+
+def drop_failed(t):
+    for r in resources(t, "AWS::Events::Rule").values():
+        if "EventPattern" in r["Properties"]:
+            r["Properties"]["EventPattern"]["detail"]["status"].remove("FAILED")
+
+
+# Plan 14-19: the binding of the 14-16 enumeration to the template. (name, template mutation, artifact mutation, every rule
+# that must refuse): the pre-existing rule a template change hits first, and the surface-binding field it must ALSO hit.
+SURFACE_CASES = [
+    ("a Catch added to Finalize", asl_edit(add_finalize_catch), None, ("surface-binding-catch", "surface-binding-no-catch")),
+    ("the Train Catch retargeted away from CatchFinalize", asl_edit(retarget_train_catch), None, ("train-catch", "surface-binding-catch")),
+    ("the status rule without FAILED", drop_failed, None, ("status-rule-statuses", "surface-binding-events")),
+    ("the reconcile rule dropped", drop_reconcile, None, ("reconcile-rule", "surface-binding-reconcile")),
+    ("the machine TimeoutSeconds removed", asl_edit(lambda a: a.pop("TimeoutSeconds")), None, ("machine-timeout", "surface-binding-timeout")),
+    ("the artifact edited: a state added to its list", None, surface_edit(lambda sm: sm["states"].append("Notify")), ("surface-binding-states",)),
+    ("the artifact claiming a Catch on Finalize the template lacks", None,
+     surface_edit(lambda sm: sm["catch"].__setitem__("Finalize", [{"ErrorEquals": ["States.ALL"], "Next": "CatchFinalize", "ResultPath": "$.error"}])),
+     ("surface-binding-catch", "surface-binding-no-catch")),
+    ("the artifact dropping ABORTED from event_statuses", None, surface_edit(lambda sm: sm["event_statuses"].remove("ABORTED")), ("surface-binding-events",)),
+    ("the artifact naming a 5-minute reconcile", None, surface_edit(lambda sm: sm.__setitem__("reconcile_rate_minutes", 5)), ("surface-binding-reconcile",)),
+    ("the artifact without machine_timeout_secs", None, surface_edit(lambda sm: sm.pop("machine_timeout_secs")), ("surface-binding-artifact",)),
+    ("the artifact absent", None, "absent", ("surface-binding-artifact",)),
+]
+
+
 def selftest(trainer_path, images_path):
     for p in (trainer_path, images_path):
         if not os.path.isfile(p):
@@ -786,7 +888,31 @@ def selftest(trainer_path, images_path):
         else:
             print("  FAIL %s: expected REFUSED %s, got %s" % (name, want, sorted(names) or "no refusal"))
             fails += 1
-    print("%d mutation cases, %d failure(s)" % (len(CASES), fails))
+    base_sm = load_surface()
+    if base_sm is None:
+        print("  FAIL the failure-surface artifact %s is absent or unreadable" % os.path.relpath(SURFACE_ARTIFACT, ROOT))
+        fails += 1
+    for name, mutate, mutate_sm, wants in SURFACE_CASES if base_sm is not None else []:
+        tpl = copy.deepcopy(trainer)
+        sm = copy.deepcopy(base_sm)
+        try:
+            if mutate:
+                mutate(tpl)
+            if mutate_sm == "absent":
+                sm = None
+            elif mutate_sm:
+                mutate_sm(sm)
+        except Exception as e:
+            print("  FAIL %s: the mutation could not be applied: %r" % (name, e))
+            fails += 1
+            continue
+        names = {n for n, _ in check_trainer(tpl, surface=sm).refused}
+        if set(wants) <= names:
+            print("  ok %s -> REFUSED %s" % (name, ", ".join(wants)))
+        else:
+            print("  FAIL %s: expected REFUSED %s, got %s" % (name, ", ".join(wants), sorted(names) or "no refusal"))
+            fails += 1
+    print("%d mutation cases (%d template, %d surface-binding), %d failure(s)" % (len(CASES) + len(SURFACE_CASES), len(CASES), len(SURFACE_CASES), fails))
     if fails:
         print("STACK CHECK SELFTEST FAILED")
         return 1
