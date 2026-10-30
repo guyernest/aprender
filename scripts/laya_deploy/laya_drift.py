@@ -590,8 +590,145 @@ def prepare_out(out):
     return p
 
 
+NEGATIVE_DATA = "models/decide/motivation-v1-sm/data"     # another run's data directory: must be refused, not measured
+THREAD_SETTINGS = (1, 4, 8, None)
+THREAD_ENGAGED_FACTOR = 1.5
+
+
+def read_noise(run_dir):
+    """{set: max_abs} of the run's rescore-noise.json (measured on the TRAINING device), or None."""
+    try:
+        r = json.loads((Path(run_dir) / "rescore-noise.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return {x.get("which"): x.get("max_abs") for x in r.get("sets") or [] if isinstance(x, dict)}
+
+
+def negative_control(ctx, binary, base, base_sha, logdir):
+    """The smoke artifact with ANOTHER run's data directory must be refused for a rule other than RescoreDrift; it is
+    recorded as not a drift leg. A wrong directory that yields a drift number means the harness cannot tell them apart."""
+    spec, why = resolve_leg(ctx, "smoke-stance-64", base_sha)
+    if spec is None:
+        refuse("control", "negative control: the smoke leg is not measurable: %s" % why)
+    if data_matches(ctx.root / NEGATIVE_DATA, spec["inputs_sha256"]):
+        refuse("control", "negative control: %s hashes to the smoke run's inputs, so it is not a wrong directory" % NEGATIVE_DATA)
+    rep = run_once(ctx, binary, spec, base, logdir, "negative-control", data=NEGATIVE_DATA)
+    ctx.emit(describe(rep))
+    rec = rep["record"]
+    if not (rec["class"] == "another_rule" and rec.get("rule") != "RescoreDrift"):
+        refuse("control", "the negative control (the smoke artifact with %s) was not refused for another rule (class %s): the "
+                          "harness cannot tell a wrong data directory from a drift measurement" % (NEGATIVE_DATA, rec["class"]))
+    ctx.emit("NEGATIVE CONTROL refused for %s: not a drift leg" % rec["rule"])
+    return {"artifact": spec["apr"], "run": spec["run"], "data": NEGATIVE_DATA,
+            "data_is": "the data directory of motivation-v1-sm (another run, other input hashes)", "rc": rep["rc"],
+            "wall_s": rep["wall_s"], "rule": rec["rule"], "line": rec["text"], "classified": "not_a_drift_leg",
+            "recorded_as_drift_leg": False}
+
+
+def thread_control(ctx, binary, spec, base, logdir, graviton_ft):
+    """The smoke leg at RAYON_NUM_THREADS 1, 4, 8 and unset. The knob is ENGAGED only if wall time moves with it by at
+    least THREAD_ENGAGED_FACTOR between 1 and 8 threads; otherwise it is not controllable and no cause is claimed."""
+    settings = []
+    for t in THREAD_SETTINGS:
+        rep = run_once(ctx, binary, spec, base, logdir, "threads-%s" % ("default" if t is None else t), threads=t)
+        ctx.emit(describe(rep))
+        rec = rep["record"]
+        ft = (rec.get("sets") or {}).get("fine_tuned")
+        settings.append({"threads": rep["threads"], "wall_s": rep["wall_s"], "rc": rep["rc"], "class": rec["class"],
+                         "fine_tuned_max_abs": ft["max_abs"]["text"] if ft else None,
+                         "zero_shot_max_abs": ((rec.get("sets") or {}).get("zero_shot") or {}).get("max_abs", {}).get("text"),
+                         "fine_tuned_equals_recorded_graviton": (ft["max_abs"]["value"] == graviton_ft) if ft else None,
+                         "record": rec})
+    wall = {x["threads"]: x["wall_s"] for x in settings}
+    factor = round(wall[1] / wall[8], 3) if wall.get(8) else None
+    engaged = factor is not None and factor >= THREAD_ENGAGED_FACTOR
+    identical = len({measured_key(x["record"]) for x in settings}) == 1
+    if not engaged:
+        verdict = ("not controllable: wall time did not follow RAYON_NUM_THREADS (1 -> 8 threads x%s, under %s); no cause "
+                   "is claimed" % (factor, THREAD_ENGAGED_FACTOR))
+    elif identical:
+        verdict = ("engaged (wall time x%s from 1 to 8 threads); the re-score is identical at every setting, so on this CPU "
+                   "the rayon thread count does not move these numbers" % factor)
+    else:
+        verdict = ("engaged (wall time x%s from 1 to 8 threads); the re-score DIFFERS across settings (%s): on this CPU the "
+                   "result depends on the rayon thread count, a candidate contributor to the cross-CPU difference, not a "
+                   "proven cause" % (factor, ", ".join("%s: %s %s" % (x["threads"], x["class"], x["fine_tuned_max_abs"])
+                                                       for x in settings)))
+    return {"leg": spec["leg"], "knob": "RAYON_NUM_THREADS", "settings": settings, "wall_ratio_1_over_8": factor,
+            "engaged_threshold": THREAD_ENGAGED_FACTOR, "engaged": engaged, "results_identical_across_settings": identical,
+            "recorded_graviton_fine_tuned_max_abs": graviton_ft, "verdict": verdict}
+
+
+def per_set(leg):
+    """The first measured repeat's sets with the noise reference and both ratios (None when nothing was measured)."""
+    measured = [r["record"] for r in leg["repeats"] if r["record"]["class"] in ("accepted", "drift")]
+    if not measured:
+        return None
+    out = {}
+    for which, x in sorted(measured[0]["sets"].items()):
+        noise = (leg.get("noise_reference") or {}).get(which)
+        mx, bd = x["max_abs"]["value"], x["bound"]["value"]
+        out[which] = {"max_abs": x["max_abs"]["text"], "bound": x["bound"]["text"], "max_abs_over_bound": ratio(mx, bd),
+                      "noise_reference": noise, "noise_device": leg.get("device_used"), "max_abs_over_noise": ratio(mx, noise),
+                      "within_bound": mx <= bd}
+    return out
+
+
+def build_evidence(ctx, result, controls):
+    smoke_ev = json.loads((ctx.root / SMOKE_EVIDENCE).read_text(encoding="utf-8"))
+    gate_ev = json.loads((ctx.root / GATE_RUN_EVIDENCE).read_text(encoding="utf-8"))
+    a10g = {}
+    for name in ("smoke-stance-64", "motivation-v1-sm"):
+        run = ctx.root / LEGS[name]["run"]
+        rn_path, gr = run / "rescore-noise.json", json.loads((run / "gate-report.json").read_text(encoding="utf-8"))
+        rn = json.loads(rn_path.read_text(encoding="utf-8"))
+        a10g[name] = {"device_used": gr.get("device_used"), "torch_version": gr.get("torch_version"),
+                      "rescore_noise_sha256_matches_gate_report": sha256_file(rn_path) == gr.get("rescore_noise_sha256"),
+                      "reference": rn.get("reference"), "k": rn.get("k"), "floor_abs": rn.get("floor_abs"),
+                      "sets": {x["which"]: {"n": x.get("n"), "max_abs": x.get("max_abs"), "bound": x.get("bound"),
+                                            "argmax_agree": x.get("argmax_agree")} for x in rn.get("sets", [])},
+                      "read_from": [tidy_path(rn_path), tidy_path(run / "gate-report.json")],
+                      "how": "read from the CUDA run's own records, not re-measured"}
+    sv, gp = smoke_ev["smoke"]["verdict"]["pack"], gate_ev["pack"]
+    graviton = {"smoke-stance-64": {"step": "pack-task verify (14-14)", "line": sv["line"],
+                                    "sets": parse_output(sv["line"], 0).get("sets"), "from": SMOKE_EVIDENCE},
+                "motivation-v1-sm": {"step": "pack-task pack (14-15)", "line": gp["line"],
+                                     "sets": parse_output(gp["line"], gp["rc"]).get("sets"), "from": GATE_RUN_EVIDENCE}}
+    mac = {"smoke-stance-64": {"line": smoke_ev["local_verify"]["line"], "repeats": smoke_ev["local_verify"]["repeats"],
+                               "from": SMOKE_EVIDENCE}}
+    legs = []
+    for leg in result["legs"]:
+        leg = dict(leg)
+        leg["per_set"] = per_set(leg)
+        ref_g = graviton.get(leg["leg"])
+        if ref_g and leg["per_set"]:
+            leg["vs_recorded_graviton"] = {w: {"this_cpu": leg["per_set"][w]["max_abs"],
+                                               "graviton": ref_g["sets"][w]["max_abs"]["text"],
+                                               "equal": leg["per_set"][w]["max_abs"] == ref_g["sets"][w]["max_abs"]["text"]}
+                                           for w in leg["per_set"] if w in (ref_g["sets"] or {})}
+        legs.append(leg)
+    notes = [
+        "Every number in legs and controls was produced on this host by the pinned binary named in `binary`; references are "
+        "copied from the files their `from` / `read_from` fields name.",
+        "pack_laya reports a RescoreDrift refusal for the FIRST drifted set only: a refused leg measures one set, and the "
+        "other set is not measured on that CPU. Exposing it would need a decide-crate change, which D-15 and D-05 forbid here.",
+        "A pack leg's scratch .apr is hashed against its PACKED line and removed (807 MB each); its sha256 is the record.",
+        "The noise reference of a CUDA run is the A10G figure from its rescore-noise.json; of an MPS run, the MPS figure from "
+        "its rescore-noise.json. The bound is max(floor, k x that noise), so the ratio max_abs / noise is the drift in units "
+        "of the training-device noise the bound was built from.",
+        "Wall times are from a desktop machine running the legs one at a time; other load was not controlled.",
+        "No x86_64 CPU is measured: there is no x86_64 pack binary or image. The Graviton legs are generated by aws-plan and "
+        "run by the owner in 14-21. No contract was amended (D-15).",
+    ]
+    return {"schema": EVIDENCE_SCHEMA, "kind": "local", "plan": "14-20",
+            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "host": result["host"],
+            "binary": result["binary"], "base": result["base"], "legs": legs, "not_measurable": result["not_measurable"],
+            "controls": {"positive": result["positive"], **controls},
+            "references": {"a10g_noise": a10g, "graviton_recorded": graviton, "mac_recorded": mac}, "notes": notes}
+
+
 def cmd_local(argv, ctx):
-    only, repeats, out = None, None, "models/decide/drift-local"
+    only, repeats, out, controls, evidence = None, None, "models/decide/drift-local", False, None
     it = iter(argv)
     for a in it:
         if a == "--only":
@@ -607,12 +744,20 @@ def cmd_local(argv, ctx):
             out = next(it, None)
             if not out:
                 refuse("usage", "--out needs a directory")
+        elif a == "--controls":
+            controls = True
+        elif a == "--evidence":
+            evidence = next(it, None)
+            if not evidence:
+                refuse("usage", "--evidence needs a file")
         else:
             refuse("usage", "unknown argument %r" % a[:40])
     names = list(LEGS) if only is None else only.split(",")
     unknown = [n for n in names if n not in LEGS]
     if unknown or len(set(names)) != len(names):
         refuse("leg", "unknown or repeated leg %s (known: %s)" % (",".join(unknown) or "?", ", ".join(LEGS)))
+    if (controls or evidence) and "smoke-stance-64" not in names:
+        refuse("usage", "--controls and --evidence need the smoke-stance-64 leg (it carries the positive control)")
     smoke_ev = json.loads((ctx.root / SMOKE_EVIDENCE).read_text(encoding="utf-8"))
     reference_line = smoke_ev["local_verify"]["line"]
     outdir = prepare_out(out)
@@ -648,12 +793,27 @@ def cmd_local(argv, ctx):
             reps.append(rep)
         legs.append({"leg": name, "kind": spec["kind"], "trained_on": spec["trained_on"], "device_used": spec["device_used"],
                      "run": spec["run"], "data": spec["data"], "data_found_by": spec["data_found_by"],
-                     "data_candidates": spec["data_candidates"], "apr": spec["apr"], "repeats": reps,
+                     "data_candidates": spec["data_candidates"], "apr": spec["apr"],
+                     "noise_reference": read_noise(ctx.root / spec["run"]), "repeats": reps,
                      "summary": leg_summary(reps)})
     result = {"host": host, "binary": {k: v for k, v in binary.items() if k != "abs_path"},
               "base": {"path": tidy_path(base), "model_safetensors_sha256": base_sha}, "legs": legs,
               "not_measurable": not_measurable, "positive": positive}
+    ctl = {}
+    if controls:
+        ctl["negative"] = negative_control(ctx, binary["abs_path"], base, base_sha, logdir)
+        spec, why = resolve_leg(ctx, "smoke-stance-64", base_sha)
+        g_ft = parse_output(smoke_ev["smoke"]["verdict"]["pack"]["line"], 0)["sets"]["fine_tuned"]["max_abs"]["value"]
+        ctl["thread"] = thread_control(ctx, binary["abs_path"], spec, base, logdir, g_ft)
+        ctx.emit("THREAD CONTROL %s" % ctl["thread"]["verdict"])
+    result["controls"] = ctl
     (outdir / "local-legs.json").write_text(json.dumps(result, indent=2) + "\n")
+    if evidence:
+        ev = build_evidence(ctx, result, ctl)
+        text = json.dumps(ev, indent=2) + "\n"
+        assert_clean(text, evidence)
+        (Path(evidence) if os.path.isabs(evidence) else ctx.root / evidence).write_text(text)
+        ctx.emit("DRIFT EVIDENCE written %s" % evidence)
     ctx.emit("DRIFT LOCAL OK legs=%d (records %s)" % (len(legs), tidy_path(outdir / "local-legs.json")))
     return 0, result
 
@@ -1912,6 +2072,31 @@ def selftest():
         (work / "nonempty" / "x").write_text("x")
         rc = main(["local", "--out", str(work / "nonempty")], Ctx(cmd=fake_cmd(False), emit=lambda s: None, err=errs.append))
         case("a non-empty --out is refused drift-out (old logs are never mixed in)", rc == 2 and errs[-1].startswith("REFUSED drift-out:"))
+
+        # the thread control's verdict rule, on a fake spawn whose wall time and line are set per RAYON_NUM_THREADS
+        def thread_case(walls, lines):
+            def spawn(argv, stdout_path, stderr_path, env, timeout):
+                t = env.get("RAYON_NUM_THREADS", "default")
+                Path(stdout_path).write_text(lines.get(t, lines["default"]) + "\n")
+                Path(stderr_path).write_text("")
+                return 2, walls[t]
+            td = work / ("threads-%d" % len(list(work.glob("threads-*"))))
+            td.mkdir()
+            return thread_control(Ctx(spawn=spawn, emit=lambda s: None), "/fake", dict(spec), "/b", td, 2.7477741241455078e-05)
+
+        drift_line = smoke_ev["local_verify"]["line"]
+        g_line = ("REFUSED RescoreDrift which=fine_tuned row=199 max_abs=0.000027477741241455078 bound=0.00001 "
+                  "(nothing written)")
+        tc = thread_case({"1": 200.0, "4": 60.0, "8": 40.0, "default": 35.0}, {"default": drift_line})
+        case("thread control: wall x5 from 1 to 8 threads with one result -> engaged, identical",
+             tc["engaged"] is True and tc["results_identical_across_settings"] is True and tc["wall_ratio_1_over_8"] == 5.0)
+        tc = thread_case({"1": 100.0, "4": 98.0, "8": 90.0, "default": 95.0}, {"default": drift_line})
+        case("thread control: wall x1.11 -> not controllable, no cause claimed",
+             tc["engaged"] is False and tc["verdict"].startswith("not controllable") and "no cause" in tc["verdict"])
+        tc = thread_case({"1": 200.0, "4": 60.0, "8": 40.0, "default": 35.0}, {"default": drift_line, "8": g_line})
+        case("thread control: engaged with a different result at 8 threads -> DIFFERS, compared with the recorded Graviton",
+             tc["engaged"] and tc["results_identical_across_settings"] is False and "DIFFERS" in tc["verdict"]
+             and [x["fine_tuned_equals_recorded_graviton"] for x in tc["settings"]] == [False, False, True, False])
 
         aws_work = work / "aws"
         aws_work.mkdir()

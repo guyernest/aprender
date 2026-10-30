@@ -1,0 +1,902 @@
+{
+  "schema": "laya-drift-evidence-v1",
+  "kind": "local",
+  "plan": "14-20",
+  "generated_at": "2026-10-30T19:40:28Z",
+  "host": {
+    "os": "Darwin",
+    "os_release": "25.6.0",
+    "arch": "arm64",
+    "logical_cpus": 14,
+    "cpu_model": "Apple M4 Pro",
+    "physical_cpus": "14",
+    "performance_cores": "10",
+    "efficiency_cores": "4",
+    "os_version": "26.6.2"
+  },
+  "binary": {
+    "path": "target/release/examples/pack_laya",
+    "sha256": "64baa3f24c364821d760e1262d24f123a1964e69a60ab2f1eee60df8ba874028",
+    "commit": "f0204a968231ef4028ddf82616d38c6ebb2afc5c",
+    "closure_dirty": false,
+    "closure_checked": [
+      "crates/apr-format",
+      "crates/aprender-common",
+      "crates/aprender-compute",
+      "crates/aprender-contracts-macros",
+      "crates/aprender-core",
+      "crates/aprender-decide",
+      "crates/aprender-gemm-codegen",
+      "crates/aprender-quant",
+      "contracts/laya-finetune-gate-v1.yaml",
+      "contracts/laya-parity-v1.yaml",
+      "Cargo.lock"
+    ],
+    "cargo_fresh": false,
+    "build_argv": [
+      "cargo",
+      "build",
+      "--release",
+      "-p",
+      "aprender-decide",
+      "--example",
+      "pack_laya",
+      "--message-format=json-render-diagnostics"
+    ]
+  },
+  "base": {
+    "path": "~/.cache/huggingface/hub/models--convaiinnovations--laya/snapshots/55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851",
+    "model_safetensors_sha256": "891102d372688fc2a094dac56a384bc537b87c63f21f9f3dac0be2b7cbc8d86c"
+  },
+  "legs": [
+    {
+      "leg": "smoke-stance-64",
+      "kind": "verify",
+      "trained_on": "cuda:0 (A10G, SageMaker ml.g5.xlarge)",
+      "device_used": "cuda:0",
+      "run": "models/decide/smoke-stance-64/run",
+      "data": "models/decide/smoke-stance-64/data",
+      "data_found_by": "fixed path, hashes verified against gate-report.json inputs_sha256",
+      "data_candidates": [
+        "models/decide/smoke-stance-64/data"
+      ],
+      "apr": "models/decide/smoke-stance-64/smoke-stance-64.apr",
+      "noise_reference": {
+        "fine_tuned": 8.147599085628343e-06,
+        "zero_shot": 4.70304053501458e-06
+      },
+      "repeats": [
+        {
+          "label": "smoke-stance-64-1",
+          "rc": 2,
+          "wall_s": 105.6,
+          "threads": "default",
+          "record": {
+            "class": "drift",
+            "which": "fine_tuned",
+            "row": 199,
+            "sets": {
+              "fine_tuned": {
+                "max_abs": {
+                  "text": "0.00003439188003540039",
+                  "value": 3.439188003540039e-05
+                },
+                "bound": {
+                  "text": "0.00003259039634251337",
+                  "value": 3.259039634251337e-05
+                },
+                "noise": null
+              }
+            },
+            "rc": 2,
+            "line": "REFUSED RescoreDrift which=fine_tuned row=199 max_abs=0.00003439188003540039 bound=0.00003259039634251337 (nothing written)"
+          },
+          "stdout": "models/decide/drift-local/legs/smoke-stance-64-1.stdout",
+          "n": 1
+        },
+        {
+          "label": "smoke-stance-64-2",
+          "rc": 2,
+          "wall_s": 102.62,
+          "threads": "default",
+          "record": {
+            "class": "drift",
+            "which": "fine_tuned",
+            "row": 199,
+            "sets": {
+              "fine_tuned": {
+                "max_abs": {
+                  "text": "0.00003439188003540039",
+                  "value": 3.439188003540039e-05
+                },
+                "bound": {
+                  "text": "0.00003259039634251337",
+                  "value": 3.259039634251337e-05
+                },
+                "noise": null
+              }
+            },
+            "rc": 2,
+            "line": "REFUSED RescoreDrift which=fine_tuned row=199 max_abs=0.00003439188003540039 bound=0.00003259039634251337 (nothing written)"
+          },
+          "stdout": "models/decide/drift-local/legs/smoke-stance-64-2.stdout",
+          "n": 2
+        },
+        {
+          "label": "smoke-stance-64-3",
+          "rc": 2,
+          "wall_s": 102.42,
+          "threads": "default",
+          "record": {
+            "class": "drift",
+            "which": "fine_tuned",
+            "row": 199,
+            "sets": {
+              "fine_tuned": {
+                "max_abs": {
+                  "text": "0.00003439188003540039",
+                  "value": 3.439188003540039e-05
+                },
+                "bound": {
+                  "text": "0.00003259039634251337",
+                  "value": 3.259039634251337e-05
+                },
+                "noise": null
+              }
+            },
+            "rc": 2,
+            "line": "REFUSED RescoreDrift which=fine_tuned row=199 max_abs=0.00003439188003540039 bound=0.00003259039634251337 (nothing written)"
+          },
+          "stdout": "models/decide/drift-local/legs/smoke-stance-64-3.stdout",
+          "n": 3
+        }
+      ],
+      "summary": {
+        "repeats_identical": true,
+        "distinct_results": 1,
+        "classes": [
+          "drift"
+        ],
+        "measured_repeats": 3,
+        "wall_s": [
+          105.6,
+          102.62,
+          102.42
+        ]
+      },
+      "per_set": {
+        "fine_tuned": {
+          "max_abs": "0.00003439188003540039",
+          "bound": "0.00003259039634251337",
+          "max_abs_over_bound": 1.05528,
+          "noise_reference": 8.147599085628343e-06,
+          "noise_device": "cuda:0",
+          "max_abs_over_noise": 4.22111,
+          "within_bound": false
+        }
+      },
+      "vs_recorded_graviton": {
+        "fine_tuned": {
+          "this_cpu": "0.00003439188003540039",
+          "graviton": "0.000027477741241455078",
+          "equal": false
+        }
+      }
+    },
+    {
+      "leg": "motivation-v1-sm",
+      "kind": "pack",
+      "trained_on": "cuda:0 (A10G, SageMaker ml.g5.xlarge)",
+      "device_used": "cuda:0",
+      "run": "models/decide/motivation-v1-sm/run",
+      "data": "models/decide/motivation-v1-sm/data",
+      "data_found_by": "fixed path, hashes verified against gate-report.json inputs_sha256",
+      "data_candidates": [
+        "models/decide/motivation-v1-sm/data"
+      ],
+      "apr": null,
+      "noise_reference": {
+        "fine_tuned": 3.255285573489086e-06,
+        "zero_shot": 1.7265105816122173e-06
+      },
+      "repeats": [
+        {
+          "label": "motivation-v1-sm-1",
+          "rc": 2,
+          "wall_s": 72.57,
+          "threads": "default",
+          "record": {
+            "class": "drift",
+            "which": "zero_shot",
+            "row": 17,
+            "sets": {
+              "zero_shot": {
+                "max_abs": {
+                  "text": "0.000014901161193847656",
+                  "value": 1.4901161193847656e-05
+                },
+                "bound": {
+                  "text": "0.00001",
+                  "value": 1e-05
+                },
+                "noise": null
+              }
+            },
+            "rc": 2,
+            "line": "REFUSED RescoreDrift which=zero_shot row=17 max_abs=0.000014901161193847656 bound=0.00001 (nothing written)"
+          },
+          "stdout": "models/decide/drift-local/legs/motivation-v1-sm-1.stdout",
+          "n": 1
+        },
+        {
+          "label": "motivation-v1-sm-2",
+          "rc": 2,
+          "wall_s": 73.26,
+          "threads": "default",
+          "record": {
+            "class": "drift",
+            "which": "zero_shot",
+            "row": 17,
+            "sets": {
+              "zero_shot": {
+                "max_abs": {
+                  "text": "0.000014901161193847656",
+                  "value": 1.4901161193847656e-05
+                },
+                "bound": {
+                  "text": "0.00001",
+                  "value": 1e-05
+                },
+                "noise": null
+              }
+            },
+            "rc": 2,
+            "line": "REFUSED RescoreDrift which=zero_shot row=17 max_abs=0.000014901161193847656 bound=0.00001 (nothing written)"
+          },
+          "stdout": "models/decide/drift-local/legs/motivation-v1-sm-2.stdout",
+          "n": 2
+        },
+        {
+          "label": "motivation-v1-sm-3",
+          "rc": 2,
+          "wall_s": 73.73,
+          "threads": "default",
+          "record": {
+            "class": "drift",
+            "which": "zero_shot",
+            "row": 17,
+            "sets": {
+              "zero_shot": {
+                "max_abs": {
+                  "text": "0.000014901161193847656",
+                  "value": 1.4901161193847656e-05
+                },
+                "bound": {
+                  "text": "0.00001",
+                  "value": 1e-05
+                },
+                "noise": null
+              }
+            },
+            "rc": 2,
+            "line": "REFUSED RescoreDrift which=zero_shot row=17 max_abs=0.000014901161193847656 bound=0.00001 (nothing written)"
+          },
+          "stdout": "models/decide/drift-local/legs/motivation-v1-sm-3.stdout",
+          "n": 3
+        }
+      ],
+      "summary": {
+        "repeats_identical": true,
+        "distinct_results": 1,
+        "classes": [
+          "drift"
+        ],
+        "measured_repeats": 3,
+        "wall_s": [
+          72.57,
+          73.26,
+          73.73
+        ]
+      },
+      "per_set": {
+        "zero_shot": {
+          "max_abs": "0.000014901161193847656",
+          "bound": "0.00001",
+          "max_abs_over_bound": 1.49012,
+          "noise_reference": 1.7265105816122173e-06,
+          "noise_device": "cuda:0",
+          "max_abs_over_noise": 8.6308,
+          "within_bound": false
+        }
+      },
+      "vs_recorded_graviton": {
+        "zero_shot": {
+          "this_cpu": "0.000014901161193847656",
+          "graviton": "0.00001728534698486328",
+          "equal": false
+        }
+      }
+    },
+    {
+      "leg": "laya-motivation-v1",
+      "kind": "verify",
+      "trained_on": "mps:0",
+      "device_used": "mps:0",
+      "run": "models/decide/laya-motivation-v1",
+      "data": "data/decide/motivation-v1",
+      "data_found_by": "the first directory (sorted) whose input files hash to gate-report.json inputs_sha256",
+      "data_candidates": [
+        "data/decide/motivation-v1",
+        "models/decide/motivation-v1-sm/data"
+      ],
+      "apr": "models/decide/laya-motivation-v1.apr",
+      "noise_reference": {
+        "fine_tuned": 1.820794164297812e-05,
+        "zero_shot": 1.2524598510976759e-05
+      },
+      "repeats": [
+        {
+          "label": "laya-motivation-v1-1",
+          "rc": 0,
+          "wall_s": 75.95,
+          "threads": "default",
+          "record": {
+            "class": "accepted",
+            "mode": "verify",
+            "artifact_sha256": "d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd",
+            "argmax": "100/100",
+            "deploy_eligible": true,
+            "sets": {
+              "fine_tuned": {
+                "max_abs": {
+                  "text": "9.149312973022461e-6",
+                  "value": 9.149312973022461e-06
+                },
+                "bound": {
+                  "text": "0.00007283176657191248",
+                  "value": 7.283176657191248e-05
+                },
+                "noise": {
+                  "text": "0.00001820794164297812",
+                  "value": 1.820794164297812e-05
+                }
+              },
+              "zero_shot": {
+                "max_abs": {
+                  "text": "3.337860107421875e-6",
+                  "value": 3.337860107421875e-06
+                },
+                "bound": {
+                  "text": "0.000050098394043907035",
+                  "value": 5.0098394043907035e-05
+                },
+                "noise": {
+                  "text": "0.000012524598510976759",
+                  "value": 1.2524598510976759e-05
+                }
+              }
+            },
+            "rc": 0,
+            "line": "{\"argmax\":\"100/100\",\"artifact_sha256\":\"d202f4956cd6bbaabdc853afaffef2595e28a78c7054816687267292d9e1aecd\",\"deploy_eligible\":true,\"noise\":0.00001820794164297812,\"recomputed\":{\"ece_post\":0.09355141013860704,\"ft_macro_f1\":0.7475947000934631,\"margin\":0.3780294827021587,\"zs_macro_f1\":0.3695652173913044},\"rescore_bound\":0.00007283176657191248,\"rescore_max_abs\":9.149312973022461e-6,\"shipped_seed\":13,\"waived\":null,\"zs_noise\":0.000012524598510976759,\"zs_rescore_bound\":0.000050098394043907035,\"zs_rescore_max_abs\":3.337860107421875e-6}"
+          },
+          "stdout": "models/decide/drift-local/legs/laya-motivation-v1-1.stdout",
+          "n": 1
+        }
+      ],
+      "summary": {
+        "repeats_identical": true,
+        "distinct_results": 1,
+        "classes": [
+          "accepted"
+        ],
+        "measured_repeats": 1,
+        "wall_s": [
+          75.95
+        ]
+      },
+      "per_set": {
+        "fine_tuned": {
+          "max_abs": "9.149312973022461e-6",
+          "bound": "0.00007283176657191248",
+          "max_abs_over_bound": 0.125623,
+          "noise_reference": 1.820794164297812e-05,
+          "noise_device": "mps:0",
+          "max_abs_over_noise": 0.50249,
+          "within_bound": true
+        },
+        "zero_shot": {
+          "max_abs": "3.337860107421875e-6",
+          "bound": "0.000050098394043907035",
+          "max_abs_over_bound": 0.0666261,
+          "noise_reference": 1.2524598510976759e-05,
+          "noise_device": "mps:0",
+          "max_abs_over_noise": 0.266504,
+          "within_bound": true
+        }
+      }
+    },
+    {
+      "leg": "laya-stance-64",
+      "kind": "verify",
+      "trained_on": "mps:0",
+      "device_used": "mps:0",
+      "run": "models/decide/laya-stance-64",
+      "data": "data/decide/tweet-stance-64",
+      "data_found_by": "the first directory (sorted) whose input files hash to gate-report.json inputs_sha256",
+      "data_candidates": [
+        "data/decide/tweet-stance-64",
+        "models/decide/smoke-stance-64/data"
+      ],
+      "apr": "models/decide/laya-stance-64.apr",
+      "noise_reference": {
+        "fine_tuned": 8.33931784072206e-06,
+        "zero_shot": 1.495515496430233e-05
+      },
+      "repeats": [
+        {
+          "label": "laya-stance-64-1",
+          "rc": 0,
+          "wall_s": 199.26,
+          "threads": "default",
+          "record": {
+            "class": "accepted",
+            "mode": "verify",
+            "artifact_sha256": "24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a",
+            "argmax": "459/459",
+            "deploy_eligible": true,
+            "sets": {
+              "fine_tuned": {
+                "max_abs": {
+                  "text": "0.000011324882507324219",
+                  "value": 1.1324882507324219e-05
+                },
+                "bound": {
+                  "text": "0.00003335727136288824",
+                  "value": 3.335727136288824e-05
+                },
+                "noise": {
+                  "text": "8.33931784072206e-6",
+                  "value": 8.33931784072206e-06
+                }
+              },
+              "zero_shot": {
+                "max_abs": {
+                  "text": "7.3462724685668945e-6",
+                  "value": 7.3462724685668945e-06
+                },
+                "bound": {
+                  "text": "0.00005982061985720932",
+                  "value": 5.982061985720932e-05
+                },
+                "noise": {
+                  "text": "0.00001495515496430233",
+                  "value": 1.495515496430233e-05
+                }
+              }
+            },
+            "rc": 0,
+            "line": "{\"argmax\":\"459/459\",\"artifact_sha256\":\"24a44d7e050166c9b64e2716f2bcb3ce91747f7a3b927d03d6eeae5f89b6275a\",\"deploy_eligible\":true,\"noise\":8.33931784072206e-6,\"recomputed\":{\"ece_post\":0.04425034660659325,\"ft_macro_f1\":0.6308225530950676,\"margin\":0.22166308511207028,\"zs_macro_f1\":0.40915946798299735},\"rescore_bound\":0.00003335727136288824,\"rescore_max_abs\":0.000011324882507324219,\"shipped_seed\":17,\"waived\":null,\"zs_noise\":0.00001495515496430233,\"zs_rescore_bound\":0.00005982061985720932,\"zs_rescore_max_abs\":7.3462724685668945e-6}"
+          },
+          "stdout": "models/decide/drift-local/legs/laya-stance-64-1.stdout",
+          "n": 1
+        }
+      ],
+      "summary": {
+        "repeats_identical": true,
+        "distinct_results": 1,
+        "classes": [
+          "accepted"
+        ],
+        "measured_repeats": 1,
+        "wall_s": [
+          199.26
+        ]
+      },
+      "per_set": {
+        "fine_tuned": {
+          "max_abs": "0.000011324882507324219",
+          "bound": "0.00003335727136288824",
+          "max_abs_over_bound": 0.339503,
+          "noise_reference": 8.33931784072206e-06,
+          "noise_device": "mps:0",
+          "max_abs_over_noise": 1.35801,
+          "within_bound": true
+        },
+        "zero_shot": {
+          "max_abs": "7.3462724685668945e-6",
+          "bound": "0.00005982061985720932",
+          "max_abs_over_bound": 0.122805,
+          "noise_reference": 1.495515496430233e-05,
+          "noise_device": "mps:0",
+          "max_abs_over_noise": 0.49122,
+          "within_bound": true
+        }
+      }
+    },
+    {
+      "leg": "laya-antisemitism-v1",
+      "kind": "verify",
+      "trained_on": "mps:0",
+      "device_used": "mps:0",
+      "run": "models/decide/laya-antisemitism-v1",
+      "data": "data/decide/goldstandard-2024",
+      "data_found_by": "the first directory (sorted) whose input files hash to gate-report.json inputs_sha256",
+      "data_candidates": [
+        "data/decide/goldstandard-2024"
+      ],
+      "apr": "models/decide/laya-antisemitism-v1.apr",
+      "noise_reference": {
+        "fine_tuned": 3.592973853439041e-06,
+        "zero_shot": 1.5070898052527149e-05
+      },
+      "repeats": [
+        {
+          "label": "laya-antisemitism-v1-1",
+          "rc": 0,
+          "wall_s": 1323.37,
+          "threads": "default",
+          "record": {
+            "class": "accepted",
+            "mode": "verify",
+            "artifact_sha256": "2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e",
+            "argmax": "2129/2129",
+            "deploy_eligible": true,
+            "sets": {
+              "fine_tuned": {
+                "max_abs": {
+                  "text": "7.554888725280762e-6",
+                  "value": 7.554888725280762e-06
+                },
+                "bound": {
+                  "text": "0.000014371895413756164",
+                  "value": 1.4371895413756164e-05
+                },
+                "noise": {
+                  "text": "3.592973853439041e-6",
+                  "value": 3.592973853439041e-06
+                }
+              },
+              "zero_shot": {
+                "max_abs": {
+                  "text": "0.00001195073127746582",
+                  "value": 1.195073127746582e-05
+                },
+                "bound": {
+                  "text": "0.000060283592210108594",
+                  "value": 6.0283592210108594e-05
+                },
+                "noise": {
+                  "text": "0.000015070898052527149",
+                  "value": 1.5070898052527149e-05
+                }
+              }
+            },
+            "rc": 0,
+            "line": "{\"argmax\":\"2129/2129\",\"artifact_sha256\":\"2293bebb29acfd857506c387c521aef8a1211ab000fc179648db93763c6c776e\",\"deploy_eligible\":true,\"noise\":3.592973853439041e-6,\"recomputed\":{\"ece_post\":0.04236402879471284,\"ft_macro_f1\":0.7956129081807202,\"margin\":0.23603720989749355,\"zs_macro_f1\":0.5595756982832266},\"rescore_bound\":0.000014371895413756164,\"rescore_max_abs\":7.554888725280762e-6,\"shipped_seed\":23,\"waived\":null,\"zs_noise\":0.000015070898052527149,\"zs_rescore_bound\":0.000060283592210108594,\"zs_rescore_max_abs\":0.00001195073127746582}"
+          },
+          "stdout": "models/decide/drift-local/legs/laya-antisemitism-v1-1.stdout",
+          "n": 1
+        }
+      ],
+      "summary": {
+        "repeats_identical": true,
+        "distinct_results": 1,
+        "classes": [
+          "accepted"
+        ],
+        "measured_repeats": 1,
+        "wall_s": [
+          1323.37
+        ]
+      },
+      "per_set": {
+        "fine_tuned": {
+          "max_abs": "7.554888725280762e-6",
+          "bound": "0.000014371895413756164",
+          "max_abs_over_bound": 0.525671,
+          "noise_reference": 3.592973853439041e-06,
+          "noise_device": "mps:0",
+          "max_abs_over_noise": 2.10268,
+          "within_bound": true
+        },
+        "zero_shot": {
+          "max_abs": "0.00001195073127746582",
+          "bound": "0.000060283592210108594",
+          "max_abs_over_bound": 0.198242,
+          "noise_reference": 1.5070898052527149e-05,
+          "noise_device": "mps:0",
+          "max_abs_over_noise": 0.792967,
+          "within_bound": true
+        }
+      }
+    }
+  ],
+  "not_measurable": [],
+  "controls": {
+    "positive": {
+      "expected": {
+        "which": "fine_tuned",
+        "row": 199,
+        "max_abs": "0.00003439188003540039",
+        "bound": "0.00003259039634251337"
+      },
+      "got": {
+        "which": "fine_tuned",
+        "row": 199,
+        "max_abs": "0.00003439188003540039",
+        "bound": "0.00003259039634251337"
+      },
+      "got_class": "drift",
+      "reference": ".planning/phases/14-laya-training-mcp-server-s3-dataset-in-apr-and-reports-out/14-SMOKE-EVIDENCE.json local_verify.line",
+      "reproduced": true
+    },
+    "negative": {
+      "artifact": "models/decide/smoke-stance-64/smoke-stance-64.apr",
+      "run": "models/decide/smoke-stance-64/run",
+      "data": "models/decide/motivation-v1-sm/data",
+      "data_is": "the data directory of motivation-v1-sm (another run, other input hashes)",
+      "rc": 2,
+      "wall_s": 2.27,
+      "rule": "Pack",
+      "line": "REFUSED Pack pack: the run dir's task.json is not a byte copy of the data dir's task.json (nothing written)",
+      "classified": "not_a_drift_leg",
+      "recorded_as_drift_leg": false
+    },
+    "thread": {
+      "leg": "smoke-stance-64",
+      "knob": "RAYON_NUM_THREADS",
+      "settings": [
+        {
+          "threads": 1,
+          "wall_s": 485.95,
+          "rc": 2,
+          "class": "drift",
+          "fine_tuned_max_abs": "0.00003439188003540039",
+          "zero_shot_max_abs": null,
+          "fine_tuned_equals_recorded_graviton": false,
+          "record": {
+            "class": "drift",
+            "which": "fine_tuned",
+            "row": 199,
+            "sets": {
+              "fine_tuned": {
+                "max_abs": {
+                  "text": "0.00003439188003540039",
+                  "value": 3.439188003540039e-05
+                },
+                "bound": {
+                  "text": "0.00003259039634251337",
+                  "value": 3.259039634251337e-05
+                },
+                "noise": null
+              }
+            },
+            "rc": 2,
+            "line": "REFUSED RescoreDrift which=fine_tuned row=199 max_abs=0.00003439188003540039 bound=0.00003259039634251337 (nothing written)"
+          }
+        },
+        {
+          "threads": 4,
+          "wall_s": 150.52,
+          "rc": 2,
+          "class": "drift",
+          "fine_tuned_max_abs": "0.00003439188003540039",
+          "zero_shot_max_abs": null,
+          "fine_tuned_equals_recorded_graviton": false,
+          "record": {
+            "class": "drift",
+            "which": "fine_tuned",
+            "row": 199,
+            "sets": {
+              "fine_tuned": {
+                "max_abs": {
+                  "text": "0.00003439188003540039",
+                  "value": 3.439188003540039e-05
+                },
+                "bound": {
+                  "text": "0.00003259039634251337",
+                  "value": 3.259039634251337e-05
+                },
+                "noise": null
+              }
+            },
+            "rc": 2,
+            "line": "REFUSED RescoreDrift which=fine_tuned row=199 max_abs=0.00003439188003540039 bound=0.00003259039634251337 (nothing written)"
+          }
+        },
+        {
+          "threads": 8,
+          "wall_s": 97.77,
+          "rc": 2,
+          "class": "drift",
+          "fine_tuned_max_abs": "0.00003439188003540039",
+          "zero_shot_max_abs": null,
+          "fine_tuned_equals_recorded_graviton": false,
+          "record": {
+            "class": "drift",
+            "which": "fine_tuned",
+            "row": 199,
+            "sets": {
+              "fine_tuned": {
+                "max_abs": {
+                  "text": "0.00003439188003540039",
+                  "value": 3.439188003540039e-05
+                },
+                "bound": {
+                  "text": "0.00003259039634251337",
+                  "value": 3.259039634251337e-05
+                },
+                "noise": null
+              }
+            },
+            "rc": 2,
+            "line": "REFUSED RescoreDrift which=fine_tuned row=199 max_abs=0.00003439188003540039 bound=0.00003259039634251337 (nothing written)"
+          }
+        },
+        {
+          "threads": "default",
+          "wall_s": 98.58,
+          "rc": 2,
+          "class": "drift",
+          "fine_tuned_max_abs": "0.00003439188003540039",
+          "zero_shot_max_abs": null,
+          "fine_tuned_equals_recorded_graviton": false,
+          "record": {
+            "class": "drift",
+            "which": "fine_tuned",
+            "row": 199,
+            "sets": {
+              "fine_tuned": {
+                "max_abs": {
+                  "text": "0.00003439188003540039",
+                  "value": 3.439188003540039e-05
+                },
+                "bound": {
+                  "text": "0.00003259039634251337",
+                  "value": 3.259039634251337e-05
+                },
+                "noise": null
+              }
+            },
+            "rc": 2,
+            "line": "REFUSED RescoreDrift which=fine_tuned row=199 max_abs=0.00003439188003540039 bound=0.00003259039634251337 (nothing written)"
+          }
+        }
+      ],
+      "wall_ratio_1_over_8": 4.97,
+      "engaged_threshold": 1.5,
+      "engaged": true,
+      "results_identical_across_settings": true,
+      "recorded_graviton_fine_tuned_max_abs": 2.7477741241455078e-05,
+      "verdict": "engaged (wall time x4.97 from 1 to 8 threads); the re-score is identical at every setting, so on this CPU the rayon thread count does not move these numbers"
+    }
+  },
+  "references": {
+    "a10g_noise": {
+      "smoke-stance-64": {
+        "device_used": "cuda:0",
+        "torch_version": "2.14.0+cu130",
+        "rescore_noise_sha256_matches_gate_report": true,
+        "reference": "float64",
+        "k": 4.0,
+        "floor_abs": 1e-05,
+        "sets": {
+          "fine_tuned": {
+            "n": 459,
+            "max_abs": 8.147599085628343e-06,
+            "bound": 3.259039634251337e-05,
+            "argmax_agree": 459
+          },
+          "zero_shot": {
+            "n": 459,
+            "max_abs": 4.70304053501458e-06,
+            "bound": 1.881216214005832e-05,
+            "argmax_agree": 459
+          }
+        },
+        "read_from": [
+          "models/decide/smoke-stance-64/run/rescore-noise.json",
+          "models/decide/smoke-stance-64/run/gate-report.json"
+        ],
+        "how": "read from the CUDA run's own records, not re-measured"
+      },
+      "motivation-v1-sm": {
+        "device_used": "cuda:0",
+        "torch_version": "2.14.0+cu130",
+        "rescore_noise_sha256_matches_gate_report": true,
+        "reference": "float64",
+        "k": 4.0,
+        "floor_abs": 1e-05,
+        "sets": {
+          "fine_tuned": {
+            "n": 100,
+            "max_abs": 3.255285573489086e-06,
+            "bound": 1.3021142293956345e-05,
+            "argmax_agree": 100
+          },
+          "zero_shot": {
+            "n": 100,
+            "max_abs": 1.7265105816122173e-06,
+            "bound": 1e-05,
+            "argmax_agree": 100
+          }
+        },
+        "read_from": [
+          "models/decide/motivation-v1-sm/run/rescore-noise.json",
+          "models/decide/motivation-v1-sm/run/gate-report.json"
+        ],
+        "how": "read from the CUDA run's own records, not re-measured"
+      }
+    },
+    "graviton_recorded": {
+      "smoke-stance-64": {
+        "step": "pack-task verify (14-14)",
+        "line": "{\"argmax\":\"459/459\",\"artifact_sha256\":\"31ace8ea95ca0c750b6d007d0f4c68e4322d20363117f837673a936d6f696c85\",\"deploy_eligible\":true,\"noise\":8.147599085628343e-6,\"recomputed\":{\"ece_post\":0.06310529497194395,\"ft_macro_f1\":0.7249874875126133,\"margin\":0.315828019529616,\"zs_macro_f1\":0.40915946798299735},\"rescore_bound\":0.00003259039634251337,\"rescore_max_abs\":0.000027477741241455078,\"shipped_seed\":23,\"waived\":null,\"zs_noise\":4.70304053501458e-6,\"zs_rescore_bound\":0.00001881216214005832,\"zs_rescore_max_abs\":0.000015079975128173828}",
+        "sets": {
+          "fine_tuned": {
+            "max_abs": {
+              "text": "0.000027477741241455078",
+              "value": 2.7477741241455078e-05
+            },
+            "bound": {
+              "text": "0.00003259039634251337",
+              "value": 3.259039634251337e-05
+            },
+            "noise": {
+              "text": "8.147599085628343e-6",
+              "value": 8.147599085628343e-06
+            }
+          },
+          "zero_shot": {
+            "max_abs": {
+              "text": "0.000015079975128173828",
+              "value": 1.5079975128173828e-05
+            },
+            "bound": {
+              "text": "0.00001881216214005832",
+              "value": 1.881216214005832e-05
+            },
+            "noise": {
+              "text": "4.70304053501458e-6",
+              "value": 4.70304053501458e-06
+            }
+          }
+        },
+        "from": ".planning/phases/14-laya-training-mcp-server-s3-dataset-in-apr-and-reports-out/14-SMOKE-EVIDENCE.json"
+      },
+      "motivation-v1-sm": {
+        "step": "pack-task pack (14-15)",
+        "line": "REFUSED RescoreDrift which=zero_shot row=17 max_abs=0.00001728534698486328 bound=0.00001 (nothing written)",
+        "sets": {
+          "zero_shot": {
+            "max_abs": {
+              "text": "0.00001728534698486328",
+              "value": 1.728534698486328e-05
+            },
+            "bound": {
+              "text": "0.00001",
+              "value": 1e-05
+            },
+            "noise": null
+          }
+        },
+        "from": ".planning/phases/14-laya-training-mcp-server-s3-dataset-in-apr-and-reports-out/14-GATE-RUN-EVIDENCE.json"
+      }
+    },
+    "mac_recorded": {
+      "smoke-stance-64": {
+        "line": "REFUSED RescoreDrift which=fine_tuned row=199 max_abs=0.00003439188003540039 bound=0.00003259039634251337 (nothing written)",
+        "repeats": "3 runs on this Mac (Apple M4 Pro, arm64), identical refusal and identical max_abs (deterministic)",
+        "from": ".planning/phases/14-laya-training-mcp-server-s3-dataset-in-apr-and-reports-out/14-SMOKE-EVIDENCE.json"
+      }
+    }
+  },
+  "notes": [
+    "Every number in legs and controls was produced on this host by the pinned binary named in `binary`; references are copied from the files their `from` / `read_from` fields name.",
+    "pack_laya reports a RescoreDrift refusal for the FIRST drifted set only: a refused leg measures one set, and the other set is not measured on that CPU. Exposing it would need a decide-crate change, which D-15 and D-05 forbid here.",
+    "A pack leg's scratch .apr is hashed against its PACKED line and removed (807 MB each); its sha256 is the record.",
+    "The noise reference of a CUDA run is the A10G figure from its rescore-noise.json; of an MPS run, the MPS figure from its rescore-noise.json. The bound is max(floor, k x that noise), so the ratio max_abs / noise is the drift in units of the training-device noise the bound was built from.",
+    "Wall times are from a desktop machine running the legs one at a time; other load was not controlled.",
+    "No x86_64 CPU is measured: there is no x86_64 pack binary or image. The Graviton legs are generated by aws-plan and run by the owner in 14-21. No contract was amended (D-15)."
+  ]
+}

@@ -1353,6 +1353,19 @@ laya-fetch *args:
     set -euo pipefail
     exec python3 -I scripts/laya_deploy/laya_fetch.py "$@"
 
+# The cross-CPU re-score drift study (plan 14-20; 14-VERIFICATION gap 2; D-14, D-15): `just laya-drift local [--only
+# LEG,..] [--repeats N] [--out DIR] [--controls] [--evidence FILE]` measures the retained runs on THIS machine with the
+# pinned pack_laya binary (path from cargo's own message, sha256 and commit recorded, a dirty closure refused) and a
+# positive control that must reproduce the recorded Mac refusal; `aws-plan --source smoke:TASK_ID [--source
+# motivation:TASK_ID]` WRITES the owner-run Graviton script (gitignored; it runs no aws); `collect` merges the legs into
+# 14-DRIFT-EVIDENCE.json; `bashrs-gate FILE..` is the repository's bashrs judgement for a gitignored shell file; and
+# `--selftest`. No contract is amended. A thin wrapper: the script owns every refusal. Row drift.
+[positional-arguments]
+laya-drift *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec python3 -I scripts/laya_deploy/laya_drift.py "$@"
+
 # The finalizer and state-machine failure surface (plan 14-16): `just laya-failure-surface --check [--artifact PATH]`
 # binds crates/aprender-mcp-laya-train-lambda/fixtures/failure-surface-v1.json and 14-FAILURE-SURFACE.md to the code
 # (axes, catch-fed classes and the KNOWN_DEFECTS ratchet out of finalizer.rs, the exit classes by running run_step.py's
@@ -5946,6 +5959,17 @@ laya-gates-selftest:
         must_fail refetch-over 'REFUSED fetch-dest' env PATH="$FA:$PATH" FETCH_RUN="$FR" just laya-fetch fixture-run "$TID" fixture-bucket --dest "$FD"
         must_fail wrong-profile 'REFUSED fetch-profile' env PATH="$FA:$PATH" FETCH_RUN="$FR" just laya-fetch fixture-run "$TID" fixture-bucket --dest "$W/fetchdest2" --profile augury-dev
         must_pass selftest '^LAYA FETCH SELFTEST OK' just laya-fetch --selftest
+    }
+    row_drift() {
+        # D-15 (plan 14-20): an unknown leg is refused before any build or measurement; the selftest proves the parser, the
+        # pinned-binary leg on a fake pack_laya, the generated Graviton script against a tag-modelling fake aws (three tag
+        # mutants refused), the static policy table, bashrs-gate and the collect scrub. The long legs never run in this row.
+        must_fail unknown-leg '^REFUSED drift-leg: ' just laya-drift local --only no-such-leg --out "$W/drift-out"
+        [ "$RC" -eq 2 ] || red "unknown-leg: exit $RC, not 2"
+        [ ! -e "$W/drift-out" ] || red "unknown-leg: a refused run created its output directory"
+        grep -q 'cargo build\|LEG ' "$(logof unknown-leg)" && red "unknown-leg: a refused run built or measured something"
+        must_pass selftest '^DRIFT SELFTEST OK' just laya-drift --selftest
+        grep -q '^ok   bashrs-gate passes the generated fixture script$' "$(logof selftest)" || red "selftest: the generated script was not linted"
     }
     row_failure_surface() {
         # Plan 14-16: the failure-surface enumeration is bound to the code it was derived from; a tampered copy (one
