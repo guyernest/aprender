@@ -199,6 +199,27 @@ None. No AWS call was made and nothing was deployed.
 - 14-17 can run now. Its mutation runner rewrites finalizer sources, which are in the closure, so it must not run concurrently with a synth. This plan has finished, so there is no overlap.
 - 14-22 must run `just laya-trainer-synth <env>` on a clean, committed closure immediately before `infra diff` and `deploy`.
 
+## State and roadmap updates
+
+- `roadmap.update-plan-progress 14` succeeded: Phase 14 went from 16/22 to 17/22, and 14-19 is checked.
+- `state.advance-plan`, `state.record-session` and `state.add-decision` all failed with the known tooling error: `.planning/phases/04-apr-artifact-and-production-parity/04-VERIFICATION.md` has status `gaps_acknowledged`, which is outside the tool's closed set. That file was deliberately not edited, so STATE.md is unchanged by this plan.
+  - The tool also warned that STATE.md's Current Position points at phase 08.
+  - The decisions above are recorded here instead.
+- Requirement IDs (D-01, D-02, D-12, D-14, D-22) are phase decision IDs, not REQUIREMENTS.md entries. Per the plan ("Requirement-ID probes: SKIPPED visibly"), `requirements.mark-complete` was not run.
+- Windows ledger: no stub, skipped test or unrun verify was left, so nothing was appended.
+
+## Self-Check: PASSED
+
+- Files: the justfile, both scripts, the README and `deploy-extensions/assets/laya-finalizer/bootstrap.build.json` (untracked, gitignored) all exist.
+- Commits: `a0902975d`, `950e702f0` and `c60b48745` are ancestors of HEAD. `evaluation-scope --plan 14-19 --commits-only` resolves them from plan subjects.
+- Plan verification, re-run after the last task commit:
+  - ops selftest: `LAYA TRAINER OPS SELFTEST OK` (65 ok);
+  - stack-check selftest: `STACK CHECK SELFTEST OK` (52 cases);
+  - `laya_failure_surface.py --check`: OK;
+  - `LAYA_GATES_ONLY=trainer-synth,trainer-image,trainer-infra,failure-surface just laya-gates-selftest`: `LAYA GATES ROWS OK 4 of 55` (the trainer-synth row re-synthesized and ended `TRAINER SYNTH OK env=dev`);
+  - `finalizer-provenance verify` on the re-synthesized asset: `FINALIZER PROVENANCE OK`;
+  - `git diff --quiet HEAD -- deploy-extensions/lib contracts crates/aprender-decide .github`: rc 0.
+
 ---
 *Phase: 14-laya-training-mcp-server-s3-dataset-in-apr-and-reports-out*
 *Completed: 2026-10-30*
