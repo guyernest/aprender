@@ -22,6 +22,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use aprender_mcp_laya_train::layout::SERVER_NAME;
+use aprender_mcp_laya_train::redact::RedactingBackend;
 use aprender_mcp_laya_train::{build_server, Dispatcher, ServerCtx, TaskBackend};
 use aprender_mcp_laya_train_lambda::{
     require_env, server_config, Executions, S3DatasetSource, S3ObjectReader, S3Presign,
@@ -58,13 +59,23 @@ fn read_env() -> Result<Env, String> {
 /// ONE `Arc<dyn TaskBackend>` goes into [`ServerCtx::new`], which builds the task
 /// store from it and keeps the same `Arc` for the single-flight lock, so the two
 /// can never address different tables.
+///
+/// That backend is the DynamoDB one wrapped in [`RedactingBackend`] (WR-03, SK-05):
+/// the sibling `DynamoDbTaskBackend` renders every SDK failure, the table ARN and
+/// the account id included, into its error text, and the lock, `train`,
+/// `train_status` and pmcp's own task handlers all read through this backend. The
+/// wrapper logs that text and hands the caller a fixed one naming the operation.
+/// The finalizer binary is deliberately NOT wrapped: its errors are log-only (they
+/// become the Lambda invocation error and the execution history, never a
+/// caller-visible string).
 async fn build() -> Result<pmcp::Server, String> {
     let env = read_env()?;
     let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
-    let backend: Arc<dyn TaskBackend> = Arc::new(DynamoDbTaskBackend::new(
+    let dynamodb: Arc<dyn TaskBackend> = Arc::new(DynamoDbTaskBackend::new(
         aws_sdk_dynamodb::Client::new(&config),
         env.table,
     ));
+    let backend: Arc<dyn TaskBackend> = Arc::new(RedactingBackend::new(dynamodb));
     let s3 = aws_sdk_s3::Client::new(&config);
     let executions: Arc<dyn Executions> = Arc::new(SfnExecutions::new(
         aws_sdk_sfn::Client::new(&config),

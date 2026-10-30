@@ -47,7 +47,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use pmcp::server::task_store::TaskStore;
+use pmcp::server::task_store::{TaskStore, TaskStoreError};
 use pmcp::server::typed_tool::TypedTool;
 use pmcp::types::capabilities::ServerCapabilities;
 use pmcp::types::{Content, TaskStatus, TaskSupport, ToolExecution};
@@ -61,6 +61,7 @@ use crate::layout::{
     SCHEMA_EXECUTION_INPUT, SERVER_NAME, TASK_TTL_MS, TOOL_STATUS, TOOL_TRAIN, TOOL_VALIDATE,
 };
 use crate::lock::{now_secs, AcquireError, LOCK_OWNER};
+use crate::redact::{caller_safe, MAX_CALLER_TEXT_CHARS};
 use crate::validate::{
     validate_files, validate_for_submit, DatasetFiles, Refusal, ValidationPolicy,
 };
@@ -584,6 +585,9 @@ async fn submit(
         },
     };
     if let Some(reason) = not_started {
+        // The reason is the dispatcher's text (an AWS error code since 14-18); it is
+        // made caller-safe here as well, defense in depth (WR-03, SK-01).
+        let reason = caller_safe(&reason, MAX_CALLER_TEXT_CHARS);
         lock::release(ctx.backend.as_ref(), &task_id).await;
         compensate(
             ctx,
@@ -644,10 +648,17 @@ async fn status(
     task_id: &str,
 ) -> pmcp::Result<serde_json::Value> {
     let owner = resolve_owner(extra);
-    let task =
-        ctx.store.get(task_id, &owner).await.map_err(|e| {
-            pmcp::Error::validation(format!("no task {task_id} on this server: {e}"))
-        })?;
+    // Never the store's own Display text (WR-03, SK-04): an absent or expired task
+    // reads as absent, anything else as an unreadable store.
+    let task = ctx.store.get(task_id, &owner).await.map_err(|e| {
+        let text = match e {
+            TaskStoreError::NotFound { .. } | TaskStoreError::Expired { .. } => {
+                format!("no task {task_id} on this server")
+            }
+            _ => "the task store could not be read".to_string(),
+        };
+        pmcp::Error::validation(caller_safe(&text, MAX_CALLER_TEXT_CHARS))
+    })?;
 
     // A stored result is THE payload: both doors serve one document.
     let mut unreadable = false;
@@ -1977,5 +1988,254 @@ mod tests {
         let submit_keys = keys(&working_answer(&id, "n", "u"));
         assert!(reference.iter().all(|k| submit_keys.contains(k)));
         assert_eq!(submit_keys.len(), reference.len() + 3);
+    }
+
+    // ------------------------------------------------- WR-03: hostile request side
+
+    /// An account-id-shaped constant the hostile fakes plant (never a real account).
+    const HOSTILE_ACCOUNT: &str = "987654321098";
+
+    /// What the sibling DynamoDB backend's `DisplayErrorContext` renders for a
+    /// denied call: the assumed-role ARN and the table ARN, both naming the account.
+    fn hostile_store_text(op: &str) -> String {
+        format!(
+            "service error: AccessDeniedException: User: arn:aws:sts::{HOSTILE_ACCOUNT}:\
+             assumed-role/laya-train-request-dev/aprender-laya-train is not authorized to \
+             perform: dynamodb:{op} on resource: arn:aws:dynamodb:us-east-1:{HOSTILE_ACCOUNT}:\
+             table/laya-train-tasks-dev (request id 1b2c)"
+        )
+    }
+
+    /// What the SDK renders for a denied StartExecution.
+    fn hostile_dispatch_text() -> String {
+        format!(
+            "AccessDeniedException: User: arn:aws:sts::{HOSTILE_ACCOUNT}:assumed-role/r/s is not \
+             authorized to perform: states:StartExecution on resource: \
+             arn:aws:states:us-east-1:{HOSTILE_ACCOUNT}:stateMachine:laya-train-dev"
+        )
+    }
+
+    fn assert_no_hostile(what: &str, text: &str) {
+        for needle in [HOSTILE_ACCOUNT, "arn:aws", "amazonaws.com"] {
+            assert!(!text.contains(needle), "{what}: {needle:?} in {text:?}");
+        }
+    }
+
+    /// The in-memory backend, failing ONE chosen (operation, owner) call with the
+    /// planted `TaskStoreError::Internal` text the DynamoDB backend would render.
+    struct HostileBackend {
+        inner: InMemoryTaskBackend,
+        armed: Mutex<Option<(&'static str, String)>>,
+    }
+
+    impl HostileBackend {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                inner: InMemoryTaskBackend::new(),
+                armed: Mutex::new(None),
+            })
+        }
+
+        /// Fail the next `op` addressed to `owner`, once.
+        fn arm(&self, op: &'static str, owner: &str) {
+            *self.armed.lock().expect("lock") = Some((op, owner.to_string()));
+        }
+
+        fn trip(&self, op: &str, owner: &str) -> Result<(), BackendError> {
+            let mut armed = self.armed.lock().expect("lock");
+            if armed
+                .as_ref()
+                .is_some_and(|(o, w)| *o == op && w.as_str() == owner)
+            {
+                *armed = None;
+                return Err(BackendError::Store(TaskStoreError::Internal {
+                    message: hostile_store_text(op),
+                }));
+            }
+            Ok(())
+        }
+    }
+
+    #[pmcp::async_trait]
+    impl TaskBackend for HostileBackend {
+        async fn put_new(&self, owner_id: &str, record: StoredTask) -> Result<(), BackendError> {
+            self.trip("put_new", owner_id)?;
+            self.inner.put_new(owner_id, record).await
+        }
+
+        async fn get(
+            &self,
+            owner_id: &str,
+            task_id: &str,
+        ) -> Result<Option<StoredTask>, BackendError> {
+            self.trip("get", owner_id)?;
+            self.inner.get(owner_id, task_id).await
+        }
+
+        async fn cas(
+            &self,
+            owner_id: &str,
+            task_id: &str,
+            expected_version: u64,
+            record: StoredTask,
+        ) -> Result<(), BackendError> {
+            self.trip("cas", owner_id)?;
+            self.inner
+                .cas(owner_id, task_id, expected_version, record)
+                .await
+        }
+
+        async fn list(
+            &self,
+            owner_id: &str,
+            cursor: Option<&str>,
+        ) -> Result<(Vec<StoredTask>, Option<String>), BackendError> {
+            self.trip("list", owner_id)?;
+            self.inner.list(owner_id, cursor).await
+        }
+
+        async fn sweep_expired(&self) -> Result<usize, BackendError> {
+            self.inner.sweep_expired().await
+        }
+    }
+
+    /// A harness whose backend is the HOSTILE one behind the production wrapper.
+    fn hostile_harness() -> (Harness, Arc<HostileBackend>) {
+        let hostile = HostileBackend::new();
+        let wrapped = Arc::new(redact::RedactingBackend::new(
+            Arc::clone(&hostile) as Arc<dyn TaskBackend>
+        ));
+        (Harness::with_backend(20, wrapped), hostile)
+    }
+
+    #[tokio::test]
+    async fn hostile_backend_mint_failure_is_caller_safe() {
+        let (h, hostile) = hostile_harness();
+        hostile.arm("put_new", "alice");
+        let err = h
+            .train("alice", "m", Some(4))
+            .await
+            .expect_err("mint fails");
+        let text = message(&err);
+        assert!(text.contains("cannot mint a training task"), "{text}");
+        assert_no_hostile("mint error", &text);
+        let (records, _) = h.backend.list("alice", None).await.expect("list");
+        assert!(records.is_empty(), "nothing minted");
+    }
+
+    #[tokio::test]
+    async fn hostile_backend_lock_failure_is_caller_safe() {
+        let (h, hostile) = hostile_harness();
+        hostile.arm("put_new", LOCK_OWNER);
+        let err = h
+            .train("alice", "m", Some(4))
+            .await
+            .expect_err("lock fails");
+        let text = message(&err);
+        assert!(
+            text.contains("cannot take the single-flight lock"),
+            "{text}"
+        );
+        assert_no_hostile("lock error", &text);
+        let minted = only_task(&h, "alice").await;
+        assert_eq!(minted.task.status, TaskStatus::Failed, "compensated");
+        let stored = stored_text(&minted).expect("a compensated payload");
+        assert!(
+            stored.contains("cannot take the single-flight lock"),
+            "{stored}"
+        );
+        assert_no_hostile("compensated payload", &stored);
+    }
+
+    #[tokio::test]
+    async fn hostile_backend_envelope_failure_is_caller_safe() {
+        let (h, hostile) = hostile_harness();
+        hostile.arm("cas", "alice");
+        let err = h
+            .train("alice", "m", Some(4))
+            .await
+            .expect_err("envelope fails");
+        let text = message(&err);
+        assert!(text.contains("cannot record the run envelope"), "{text}");
+        assert_no_hostile("envelope error", &text);
+        let minted = only_task(&h, "alice").await;
+        assert_eq!(minted.task.status, TaskStatus::Failed, "compensated");
+        let stored = stored_text(&minted).expect("a compensated payload");
+        assert_no_hostile("compensated payload", &stored);
+        assert_eq!(lock::peek(h.backend.as_ref()).await, None, "lock released");
+    }
+
+    #[tokio::test]
+    async fn hostile_backend_status_and_task_protocol_are_caller_safe() {
+        let (h, hostile) = hostile_harness();
+        let (id, _) = started(&h).await;
+
+        hostile.arm("get", "alice");
+        let err = status(&h.ctx, &extra("alice"), &id)
+            .await
+            .expect_err("store read fails");
+        assert_eq!(message(&err), "the task store could not be read");
+
+        // pmcp's own task handlers (tasks/get, tasks/result) read the same store.
+        hostile.arm("get", "alice");
+        let err = h.ctx.store.get(&id, "alice").await.expect_err("get fails");
+        assert_no_hostile("tasks/get", &err.to_string());
+        assert_no_hostile("tasks/get protocol", &pmcp::Error::from(err).to_string());
+        hostile.arm("get", "alice");
+        let err = h
+            .ctx
+            .store
+            .get_result(&id, "alice")
+            .await
+            .expect_err("result fails");
+        assert_no_hostile("tasks/result", &err.to_string());
+        assert_no_hostile("tasks/result protocol", &pmcp::Error::from(err).to_string());
+
+        // An absent task names only the id the caller sent.
+        let err = status(&h.ctx, &extra("alice"), "no-such-task")
+            .await
+            .expect_err("absent");
+        assert_eq!(message(&err), "no task no-such-task on this server");
+        // The store is healthy again once the planted fault is spent.
+        let read = status(&h.ctx, &extra("alice"), &id).await.expect("status");
+        assert_eq!(read["phase"], "working");
+    }
+
+    #[tokio::test]
+    async fn hostile_dispatch_reasons_are_caller_safe() {
+        for ambiguous in [false, true] {
+            let h = Harness::new(20);
+            let reason = hostile_dispatch_text();
+            h.dispatcher
+                .dispatch_script
+                .lock()
+                .expect("lock")
+                .push_back(Err(if ambiguous {
+                    DispatchError::Ambiguous(reason)
+                } else {
+                    DispatchError::Rejected(reason)
+                }));
+            if ambiguous {
+                h.dispatcher
+                    .confirm_script
+                    .lock()
+                    .expect("lock")
+                    .push_back(Ok(Confirm::NotStarted));
+            }
+            let err = h
+                .train("alice", "m", Some(4))
+                .await
+                .expect_err("not started");
+            let text = message(&err);
+            assert!(
+                text.starts_with("REFUSED dispatch: AccessDeniedException"),
+                "{text}"
+            );
+            assert_no_hostile("dispatch error", &text);
+            let minted = only_task(&h, "alice").await;
+            let stored = stored_text(&minted).expect("a compensated payload");
+            assert_no_hostile("compensated payload", &stored);
+            assert_eq!(lock::peek(h.backend.as_ref()).await, None);
+        }
     }
 }

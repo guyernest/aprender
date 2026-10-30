@@ -37,8 +37,49 @@ pub enum StartErrorKind {
 pub struct StartError {
     /// What the failure proves.
     pub kind: StartErrorKind,
-    /// The SDK's error text (never the execution input).
+    /// The caller-visible label, [`start_error_label`]: `StartExecution` and the AWS
+    /// error CODE only (never the SDK message, which names the role and the
+    /// state-machine ARN, and never the execution input).
     pub message: String,
+}
+
+/// Longest AWS error code [`start_error_label`] keeps.
+const MAX_ERROR_CODE_CHARS: usize = 64;
+
+/// The caller-visible text of a failed `StartExecution` (WR-03, SK-01):
+/// `StartExecution <code>` when `code` is an identifier of at most 64 characters
+/// (ASCII letters, digits, underscore, dot), else `StartExecution unknown`. An
+/// allowlist, so no SDK message, ARN or account id can reach the caller through
+/// the dispatch error; the full SDK text goes to the server-side log.
+#[must_use]
+pub fn start_error_label(code: Option<&str>) -> String {
+    match code {
+        Some(code)
+            if !code.is_empty()
+                && code.chars().count() <= MAX_ERROR_CODE_CHARS
+                && code
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.')) =>
+        {
+            format!("StartExecution {code}")
+        }
+        _ => "StartExecution unknown".to_string(),
+    }
+}
+
+/// The code [`start_error_label`] is given: the service's error code, or a fixed
+/// word for a failure that never reached the service (a timeout, a dispatch or
+/// response failure), so a caller can still tell those apart.
+fn start_error_code<R>(err: &SdkError<StartExecutionError, R>) -> Option<&str> {
+    use aws_sdk_sfn::error::ProvideErrorMetadata;
+    match err {
+        SdkError::ServiceError(service) => service.err().code(),
+        SdkError::TimeoutError(_) => Some("TimeoutError"),
+        SdkError::DispatchFailure(_) => Some("DispatchFailure"),
+        SdkError::ResponseError(_) => Some("ResponseError"),
+        SdkError::ConstructionFailure(_) => Some("ConstructionFailure"),
+        _ => None,
+    }
 }
 
 /// The three Step Functions calls the request function makes.
@@ -138,9 +179,17 @@ impl Executions for SfnExecutions {
             .send()
             .await
             .map(|_| ())
-            .map_err(|e| StartError {
-                kind: classify_start_error(&e),
-                message: DisplayErrorContext(&e).to_string(),
+            .map_err(|e| {
+                // The full SDK text names the role and the state machine: log only.
+                tracing::error!(
+                    execution = name,
+                    error = %DisplayErrorContext(&e),
+                    "StartExecution failed (server-side log only)"
+                );
+                StartError {
+                    kind: classify_start_error(&e),
+                    message: start_error_label(start_error_code(&e)),
+                }
             })
     }
 
@@ -723,6 +772,58 @@ mod tests {
                 "{name} may have started"
             );
         }
+    }
+
+    #[test]
+    fn start_error_label_table() {
+        let benign = [
+            (
+                "AccessDeniedException",
+                "StartExecution AccessDeniedException",
+            ),
+            ("ThrottlingException", "StartExecution ThrottlingException"),
+            ("States.Runtime", "StartExecution States.Runtime"),
+            ("Code_9", "StartExecution Code_9"),
+        ];
+        for (code, want) in benign {
+            assert_eq!(start_error_label(Some(code)), want, "{code:?}");
+        }
+        let unknown = "StartExecution unknown";
+        let hostile = [
+            "AccessDeniedException: User: arn:aws:sts::987654321098:assumed-role/r/s".to_string(),
+            "arn:aws:states:us-east-1:987654321098:stateMachine:laya-train-dev".to_string(),
+            "987654321098.dkr.ecr.us-east-1.amazonaws.com".to_string(),
+            "https://states.us-east-1.amazonaws.com/".to_string(),
+            "Access Denied".to_string(),
+            "code\nUser".to_string(),
+            "x-y".to_string(),
+            "C".repeat(65),
+            String::new(),
+        ];
+        for code in &hostile {
+            assert_eq!(start_error_label(Some(code)), unknown, "{code:?}");
+        }
+        assert_eq!(start_error_label(None), unknown);
+        assert_eq!(
+            start_error_label(Some(&"C".repeat(64))),
+            format!("StartExecution {}", "C".repeat(64))
+        );
+        // The code the label is built from: the service's code, or a fixed word.
+        assert_eq!(
+            start_error_code(&coded("AccessDeniedException")),
+            Some("AccessDeniedException")
+        );
+        assert_eq!(
+            start_error_code(&SdkError::<StartExecutionError, ()>::timeout_error("t")),
+            Some("TimeoutError")
+        );
+        assert_eq!(
+            start_error_code(&SdkError::<StartExecutionError, ()>::response_error(
+                "g",
+                ()
+            )),
+            Some("ResponseError")
+        );
     }
 
     #[tokio::test]
