@@ -2,7 +2,7 @@
   "schema": "laya-gate-run-evidence-v3",
   "phase": "14",
   "plan": "14-15",
-  "status": "CHECKPOINT: attempt 1 ended in a pack refusal (D-15) and a defect-class evaluation; no retry is allowed by the declaration; awaiting the owner",
+  "status": "Complete: attempt 1 ended not-reproduced (shipped-seed margin below the band floor and an arm64 pack RescoreDrift refusal); the owner accepted not-reproduced and authorized no further attempt",
   "attempt_cap": 2,
   "attempts": [
     {
