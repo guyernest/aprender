@@ -81,6 +81,14 @@
       "result": "4800 cells + 10 aborted: I1, I2, I3, I5, I6, I7 and I8 hold; I4 is violated in 1536 cells (sm_caught 936, each other delivery 150), the one remaining ratchet entry (14-18). The transient-fault table grew to 58 single-fault cases (the drop listing and the post-write listing are two more calls)",
       "date": "2026-10-30",
       "head": "736eacdb6"
+    },
+    {
+      "id": "D-k",
+      "what": "the sweep, the redaction tables and the hostile fakes after plan 14-18",
+      "command": "python3 -I scripts/laya_deploy/laya_failure_surface.py --sweep; the sweep test binary with --nocapture",
+      "result": "4800 cells + 10 aborted: I1..I8 all hold, zero violations (failure_surface_sweep_clean, the ratchet empty), with a fourth planted constant (HOSTILE_UNLISTED, under a Cause key outside stage_error's whitelist); 58 single-fault transient cases; the redact, hostile_ and start_error_label runs green",
+      "date": "2026-10-30",
+      "head": "1a0606a98"
     }
   ],
   "state_machine": {
@@ -410,9 +418,9 @@
     {
       "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
       "pattern": "log",
-      "count": 7,
+      "count": 8,
       "classes": {
-        "log-only": 7
+        "log-only": 8
       },
       "rows": [
         "SK-10"
@@ -432,10 +440,10 @@
     {
       "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
       "pattern": "stage-error",
-      "count": 7,
+      "count": 10,
       "classes": {
-        "caller": 3,
-        "static": 4
+        "caller": 4,
+        "static": 6
       },
       "rows": [
         "SK-02",
@@ -458,8 +466,7 @@
       "pattern": "aws-renderer",
       "count": 3,
       "classes": {
-        "caller": 1,
-        "log-only": 2
+        "log-only": 3
       },
       "rows": [
         "SK-01",
@@ -482,9 +489,9 @@
     {
       "file": "crates/aprender-mcp-laya-train-lambda/src/sfn.rs",
       "pattern": "log",
-      "count": 6,
+      "count": 7,
       "classes": {
-        "log-only": 6
+        "log-only": 7
       },
       "rows": [
         "SK-10"
@@ -495,8 +502,7 @@
       "pattern": "start-error",
       "count": 2,
       "classes": {
-        "caller": 1,
-        "static": 1
+        "static": 2
       },
       "rows": [
         "SK-01"
@@ -516,6 +522,17 @@
     },
     {
       "file": "crates/aprender-mcp-laya-train/src/finalize.rs",
+      "pattern": "payload-notes",
+      "count": 2,
+      "classes": {
+        "caller": 2
+      },
+      "rows": [
+        "SK-NOTES"
+      ]
+    },
+    {
+      "file": "crates/aprender-mcp-laya-train/src/finalize.rs",
       "pattern": "stage-error",
       "count": 7,
       "classes": {
@@ -528,14 +545,15 @@
       ]
     },
     {
-      "file": "crates/aprender-mcp-laya-train/src/finalize.rs",
-      "pattern": "payload-notes",
-      "count": 2,
+      "file": "crates/aprender-mcp-laya-train/src/layout.rs",
+      "pattern": "payload-error-assign",
+      "count": 1,
       "classes": {
-        "caller": 2
+        "caller": 1
       },
       "rows": [
-        "SK-NOTES"
+        "SK-02",
+        "SK-06"
       ]
     },
     {
@@ -616,6 +634,29 @@
       ]
     },
     {
+      "file": "crates/aprender-mcp-laya-train/src/redact.rs",
+      "pattern": "log",
+      "count": 1,
+      "classes": {
+        "log-only": 1
+      },
+      "rows": [
+        "SK-10"
+      ]
+    },
+    {
+      "file": "crates/aprender-mcp-laya-train/src/redact.rs",
+      "pattern": "stage-error",
+      "count": 9,
+      "classes": {
+        "caller": 1,
+        "static": 8
+      },
+      "rows": [
+        "SK-02"
+      ]
+    },
+    {
       "file": "crates/aprender-setfit-train-lambda/src/dynamodb.rs",
       "pattern": "aws-renderer",
       "count": 1,
@@ -642,7 +683,7 @@
     },
     {
       "id": "I4",
-      "text": "caller-safe text: the stored payload, verdict.json and manifest.json carry none of the planted hostile constants (an account-id-shaped digit string, an ARN and an ECR host containing it) planted in the Catch Cause, the trainer's refused line, the pack verify and packed lines and an injected S3 error"
+      "text": "caller-safe text: the stored payload, verdict.json and manifest.json carry none of the planted hostile constants (an account-id-shaped digit string, an ARN and an ECR host containing it, and a value no redaction rule knows planted under a Catch Cause key outside stage_error's whitelist, which only the reduction drops) planted in the Catch Cause, the trainer's refused line, the pack verify and packed lines and an injected S3 error. The account id of the run bucket's name in run_prefix and the manifest links is a caller handle (SK-12) and is excluded by design. Closed by 14-18 at three boundaries: StatusPayload::to_value, RedactingBackend and the dispatch code label; the request side is proven by the hostile-backend and hostile-dispatcher tests"
     },
     {
       "id": "I5",
@@ -726,13 +767,7 @@
     "crash",
     "timeout"
   ],
-  "known_defects": [
-    {
-      "id": "I4",
-      "ref": "WR-03",
-      "closes": "14-18"
-    }
-  ],
+  "known_defects": [],
   "rows": [
     {
       "id": "FS-SM-01",
@@ -743,9 +778,10 @@
       "closes": null,
       "test": {
         "file": "scripts/laya_deploy/laya_trainer_stack_check.py",
-        "name": "check_machine"
+        "name": "check_surface_binding"
       },
-      "invariants": []
+      "invariants": [],
+      "note": "bound both ways to the synthesized template by 14-19 (check_surface_binding: states, Catch per state, no-catch states, StartAt and Next, TimeoutSeconds, the status rule and the reconcile rate, each refusing under its own surface-binding-<field> rule)"
     },
     {
       "id": "FS-SM-02",
@@ -790,7 +826,7 @@
       "closes": "14-17",
       "test": {
         "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
-        "name": "failure_surface_sweep_known_defects_only"
+        "name": "failure_surface_sweep_clean"
       },
       "invariants": [
         "I3",
@@ -994,7 +1030,7 @@
       "closes": "14-17",
       "test": {
         "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
-        "name": "failure_surface_sweep_known_defects_only"
+        "name": "failure_surface_sweep_clean"
       },
       "invariants": [
         "I3"
@@ -1072,7 +1108,7 @@
       "closes": "14-17",
       "test": {
         "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
-        "name": "failure_surface_sweep_known_defects_only"
+        "name": "failure_surface_sweep_clean"
       },
       "invariants": [
         "I3"
@@ -1119,7 +1155,7 @@
       "closes": null,
       "test": {
         "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
-        "name": "failure_surface_sweep_known_defects_only"
+        "name": "failure_surface_sweep_clean"
       },
       "invariants": [
         "I3"
@@ -1134,7 +1170,7 @@
       "closes": null,
       "test": {
         "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
-        "name": "failure_surface_sweep_known_defects_only"
+        "name": "failure_surface_sweep_clean"
       },
       "invariants": [
         "I3"
@@ -1149,7 +1185,7 @@
       "closes": null,
       "test": {
         "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
-        "name": "failure_surface_sweep_known_defects_only"
+        "name": "failure_surface_sweep_clean"
       },
       "invariants": [
         "I3"
@@ -1164,7 +1200,7 @@
       "closes": null,
       "test": {
         "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
-        "name": "failure_surface_sweep_known_defects_only"
+        "name": "failure_surface_sweep_clean"
       },
       "invariants": [
         "I3"
@@ -1195,7 +1231,7 @@
       "closes": null,
       "test": {
         "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
-        "name": "failure_surface_sweep_known_defects_only"
+        "name": "failure_surface_sweep_clean"
       },
       "invariants": [
         "I3"
@@ -1561,85 +1597,97 @@
       "id": "SK-01",
       "group": "sink",
       "what": "sfn.rs SfnExecutions::start renders the SDK error (DisplayErrorContext) into StartError.message -> DispatchError -> lib.rs `REFUSED dispatch: {reason}` and the compensated payload's error",
-      "status": "defect",
+      "status": "closed",
       "ref": "WR-03",
       "closes": "14-18",
       "test": {
         "file": "crates/aprender-mcp-laya-train/src/lib.rs",
-        "name": "submit_dispatch_rejected"
+        "name": "hostile_dispatch_reasons_are_caller_safe"
       },
       "invariants": [
         "I4"
-      ]
+      ],
+      "note": "closed by 14-18 (dispatch label, an allowlist): SfnExecutions::start builds StartError.message from start_error_label, 'StartExecution <code>' with the AWS error code only when it is an identifier, else 'StartExecution unknown'; the DisplayErrorContext text goes to tracing::error (log-only). lib.rs also passes every DispatchError reason through caller_safe before the REFUSED dispatch error and the compensated payload (defense in depth); start_error_label_table holds the hostile and benign codes"
     },
     {
       "id": "SK-02",
       "group": "sink",
       "what": "finalizer.rs bounded_error forwards the Catch `Error: Cause` (a DescribeTrainingJob JSON naming the ECR image and role ARN) as stage_error -> finalize.rs payload.error -> the stored payload, verdict.json, train_status",
-      "status": "defect",
+      "status": "closed",
       "ref": "WR-03",
       "closes": "14-18",
       "test": {
         "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
-        "name": "failure_surface_sweep_known_defects_only"
+        "name": "failure_surface_sweep_clean"
       },
       "invariants": [
         "I4"
-      ]
+      ],
+      "note": "closed by 14-18 (the Catch reduction): bounded_error calls redact::stage_error, so the decision gets the Error name when it is an identifier and, from a JSON Cause, only the first four values of FailureReason, errorMessage, StoppedReason, StopCode, Reason, ExitCode, SecondaryStatus and TrainingJobStatus, each caller-safe at 240 characters; a non-JSON Cause is caller-safe at 300; the full text goes to tracing::warn (log-only). The sweep plants a value no redaction rule knows under a Cause key outside the whitelist (HOSTILE_UNLISTED), so I4 sees a forwarded Cause even where the serializer's blacklist would pass it (stage_error_table, M-WR03-c)"
     },
     {
       "id": "SK-03",
       "group": "sink",
       "what": "lib.rs submit: the mint, lock-backend and envelope error texts reach pmcp Error::internal and the compensated payload",
-      "status": "defect",
+      "status": "closed",
       "ref": "WR-03",
       "closes": "14-18",
-      "test": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train/src/lib.rs",
+        "name": "hostile_backend_lock_failure_is_caller_safe"
+      },
       "invariants": [
         "I4"
       ],
-      "note": "untested at HEAD: no test exercises these error paths; 14-18 adds the request-side hostile-backend test"
+      "note": "closed by 14-18 (RedactingBackend): the mint, lock and envelope texts keep their wording, but the backend text inside them is now 'the task store failed on <op>'; hostile_backend_mint_failure_is_caller_safe, hostile_backend_lock_failure_is_caller_safe and hostile_backend_envelope_failure_is_caller_safe plant the DynamoDB renderer's text and find none of it in the pmcp error or the compensated payload"
     },
     {
       "id": "SK-04",
       "group": "sink",
       "what": "lib.rs status: `no task {task_id} on this server: {e}` carries the store's error text to the caller",
-      "status": "defect",
+      "status": "closed",
       "ref": "WR-03",
       "closes": "14-18",
-      "test": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train/src/lib.rs",
+        "name": "hostile_backend_status_and_task_protocol_are_caller_safe"
+      },
       "invariants": [
         "I4"
       ],
-      "note": "untested at HEAD: no test exercises this error path; 14-18 adds it"
+      "note": "closed by 14-18: a NotFound or Expired store error reads 'no task <id> on this server', any other 'the task store could not be read', through caller_safe, never the store's own Display text"
     },
     {
       "id": "SK-05",
       "group": "sink",
       "what": "the sibling DynamoDbTaskBackend (aprender-setfit-train-lambda dynamodb.rs `aws`) renders DisplayErrorContext into BackendError: the text SK-03 and SK-04 forward",
-      "status": "defect",
+      "status": "closed",
       "ref": "WR-03",
       "closes": "14-18",
-      "test": null,
+      "test": {
+        "file": "crates/aprender-mcp-laya-train/src/lib.rs",
+        "name": "hostile_backend_mint_failure_is_caller_safe"
+      },
       "invariants": [
         "I4"
       ],
-      "note": "untested at HEAD: no test exercises the renderer's text; 14-18 wraps the backend (RedactingBackend)"
+      "note": "closed by 14-18 at the laya boundary (the sibling crate is live and unchanged): bootstrap.rs wraps the DynamoDbTaskBackend in RedactingBackend before ServerCtx::new, so every Internal store error is logged in full (eprintln) and returned as a fixed text naming the operation; Conflict, NotFound, Expired and InvalidTransition pass through (task ids only). pmcp's task handlers (tasks/get, tasks/result) read the same wrapped backend (hostile_backend_status_and_task_protocol_are_caller_safe). The finalizer binary is not wrapped: its errors are log-only"
     },
     {
       "id": "SK-06",
       "group": "sink",
       "what": "job-written lines reach the caller verbatim: outcome.refused_line in the error, pack verify_line / packed_line in verdict.pack.line and the pack-refused error",
-      "status": "defect",
+      "status": "closed",
       "ref": "WR-03",
       "closes": "14-18",
       "test": {
         "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
-        "name": "failure_surface_sweep_known_defects_only"
+        "name": "failure_surface_sweep_clean"
       },
       "invariants": [
         "I4"
-      ]
+      ],
+      "note": "closed by 14-18 at the one serializer: StatusPayload::to_value passes error, verdict.pack.line and every note through caller_safe, so the refused line, the verify and packed lines and the pack-refused error are caller-safe in the stored payload, verdict.json, tasks/result and train_status; the real smoke verify line is kept byte for byte (redact_must_keep_table)"
     },
     {
       "id": "SK-07",
@@ -1654,7 +1702,8 @@
       },
       "invariants": [
         "I4"
-      ]
+      ],
+      "note": "log-only sink class (14-18): FinalizerError text becomes the Lambda invocation error and the execution history, never a caller-visible string; the transient table plants hostile store text and finds none of it in the stored payload, verdict.json or manifest.json"
     },
     {
       "id": "SK-08",
@@ -1680,7 +1729,8 @@
         "file": "crates/aprender-mcp-laya-train-lambda/src/sfn.rs",
         "name": "cancel_sink_logs_a_failing_stop_and_returns"
       },
-      "invariants": []
+      "invariants": [],
+      "note": "log-only sink class (14-18): the describe text is printed by the dispatch-unconfirmed eprintln, the stop text by the cancel sink's log; neither reaches a caller (the dispatch label of SK-01 is the only caller-visible StartExecution text)"
     },
     {
       "id": "SK-10",
@@ -1722,28 +1772,29 @@
       "invariants": [
         "I4"
       ],
-      "note": "classified a handle, not a leak: the caller names this bucket in dataset_uri; the planted I4 constants deliberately exclude it. 14-18 must state the exclusion in I4 (its redactor would otherwise break the s3:// handle)"
+      "note": "decided by 14-18: a handle, not a leak. The caller names this bucket itself in dataset_uri, so the account id in run_prefix and the manifest links is a value the caller already holds; redacting it would break the s3:// handle train_status and laya-fetch resolve. caller_safe therefore runs on the free-text fields only (error, verdict.pack.line, notes), never on run_prefix or a link, and I4's planted constants exclude the bucket account id by design (stated in I4); an s3:// URI or a bucket-name account id INSIDE a free-text field reads [redacted]"
     },
     {
       "id": "SK-NOTES",
       "group": "sink",
       "what": "finalize.rs Builder::decide pushes StatusPayload.notes: stage-error-overridden (one fixed sentence) and listed-but-absent (the count and at most eight job-written manifest paths, each clipped to 128 characters) -> the stored payload, verdict.json, tasks/result and train_status. No stage error or infrastructure text by construction, but the paths are job-written, so 14-18 extends its serializer redaction to notes",
-      "status": "defect",
+      "status": "closed",
       "ref": "WR-03",
       "closes": "14-18",
       "test": {
-        "file": "crates/aprender-mcp-laya-train/src/finalize.rs",
-        "name": "finalize_dropped_note"
+        "file": "crates/aprender-mcp-laya-train/src/redact.rs",
+        "name": "redact_notes_through_to_value"
       },
       "invariants": [
         "I4"
-      ]
+      ],
+      "note": "closed by 14-18 at the one serializer: every notes entry passes caller_safe at 1024 characters in StatusPayload::to_value; the fixed prefixes stage-error-overridden and listed-but-absent are kept (the I2 and I3 oracles read them), a job-written path that embeds an account id or an ARN reads [redacted] (M-WR03-h)"
     },
     {
       "id": "FS-AS-01",
       "group": "asset",
       "what": "the finalizer Lambda asset (deploy-extensions/assets/laya-finalizer/bootstrap) is deployed with an existence check only: no commit, clean-tree or sha256 provenance",
-      "status": "defect",
+      "status": "closed",
       "ref": "WR-04",
       "closes": "14-19",
       "test": {
@@ -1751,7 +1802,7 @@
         "name": "selftest"
       },
       "invariants": [],
-      "note": "the ops selftest covers only the ABSENT-asset refusal of cmd_infra; nothing ties the binary to HEAD"
+      "note": "closed by 14-19: the synth writes a provenance sidecar (bootstrap.build.json: commit, clean closure, sha256) beside the asset, and infra diff/deploy refuse an unattributable asset (check_provenance, the provenance cases of the ops selftest). The sidecar goes stale by design whenever a closure file changes (14-17 and 14-18 did): 14-22 re-synths before the owner deploys"
     },
     {
       "id": "FS-UT-01",
@@ -1778,7 +1829,7 @@
       "closes": "14-17",
       "test": {
         "file": "crates/aprender-mcp-laya-train-lambda/src/finalizer.rs",
-        "name": "failure_surface_sweep_known_defects_only"
+        "name": "failure_surface_sweep_clean"
       },
       "invariants": [
         "I3"

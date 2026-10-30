@@ -3382,8 +3382,14 @@ mod tests {
         const HOSTILE_ARN: &str = "arn:aws:iam::987654321098:role/laya-train-execution-dev";
         /// An ECR host that embeds [`HOSTILE_ACCOUNT`].
         const HOSTILE_ECR: &str = "987654321098.dkr.ecr.us-east-1.amazonaws.com";
+        /// A value no redaction rule knows (no ARN, host, URL, account or key
+        /// shape), planted under a Cause key OUTSIDE `stage_error`'s whitelist: only
+        /// the reduction (an allowlist) drops it, so I4 sees a Catch Cause that is
+        /// forwarded instead of reduced even though the blacklist would pass it
+        /// (T-14-86: a shape such as a role session name or a request id).
+        const HOSTILE_UNLISTED: &str = "alias/laya-train-hostile-7f3a";
         /// Every planted constant I4 looks for in caller-readable bytes.
-        const HOSTILE: [&str; 3] = [HOSTILE_ACCOUNT, HOSTILE_ARN, HOSTILE_ECR];
+        const HOSTILE: [&str; 4] = [HOSTILE_ACCOUNT, HOSTILE_ARN, HOSTILE_ECR, HOSTILE_UNLISTED];
 
         /// The trainer's own refusal rule (the part of the line a caller must see).
         const REFUSED_OTHER_RULE: &str = "REFUSED shots-per-class";
@@ -3421,6 +3427,7 @@ mod tests {
                     "TrainingImage": format!("{HOSTILE_ECR}/aprender-laya-train@sha256:{}", sha("image")),
                     "TrainingInputMode": "File",
                 },
+                "OutputDataConfig": { "KmsKeyId": HOSTILE_UNLISTED },
                 "RoleArn": HOSTILE_ARN,
                 "TrainingJobName": format!("laya-{TASK_ID}"),
                 "TrainingJobArn": format!(

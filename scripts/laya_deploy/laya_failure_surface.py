@@ -26,9 +26,10 @@ silently:
 
 `--check` exits 0 with `FAILURE SURFACE OK ...`, or 1 with one `REFUSED surface-<rule>: <detail>` line per failure.
 `--selftest` mutates in-memory copies once per case and requires exactly that case's own rule to refuse it, and the
-unmutated inputs to pass; it ends `FAILURE SURFACE SELFTEST OK <n> cases`. `--sweep` runs the finalizer sweep tests with cargo
-and refuses unless every expected test is reported ok and at least the expected minimum passed; it ends
-`FAILURE SURFACE SWEEP OK`. `--mutations` is the source-mutation runner plans 14-17 and 14-18 register cases in: each
+unmutated inputs to pass; it ends `FAILURE SURFACE SELFTEST OK <n> cases`. `--sweep` runs the finalizer sweep tests and
+14-18's caller-safe text tables and hostile fakes with cargo (one run per crate and filter) and refuses unless every
+expected test is reported ok and each run passed at least its minimum; it ends `FAILURE SURFACE SWEEP OK`. The ratchet
+(`KNOWN_DEFECTS`) is empty since 14-18; the checker accepts the empty const and an empty `known_defects`. `--mutations` is the source-mutation runner plans 14-17 and 14-18 register cases in: each
 case rewrites one anchor of the fixed source on disk, requires the named tests or invariants to turn red, and restores
 the file byte for byte (in a finally block, re-read to prove it); it ends `FAILURE SURFACE MUTATIONS OK <n>/<n>`.
 
@@ -82,17 +83,29 @@ SINK_PATTERNS = {
 }
 SINK_CLASSES = ("caller", "log-only", "static")
 
-# --sweep: the finalizer sweep tests that must run and pass. Later plans extend the table (14-18 renames the sweep).
-SWEEP = {
-    "crate": "aprender-mcp-laya-train-lambda",
-    "filter": "failure_surface",
-    "tests": [
-        "failure_surface_tracer_wr01",
-        "failure_surface_sweep_known_defects_only",
-        "failure_surface_transient_faults",
-    ],
-    "min_passed": 3,
-}
+SERVER = "aprender-mcp-laya-train"
+LAMBDA = "aprender-mcp-laya-train-lambda"
+
+# --sweep: the tests that must run and pass, one cargo run per (crate, filter): the finalizer sweep (renamed
+# failure_surface_sweep_clean by 14-18, whose ratchet is empty), and 14-18's caller-safe text tables and hostile fakes.
+SWEEP = [
+    {"crate": LAMBDA, "filter": "failure_surface",
+     "tests": ["failure_surface_tracer_wr01", "failure_surface_sweep_clean", "failure_surface_transient_faults"],
+     "min_passed": 3},
+    {"crate": SERVER, "filter": "redact",
+     "tests": ["redact_must_redact_table", "redact_must_keep_table", "redact_keeps_the_rest_of_a_redacted_sentence",
+               "redact_digit_boundaries", "redact_is_idempotent_and_bounded",
+               "redact_truncation_never_reveals_an_account_id", "redact_notes_through_to_value",
+               "redact_error_and_pack_line_through_to_value", "stage_error_table",
+               "stage_error_keeps_only_the_first_four_reasons"],
+     "min_passed": 10},
+    {"crate": SERVER, "filter": "hostile_",
+     "tests": ["hostile_backend_mint_failure_is_caller_safe", "hostile_backend_lock_failure_is_caller_safe",
+               "hostile_backend_envelope_failure_is_caller_safe",
+               "hostile_backend_status_and_task_protocol_are_caller_safe", "hostile_dispatch_reasons_are_caller_safe"],
+     "min_passed": 5},
+    {"crate": LAMBDA, "filter": "start_error_label", "tests": ["start_error_label_table"], "min_passed": 1},
+]
 
 # --mutations: the red-side proofs. One case is (id, file, old text, new text, runs): `old` must occur in `file`
 # EXACTLY once (taken verbatim from the fixed source), `new` replaces it, and every run (crate, test filter, expected)
@@ -100,10 +113,15 @@ SWEEP = {
 # `test ...::<name> ... FAILED` line) or an invariant id (the sweep's `violations outside the ratchet: [...(<id>, ...`).
 # Before any mutation each distinct (crate, filter) runs unmutated and must be green with every expected test reported
 # ok (the control: a filter that matches nothing exits 0 with zero tests run). Plans 14-17 and 14-18 register cases.
-SERVER = "aprender-mcp-laya-train"
-LAMBDA = "aprender-mcp-laya-train-lambda"
 FINALIZE_RS = "crates/aprender-mcp-laya-train/src/finalize.rs"
-SWEEP_TEST = "failure_surface_sweep_known_defects_only"
+LAYOUT_RS = "crates/aprender-mcp-laya-train/src/layout.rs"
+REDACT_RS = "crates/aprender-mcp-laya-train/src/redact.rs"
+SFN_RS = "crates/aprender-mcp-laya-train-lambda/src/sfn.rs"
+SWEEP_TEST = "failure_surface_sweep_clean"
+HOSTILE_BACKEND_TESTS = [
+    "hostile_backend_mint_failure_is_caller_safe", "hostile_backend_lock_failure_is_caller_safe",
+    "hostile_backend_envelope_failure_is_caller_safe", "hostile_backend_status_and_task_protocol_are_caller_safe",
+]
 TRACER_TEST = "failure_surface_tracer_wr01"
 
 MUTATIONS = [
@@ -174,6 +192,56 @@ MUTATIONS = [
      "        let _ = dropped_note(&self.input.dropped);\n",
      [(SERVER, "finalize_dropped_note", ["finalize_dropped_note"]),
       (LAMBDA, SWEEP_TEST, ["I2"])]),
+    # WR-03: caller-safe text at the boundaries (plan 14-18). One case per bound: the serializer's error, pack line
+    # and notes redaction, the Catch reduction, the backend wrapper, the dispatch label, the ARN rule, the digit rule.
+    ("M-WR03-a", LAYOUT_RS,
+     "        safe.error = self\n"
+     "            .error\n"
+     "            .as_deref()\n"
+     "            .map(|e| caller_safe(e, MAX_CALLER_TEXT_CHARS));\n",
+     "",
+     [(LAMBDA, SWEEP_TEST, [SWEEP_TEST, "I4"])]),
+    ("M-WR03-b", LAYOUT_RS,
+     "            pack.line = pack\n"
+     "                .line\n"
+     "                .as_deref()\n"
+     "                .map(|l| caller_safe(l, MAX_CALLER_TEXT_CHARS));\n",
+     "            let _ = &pack;\n",
+     [(LAMBDA, SWEEP_TEST, [SWEEP_TEST, "I4"])]),
+    ("M-WR03-h", LAYOUT_RS,
+     "        safe.notes = self\n"
+     "            .notes\n"
+     "            .iter()\n"
+     "            .map(|n| caller_safe(n, MAX_CALLER_TEXT_CHARS))\n"
+     "            .collect();\n",
+     "",
+     [(SERVER, "redact_notes_through_to_value", ["redact_notes_through_to_value"])]),
+    # The raw Cause forwarded: the blacklist still redacts the account shapes, so the sweep sees it through the planted
+    # value no rule knows (HOSTILE_UNLISTED, under a Cause key outside the whitelist).
+    ("M-WR03-c", REDACT_RS,
+     '    let summary = summary.unwrap_or_else(|| "no cause recorded".to_string());\n',
+     '    let summary = summary.unwrap_or_else(|| "no cause recorded".to_string());\n'
+     "    let summary = cause.map_or(summary, str::to_string);\n",
+     [(SERVER, "stage_error_table", ["stage_error_table"]),
+      (LAMBDA, SWEEP_TEST, [SWEEP_TEST, "I4"])]),
+    ("M-WR03-d", REDACT_RS,
+     '                    message: format!("the task store failed on {op}"),\n',
+     "                    message,\n",
+     [(SERVER, "hostile_backend", HOSTILE_BACKEND_TESTS)]),
+    ("M-WR03-e", SFN_RS,
+     '        _ => "StartExecution unknown".to_string(),\n',
+     '        Some(code) => format!("StartExecution {code}"),\n'
+     '        None => "StartExecution unknown".to_string(),\n',
+     [(LAMBDA, "start_error_label", ["start_error_label_table"])]),
+    ("M-WR03-f", REDACT_RS,
+     '    lower.contains("arn:aws")\n'
+     '        || lower.contains("amazonaws.com")\n',
+     '    lower.contains("amazonaws.com")\n',
+     [(SERVER, "redact_must_redact_table", ["redact_must_redact_table"])]),
+    ("M-WR03-g", REDACT_RS,
+     "i - start == ACCOUNT_ID_DIGITS",
+     "i - start >= ACCOUNT_ID_DIGITS",
+     [(SERVER, "redact", ["redact_must_keep_table", "redact_digit_boundaries"])]),
 ]
 
 def read(rel, root=ROOT):
@@ -516,8 +584,9 @@ def edit_axis(a):
     a["axes"][1][1][0] = "vanished"
 
 
-def drop_defect(a):
-    a["known_defects"].pop()
+def add_defect(a):
+    # The ratchet is empty since 14-18, so the drift case ADDS an entry the Rust const does not carry.
+    a["known_defects"].append({"id": "I4", "ref": "WR-03", "closes": "14-18"})
 
 
 def dup_row(a):
@@ -553,8 +622,9 @@ def add_state(a):
 
 
 def defect_without_plan(a):
-    row = next(r for r in a["rows"] if r.get("status") == "defect")
-    row["closes"] = None
+    # No row is a defect since 14-18, so the case turns one into a defect that names no closing plan.
+    row = next((r for r in a["rows"] if r.get("status") == "defect"), a["rows"][0])
+    row["status"], row["ref"], row["closes"] = "defect", "WR-03", None
 
 
 CASES = [
@@ -564,7 +634,7 @@ CASES = [
     ("a row cites an unknown invariant", mutate_artifact(cite_unknown), "surface-invariant-cited"),
     ("a row names a missing test", mutate_artifact(missing_test), "surface-test-exists"),
     ("an axis value edited", mutate_artifact(edit_axis), "surface-axes"),
-    ("a known defect dropped", mutate_artifact(drop_defect), "surface-known-defects"),
+    ("a known defect the Rust ratchet does not carry", mutate_artifact(add_defect), "surface-known-defects"),
     ("a row id duplicated", mutate_artifact(dup_row), "surface-row-ids"),
     ("a schema key removed", mutate_artifact(drop_key), "surface-schema"),
     ("a new sink in an unclassified file", new_sink, "surface-sink-unclassified"),
@@ -611,32 +681,38 @@ def selftest():
 # --------------------------------------------------------------------------------------------- sweep, mutations
 
 def sweep():
-    cmd = ["cargo", "test", "-p", SWEEP["crate"], "--lib", SWEEP["filter"]]
-    print("+ " + " ".join(cmd))
-    r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
-    out = r.stdout
-    refused = []
-    if r.returncode != 0:
-        refused.append("cargo exited %d" % r.returncode)
-    for name in SWEEP["tests"]:
-        if not re.search(r"^test \S*::%s \.\.\. ok$" % re.escape(name), out, re.M):
-            refused.append("%s was not reported ok" % name)
-    passed = [int(n) for n in re.findall(r"^test result: \w+\. (\d+) passed", out, re.M)]
-    total = sum(passed)
-    if total < SWEEP["min_passed"]:
-        refused.append("%d passed, below the minimum %d" % (total, SWEEP["min_passed"]))
-    for line in re.findall(r"^test \S*failure_surface\S* \.\.\. \S+$", out, re.M):
-        print("  " + line)
+    refused, named, total, minimum = [], 0, 0, 0
+    for run in SWEEP:
+        cmd = ["cargo", "test", "-p", run["crate"], "--lib", run["filter"]]
+        print("+ " + " ".join(cmd))
+        r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
+        out = r.stdout
+        before = len(refused)
+        if r.returncode != 0:
+            refused.append("%s %s: cargo exited %d" % (run["crate"], run["filter"], r.returncode))
+        for name in run["tests"]:
+            if not re.search(r"^test \S*::%s \.\.\. ok$" % re.escape(name), out, re.M):
+                refused.append("%s %s: %s was not reported ok" % (run["crate"], run["filter"], name))
+        passed = sum(int(n) for n in re.findall(r"^test result: \w+\. (\d+) passed", out, re.M))
+        if passed < run["min_passed"]:
+            refused.append("%s %s: %d passed, below the minimum %d"
+                           % (run["crate"], run["filter"], passed, run["min_passed"]))
+        names = "|".join(re.escape(t) for t in run["tests"])
+        for line in re.findall(r"^test \S*::(?:%s) \.\.\. \S+$" % names, out, re.M):
+            print("  " + line)
+        if len(refused) > before:
+            for line in (r.stdout + r.stderr).strip().splitlines()[-12:]:
+                print("  | " + line)
+        named += len(run["tests"])
+        total += passed
+        minimum += run["min_passed"]
     if refused:
         for x in refused:
             print("REFUSED surface-sweep: %s" % x)
-        tail = (r.stdout + r.stderr).strip().splitlines()[-12:]
-        for line in tail:
-            print("  | " + line)
         print("FAILURE SURFACE SWEEP FAILED")
         return 1
-    print("FAILURE SURFACE SWEEP OK %d/%d named tests ok, %d passed (minimum %d)"
-          % (len(SWEEP["tests"]), len(SWEEP["tests"]), total, SWEEP["min_passed"]))
+    print("FAILURE SURFACE SWEEP OK %d/%d named tests ok in %d runs, %d passed (minimum %d)"
+          % (named, named, len(SWEEP), total, minimum))
     return 0
 
 
