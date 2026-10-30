@@ -165,6 +165,53 @@
       "reply": "redeploy-now",
       "recorded_by": "orchestrator",
       "channel": "AskUserQuestion answer in the orchestrating session"
+    },
+    {
+      "date": "2026-10-30",
+      "step": "B0 no run in flight",
+      "reply": "owner ran it in-session; printed '0'",
+      "recorded_by": "orchestrator",
+      "note": "first paste broke on a line-wrapped nested quote (zsh 'unmatched'); re-run with the ARN read via jq into a variable, same query"
+    },
+    {
+      "date": "2026-10-30",
+      "step": "B1 config",
+      "reply": "'CONFIG OK deploy-config-dev.toml'",
+      "recorded_by": "orchestrator",
+      "orchestrator_check": "mode 600, no [[iam.statements]], [auth] enabled = false"
+    },
+    {
+      "date": "2026-10-30",
+      "step": "B2 publish attempt 1",
+      "reply": "'DEPLOY FAILED rc=1'",
+      "recorded_by": "orchestrator",
+      "note": "GRANT REVOKED for redeploy, binary built, then cargo pmcp deploy failed 'Token refresh failed: invalid_grant' (expired pmcp.run login) before any upload; crates root RESTORED byte-identical; nothing published. Owner re-ran `cargo pmcp deploy login --target pmcp-run`."
+    },
+    {
+      "date": "2026-10-30",
+      "step": "B2 publish attempt 2",
+      "reply": "'DEPLOY OK aprender-mcp-laya-train'",
+      "recorded_by": "orchestrator",
+      "note": "grant step: 'no inline grant ... nothing to revoke'; deploy output reported oauth_enabled: true (OAuth not reset by this --no-oauth publish); crates RESTORED byte-identical exit 0"
+    },
+    {
+      "date": "2026-10-30",
+      "step": "B3 OAuth",
+      "reply": "'auth-refusal ok: tools/list 401, tools/call 401 after 1 poll(s) (2 s); first_401_utc 2026-10-30T23:35:22Z'",
+      "recorded_by": "orchestrator"
+    },
+    {
+      "date": "2026-10-30",
+      "step": "B4 grant",
+      "reply": "'GRANT OK role pmcp-...-aprender-mcp-laya-train-ExecutionRole-...'",
+      "recorded_by": "orchestrator",
+      "note": "grant recipe confirmed the 401 in its own invocation before put-role-policy"
+    },
+    {
+      "date": "2026-10-30",
+      "step": "B5 authenticated list-tools",
+      "reply": "m2m-token HTTP 200 (auth form); tools/list ok:true naming exactly train, train_status, validate_dataset",
+      "recorded_by": "orchestrator"
     }
   ]
 }
