@@ -188,7 +188,7 @@ None.
 
 ## Next Phase Readiness
 
-- Phase 14's plans are complete. Still open in 14-VERIFICATION human_verification: D-16 (a second reproduction or a waiver), the packing-cancel live check, and now the planned amendment of laya-parity-v1 that follows from D-15 (parameters unspecified, before about 2026-11-28 if motivation-v1-sm is needed again).
+- 21 of Phase 14's 22 plans are executed. Ready for 14-22 (owner-run finalizer redeploy with hash check). Still open in 14-VERIFICATION human_verification: D-16 (a second reproduction or a waiver), the packing-cancel live check, and now the planned amendment of laya-parity-v1 that follows from D-15 (parameters unspecified, before about 2026-11-28 if motivation-v1-sm is needed again).
 
 ## Self-Check: PASSED
 
