@@ -961,7 +961,9 @@ run_leg() {
     printf 'leg %s\nrepeat %s\nsource %s\nprefix %s\ntask_id %s\n' "$leg" "$n" "$src" "$dst" "$uuid" > "${out}/leg.txt"
     : > "${work}/written.txt"
     got="$(aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "$dst" --query 'KeyCount' --output text --profile "$PROFILE" --region "$REGION")"
-    [ "$got" = "0" ] || refuse "prefix: ${dst} is not empty"
+    # aws-cli v2 auto-paginates and prints None, not 0, for KeyCount on an empty prefix
+    # (measured: aws-cli/2.29.0). Any other value, a count included, refuses.
+    case "$got" in 0|None) ;; *) refuse "prefix: ${dst} is not empty (KeyCount ${got})" ;; esac
     aws s3api get-object --bucket "$BUCKET" --key "${src}training-manifest.json" "${work}/training-manifest.json" --profile "$PROFILE" --region "$REGION" > /dev/null
     aws s3api get-object --bucket "$BUCKET" --key "${src}outcome.json" "${work}/outcome.json" --profile "$PROFILE" --region "$REGION" > /dev/null
     python3 -I -c "$PY_ENTRIES" "${work}/training-manifest.json" "$task" > "${work}/entries.txt"
@@ -1714,7 +1716,9 @@ if svc == "s3api" and verb in ("list-objects-v2", "get-object", "copy-object", "
         die("An error occurred (NoSuchBucket)")
     key = opt("--key")
     if verb == "list-objects-v2":
-        done(str(sum(1 for k in store if k.startswith(opt("--prefix")))))
+        n = sum(1 for k in store if k.startswith(opt("--prefix")))
+        # The real aws-cli v2 prints None for KeyCount on an empty prefix (2.29.0).
+        done(str(n) if n else "None")
     if verb == "get-object":
         if key not in store:
             die("An error occurred (NoSuchKey) when calling the GetObject operation")
