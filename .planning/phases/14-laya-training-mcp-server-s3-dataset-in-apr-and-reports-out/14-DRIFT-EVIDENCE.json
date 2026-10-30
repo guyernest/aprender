@@ -15,7 +15,30 @@
     "Then the executor runs: python3 -I scripts/laya_deploy/laya_drift.py collect",
     "Run stage 2 before about 2026-11-28: the motivation-v1-sm source is tagged expire and the 30 day lifecycle rule removes it."
   ],
-  "owner_replies": [],
+  "owner_replies": [
+    {
+      "date": "2026-10-30",
+      "stage": "stage-1 attempt 1",
+      "command": "assume ze-kasher-dev && LAYA_DRIFT_APPROVED=graviton bash models/laya-trainer/drift-graviton.sh smoke:1",
+      "reply": "owner ran it in-session (bang prefix); script refused before any copy: 'REFUSED prefix: runs/drift-smoke/974b00e8-.../ is not empty'",
+      "recorded_by": "orchestrator",
+      "note": "false refusal: aws-cli/2.29.0 prints None for KeyCount on an empty prefix; owner-run diagnostic showed 'None\\n'. Fixed in 5353b8727, script regenerated; no object written, no task run."
+    },
+    {
+      "date": "2026-10-30",
+      "stage": "stage-1",
+      "command": "assume ze-kasher-dev && LAYA_DRIFT_APPROVED=graviton bash models/laya-trainer/drift-graviton.sh smoke:1",
+      "reply": "owner ran it in-session (bang prefix); last line 'DRIFT GRAVITON DONE smoke:1', container_exit 0",
+      "recorded_by": "orchestrator"
+    },
+    {
+      "date": "2026-10-30",
+      "stage": "stage-2",
+      "command": "assume ze-kasher-dev && LAYA_DRIFT_APPROVED=graviton bash models/laya-trainer/drift-graviton.sh smoke:2 motivation:3",
+      "reply": "owner ran it in-session (bang prefix); last line 'DRIFT GRAVITON DONE smoke:2 motivation:3', five legs container_exit 0",
+      "recorded_by": "orchestrator"
+    }
+  ],
   "owner_script": {
     "path": "models/laya-trainer/drift-graviton.sh (gitignored: it holds the account id)",
     "sha256": "e6917dc4d4092cdc1a313ce59459bf46a83027ff73018382e3e91aeea295c353",
