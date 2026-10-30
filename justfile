@@ -1367,7 +1367,9 @@ laya-failure-surface *args:
 
 # Synthesize the Laya training server's two CDK stacks OFFLINE and assert their shape (Phase 14, plan 14-08; D-01, D-02,
 # D-12, D-13, D-14, D-19). Cross-builds the finalizer for aarch64 (glibc floor <= 2.34), installs it as the Lambda asset
-# deploy-extensions/assets/laya-finalizer/bootstrap, synthesizes the images stack and the trainer stack with no
+# deploy-extensions/assets/laya-finalizer/bootstrap with its build record bootstrap.build.json beside it (plan 14-19: commit,
+# cargo-tree source closure, sha256; `laya-trainer-infra diff|deploy` refuse an asset it cannot attribute to a clean,
+# committed closure), synthesizes the images stack and the trainer stack with no
 # credentials, no profile and no notices (so no account is ever contacted and the templates do not depend on whose
 # machine ran them), runs scripts/laya_deploy/laya_trainer_stack_check.py on both templates and prints TRAINER SYNTH OK.
 # env is dev or prod only. With no digests, all-zero placeholders are used and said so: that is for a synth only, never a
@@ -1397,6 +1399,9 @@ laya-trainer-synth env="dev" train_digest="" pack_digest="":
     mkdir -p "$ASSET"
     cp "$BIN" "$ASSET/bootstrap"
     chmod 0755 "$ASSET/bootstrap"
+    # Plan 14-19 (WR-04): record what the asset was built from (commit, the cargo-tree source closure, sha256, target,
+    # UTC time) in $ASSET/bootstrap.build.json; `laya-trainer-infra diff|deploy` refuse an asset it cannot attribute.
+    python3 -I scripts/laya_deploy/laya_trainer_ops.py finalizer-provenance write "$ASSET" --target {{target}}
     OFFLINE_ENV="AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null AWS_EC2_METADATA_DISABLED=true"
     synth() {
         (cd deploy-extensions && env -u AWS_PROFILE -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN -u AWS_REGION -u AWS_DEFAULT_REGION \

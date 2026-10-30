@@ -9,6 +9,7 @@
     python3 -I scripts/laya_deploy/laya_trainer_ops.py [--state-dir DIR] config ENV PROFILE [--template FILE   (DRY_RUN=1 only)]
     python3 -I scripts/laya_deploy/laya_trainer_ops.py [--state-dir DIR] deploy ENV PROFILE
     python3 -I scripts/laya_deploy/laya_trainer_ops.py [--state-dir DIR] grant  ENV PROFILE        (no URL, by design)
+    python3 -I scripts/laya_deploy/laya_trainer_ops.py finalizer-provenance write|verify ASSET_DIR [--target TRIPLE]
     python3 -I scripts/laya_deploy/laya_trainer_ops.py --write-placeholder-state DIR [--env dev|prod]
     python3 -I scripts/laya_deploy/laya_trainer_ops.py --selftest
 
@@ -49,6 +50,16 @@ deploy-extensions/container/pack-arm64/context-paths.txt) plus the image's Docke
 root (`docker build -f $DOCKERFILE .`) and which the pack list does not name. The clean-tree check is scoped to exactly those
 paths, so a modified .planning/ file never refuses a build. Zip entries are sorted with fixed timestamps.
 
+Finalizer provenance (plan 14-19, WR-04). `just laya-trainer-synth` runs `finalizer-provenance write` after it copies the
+finalizer into deploy-extensions/assets/laya-finalizer/, which writes bootstrap.build.json beside it: the commit, the source
+closure (the workspace directories `cargo tree -p aprender-mcp-laya-train-lambda -e normal --prefix none --format {p} --target
+<triple>` names with a local path, plus Cargo.lock, Cargo.toml and rust-toolchain.toml), whether those paths were clean, the
+binary's sha256, the target and the UTC time. A dirty closure is recorded, not refused, at write time. `infra diff` and `infra
+deploy` then refuse (`REFUSED infra: finalizer provenance: <reason>`; a dry run notes it) unless the asset's sha256 is the
+recorded one, the build was clean, the recorded commit is an ancestor of HEAD, no closure path differs between it and HEAD and
+none is dirty now. The check runs after the account check and before any cdk call. It attests what was built from what; it is
+not byte reproducibility (a re-synth of unchanged source writes a different binary and a new sidecar).
+
 Publishing the request function (plan 14-10, D-10). `config` fills the tracked deploy template's three placeholders from
 outputs-<env>.json into <state-dir>/deploy-config-<env>.toml (mode 600); the template declares NO [[iam.statements]] and
 `[auth] enabled = false`, and a template that declares IAM is refused. `deploy` first revokes any inline grant
@@ -70,7 +81,7 @@ confirmed (tools/list answered <code>)`, or `REFUSED grant: endpoint unreachable
 connect), and only then `_laya-account-check`, the role lookup and the put-role-policy run. A live grant needs
 LAYA_TRAINER_APPROVED_GRANT=<env>. A 401 seen on an unrelated endpoint can therefore never authorize this function's grant.
 
-stdlib only. Every external command goes through ONE Runner (aws, npx cdk, git, just); --selftest replaces it with a
+stdlib only. Every external command goes through ONE Runner (aws, npx cdk, git, just, cargo tree); --selftest replaces it with a
 simulated world and never reaches AWS, the network or the real account.
 """
 
@@ -133,7 +144,8 @@ IMAGES_OUTPUT_KEYS = ("ContextBucketName", "TrainRepoUri", "PackRepoUri", "Train
 TRAINER_OUTPUT_KEYS = ("BucketName", "TableName", "StateMachineArn", "FinalizerName", "SageMakerRoleArn", "TrainRepoUri",
                        "PackTaskDefinitionArn", "ClusterArn", "SubnetIds", "SecurityGroupId", "FinalizerDlqUrl",
                        "RequestLambdaPolicy")
-FINALIZER_ASSET = "deploy-extensions/assets/laya-finalizer/bootstrap"
+FINALIZER_DIR = "deploy-extensions/assets/laya-finalizer"
+FINALIZER_ASSET = FINALIZER_DIR + "/bootstrap"
 INFRA_ACTIONS = ("diff-images", "deploy-images", "outputs-images", "diff", "deploy", "outputs")
 
 
@@ -235,6 +247,7 @@ class Ctx:
         self.is_ignored = is_ignored or self._git_ignored
         self.file_exists = file_exists or os.path.isfile
         self.base_stage = str(self.repo_root / BASE_STAGE_JSON)
+        self.finalizer_dir = self.repo_root / FINALIZER_DIR
         self.state = None
         self.target = ""
         self.suffix = ""
@@ -604,6 +617,249 @@ def first_line(text):
     return lines[-1][:160] if lines else "no error text"
 
 
+# ---- finalizer provenance (plan 14-19; WR-04, 14-SECURITY W-3) ------------------------------------------------
+#
+# The finalizer is the one writer of the terminal record, the verdict, the manifest, the tags and the lock release,
+# and its Lambda asset is an UNTRACKED binary (deploy-extensions/assets/ is gitignored) written by `just
+# laya-trainer-synth` from whatever the working tree held. `finalizer-provenance write` records, beside the asset,
+# what it was built from; `infra diff` and `infra deploy` refuse an asset that record cannot attribute to a commit on
+# HEAD's history and a source closure that is clean and unchanged since. This is ATTESTATION of what was built from
+# what, not byte reproducibility (W-3 stays open): a re-synth of unchanged source yields a different binary and a new
+# sidecar. The closure is DERIVED with cargo tree (never a hard-coded list) and is scoped, so a commit touching only
+# other paths (planning documents) never refuses, while a commit touching any closure crate, Laya or not, does.
+
+FINALIZER_SIDECAR = "bootstrap.build.json"
+FINALIZER_SCHEMA = "laya-finalizer-build-v1"
+FINALIZER_PACKAGE = "aprender-mcp-laya-train-lambda"
+FINALIZER_TARGET = "aarch64-unknown-linux-gnu"
+CLOSURE_ROOT_FILES = ("Cargo.lock", "Cargo.toml", "rust-toolchain.toml")
+TARGET_RE = re.compile(r"[a-z0-9_]+(?:-[a-z0-9_.]+){1,3}")
+CLOSURE_PATH_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*)*")
+TREE_GROUP_RE = re.compile(r"\(([^()]*)\)")
+NAME_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*")
+
+
+def cargo_tree_argv(target):
+    """The ONE closure derivation: every package the finalizer's package links, over normal edges, for the build target."""
+    return ["cargo", "tree", "-p", FINALIZER_PACKAGE, "-e", "normal", "--prefix", "none", "--format", "{p}", "--target", target]
+
+
+def parse_closure(tree_text, repo_root):
+    """cargo tree `{p}` lines -> ({crate name: repository-relative dir}, [local paths outside the repository]).
+
+    A line names a package and, for a path dependency, its absolute directory in parentheses; a registry or git
+    dependency carries no absolute path (`(proc-macro)` and `(*)` are markers, a git source is a URL). Duplicates
+    collapse. Only the absolute-path group is read, so a marker can never be mistaken for a crate."""
+    root = Path(repo_root).resolve()
+    crates, outside = {}, set()
+    for raw in tree_text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        name = line.split(" ", 1)[0]
+        for grp in TREE_GROUP_RE.findall(line):
+            if not grp.startswith("/"):
+                continue
+            p = Path(grp).resolve()
+            try:
+                rel = p.relative_to(root).as_posix()
+            except ValueError:
+                outside.add(grp)
+                continue
+            if NAME_RE.fullmatch(name):
+                crates[name] = rel or "."
+    return crates, sorted(outside)
+
+
+def closure_paths(crates):
+    return sorted(set(crates.values()) | set(CLOSURE_ROOT_FILES))
+
+
+def porcelain_paths(text):
+    names = []
+    for ln in text.splitlines():
+        if len(ln) < 4:
+            continue
+        n = ln[3:]
+        if " -> " in n:
+            n = n.split(" -> ", 1)[1]
+        names.append(n.strip('"'))
+    return sorted(set(names))
+
+
+def git_head(ctx):
+    return ctx.runner.run(["git", "--literal-pathspecs", "rev-parse", "HEAD"], local=True, cwd=str(ctx.repo_root)).out.strip()
+
+
+def git_dirty(ctx, paths):
+    """Closure paths with uncommitted changes (untracked files included); None when git could not answer."""
+    r = ctx.runner.run(["git", "--literal-pathspecs", "status", "--porcelain", "--untracked-files=all", "--", *paths],
+                       local=True, cwd=str(ctx.repo_root))
+    return porcelain_paths(r.out) if r.rc == 0 else None
+
+
+def git_is_ancestor(ctx, commit):
+    r = ctx.runner.run(["git", "--literal-pathspecs", "merge-base", "--is-ancestor", commit, "HEAD"], local=True, cwd=str(ctx.repo_root))
+    return r.rc == 0
+
+
+def git_changed_since(ctx, commit, paths):
+    """Closure files that differ between the build commit and HEAD; None when git could not answer."""
+    r = ctx.runner.run(["git", "--literal-pathspecs", "diff", "--name-only", commit, "HEAD", "--", *paths],
+                       local=True, cwd=str(ctx.repo_root))
+    return sorted(n for n in r.out.splitlines() if n) if r.rc == 0 else None
+
+
+def sidecar_shape(sc):
+    """The first malformed field of a sidecar of the right schema, or None."""
+    if not isinstance(sc.get("commit"), str) or not COMMIT_RE.fullmatch(sc["commit"]):
+        return "commit is not a 40-hex commit"
+    cl = sc.get("closure")
+    if not isinstance(cl, list) or not cl or not all(isinstance(p, str) and CLOSURE_PATH_RE.fullmatch(p) and ".." not in p.split("/")
+                                                     for p in cl):
+        return "closure is not a non-empty list of repository-relative paths"
+    if not isinstance(sc.get("closure_clean"), bool):
+        return "closure_clean is not a boolean"
+    if not isinstance(sc.get("dirty"), list) or not all(isinstance(p, str) for p in sc["dirty"]):
+        return "dirty is not a list of paths"
+    if not isinstance(sc.get("bootstrap_sha256"), str) or not SHA_RE.fullmatch(sc["bootstrap_sha256"]):
+        return "bootstrap_sha256 is not 64 hex"
+    if not isinstance(sc.get("target"), str) or not TARGET_RE.fullmatch(sc["target"]):
+        return "target is not a target triple"
+    if not isinstance(sc.get("built_at"), str) or not sc["built_at"]:
+        return "built_at is absent"
+    return None
+
+
+def first_of(names):
+    return names[0] + (" (and %d more)" % (len(names) - 1) if len(names) > 1 else "")
+
+
+def check_provenance(sidecar, facts):
+    """The pure rule: the first reason the asset cannot be attributed, or None. Every reason opens with its own phrase.
+
+    facts = {asset_sha256, is_ancestor, changed (list | None), dirty (list | None)}, gathered from the asset and git."""
+    if sidecar is None:
+        return "sidecar absent: no %s beside the asset" % FINALIZER_SIDECAR
+    if not isinstance(sidecar, dict) or sidecar.get("schema") != FINALIZER_SCHEMA:
+        return "schema: %s is not a %s record" % (FINALIZER_SIDECAR, FINALIZER_SCHEMA)
+    bad = sidecar_shape(sidecar)
+    if bad:
+        return "schema: %s %s" % (FINALIZER_SIDECAR, bad)
+    if facts.get("asset_sha256") != sidecar["bootstrap_sha256"]:
+        return "sha mismatch: the asset's sha256 %s is not the recorded %s" % (str(facts.get("asset_sha256"))[:16], sidecar["bootstrap_sha256"][:16])
+    if not sidecar["closure_clean"]:
+        return "built from a dirty closure: %s" % first_of(sorted(sidecar["dirty"]) or ["(no path recorded)"])
+    if not facts.get("is_ancestor"):
+        return "commit not an ancestor of HEAD: the asset was built at %s" % sidecar["commit"][:12]
+    if facts.get("changed") is None:
+        return "closure path changed since the build: git could not diff %s..HEAD" % sidecar["commit"][:12]
+    if facts["changed"]:
+        return "closure path changed since the build: %s" % first_of(facts["changed"])
+    if facts.get("dirty") is None:
+        return "closure path dirty: git status could not answer"
+    if facts["dirty"]:
+        return "closure path dirty: %s" % first_of(facts["dirty"])
+    return None
+
+
+def read_sidecar(asset_dir):
+    path = Path(asset_dir) / FINALIZER_SIDECAR
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return "<unreadable>"
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return "<not JSON>"
+
+
+def gather_provenance(ctx, asset_dir):
+    """The thin, impure half: (sidecar, facts). Git is asked only about a sidecar whose shape check_provenance accepts."""
+    sidecar = read_sidecar(asset_dir)
+    boot = Path(asset_dir) / "bootstrap"
+    facts = {"asset_sha256": sha256_file(boot) if boot.is_file() else None, "is_ancestor": False, "changed": None, "dirty": None}
+    if isinstance(sidecar, dict) and sidecar.get("schema") == FINALIZER_SCHEMA and sidecar_shape(sidecar) is None:
+        facts["is_ancestor"] = git_is_ancestor(ctx, sidecar["commit"])
+        facts["changed"] = git_changed_since(ctx, sidecar["commit"], sidecar["closure"]) if facts["is_ancestor"] else None
+        facts["dirty"] = git_dirty(ctx, sidecar["closure"])
+    return sidecar, facts
+
+
+def build_sidecar(ctx, asset_dir, target, crates):
+    """The record `write` stores. It does not refuse a dirty closure (an offline synth from a dirty tree stays possible);
+    it records closure_clean false and the dirty paths, and the deploy path refuses that record."""
+    boot = Path(asset_dir) / "bootstrap"
+    if not boot.is_file():
+        refuse("provenance", "no finalizer binary at %s; the synth must copy it there first" % boot)
+    head = git_head(ctx)
+    if not COMMIT_RE.fullmatch(head):
+        refuse("provenance", "git rev-parse HEAD did not answer a 40-hex commit")
+    paths = closure_paths(crates)
+    dirty = git_dirty(ctx, paths)
+    if dirty is None:
+        refuse("provenance", "git status over the closure failed")
+    return {"schema": FINALIZER_SCHEMA, "commit": head, "closure": paths, "closure_crates": sorted(crates),
+            "closure_clean": not dirty, "dirty": dirty, "bootstrap_sha256": sha256_file(boot), "target": target,
+            "built_at": ctx.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "note": "attestation of what was built from what, not byte reproducibility; carries no secret"}
+
+
+def derive_closure(ctx, target):
+    r = ctx.runner.run(cargo_tree_argv(target), local=True, cwd=str(ctx.repo_root))
+    if r.rc != 0:
+        refuse("provenance", "cargo tree failed (rc %d): %s" % (r.rc, first_line(r.err)))
+    crates, outside = parse_closure(r.out, ctx.repo_root)
+    if outside:
+        refuse("provenance", "the closure has a path dependency outside the repository (%s); git cannot attest it" % outside[0])
+    if FINALIZER_PACKAGE not in crates:
+        refuse("provenance", "cargo tree did not name %s with a local path" % FINALIZER_PACKAGE)
+    return crates
+
+
+def write_provenance(ctx, asset_dir, target):
+    sc = build_sidecar(ctx, asset_dir, target, derive_closure(ctx, target))
+    path = Path(asset_dir) / FINALIZER_SIDECAR
+    tmp = Path(asset_dir) / (".%s.tmp-%d" % (FINALIZER_SIDECAR, os.getpid()))
+    tmp.write_text(json.dumps(sc, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+    return sc
+
+
+def verify_provenance(ctx, asset_dir=None):
+    sidecar, facts = gather_provenance(ctx, asset_dir or ctx.finalizer_dir)
+    return check_provenance(sidecar, facts)
+
+
+def cmd_provenance(ctx, pos, opts):
+    """`finalizer-provenance write ASSET_DIR [--target T]` (run by just laya-trainer-synth) | `verify ASSET_DIR`. No AWS call."""
+    if len(pos) != 2 or pos[0] not in ("write", "verify"):
+        refuse("usage", "finalizer-provenance write|verify ASSET_DIR [--target TRIPLE]")
+    verb, asset_dir = pos[0], Path(pos[1]).resolve()
+    target = opts.get("target", FINALIZER_TARGET)
+    if not TARGET_RE.fullmatch(target):
+        refuse("usage", "--target is not a target triple: %r" % target[:40])
+    if verb == "write":
+        sc = write_provenance(ctx, asset_dir, target)
+        ctx.say("FINALIZER PROVENANCE WRITTEN commit=%s closure=%d paths (%d crates) clean=%s sha256=%s"
+                % (sc["commit"][:12], len(sc["closure"]), len(sc["closure_crates"]), str(sc["closure_clean"]).lower(), sc["bootstrap_sha256"][:16]))
+        if not sc["closure_clean"]:
+            ctx.warn("WARNING: built from a dirty closure (%s); `infra diff` and `infra deploy` will refuse this asset until a "
+                     "clean re-synth" % first_of(sc["dirty"]))
+        return 0
+    if opts.get("target"):
+        refuse("usage", "--target is for write only")
+    why = verify_provenance(ctx, asset_dir)
+    if why:
+        refuse("provenance", "finalizer provenance: %s" % why)
+    ctx.say("FINALIZER PROVENANCE OK")
+    return 0
+
+
 # ---- infra ---------------------------------------------------------------------------------------------------
 
 def load_image_digests(ctx, env):
@@ -665,15 +921,28 @@ def cmd_infra(ctx, pos, opts):
         refuse("usage", "infra ACTION must be one of %s, got %r" % (", ".join(INFRA_ACTIONS), action[:40]))
     state_dir(ctx, opts.get("state_dir"), create=not ctx.dry)
     digests = None
+    asset_present = False
     if action in ("diff", "deploy"):
         digests = load_image_digests(ctx, env)
-        if not ctx.file_exists(str(ctx.repo_root / FINALIZER_ASSET)):
+        asset_present = ctx.file_exists(str(ctx.finalizer_dir / "bootstrap"))
+        if not asset_present:
             msg = "the finalizer asset %s is absent; run `just laya-trainer-synth %s` to build it" % (FINALIZER_ASSET, env)
             if ctx.dry:
                 ctx.say("DRY RUN NOTE: a live run would be REFUSED infra: " + msg)
             else:
                 refuse("infra", msg)
     region = connect(ctx, profile)
+    if asset_present:
+        # After the account check (which stays the first command), before any cdk call: the asset must be attributable
+        # to a commit on HEAD's history and a closure clean and unchanged since (plan 14-19, WR-04).
+        why = verify_provenance(ctx)
+        if why:
+            msg = ("finalizer provenance: %s; re-run `just laya-trainer-synth %s` on a clean, committed closure, then diff, "
+                   "then deploy" % (why, env))
+            if ctx.dry:
+                ctx.say("DRY RUN NOTE: a live run would be REFUSED infra: " + msg)
+            else:
+                refuse("infra", msg)
     cwd = str(ctx.repo_root / "deploy-extensions")
     cenv = child_env(profile, region)
 
@@ -1455,12 +1724,13 @@ def cmd_grant(ctx, pos, opts):
 # ---- dispatch ------------------------------------------------------------------------------------------------
 
 VALUE_OPTS = {"--state-dir": "state_dir", "--tar": "tar", "--expect": "expect", "--stage-json": "stage_json", "--env": "env",
-              "--template": "template"}
+              "--template": "template", "--target": "target"}
 FLAG_OPTS = {"--list-files": "list_files"}
 COMMANDS = {"image": cmd_image, "infra": cmd_infra, "stage": cmd_stage, "probe": cmd_probe, "config": cmd_config, "deploy": cmd_deploy,
-            "grant": cmd_grant}
+            "grant": cmd_grant, "finalizer-provenance": cmd_provenance}
 SUBCOMMAND_OPTS = {"image": ("state_dir", "list_files"), "infra": ("state_dir",), "stage": ("state_dir", "tar", "expect", "stage_json"),
-                   "probe": ("state_dir",), "config": ("state_dir", "template"), "deploy": ("state_dir",), "grant": ("state_dir",)}
+                   "probe": ("state_dir",), "config": ("state_dir", "template"), "deploy": ("state_dir",), "grant": ("state_dir",),
+                   "finalizer-provenance": ("target",)}
 
 
 def parse_args(argv):
@@ -1499,7 +1769,7 @@ def main(argv, ctx=None):
             refuse("usage", "usage: laya_trainer_ops.py [--state-dir DIR] image|infra|stage|probe ... (see the module docstring)")
         cmd, rest = pos[0], pos[1:]
         if cmd not in COMMANDS:
-            refuse("usage", "unknown subcommand %r (image, infra, stage, probe, config, deploy, grant)" % cmd[:40])
+            refuse("usage", "unknown subcommand %r (image, infra, stage, probe, config, deploy, grant, finalizer-provenance)" % cmd[:40])
         allowed = SUBCOMMAND_OPTS[cmd]
         for k in opts:
             if k not in allowed:
@@ -1543,6 +1813,9 @@ class Sim:
         self.account_refusal = False
         self.dirty = []
         self.tree = []
+        self.ancestor = True
+        self.changed = []
+        self.asset_dir = None
         self.real_git = False
         self.build_statuses = ["IN_PROGRESS", "IN_PROGRESS", "SUCCEEDED"]
         self.build_polls = 0
@@ -1625,6 +1898,10 @@ class Sim:
             return Result(0, "".join(n + "\n" for n in sorted(self.tree) if any(covers(s, n) for s in specs)), "")
         if sub == "status":
             return Result(0, "".join("%s %s\n" % (flag, n) for flag, n in self.dirty if any(covers(s, n) for s in specs)), "")
+        if sub == "merge-base":
+            return Result(0 if self.ancestor else 1, "", "")
+        if sub == "diff":
+            return Result(0, "".join(n + "\n" for n in sorted(self.changed) if any(covers(s, n) for s in specs)), "")
         if sub == "archive":
             out = rest[rest.index("-o") + 1]
             with tarfile.open(out, "w") as tf:
@@ -1828,11 +2105,25 @@ def selftest():
         d.mkdir(parents=True)
         return d
 
+    SIM_CRATES = {FINALIZER_PACKAGE: "crates/" + FINALIZER_PACKAGE, "aprender-core": "crates/aprender-core"}
+
+    def sim_sidecar(adir, **over):
+        sc = {"schema": FINALIZER_SCHEMA, "commit": Sim.HEAD, "closure": closure_paths(SIM_CRATES), "closure_crates": sorted(SIM_CRATES),
+              "closure_clean": True, "dirty": [], "bootstrap_sha256": sha256_file(adir / "bootstrap"), "target": FINALIZER_TARGET,
+              "built_at": "2026-10-29T12:34:56Z"}
+        sc.update(over)
+        return sc
+
     def world(real_git=False, stateless=False):
         d = fresh("w")
         sim = Sim(d)
         sim.real_git = real_git
         sim.tree = list(DEFAULT_TREE)
+        adir = d / "asset"
+        adir.mkdir()
+        (adir / "bootstrap").write_bytes(b"\x7fELF finalizer bytes\n")
+        (adir / FINALIZER_SIDECAR).write_text(json.dumps(sim_sidecar(adir)))
+        sim.asset_dir = adir
         sdir = d / "state"
         sdir.mkdir(mode=0o700)
         if not stateless:
@@ -1854,6 +2145,8 @@ def selftest():
         ctx = Ctx(runner=runner, env=env, stdout=out, stderr=err, sleep=lambda s: sim.clock.__setitem__(0, sim.clock[0] + s),
                   file_exists=file_exists or (lambda p: True))
         ctx.clock = lambda: sim.clock[0]
+        if sim.asset_dir is not None:
+            ctx.finalizer_dir = sim.asset_dir
         if base_stage:
             ctx.base_stage = str(base_stage)
         ctx.utcnow = lambda: datetime(2026, 10, 29, 12, 34, 56, tzinfo=timezone.utc)
@@ -1976,6 +2269,36 @@ def selftest():
     case("infra-deploy-guard", a and b and r["rc"] == 0 and r["out"].rstrip().endswith("AWS CALLS: 0") and r2["rc"] == 2 and "no built image digests" in r2["err"]
          and r3["rc"] == 2 and "REFUSED infra: the finalizer asset" in r3["err"] and r4["rc"] == 0 and "DRY RUN NOTE" in r4["out"],
          "no images file, an all-zero digest and a malformed digest are refused (also under diff); an absent finalizer asset refuses live and is noted in a dry run")
+
+    # ---- infra-provenance-tracer (plan 14-19, WR-04): the sidecar decides, end to end through go()
+    def cdk_acts(sim):
+        return [c[2] for c in sim.calls if c[:2] == ["npx", "cdk"]]
+
+    sim_a, sdir_a = world()
+    ra_dry = go(sim_a, sdir_a, ["infra", "deploy", "dev", PROFILE], dry=True)
+    ra_live = go(sim_a, sdir_a, ["infra", "deploy", "dev", PROFILE])
+    benign = (ra_dry["rc"] == 0 and ra_dry["out"].rstrip().endswith("AWS CALLS: 0") and "finalizer provenance" not in ra_dry["out"] + ra_dry["err"]
+              and ra_live["rc"] == 0 and ra_live["out"].rstrip().endswith("INFRA OK deploy") and cdk_acts(sim_a) == ["diff", "deploy"]
+              and any(c[:4] == ["git", "--literal-pathspecs", "merge-base", "--is-ancestor"] for c in sim_a.calls))
+    sim_b, sdir_b = world()
+    (sim_b.asset_dir / "bootstrap").write_bytes(b"\x7fELF a different finalizer\n")
+    rb_live = go(sim_b, sdir_b, ["infra", "deploy", "dev", PROFILE])
+    rb_diff = go(sim_b, sdir_b, ["infra", "diff", "dev", PROFILE])
+    rb_dry = go(sim_b, sdir_b, ["infra", "deploy", "dev", PROFILE], dry=True)
+    tampered = (rb_live["rc"] == 2 and "REFUSED infra: finalizer provenance: sha mismatch" in rb_live["err"] and "just laya-trainer-synth dev" in rb_live["err"]
+                and rb_diff["rc"] == 2 and "finalizer provenance: sha mismatch" in rb_diff["err"] and cdk_acts(sim_b) == []
+                and rb_dry["rc"] == 0 and "DRY RUN NOTE: a live run would be REFUSED infra: finalizer provenance: sha mismatch" in rb_dry["out"])
+    sim_c, sdir_c = world()
+    (sim_c.asset_dir / FINALIZER_SIDECAR).write_text(json.dumps(sim_sidecar(sim_c.asset_dir, closure_clean=False,
+                                                                            dirty=["crates/aprender-core/src/lib.rs"])))
+    rc_live = go(sim_c, sdir_c, ["infra", "deploy", "dev", PROFILE])
+    rc_dry = go(sim_c, sdir_c, ["infra", "diff", "dev", PROFILE], dry=True)
+    dirty_built = (rc_live["rc"] == 2 and "REFUSED infra: finalizer provenance: built from a dirty closure: crates/aprender-core/src/lib.rs" in rc_live["err"]
+                   and cdk_acts(sim_c) == [] and rc_dry["rc"] == 0
+                   and "DRY RUN NOTE: a live run would be REFUSED infra: finalizer provenance: built from a dirty closure" in rc_dry["out"])
+    case("infra-provenance-tracer", benign and tampered and dirty_built,
+         "a matching sidecar deploys (dry: AWS CALLS: 0); a changed asset byte (sha mismatch) and a dirty-closure build are refused live with no "
+         "cdk call and noted under DRY_RUN (benign=%s tampered=%s dirty=%s)" % (benign, tampered, dirty_built))
 
     # ---- infra-order
     sim, sdir = world()
