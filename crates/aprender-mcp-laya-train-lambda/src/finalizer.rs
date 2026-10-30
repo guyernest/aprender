@@ -39,6 +39,7 @@ use aprender_mcp_laya_train::layout::{
     SCHEMA_EXECUTION_INPUT, SCHEMA_MANIFEST, TASK_TTL_MS,
 };
 use aprender_mcp_laya_train::lock;
+use aprender_mcp_laya_train::redact::stage_error;
 use aprender_mcp_laya_train::{AprenderTaskStore, StoredTask, TaskBackend};
 use pmcp::server::task_store::TaskStore;
 use pmcp::types::{CallToolResult, Content, TaskStatus};
@@ -60,9 +61,6 @@ pub const EVENT_DETAIL_TYPE: &str = "Step Functions Execution Status Change";
 
 /// Largest JSON object the finalizer reads from a job-written key.
 const MAX_JSON_BYTES: usize = 1_048_576;
-
-/// Longest stage error the finalizer hands the decision (the decision clips it again).
-const MAX_STAGE_ERROR_CHARS: usize = 2_048;
 
 /// The object names that inventory a run's other objects and so cannot list
 /// themselves. None is a manifest entry, but each is a retention-tag target when it
@@ -263,13 +261,19 @@ fn parse_execution_input(value: &serde_json::Value) -> Result<ExecutionInput, Fi
     parsed.map_err(|e| refused(format!("the execution input is not the closed input: {e}")))
 }
 
-fn bounded_error(error: &RawError) -> String {
-    let text = format!(
-        "{}: {}",
-        error.error.as_deref().unwrap_or("error"),
-        error.cause.as_deref().unwrap_or("no cause recorded")
+/// The Catch's `{Error, Cause}` as the decision may carry it to a caller: REDUCED by
+/// [`aprender_mcp_laya_train::redact::stage_error`] (an identifier name and the
+/// whitelisted reason keys, caller-safe and bounded), never forwarded (WR-03, SK-02).
+/// The Cause is a `DescribeTrainingJob` or `DescribeTasks` answer naming the image,
+/// the role and the account, so its full text goes to the server-side log only.
+fn bounded_error(execution_arn: &str, error: &RawError) -> String {
+    tracing::warn!(
+        execution_arn,
+        error = error.error.as_deref().unwrap_or(""),
+        cause = error.cause.as_deref().unwrap_or(""),
+        "the Catch's stage error, in full (server-side log only)"
     );
-    text.chars().take(MAX_STAGE_ERROR_CHARS).collect()
+    stage_error(error.error.as_deref(), error.cause.as_deref())
 }
 
 impl FinalizerInput {
@@ -289,11 +293,15 @@ impl FinalizerInput {
                     .map_err(|e| refused(format!("not a Finalize payload: {e}")))?;
                 let start_secs = parse_time_secs(&raw.start_time)
                     .ok_or_else(|| refused("start_time is not a time"))?;
+                let error = raw
+                    .error
+                    .as_ref()
+                    .map(|e| bounded_error(&raw.execution_arn, e));
                 Ok(Self::StateMachine(StateMachinePayload {
                     execution_arn: raw.execution_arn,
                     start_secs,
                     input: parse_execution_input(&raw.input)?,
-                    error: raw.error.as_ref().map(bounded_error),
+                    error,
                 }))
             }
             Some("reconcile") if object.len() == 1 => Ok(Self::Reconcile),
@@ -3897,13 +3905,15 @@ mod tests {
             ];
         }
 
-        /// The shrink-only ratchet: the invariants the sweep finds violated at HEAD
-        /// 359788182. The sweep must detect EVERY entry at least once (a stale entry
-        /// fails it) and nothing outside it. 14-17 deletes I2, I3, I7 and I8; 14-18
-        /// deletes I4. Never add an entry to make the sweep pass.
-        const KNOWN_DEFECTS: &[Invariant] = &[
-            Invariant::I4, // WR-03: AWS text reaches the stored payload
-        ];
+        /// The shrink-only ratchet: the invariants the sweep finds violated. At HEAD
+        /// 359788182 it was [I2, I3, I4, I7, I8]; 14-17 deleted I2, I3, I7 and I8 and
+        /// 14-18 deleted I4, so it is EMPTY and every violation fails the sweep. The
+        /// sweep must still detect every entry at least once (a stale entry fails
+        /// it): with nothing pinned there is nothing to detect, so the proof that the
+        /// sweep still sees a defect is the source mutations of
+        /// `scripts/laya_deploy/laya_failure_surface.py --mutations`. Never add an
+        /// entry to make the sweep pass.
+        const KNOWN_DEFECTS: &[Invariant] = &[];
 
         /// What the records alone decide, by the class table (not by `finalize_run`).
         struct Expected {
@@ -4348,9 +4358,9 @@ mod tests {
             // The tracer models a delivery the machine really makes.
             assert!(exit_class(cell.outcome).is_some_and(|c| CATCH_FED.contains(&c)));
 
-            // Its scope is WR-01's: no violation in scope. The planted Cause still
-            // leaks (I4, WR-03, pinned for 14-18); whatever else the cell violates
-            // must be a pinned defect, so the tracer cannot hide an unpinned one.
+            // Its scope is WR-01's: no violation in scope. Since 14-18 the planted
+            // Cause no longer leaks (I4) and the ratchet is empty, so whatever else
+            // the cell violates must be pinned, which now means nothing at all.
             let all = violations(&cell, &obs);
             let scoped: Vec<Invariant> = all
                 .iter()
@@ -4432,8 +4442,9 @@ mod tests {
         /// THE gate of the class: every cell of the cross product through the real
         /// entry point, I1..I8 per cell, and the violated set must equal the ratchet
         /// exactly (a pinned entry nothing violates fails it, as does a new one).
+        /// Since 14-18 the ratchet is empty: the sweep asserts zero violations.
         #[tokio::test]
-        async fn failure_surface_sweep_known_defects_only() {
+        async fn failure_surface_sweep_clean() {
             assert_axes_bound();
             let product: usize = SURFACE_AXES.iter().map(|(_, v)| v.len()).product();
             let started = std::time::Instant::now();

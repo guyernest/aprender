@@ -554,10 +554,35 @@ impl StatusPayload {
         }
     }
 
-    /// The payload as a JSON value (one serializer).
+    /// The payload as a JSON value: THE one serializer, and so the one point where
+    /// the payload's free text becomes caller-safe (WR-03, D-18, invariant I4). The
+    /// stored result, `verdict.json`, `tasks/result` and `train_status` are all this
+    /// text, so `error`, `verdict.pack.line` and every `notes` entry pass through
+    /// [`crate::redact::caller_safe`] here: no account id, ARN, `amazonaws.com`
+    /// host, URL or access key id reaches a caller from them. The redaction is
+    /// idempotent, so a stored payload re-served later is unchanged. `run_prefix`
+    /// and the manifest links are handles and are not touched (SK-12, see
+    /// [`crate::redact`]).
     #[must_use]
     pub fn to_value(&self) -> serde_json::Value {
-        serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
+        use crate::redact::{caller_safe, MAX_CALLER_TEXT_CHARS};
+        let mut safe = self.clone();
+        safe.error = self
+            .error
+            .as_deref()
+            .map(|e| caller_safe(e, MAX_CALLER_TEXT_CHARS));
+        if let Some(pack) = safe.verdict.as_mut().and_then(|v| v.pack.as_mut()) {
+            pack.line = pack
+                .line
+                .as_deref()
+                .map(|l| caller_safe(l, MAX_CALLER_TEXT_CHARS));
+        }
+        safe.notes = self
+            .notes
+            .iter()
+            .map(|n| caller_safe(n, MAX_CALLER_TEXT_CHARS))
+            .collect();
+        serde_json::to_value(safe).unwrap_or(serde_json::Value::Null)
     }
 }
 

@@ -35,6 +35,7 @@
 pub mod finalize;
 pub mod layout;
 pub mod lock;
+pub mod redact;
 pub mod validate;
 
 pub use aprender_mcp_setfit_train::{

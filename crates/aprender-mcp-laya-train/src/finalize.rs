@@ -788,21 +788,18 @@ pub(crate) mod fixtures {
     /// for a failed `.sync` task.
     pub const CATCH_ERROR: &str = "States.TaskFailed";
 
-    /// Longest stage error the finalizer hands the decision (its `bounded_error`).
-    pub const MAX_STAGE_ERROR_CHARS: usize = 2_048;
-
     /// `input` as the state machine delivers a catch-fed class: the Train (or
     /// PackVerify) task failed, the Catch put `{Error, Cause}` at `$.error`, and the
-    /// finalizer's `bounded_error` turned it into `<Error>: <Cause>`, bounded. The
+    /// finalizer's `bounded_error` reduced it to `<Error>: <reasons>` (`stage_error`). The
     /// one helper that builds that shape, so a test cannot model the Catch in a
     /// way the machine does not.
     pub fn through_catch(mut input: FinalizeInput, cause_text: &str) -> FinalizeInput {
-        input.stage_error = Some(
-            format!("{CATCH_ERROR}: {cause_text}")
-                .chars()
-                .take(MAX_STAGE_ERROR_CHARS)
-                .collect(),
-        );
+        // Exactly what the finalizer's `bounded_error` hands the decision since
+        // 14-18: the Catch's `{Error, Cause}` reduced by `redact::stage_error`.
+        input.stage_error = Some(crate::redact::stage_error(
+            Some(CATCH_ERROR),
+            Some(cause_text),
+        ));
         input
     }
 }
