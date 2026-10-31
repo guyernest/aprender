@@ -1,0 +1,41 @@
+{
+  "schema": "laya-roll-evidence-v1",
+  "plan": "15-05",
+  "status": "awaiting-image-build",
+  "pre_roll": {
+    "pack_digest": "sha256:504084d0c254af66e01b40f9f4679ba48fc09c4bf80386cc458a9388ae3090f3",
+    "pack_commit": "69af6631267ce931b186b4626eebc3f86ad7588e",
+    "train_digest": "sha256:b49b3fe902c49801e1d3eea8e4be37a73d3e59c483bbb42735180a35c2e6f11f",
+    "pack_taskdef": "aprender-laya-pack-dev:1",
+    "parity_contract_sha256": "7c646b74835f8d0d5bf0916056aae1eb909cfa6770d58e17bf65c4069b267878",
+    "template_sha256": "fd237cb2fb270f2d3b9ed70f2c66ff0e6433691e9e749a2ddc428d348df7b0b9",
+    "template_note": "synth of the trainer stack with the train digest and the pack digest recorded in images-dev.json; it ASSUMES the deployed pack task definition still pins that digest. Plan 15-06's live infra diff is what checks that; its pack-image 'from' digest must equal pre_roll.pack_digest"
+  },
+  "expected": {
+    "image_head": "9b5e171019c1b39d595d9a57f20796c67d5922f4",
+    "context_paths": [
+      "Cargo.toml",
+      "Cargo.lock",
+      "rust-toolchain.toml",
+      "src/",
+      "crates/",
+      "contracts/",
+      "scripts/laya_train/container/run_step.py",
+      "scripts/laya_train/container/stage_base.py",
+      "scripts/laya_train/container/base-stage.json",
+      "deploy-extensions/container/pack-arm64/Dockerfile"
+    ],
+    "identity_rule": "pack.commit is image_head or a descendant, and git diff --quiet image_head pack.commit over context_paths",
+    "parity_contract_sha256": "466891faa5e3e1e092a5483bafcdf2ba8c5c835c9cdda5aaff896d2e893584e9",
+    "parity_contract_note": "pre_roll.parity_contract_sha256 is the amendment-A1 contract the image that refused attempt 1 carried; expected.parity_contract_sha256 is the committed amendment-A2 contract the rebuilt image must carry"
+  },
+  "owner_commands": {
+    "A1": "! assume ze-kasher-dev && just laya-trainer-image pack dev ze-kasher-dev > models/laya-trainer/p15-image-pack.log 2>&1; tail -n 2 models/laya-trainer/p15-image-pack.log"
+  },
+  "owner_replies": [],
+  "dry_run_image_build": {
+    "last_line": "AWS CALLS: 0",
+    "archived_commit_named": true,
+    "note": "dry run at the commit preceding this file's commit; the owner's real build archives whatever HEAD is when it runs"
+  }
+}
