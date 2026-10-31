@@ -247,7 +247,14 @@ operation) and re-open the parity fixtures. `contracts/laya-parity-v1.yaml` hold
 and both are stated here: the FIXTURE bar keeps served probabilities within 1e-5 of torch fp32
 on the spike-025 rows (measured 3.841e-6 through the `.apr` path, plan 08-09); the PACK/VERIFY
 re-score bar is max(1e-5, 4 x the per-checkpoint float64-referenced torch noise) (amendment A1,
-plan 08-13). Every one of those numbers is aarch64; x86_64 is unmeasured.
+plan 08-13). Since amendment A2 (plan 15-02, owner sign-off 2026-10-31), a run carrying a
+rescore-noise.json record is held per set to fine_tuned max(5e-5, 4 x noise) and
+zero_shot max(3e-5, 4 x noise) (ceilings 1e-3 for both), and a run without one to 1e-5 for both sets;
+for a run packed by the training server, the Graviton pack task's recorded verify (pack-outcome.json,
+bound to the .apr by sha256) is the deploy and upload eligibility and this Mac's `just laya-verify` is
+advisory (role-drift-advisory: a local `RescoreDrift` refusal is logged as a cross-CPU finding, every
+other refusal still blocks; `contracts/laya-parity-v1.yaml`, `scripts/laya_deploy/laya_eligibility.py`).
+Every one of those numbers is aarch64; x86_64 is unmeasured.
 
 What this row may claim is read from the records named at the end of this paragraph and nothing
 else. The first declared gate run passed: a TweetEval abortion-stance model (`demo_s64` in
