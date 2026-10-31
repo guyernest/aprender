@@ -1,7 +1,7 @@
 {
   "schema": "laya-roll-evidence-v1",
   "plan": "15-05",
-  "status": "awaiting-image-build",
+  "status": "image-built-synth-ok",
   "pre_roll": {
     "pack_digest": "sha256:504084d0c254af66e01b40f9f4679ba48fc09c4bf80386cc458a9388ae3090f3",
     "pack_commit": "69af6631267ce931b186b4626eebc3f86ad7588e",
@@ -46,5 +46,91 @@
     "last_line": "AWS CALLS: 0",
     "archived_commit_named": true,
     "note": "dry run at the commit preceding this file's commit; the owner's real build archives whatever HEAD is when it runs"
-  }
+  },
+  "image": {
+    "digest": "sha256:dd38865c43aba2f3819e50addcf6db5e9da94ef84e762d93cf6b2c132f1d17e2",
+    "commit": "5a1cb55b86a31ac7f01150e91c107e6cb376acee",
+    "build_id": "aprender-laya-pack-image-dev:69535e5b-103d-4726-baee-e73cba9d08e7",
+    "image_bytes": 119257711,
+    "commit_note": "the ECR image tag is 5a1cb55b8 (Task 1's planning-only commit), a descendant of expected.image_head; git diff --quiet image_head pack.commit over expected.context_paths holds"
+  },
+  "synth": {
+    "sidecar_commit": "79df1af16500fbcdcfd84b456fc682a599db47ea",
+    "bootstrap_sha256": "764c5290951d630709177999dbb3e20d1625f5c5601fc763df88592cbf157b80",
+    "built_at": "2026-10-31T23:53:16Z",
+    "closure_clean": true,
+    "train_digest": "sha256:b49b3fe902c49801e1d3eea8e4be37a73d3e59c483bbb42735180a35c2e6f11f",
+    "synth_last_line": "TRAINER SYNTH OK env=dev",
+    "stack_check": "TRAINER STACK CHECK OK trainer=216 images=105 assertions",
+    "provenance_verify": "FINALIZER PROVENANCE OK"
+  },
+  "dry_run_deploy": {
+    "last_line": "AWS CALLS: 0",
+    "refused_lines": 0
+  },
+  "resources_added": [],
+  "resources_removed": [],
+  "expected_change_set": [
+    {
+      "logical_id": "Finalizer7E8242E4",
+      "type": "AWS::Lambda::Function",
+      "properties": [
+        "Code"
+      ],
+      "leaves": [
+        {
+          "path": "Properties.Code.S3Key",
+          "old_sha256": "7ebeb78e9929f10c37c137f254d7bba97bab03105c5ce8fa8e045fa3dd924ee2",
+          "new_sha256": "85088163c115c509d130a77e22d06a667971535607d023254f5c32e5625a6202",
+          "old_digest": null,
+          "new_digest": null
+        }
+      ],
+      "metadata_leaves": [
+        {
+          "path": "Metadata.aws:asset:path",
+          "old_sha256": "5d5ffef543485cfc975ca47de6d0eb0680717cec6afd55db3e7ef3b6a34c255e",
+          "new_sha256": "8dfa35f82bb0de7b2a0f98e3388f71040e329c4e28cb90e26fe279da79b80754",
+          "old_digest": null,
+          "new_digest": null
+        }
+      ],
+      "metadata_note": "CDK asset metadata (Metadata.aws:asset:path) naming the same new Finalizer asset as Properties.Code.S3Key; the 14-REDEPLOY runbook counts it as part of the one code change. It is outside Properties, so it is listed here rather than in leaves."
+    },
+    {
+      "logical_id": "Machine6FC8AE80",
+      "type": "AWS::StepFunctions::StateMachine",
+      "properties": [
+        "DefinitionString"
+      ],
+      "leaves": [
+        {
+          "path": "Properties.DefinitionString.Fn::Join[1][28]",
+          "old_sha256": "803f4e4157cb158ccbb2a746e03682e420d3ffd540d697cad1c68e4d59f8c782",
+          "new_sha256": "15a7db6b830a23a9c5bb8434d7da69400f2c7d3abacf6888240f2e541101c4f8",
+          "old_digest": "sha256:504084d0c254af66e01b40f9f4679ba48fc09c4bf80386cc458a9388ae3090f3",
+          "new_digest": "sha256:dd38865c43aba2f3819e50addcf6db5e9da94ef84e762d93cf6b2c132f1d17e2"
+        }
+      ],
+      "note": "State machine PackVerify EcsRunTask container override LAYA_PACK_IMAGE_DIGEST: the same digest value as the pack image, old to new. Not predicted by the plan's truths (it said the diff MAY touch the state machine); plan 15-06's C1 review must see exactly this one leaf and no IAM change."
+    },
+    {
+      "logical_id": "PackTaskDefinitionCAD6B20B",
+      "type": "AWS::ECS::TaskDefinition",
+      "properties": [
+        "ContainerDefinitions"
+      ],
+      "leaves": [
+        {
+          "path": "Properties.ContainerDefinitions[0].Image.Fn::Join[1][3]",
+          "old_sha256": "1af9754bbdb76430a8a12f4cfda886655b133d62cbba98c6a0b6bf69cd1a30dc",
+          "new_sha256": "4d65d5a014f2a83da78ffd478ca568a794d7d4471316655d4e513d01022c867a",
+          "old_digest": "sha256:504084d0c254af66e01b40f9f4679ba48fc09c4bf80386cc458a9388ae3090f3",
+          "new_digest": "sha256:dd38865c43aba2f3819e50addcf6db5e9da94ef84e762d93cf6b2c132f1d17e2"
+        }
+      ]
+    }
+  ],
+  "post_template_sha256": "acdcced4703dfe50fd996d59d7a22b4ada78cf0e8d62feda0480bba192e478f4",
+  "prediction_note": "offline prediction: two current-source synths with the old and new pack digest; the deployed stack is checked only by the owner's live infra diff in plan 15-06 (STOP on a live 'from' digest other than pre_roll.pack_digest, on any IAM change, any added or removed resource, or any leaf outside this list)"
 }
