@@ -1127,11 +1127,26 @@ Round 2 disposition (owner answers in 14-GAP-ROUND-2-OWNER-DECISIONS.md): Deferr
 **Plans:** 8 plans in 8 waves (sequential: owner checkpoints and the D-17 order gate every step)
 
 Plans:
+**Wave 1**
 - [ ] 15-01-PLAN.md — Bound decision brief from 14-DRIFT-EVIDENCE.json and the owner's per-set sign-off (checkpoint:decision, SC1 anchor) (wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
 - [ ] 15-03-PLAN.md — laya-verify becomes advisory: pack-record eligibility bound by sha256 in laya-deploy/laya-upload, decide-apr-v1 role text (D-08..D-10) (wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
 - [ ] 15-02-PLAN.md — Amendment A2 of laya-parity-v1: per-set enforced bound in the contract and aprender-decide, proven on the Graviton cells (wave 3)
+
+**Wave 4** *(blocked on Wave 3 completion)*
 - [ ] 15-04-PLAN.md — Real-weights proof (trainer records under A2, gap regression), CLAUDE.md and claims coherence, clean closure for the image (wave 4)
+
+**Wave 5** *(blocked on Wave 4 completion)*
 - [ ] 15-05-PLAN.md — Owner rebuilds the pack image from the amended HEAD; offline synth and predicted stack diff (wave 5)
+
+**Wave 6** *(blocked on Wave 5 completion)*
 - [ ] 15-06-PLAN.md — Owner deploys the stack and re-packs motivation-v1-sm on Graviton: accepted, deploy-eligible .apr (SC3, D-15) (wave 6)
+
+**Wave 7** *(blocked on Wave 6 completion)*
 - [ ] 15-07-PLAN.md — New trust-bar declaration: D-14 levers computed offline, owner choice and compute go, committed before the run (wave 7)
+
+**Wave 8** *(blocked on Wave 7 completion)*
 - [ ] 15-08-PLAN.md — The single owner-run SageMaker attempt, evaluated; 15-GATE-RUN-EVIDENCE.json next_trusted (SC4) (wave 8)
