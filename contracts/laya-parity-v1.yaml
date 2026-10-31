@@ -102,6 +102,19 @@ constants:
   # the worst measured and REFUSES any derived bound above it, as either an ill-conditioned
   # checkpoint or a fabricated float64 record (fail-closed: a human looks). It only ever refuses.
   pack_rescore_bound_max_abs: 1.0e-3
+  # A2 (owner sign-off 2026-10-31, 15-BOUND-DECISION.json, commit 91969e11e): the ENFORCED per-set
+  # re-score parameters, read by VerifyPolicy::from_contract_views into RescoreSetPolicy. When a
+  # record exists the enforced bound is bound(c, s) = max(floor_s, k_s x noise(c, s)), refused above
+  # ceiling_s. The A1 keys above stay the record STAMP (the k and floor_abs a rescore-noise.json header
+  # carries, and the per-set bound it reports, both cross-checked bit for bit) and the absent-record floor.
+  # A2 fine_tuned: the Graviton-packed, CUDA-trained set. Enforced when a record exists.
+  pack_rescore_noise_k_fine_tuned: 4
+  pack_rescore_floor_fine_tuned: 5.0e-5
+  pack_rescore_bound_max_abs_fine_tuned: 1.0e-3
+  # A2 zero_shot: the declared base re-scored on the gate eval rows. Enforced when a record exists.
+  pack_rescore_noise_k_zero_shot: 4
+  pack_rescore_floor_zero_shot: 3.0e-5
+  pack_rescore_bound_max_abs_zero_shot: 1.0e-3
 
 equations:
 

@@ -1765,7 +1765,8 @@ fn noise_absent_uses_floor() {
             RescoreBound {
                 which,
                 noise: None,
-                bound: floor
+                bound: floor,
+                stamp_bound: floor,
             }
         );
     }
@@ -1791,7 +1792,10 @@ fn noise_bound_accepts_what_floor_refuses() {
     let noise = write_noise_record(&run, &policy, &ft_ref, &zs_ref);
     let floor = policy.rescore_probs_abs;
     assert!(noise[0] > floor && noise[0] < 3e-5, "{noise:?}");
-    let want = floor.max(policy.rescore_noise_k * noise[0]);
+    // The ENFORCED bound is the set's A2 value; the A1 formula is what the record itself carries.
+    let ft_set = policy.rescore_set(ProbsWhich::FineTuned);
+    let zs_set = policy.rescore_set(ProbsWhich::ZeroShot);
+    let want = ft_set.floor_abs.max(ft_set.noise_k * noise[0]);
     let report = run
         .verify(&policy)
         .expect("accepted: drift inside the recorded bound");
@@ -1804,8 +1808,8 @@ fn noise_bound_accepts_what_floor_refuses() {
     assert_eq!(report.noise.map(f64::to_bits), Some(noise[0].to_bits()));
     assert_eq!(
         report.zs_rescore_bound.to_bits(),
-        floor.to_bits(),
-        "zs noise 0"
+        zs_set.floor_abs.max(zs_set.noise_k * 0.0).to_bits(),
+        "zs noise 0: the zero-shot floor"
     );
 
     // The same bytes with the record removed from the report: the floor, refused.

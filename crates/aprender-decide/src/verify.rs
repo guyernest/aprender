@@ -93,6 +93,25 @@ pub const PROBS_ROW_SUM_ABS: f64 = 1.0e-5;
 // Policy, verdicts, errors
 // ===========================================================================
 
+/// The ENFORCED re-score parameters of one scored set (laya-parity-v1 amendment A2): when a
+/// noise record exists the set is held to `max(floor_abs, noise_k x noise)` and refused above
+/// `bound_max_abs`.
+///
+/// Read from the six flat `constants.pack_rescore_{noise_k,floor,bound_max_abs}_{fine_tuned,
+/// zero_shot}` keys by [`VerifyPolicy::from_contract_views`]. These are NOT the record stamp: the
+/// stamp (the `k` and `floor_abs` a `rescore-noise.json` header carries, and the per-set bound it
+/// reports) stays the A1 pair [`VerifyPolicy::rescore_noise_k`] and
+/// [`VerifyPolicy::rescore_probs_abs`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RescoreSetPolicy {
+    /// `constants.pack_rescore_noise_k_<set>`: the multiplier on the recomputed noise.
+    pub noise_k: f64,
+    /// `constants.pack_rescore_floor_<set>`: the floor of the enforced bound.
+    pub floor_abs: f64,
+    /// `constants.pack_rescore_bound_max_abs_<set>`: an enforced bound above it is refused.
+    pub bound_max_abs: f64,
+}
+
 /// Everything the verifier decides WITH, read from the contracts by the caller.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VerifyPolicy {
@@ -104,14 +123,22 @@ pub struct VerifyPolicy {
     pub ece_bins: u64,
     /// laya-finetune-gate-v1 `constants.gate_metric_recompute_abs`.
     pub metric_recompute_abs: f64,
-    /// laya-parity-v1 `equations.pack_rescore_probs_abs.float_tolerance`: the FLOOR of every
-    /// re-score bound, and the whole bound for a run without a noise record (A1).
+    /// laya-parity-v1 `equations.pack_rescore_probs_abs.float_tolerance`: the record STAMP's
+    /// floor (a record header must carry it) and the whole bound for a run without a noise
+    /// record, for BOTH sets (A1; omitting the record can only tighten the check).
     pub rescore_probs_abs: f64,
-    /// laya-parity-v1 `constants.pack_rescore_noise_k` (A1).
+    /// laya-parity-v1 `constants.pack_rescore_noise_k` (A1): the record STAMP's multiplier (a
+    /// record header must carry it; the per-set bound the record reports is cross-checked
+    /// against it). The enforced multiplier is per set ([`Self::rescore_set`]).
     pub rescore_noise_k: f64,
-    /// laya-parity-v1 `constants.pack_rescore_bound_max_abs`: a derived bound above it is
-    /// refused (A1).
+    /// laya-parity-v1 `constants.pack_rescore_bound_max_abs` (A1): the ceiling on the STAMP
+    /// bound, and the largest ceiling a per-set value may carry (a per-set ceiling may only
+    /// tighten it).
     pub rescore_bound_max_abs: f64,
+    /// laya-parity-v1 A2: the ENFORCED parameters of the fine-tuned set.
+    pub rescore_fine_tuned: RescoreSetPolicy,
+    /// laya-parity-v1 A2: the ENFORCED parameters of the zero-shot set.
+    pub rescore_zero_shot: RescoreSetPolicy,
     /// laya-finetune-gate-v1 `constants.calibration_slice_min_per_class`.
     pub calibration_slice_min_per_class: u64,
     /// laya-finetune-gate-v1 `constants.calibration_slice_fraction`: every class keeps at least
@@ -476,6 +503,18 @@ pub struct ParityConstantsView {
     pub pack_rescore_noise_k: f64,
     /// `pack_rescore_bound_max_abs`.
     pub pack_rescore_bound_max_abs: f64,
+    /// `pack_rescore_noise_k_fine_tuned` (A2).
+    pub pack_rescore_noise_k_fine_tuned: f64,
+    /// `pack_rescore_floor_fine_tuned` (A2).
+    pub pack_rescore_floor_fine_tuned: f64,
+    /// `pack_rescore_bound_max_abs_fine_tuned` (A2).
+    pub pack_rescore_bound_max_abs_fine_tuned: f64,
+    /// `pack_rescore_noise_k_zero_shot` (A2).
+    pub pack_rescore_noise_k_zero_shot: f64,
+    /// `pack_rescore_floor_zero_shot` (A2).
+    pub pack_rescore_floor_zero_shot: f64,
+    /// `pack_rescore_bound_max_abs_zero_shot` (A2).
+    pub pack_rescore_bound_max_abs_zero_shot: f64,
 }
 
 /// laya-parity-v1 `equations` (the part the verifier reads).
@@ -510,6 +549,16 @@ impl VerifyPolicy {
             rescore_probs_abs: parity.equations.pack_rescore_probs_abs.float_tolerance,
             rescore_noise_k: parity.constants.pack_rescore_noise_k,
             rescore_bound_max_abs: parity.constants.pack_rescore_bound_max_abs,
+            rescore_fine_tuned: RescoreSetPolicy {
+                noise_k: parity.constants.pack_rescore_noise_k_fine_tuned,
+                floor_abs: parity.constants.pack_rescore_floor_fine_tuned,
+                bound_max_abs: parity.constants.pack_rescore_bound_max_abs_fine_tuned,
+            },
+            rescore_zero_shot: RescoreSetPolicy {
+                noise_k: parity.constants.pack_rescore_noise_k_zero_shot,
+                floor_abs: parity.constants.pack_rescore_floor_zero_shot,
+                bound_max_abs: parity.constants.pack_rescore_bound_max_abs_zero_shot,
+            },
             calibration_slice_min_per_class: c.calibration_slice_min_per_class,
             calibration_slice_fraction: c.calibration_slice_fraction,
             calibration_temp_min: c.calibration_temp_min,
@@ -556,6 +605,17 @@ impl VerifyPolicy {
             seed_tie_break: s.tie_break.clone(),
             stance_criteria_order: gate.demo.criteria_order.clone(),
             pilot_waivers: gate.pilot_waivers.declarations.clone(),
+        }
+    }
+
+    /// The ENFORCED re-score parameters of `which` (laya-parity-v1 A2). Only the two re-scored
+    /// sets carry one; every other set is recomputed, never re-scored, and maps to the
+    /// fine-tuned parameters it is never asked for.
+    #[must_use]
+    pub fn rescore_set(&self, which: ProbsWhich) -> RescoreSetPolicy {
+        match which {
+            ProbsWhich::ZeroShot => self.rescore_zero_shot,
+            _ => self.rescore_fine_tuned,
         }
     }
 }
@@ -684,15 +744,19 @@ pub struct RescoreStats {
     pub n: usize,
 }
 
-/// The re-score bound one (checkpoint, set) pair is held to (laya-parity-v1 A1).
+/// The re-score bound one (checkpoint, set) pair is held to (laya-parity-v1 A1 and A2).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RescoreBound {
     /// Which re-score.
     pub which: ProbsWhich,
     /// `noise(c, s)` RECOMPUTED from the float64 record; `None` without a record.
     pub noise: Option<f64>,
-    /// `max(floor, k x noise)`, or the floor without a record.
+    /// The ENFORCED bound: `max(floor_s, k_s x noise)` of the set's A2 parameters, or the A1
+    /// floor (`float_tolerance`) without a record.
     pub bound: f64,
+    /// The A1 STAMP formula `max(floor, k x noise)` the record reports; only cross-checked
+    /// against the record, never enforced. Equal to [`Self::bound`] without a record.
+    pub stamp_bound: f64,
 }
 
 /// Evidence of an accepted run (decide-apr-v1 `deploy_eligibility`).
@@ -894,7 +958,18 @@ pub enum VerifyError {
         /// The Rust recomputation.
         recomputed: f64,
     },
-    /// The derived bound exceeds laya-parity-v1 `pack_rescore_bound_max_abs` (A1).
+    /// A per-set A2 re-score parameter is not usable (non-finite, `noise_k <= 0`, a floor below
+    /// `float_tolerance`, a ceiling below its floor or above `pack_rescore_bound_max_abs`):
+    /// the verifier refuses the policy before deriving any bound.
+    RescorePolicyInvalid {
+        /// The set.
+        which: ProbsWhich,
+        /// `noise_k`, `floor_abs` or `bound_max_abs`.
+        field: &'static str,
+        /// The offending value.
+        value: f64,
+    },
+    /// The derived bound exceeds a laya-parity-v1 re-score ceiling (A1 on the stamp, A2 per set).
     RescoreBoundCeiling {
         /// The set.
         which: ProbsWhich,
@@ -1046,6 +1121,7 @@ impl VerifyError {
             Self::RescoreDrift { .. } => "RescoreDrift",
             Self::RescoreNoiseInvalid { .. } => "RescoreNoiseInvalid",
             Self::RescoreNoiseMismatch { .. } => "RescoreNoiseMismatch",
+            Self::RescorePolicyInvalid { .. } => "RescorePolicyInvalid",
             Self::RescoreBoundCeiling { .. } => "RescoreBoundCeiling",
             Self::NoiseArgmaxFlip { .. } => "NoiseArgmaxFlip",
             Self::ArgmaxDrift { .. } => "ArgmaxDrift",
@@ -1196,6 +1272,11 @@ impl fmt::Display for VerifyError {
                 f,
                 "rescore-noise.json set={which} field={field} reported={reported} recomputed={recomputed}"
             ),
+            Self::RescorePolicyInvalid {
+                which,
+                field,
+                value,
+            } => write!(f, "which={which} field={field} value={value}"),
             Self::RescoreBoundCeiling {
                 which,
                 bound,
@@ -2373,23 +2454,54 @@ fn recompute_noise(
     Ok(noise)
 }
 
-/// laya-parity-v1 A1: the bound each re-score is held to, DERIVED in Rust.
+/// Refuse a policy whose per-set A2 values the verifier could not honour, BEFORE any bound is
+/// derived: a value that is non-finite, `noise_k <= 0`, a floor below `float_tolerance`, a
+/// ceiling below its floor, or a ceiling above the A1 `pack_rescore_bound_max_abs` (a per-set
+/// ceiling may only tighten the A1 ceiling).
+fn check_rescore_policy(policy: &VerifyPolicy) -> Result<(), VerifyError> {
+    for which in [ProbsWhich::FineTuned, ProbsWhich::ZeroShot] {
+        let p = policy.rescore_set(which);
+        let bad = |field, value| VerifyError::RescorePolicyInvalid {
+            which,
+            field,
+            value,
+        };
+        if !p.noise_k.is_finite() || p.noise_k <= 0.0 {
+            return Err(bad("noise_k", p.noise_k));
+        }
+        if !p.floor_abs.is_finite() || p.floor_abs < policy.rescore_probs_abs {
+            return Err(bad("floor_abs", p.floor_abs));
+        }
+        if !p.bound_max_abs.is_finite()
+            || p.bound_max_abs < p.floor_abs
+            || p.bound_max_abs > policy.rescore_bound_max_abs
+        {
+            return Err(bad("bound_max_abs", p.bound_max_abs));
+        }
+    }
+    Ok(())
+}
+
+/// laya-parity-v1 A1 and A2: the bound each re-score is held to, DERIVED in Rust.
 ///
-/// Without a record (`rescore_noise_sha256` absent) both sets get the floor
-/// (`rescore_probs_abs`) — omitting the record can only tighten the check. With one, the
-/// record is parsed ([`pack::RescoreNoise`]), its header checked against the contract
+/// First the per-set policy is checked ([`VerifyError::RescorePolicyInvalid`]). Without a
+/// record (`rescore_noise_sha256` absent) both sets get the A1 floor (`rescore_probs_abs`)
+/// whatever the per-set floors are — omitting the record can only tighten the check. With one,
+/// the record is parsed ([`pack::RescoreNoise`]), its header checked against the A1 STAMP
 /// ([`VerifyPolicy::rescore_noise_k`], the floor, a 0.0 control), `noise(c, s)` RECOMPUTED from
 /// its stored float64 rows against the already-validated probability rows (`ft_probs`,
 /// `zs_probs`), the reported `max_abs` and `bound` required to equal the recomputation
-/// bit-for-bit, and `bound = max(floor, k x noise)` refused above
-/// [`VerifyPolicy::rescore_bound_max_abs`]. The reported numbers are never used.
+/// bit-for-bit (the bound against the A1 stamp formula `max(floor, k x noise)`, itself refused
+/// above [`VerifyPolicy::rescore_bound_max_abs`]). The ENFORCED bound is then the set's A2 value
+/// `max(floor_s, k_s x noise)` from [`VerifyPolicy::rescore_set`], refused above `ceiling_s`
+/// (inclusive). The reported numbers are never used.
 ///
 /// # Errors
 ///
-/// [`VerifyError::RescoreNoiseInvalid`] (malformed record, a field unequal to the contract, a
-/// missing or repeated row), [`VerifyError::NoiseArgmaxFlip`],
-/// [`VerifyError::RescoreNoiseMismatch`] (a reported value that differs from the
-/// recomputation) or [`VerifyError::RescoreBoundCeiling`].
+/// [`VerifyError::RescorePolicyInvalid`], [`VerifyError::RescoreNoiseInvalid`] (malformed
+/// record, a field unequal to the contract, a missing or repeated row),
+/// [`VerifyError::NoiseArgmaxFlip`], [`VerifyError::RescoreNoiseMismatch`] (a reported value
+/// that differs from the recomputation) or [`VerifyError::RescoreBoundCeiling`].
 #[provable_contracts_macros::contract("laya-parity-v1", equation = "rescore_noise_reference")]
 pub fn rescore_bounds(
     inputs: &PackInputs,
@@ -2397,11 +2509,13 @@ pub fn rescore_bounds(
     zs_probs: &[Vec<f32>],
     policy: &VerifyPolicy,
 ) -> Result<[RescoreBound; 2], VerifyError> {
+    check_rescore_policy(policy)?;
     let floor = policy.rescore_probs_abs;
     let mut out = [ProbsWhich::FineTuned, ProbsWhich::ZeroShot].map(|which| RescoreBound {
         which,
         noise: None,
         bound: floor,
+        stamp_bound: floor,
     });
     let Some(bytes) = inputs.rescore_noise_json.as_deref() else {
         return Ok(out);
@@ -2423,26 +2537,36 @@ pub fn rescore_bounds(
                 recomputed: noise,
             });
         }
-        let bound = floor.max(policy.rescore_noise_k * noise);
-        if set.bound.to_bits() != bound.to_bits() {
+        let stamp = floor.max(policy.rescore_noise_k * noise);
+        if set.bound.to_bits() != stamp.to_bits() {
             return Err(VerifyError::RescoreNoiseMismatch {
                 which,
                 field: "bound",
                 reported: set.bound,
-                recomputed: bound,
+                recomputed: stamp,
             });
         }
-        if !within(bound, policy.rescore_bound_max_abs) {
+        if !within(stamp, policy.rescore_bound_max_abs) {
             return Err(VerifyError::RescoreBoundCeiling {
                 which,
-                bound,
+                bound: stamp,
                 ceiling: policy.rescore_bound_max_abs,
+            });
+        }
+        let p = policy.rescore_set(which);
+        let enforced = p.floor_abs.max(p.noise_k * noise);
+        if !within(enforced, p.bound_max_abs) {
+            return Err(VerifyError::RescoreBoundCeiling {
+                which,
+                bound: enforced,
+                ceiling: p.bound_max_abs,
             });
         }
         *slot = RescoreBound {
             which,
             noise: Some(noise),
-            bound,
+            bound: enforced,
+            stamp_bound: stamp,
         };
     }
     Ok(out)
