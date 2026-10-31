@@ -32,7 +32,16 @@
   "owner_commands": {
     "A1": "! assume ze-kasher-dev && just laya-trainer-image pack dev ze-kasher-dev > models/laya-trainer/p15-image-pack.log 2>&1; tail -n 2 models/laya-trainer/p15-image-pack.log"
   },
-  "owner_replies": [],
+  "owner_replies": [
+    {
+      "step": "A1 pack image rebuild",
+      "recorded_by": "orchestrator",
+      "recorded_at": "2026-10-31T23:52:31Z",
+      "reply_verbatim": "IMAGE OK pack sha256:dd38865c43aba2f3819e50addcf6db5e9da94ef84e762d93cf6b2c132f1d17e2",
+      "source": "models/laya-trainer/p15-image-pack.log last line, run by the owner via the bang prefix",
+      "image_commit_tag": "5a1cb55b86a31ac7f01150e91c107e6cb376acee"
+    }
+  ],
   "dry_run_image_build": {
     "last_line": "AWS CALLS: 0",
     "archived_commit_named": true,
