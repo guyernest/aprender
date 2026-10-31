@@ -1108,11 +1108,22 @@ Not planned in the gap round (still open in 14-VERIFICATION human_verification):
 **Gap closure, round 2** *(from 14-VERIFICATION.md gaps_found 13/16 of 2026-10-30 and the owner answers in 14-GAP-ROUND-2-OWNER-DECISIONS.md; waves restart at 1)*
 - [ ] 14-23-PLAN.md — hand-off of the two open truths (the D-16 reproduction, the CUDA pack bound) to Phase 15: its success criteria, the inherited-facts seed and the deferral record; planning files only (wave 1)
 
+Round 2 disposition (owner answers in 14-GAP-ROUND-2-OWNER-DECISIONS.md): Deferred to Phase 15, named in its success criteria: truth 12 (D-16, the re-reproduction after the amendment, no waiver) and truth 13 (the D-15 per-set amendment of laya-parity-v1 and a deploy-eligible .apr from a gate-passing CUDA checkpoint). The packing-stage cancel, truth 8 (about 62 min of paid compute), stays open in 14-VERIFICATION human_verification as a candidate for the owner and is not a Phase 15 criterion, because a cancel on the D-16 run's own pack would end that run with no .apr. WR-01, WR-02, WR-03 and IN-01 to IN-09 of 14-REVIEW-DISPOSITION.md are not planned, awaiting owner triage (all open).
+
 ### Phase 15: Laya pack-bound amendment per study (D-15) and the motivation-v1 re-reproduction (D-16)
 
 **Goal:** Carry out the owner's D-15 decision (amend-per-study) and then close D-16. First, amend the pack/verify re-score bound in `contracts/laya-parity-v1.yaml` per set (fine_tuned, zero_shot), argued from `14-DRIFT-EVIDENCE.json`, and state the role of the local `laya-verify`. The plan argues the parameters, and the owner signs off at a `checkpoint:decision` before any contract edit. Then run a fresh, owner-run SageMaker reproduction of motivation-v1 under a new declaration, which must land in the D-16 band with an accepted, deploy-eligible `.apr` from the Graviton pack task before the Phase 14 training server is trusted. Inherits two items from Phase 14: truths 12 (D-16) and 13 (a gate-passing CUDA checkpoint yields a deploy-eligible `.apr`). Owner decisions: `.planning/phases/14-laya-training-mcp-server-s3-dataset-in-apr-and-reports-out/14-GAP-ROUND-2-OWNER-DECISIONS.md`.
 **Requirements**: TBD
 **Depends on:** Phase 14
+**Inherited from Phase 14:** `.planning/phases/15-laya-pack-bound-amendment-per-study-d-15-and-the-motivation/15-INHERITED-FROM-14.md` holds the three Phase 14 truths (12, 13 and the behavior-unverified truth 8) verbatim, the measured facts with their source file and JSON key, the open owner checkpoints and the compute note.
+**Success Criteria** (what must be TRUE):
+
+  1. Per truth 13 (D-15): the pack/verify re-score bound in `contracts/laya-parity-v1.yaml` (today amendment A1: max(1e-5, pack_rescore_noise_k 4 x the training-device noise) with the ceiling pack_rescore_bound_max_abs 1.0e-3) is amended per set (fine_tuned, zero_shot), its parameters argued from `14-DRIFT-EVIDENCE.json` and signed off by the owner at a `checkpoint:decision` before the contract is edited; no contract edit precedes that sign-off.
+  2. The amendment states the role of the local `just laya-verify`, which `just laya-deploy` and `just laya-upload` run on this Mac as their eligibility step, because this Mac and Graviton disagree on the same bytes (smoke-stance-64 fine_tuned: 1.055 x the bound on the M4 Pro, refused; 0.8431 x on Graviton, accepted).
+  3. Also truth 13: a gate-passing CUDA-trained checkpoint yields an accepted, deploy-eligible `.apr` from the Graviton (arm64 Fargate) pack task under the amended bound.
+  4. Per truth 12 (D-16): after criterion 1 lands, a fresh owner-run SageMaker reproduction of motivation-v1 under a new committed declaration passes the gate and lands in the owner-approved band (Phase 14's declaration: margin [0.30, 0.45], post-calibration ECE [0.07, 0.12]; any band change is the owner's, decided at the new declaration's checkpoint and committed before the paid run) with an accepted, deploy-eligible `.apr` from the Graviton pack task; the Phase 15 gate-run evidence records next_trusted true; no waiver and no override entry stands in for it, and the Phase 14 training server is trusted only after it.
+  5. Every AWS command is owner-run with the bang prefix and each paid run is approved by the owner (the CLAUDE.md check-in for compute above 1 hr on a non-lambda-vector host; approved in principle on 2026-10-30; Phase 14's attempt 1 billed 1346 s of ml.g5.xlarge plus a 124 s Fargate pack).
+
 **Plans:** 0 plans
 
 Plans:
