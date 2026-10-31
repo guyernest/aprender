@@ -1,6 +1,6 @@
 contract: decide-apr
 metadata:
-  version: 3.1.0
+  version: 4.0.0
   created: '2026-09-25'
   author: PAIML Engineering
   kind: kernel
@@ -378,14 +378,15 @@ probe_policy:
   full_eval: 'full-eval parity runs at PACK and VERIFY time (laya-parity-v1 pack_rescore_probs_abs), not at every load'
 
 deploy_eligibility:
-  rule: 'an artifact is deployable ONLY when `pack_laya verify <apr> --run <dir> --data <dir> --base <dir>` (plan 08-09) accepts that exact file'
+  rule: 'an artifact is deployable ONLY when `pack_laya verify <apr> --run <dir> --data <dir> --base <dir>` (plan 08-09) accepts that exact file on the authority CPU. For a run packed by the training server''s Graviton pack task, its recorded verify (logs/pack-outcome.json: schema laya-train-pack-outcome-v1, accepted true, deploy_eligible true, apr_sha256 equal to the local file''s sha256) is the authority, and the local `just laya-verify` on the deploying machine is advisory exactly as the signed role role-drift-advisory defines it (Phase 15 D-04, D-08, D-09): only a local `REFUSED RescoreDrift` line is a recorded cross-CPU finding (<state dir>/cross-cpu-finding-<server>.log) and every other local refusal (a gate failure, a bound ceiling, a noise-record disagreement, a base mismatch, SyntheticNotDeployable) still blocks. For a run with no pack record, including a convention-derived record path (<dir>/logs/pack-outcome.json beside a <dir>/run argument) whose file does not exist, the local pack_laya verify on this machine is the authority, as before. A record named EXPLICITLY (LAYA_PACK_OUTCOME) that does not exist, a record whose apr_sha256 differs from the local file, and a record that is not accepted are refused, and a missing record is never a pass'
+  role_note: 'the record''s authenticity rests on laya_fetch''s per-entry manifest sha256 and the apr_sha256 equality; a hand-forged record in a local directory is not detectable by the recipe alone, and would turn a local RescoreDrift refusal into a logged finding'
   verify_checks:
     - 'the full load ladder'
     - 'recipe variant == production (laya-finetune-gate-v1 synthetic_not_deployable)'
     - '(load, every door) the manifest''s base equals the embedded recipe blob''s base, field by field (rung 4, manifest.bindings); (verify, check_base, plan 08-21) the recipe''s base equals the laya-finetune-gate-v1 base block field by field (family, checkpoint, repo, revision, then sha256) and the base dir''s model.safetensors hashes to that sha256; (verify, the zero-shot load) the base dir''s encoder/config.json, rl_agent_config.json and tokenizer/tokenizer.json hash to that block''s pins on the exact bytes the baseline is built from, and the tokenizer also to inputs_sha256.tokenizer_json'
     - 'data-dir hashes equal to the manifest''s inputs_sha256'
     - 'split re-verification (laya-finetune-gate-v1 split_disjointness)'
-    - 'Rust re-score of every eval row — fine-tuned from the artifact, zero-shot from the base — within the noise-referenced bound(c, s) of laya-parity-v1 pack_rescore_probs_abs (floor 1.0e-5 when the run carries no rescore-noise.json record)'
+    - 'Rust re-score of every eval row — fine-tuned from the artifact, zero-shot from the base — within the bound laya-parity-v1 pack_rescore_probs_abs derives per set (fine_tuned, zero_shot); the 1.0e-5 floor for both sets when the run carries no rescore-noise.json record'
     - 'the gate recomputed from those verified probabilities (laya-finetune-gate-v1 gate_pass)'
     - 'the seed-selection rule re-derived from the per-seed probability files (laya-finetune-gate-v1 seed_policy, 1.4.0)'
   inspect: '`inspect` reports identity only; embedded report fields alone NEVER make an artifact eligible'
@@ -723,12 +724,14 @@ equations:
       - 'a trybuild compile-fail test proves no second minting path'
 
   deploy_eligible:
-    formula: 'deployable(apr) iff pack_laya_verify(apr, run, data, base) accepts that exact file'
+    formula: 'deployable(apr) iff the authority verify accepts that exact file: the recorded pack-task verify (logs/pack-outcome.json, apr_sha256 equal to the file''s sha256) for a server-packed run, else pack_laya_verify(apr, run, data, base) on this machine'
     domain: 'a packed artifact plus its run dir, data dir and declared base'
     codomain: 'DeployEligible, or a typed refusal naming the failed check'
     invariants:
       - 'embedded report fields alone never make an artifact eligible; `inspect` reports identity only'
       - 'the check list is deploy_eligibility.verify_checks'
+      - 'the pack record gates a server-packed run only when bound to the exact bytes by sha256; a run with no record (including an absent convention-derived record) keeps the local gate; an explicitly named record that is absent is refused'
+      - 'under role-drift-advisory only a local RescoreDrift refusal is demoted to a logged cross-CPU finding when a valid record exists; every other local refusal blocks'
 
 proof_obligations:
 
@@ -861,6 +864,13 @@ falsification_tests:
     implemented_by: 'plan 12-03 (aprender_decide::artifact GateSummary.waiver and check_manifest_bindings gate.waiver)'
     test: 'cargo test -p aprender-decide --lib artifact::ladder::waived_run_packs_with_gate_waiver_and_loads_at_every_door && cargo test -p aprender-decide --lib artifact::ladder::manifest_gate_waiver_disagrees_with_report && cargo test -p aprender-decide --lib artifact::ladder::unwaived_manifest_serializes_no_waiver_key && cargo test -p aprender-decide --lib artifact::determinism::golden_sha && cargo test -p aprender-decide --lib artifact::determinism::same_process_twice'
     if_fails: 'A waived artifact hides (or an unwaived one invents) its waiver in the pinned manifest, or the manifest change re-decided an artifact that was already shipped.'
+
+  - id: FALSIFY-DECIDE-APR-015
+    rule: 'The Graviton pack record gates a server-packed run, bound to the exact bytes; a missing record is never a pass'
+    prediction: 'A record whose apr_sha256 differs from the local file, whose accepted or deploy_eligible is false, or that is explicitly named (LAYA_PACK_OUTCOME) and absent is refused with REFUSED eligibility: pack record before any local verify result is considered; a run with no record, including a convention-derived record path whose file does not exist, keeps the local gate; and under the signed role role-drift-advisory a valid record never demotes a non-drift refusal (SyntheticNotDeployable, a gate failure, a bound ceiling, a noise-record disagreement): only the exact anchored RescoreDrift line becomes a logged cross-CPU finding.'
+    implemented_by: 'plan 15-03 (scripts/laya_deploy/laya_eligibility.py; justfile laya-deploy step 5 and laya-upload)'
+    test: 'python3 -I scripts/laya_deploy/laya_eligibility.py --selftest && just laya-deploy-selftest'
+    if_fails: 'A forged, stale or mismatched pack record lets a file skip the local gate, a missing record passes as eligible, or a refusal that is not the cross-CPU re-score drift is waved through.'
 
 kani_harnesses:
 
