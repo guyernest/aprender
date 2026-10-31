@@ -1,0 +1,24 @@
+{
+  "schema": "laya-bound-decision-v1",
+  "phase": "15",
+  "plan": "15-01",
+  "recorded_by": "orchestrator",
+  "recorded_at": "2026-10-31T19:48:37Z",
+  "owner_reply_verbatim": "sb-recommended role-drift-advisory",
+  "bound_option": "sb-recommended",
+  "structure": "S-B",
+  "params": {
+    "fine_tuned": {
+      "noise_k": 4,
+      "floor_abs": 5e-05,
+      "bound_max_abs": 0.001
+    },
+    "zero_shot": {
+      "noise_k": 4,
+      "floor_abs": 3e-05,
+      "bound_max_abs": 0.001
+    }
+  },
+  "verify_role": "role-drift-advisory",
+  "brief_sha256": "7a86790a08d0fa29b238208fe8077fdcbc034b05d6e427e4596c1536553a544d"
+}
