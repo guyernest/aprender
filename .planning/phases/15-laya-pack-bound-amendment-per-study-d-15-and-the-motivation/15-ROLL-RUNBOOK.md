@@ -120,9 +120,53 @@ deploy. If you do re-synth, start again at C1.
 
 ## Section D: the re-pack (plan 15-06)
 
-D0. The offline script regeneration: filled in by plan 15-06.
+Source: the retained, gate-passing CUDA run `motivation-v1-sm` (task a2cbacae-529c-4703-a796-b6eda6742446, objects expire about
+2026-11-28). The re-pack copies it under `runs/drift-motivation/<uuid>/` (tagged `laya-retention=expire`, tags read back before
+`run-task`), runs the production pack task definition on Fargate Graviton, and downloads `pack-outcome.json`. The source objects are only
+read, and no cancel is ever sent to the pack task (D-16). It runs the pack image and task definition "via the drift measurement prefix,
+not the state machine" (RESEARCH assumption A6). Plan 15-06 Task 1 generated the script offline, gated it with bashrs, and proved it
+against the tag-modelling fake aws in a rehearsal tree outside the repository; the production results directory
+`models/laya-trainer/p15-repack-graviton/` holds no `motivation-*` result before D1.
 
-D1. The re-pack run: filled in by plan 15-06. It must finish before about 2026-11-28 (`sources.motivation.expires_about`).
+### C1 STOP conditions in detail (read by Claude, leaf by leaf, against `expected_change_set` in `15-ROLL-EVIDENCE.json`)
+
+The saved diff is within the prediction only when every changed resource, property and value is one of these three, and nothing else:
+
+1. `PackTaskDefinitionCAD6B20B` (AWS::ECS::TaskDefinition): `Properties.ContainerDefinitions[0].Image` changes from
+   `...@sha256:504084d0c254af66e01b40f9f4679ba48fc09c4bf80386cc458a9388ae3090f3` to `...@sha256:dd38865c43aba2f3819e50addcf6db5e9da94ef84e762d93cf6b2c132f1d17e2`.
+2. `Machine6FC8AE80` (AWS::StepFunctions::StateMachine): `Properties.DefinitionString`, only the `LAYA_PACK_IMAGE_DIGEST` container
+   override, the same old to new digest as item 1.
+3. `Finalizer7E8242E4` (AWS::Lambda::Function): `Properties.Code.S3Key` (a new asset hash) and the CDK asset metadata path naming the
+   same asset.
+
+STOP on any of: a last line other than `INFRA OK diff`; any resource-level `[+]` or `[-]`; an `IAM Statement Changes` or `IAM Policy
+Changes` section; any changed resource, property or value outside the three above; a pack TaskDefinition Image whose live "from" digest
+is not `sha256:504084d0...` (drift since the last deploy).
+
+### D0. Regenerate the script (offline, no aws call)
+
+Run after C3, because the task-definition revision changes with the deploy (the current script pins `aprender-laya-pack-dev:1`):
+
+```
+python3 -I scripts/laya_deploy/laya_drift.py aws-plan --source motivation:a2cbacae-529c-4703-a796-b6eda6742446 --script models/laya-trainer/p15-repack-graviton.sh --results models/laya-trainer/p15-repack-graviton
+```
+
+- **Expected:** `AWS PLAN OK script models/laya-trainer/p15-repack-graviton.sh ...` (bashrs-gate PASS).
+
+### D1. The re-pack (owner; Fargate only, about 2 to 10 minutes of 8 vCPU, no GPU)
+
+```
+! assume ze-kasher-dev && LAYA_DRIFT_APPROVED=graviton bash models/laya-trainer/p15-repack-graviton.sh motivation:1
+```
+
+- **Expected output:** exactly one line `TAGS OK motivation-<n>: <k> keys under runs/drift-motivation/<uuid>/ read back laya-retention=expire`,
+  then the last line `DRIFT GRAVITON DONE motivation:1`. The result is the ONLY `motivation-*` directory under
+  `models/laya-trainer/p15-repack-graviton/` (`motivation-1` when the directory was empty, as plan 15-06 Task 1 proves).
+- **Reply `done`** and paste the `TAGS OK` line and the last line. If the run stopped, paste its last line instead.
+- **Do not** cancel the pack task (D-16). **Do not re-run D1 without saying so**: a second run adds a second results directory
+  (`motivation-2`), and plan 15-06 Task 3 refuses to pick between several.
+- It must finish before about 2026-11-28 (`sources.motivation.expires_about`).
+- Do not commit under `crates/`, `Cargo.toml`, `Cargo.lock` or `rust-toolchain.toml` between C1 and C2, or `infra diff|deploy` refuses.
 
 ---
 

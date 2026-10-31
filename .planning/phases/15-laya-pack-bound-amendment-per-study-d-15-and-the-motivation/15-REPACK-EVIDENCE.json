@@ -1,0 +1,59 @@
+{
+  "schema": "laya-repack-evidence-v1",
+  "plan": "15-06",
+  "status": "awaiting-owner-run",
+  "source": {
+    "name": "motivation-v1-sm",
+    "task_id": "a2cbacae-529c-4703-a796-b6eda6742446",
+    "expires_about": "2026-11-28",
+    "gate_pass": true,
+    "margin": 0.2860488947445468,
+    "ece_post": 0.09636022716760634,
+    "a10g_noise": {
+      "fine_tuned": 3.255285573489086e-06,
+      "zero_shot": 1.7265105816122173e-06
+    }
+  },
+  "expected": {
+    "pack_image_digest": "sha256:dd38865c43aba2f3819e50addcf6db5e9da94ef84e762d93cf6b2c132f1d17e2",
+    "pre_roll_pack_image_digest": "sha256:504084d0c254af66e01b40f9f4679ba48fc09c4bf80386cc458a9388ae3090f3",
+    "parity_contract_sha256": "466891faa5e3e1e092a5483bafcdf2ba8c5c835c9cdda5aaff896d2e893584e9",
+    "params": {
+      "fine_tuned": {
+        "noise_k": 4,
+        "floor_abs": 5e-05,
+        "bound_max_abs": 0.001
+      },
+      "zero_shot": {
+        "noise_k": 4,
+        "floor_abs": 3e-05,
+        "bound_max_abs": 0.001
+      }
+    },
+    "pre_roll_taskdef_revision": 1,
+    "pre_roll_taskdef": "aprender-laya-pack-dev:1",
+    "attempt_1_zs_rescore_max_abs": 1.728534698486328e-05
+  },
+  "owner_commands": {
+    "C1": "! assume ze-kasher-dev && just laya-trainer-infra diff dev ze-kasher-dev > models/laya-trainer/p15-infra-diff.txt 2>&1; tail -n 2 models/laya-trainer/p15-infra-diff.txt",
+    "C2": "! assume ze-kasher-dev && just laya-trainer-infra deploy dev ze-kasher-dev > models/laya-trainer/p15-infra-deploy.log 2>&1; tail -n 2 models/laya-trainer/p15-infra-deploy.log",
+    "C3": "! assume ze-kasher-dev && just laya-trainer-infra outputs dev ze-kasher-dev",
+    "D0": "python3 -I scripts/laya_deploy/laya_drift.py aws-plan --source motivation:a2cbacae-529c-4703-a796-b6eda6742446 --script models/laya-trainer/p15-repack-graviton.sh --results models/laya-trainer/p15-repack-graviton",
+    "D1": "! assume ze-kasher-dev && LAYA_DRIFT_APPROVED=graviton bash models/laya-trainer/p15-repack-graviton.sh motivation:1"
+  },
+  "owner_replies": [],
+  "rehearsal": {
+    "results_dir": "/tmp/p15-06-rehearsal/results",
+    "calls": 25,
+    "production_results_empty": true,
+    "note": "RESULTS-only variant of the production script run against the tag-modelling fake aws (laya_drift.py FAKE_AWS, tag_violations oracle clean, source keys byte- and tag-identical); the rehearsal tree was deleted after the run (it holds the account id). Output shape of the TAGS line: TAGS OK motivation-1: 6 keys under runs/drift-motivation/<uuid>/ read back laya-retention=expire"
+  },
+  "offline_checks": {
+    "finalizer_provenance": "FINALIZER PROVENANCE OK",
+    "drift_selftest": "DRIFT SELFTEST OK (88 cases)",
+    "aws_plan": "AWS PLAN OK (production script and rehearsal variant)",
+    "bashrs_gate": "BASHRS GATE PASS on models/laya-trainer/p15-repack-graviton.sh",
+    "dry_run_infra_diff": "not run: the executor was told not to run any `just ... infra diff|deploy` recipe, and the auto-mode classifier denied it; the owner's real C1 is the diff of record"
+  },
+  "claim_scope": "This run does NOT close the trust bar: the motivation-v1-sm margin 0.2860488947445468 is below the 0.30 band floor, so no reproduction claim is made. What it shows, once measured: the amended pack image and contract accept a gate-passing CUDA-trained checkpoint on Graviton. The re-pack ran the production pack image and task definition via the drift measurement prefix, not the state machine (RESEARCH assumption A6: a re-pack through the drift path counts as the Graviton pack task for SC3). The copy lives under runs/drift-motivation/<uuid>/ with laya-retention=expire; the real run's objects are only read. The Graviton fine_tuned figure for motivation-v1-sm is first produced here and is a post-sign-off observation, not an input to the signed bound."
+}
