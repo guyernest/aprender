@@ -2269,6 +2269,13 @@ bindings:
   signature: 'fn check_variant(recipe: &Recipe) -> Result<(), VerifyError>'
   status: implemented
   notes: 'Any variant other than production (a synthetic-fixture recipe) is refused with SyntheticNotDeployable; it is the first step of verify.rs cheap_checks, which pack_for_serving, verify_run and verify_path all run before any model is built, and the deploy recipes gate on verify. Implemented by plan 08-09; the 08-01 row named verify_run.'
+- contract: laya-finetune-gate-v1.yaml
+  equation: pilot_waiver_honoured
+  module_path: aprender_decide::verify
+  function: decide_pilot_waiver
+  signature: 'fn decide_pilot_waiver(clauses: &[GateClause], claim: Option<&PilotWaiverClaim>, run: &RunIdentity, policy: &VerifyPolicy) -> WaiverDecision'
+  status: implemented
+  notes: 'The Phase 12 D-19/D-20 pilot waiver is decided in Rust on the RECOMPUTED failed clauses: margin is never waivable and the declaration is matched on the verified applies_to values. Tests verify::tests::waiver_* and decide_pilot_waiver_case_table (FALSIFY-LAYA-GATE-016..020); the trainer half is FALSIFY-LAYA-GATE-021 (plan 12-03). Implemented by plan 12-02 (commit 0125d26f8, 2026-10-26), which added the equation and the contract attribute but no row here, so contract-audit-phase8 was red (BIND-001) from that commit until plan 15-03 added this row (pre-existing, found by the Phase 15 plan check on 2026-10-31).'
 # ---- Phase 8: laya-parity-v1 (torch -> .apr -> Rust bars) ----
 - contract: laya-parity-v1.yaml
   equation: ids_exact
