@@ -36,7 +36,8 @@ created: "2026-10-29"
 
 Evidence paths: `lt/` = `crates/aprender-mcp-laya-train/src/`, `ll/` = `crates/aprender-mcp-laya-train-lambda/src/`,
 `stack.ts` = `deploy-extensions/lib/laya-trainer-stack.ts`, `ops.py` = `scripts/laya_deploy/laya_trainer_ops.py`,
-`run_step.py` = `scripts/laya_train/container/run_step.py`. Live items cite the evidence file key.
+`run_step.py` = `scripts/laya_train/container/run_step.py`, `lfs.py` = `scripts/laya_deploy/laya_failure_surface.py`,
+`drift.py` = `scripts/laya_deploy/laya_drift.py`, `stack_check.py` = `scripts/laya_deploy/laya_trainer_stack_check.py`. Live items cite the evidence file key.
 
 | Threat ID | Severity | Status | Evidence |
 |-----------|----------|--------|----------|
@@ -122,6 +123,39 @@ Evidence paths: `lt/` = `crates/aprender-mcp-laya-train/src/`, `ll/` = `crates/a
 | T-14-53 | high | closed | evaluator verdict not-reproduced, `next_trusted false`, result not overstated |
 | T-14-54 | high | closed | Laya contracts unchanged through Phase 14 |
 | T-14-55 | medium | closed | attempt cap 2, one attempt run |
+| T-14-78 | high | closed | `ll/finalizer.rs` SURFACE_AXES with listing and absent_listed axes (3451); I2 oracle (4005-4026); `failure_surface_sweep_clean` (4454); `failure_surface_transient_faults` (4553); fix `drop_absent_entries` (573, called 1069) |
+| T-14-79 | medium | closed | I3 oracle (`ll/finalizer.rs` 4028-4072) and I8 `delivery_findings` (4263) swept over trigger x outcome; tracer `failure_surface_tracer_wr01` (4337); outcome-first `finalize_run` (`lt/finalize.rs` 534-545) |
+| T-14-80 | medium | closed | I4 `hostile_leaks` over every caller surface, four planted constants (`ll/finalizer.rs` 3380-3392, 4074-4077); `lfs.py --check` sink rules (495-516) bind 26 sink groups (102 hits) |
+| T-14-81 | medium | closed | sweep asserts ran == axis product (`ll/finalizer.rs` 4483-4484), no stale entry or unpinned violation (4529-4542); `lfs.py` binds SURFACE_AXES, CATCH_FED, KNOWN_DEFECTS to the artifact (283-296, 485) |
+| T-14-SC (16) | high | closed | no manifest or lock change in 468b55b18..HEAD |
+| T-14-82 | high | closed | `drop_absent_entries` takes one listing before the decision (`ll/finalizer.rs` 573-603, 1069); tag targets intersected with a post-write listing (963-964); `fin_listed_but_absent_*`, `fin_adopted_manifest_with_absent_entry`; bounded `dropped_note` (`lt/finalize.rs` 89-113); M-WR02-a..e |
+| T-14-83 | medium | closed | outcome decides the class (`lt/finalize.rs` 534-545); stage error is detail via `with_stage` (316); `NOTE_STAGE_ERROR_OVERRIDDEN` reaches verdict.json (386-390; `fin_override_note_reaches_verdict`); M-WR01-a..d |
+| T-14-84 | medium | closed | `lfs.py` mutation anchors occur exactly once (801-805); `finally` restores and re-reads (745-751, 814-815); end-of-run byte comparison (830-834); 17/17 run 2026-10-30 with the tree unchanged |
+| T-14-SC (17) | high | closed | Cargo.toml and Cargo.lock unchanged |
+| T-14-85 | medium | closed | three boundaries: `StatusPayload::to_value` redacts error, pack line, notes (`lt/layout.rs` 567-586); `RedactingBackend` (`lt/redact.rs` 359-425, wired `ll/bin/bootstrap.rs` 78); code-only `start_error_label` (`ll/sfn.rs` 55, 191); Catch Cause reduced by `stage_error` (`lt/redact.rs` 330). SK-12 (bucket-name account id in run_prefix/links) excluded by decision as a caller handle |
+| T-14-86 | low | closed | accepted (AR-6); partly mitigated: HOSTILE_UNLISTED under a non-whitelisted Cause key (`ll/finalizer.rs` 3390, 3430; M-WR03-c) |
+| T-14-87 | medium | closed | M-WR03-a..h (`lfs.py` 197-244) each turn a named table test or I4 red; must-redact / must-keep tables (`lt/redact.rs` 569, 583) |
+| T-14-SC (18) | high | closed | no dependency added |
+| T-14-88 | medium | closed | synth writes the sidecar (justfile:1417); `check_provenance` (`ops.py` 738-763) refuses sha mismatch, dirty build, non-ancestor, changed or dirty closure; `cmd_infra` refuses before any cdk call (937-947); real-git table (2405-2485) |
+| T-14-89 | medium | closed | `check_surface_binding`, one rule per field (`stack_check.py` 519-559); 11 SURFACE_CASES (845-858); 52/52 |
+| T-14-90 | low | closed | closure-scoped `git diff --name-only <build> HEAD -- <closure>` (`ops.py` 706-710); `unrelated-commit` case accepted (2449-2452) |
+| T-14-SC (19) | high | closed | no package added |
+| T-14-91 | high | closed | `drift.py` 412-445: dirty closure refused before build; binary path from cargo's artifact message, hashed; 14-DRIFT-LOCAL-EVIDENCE.json binary sha256 64baa3f2…, closure_dirty false; positive control reproduced |
+| T-14-92 | high | closed | `drift.py` template 843-1034: `set -euo pipefail` first, one drift prefix (955), sources read-only, empty-prefix refusal (963-966, accepts aws-cli v2 `None` since 5353b8727), path guards (958-960); static table and bashrs-gate before write (1173-1186) |
+| T-14-93 | medium | closed | `scrub` / `assert_clean` (`drift.py` 1295-1313, 1645-1652); evidence scan clean |
+| T-14-94 | high | closed | `git diff --quiet 468b55b18 HEAD -- contracts crates/aprender-decide` rc 0 |
+| T-14-103 | medium | closed | copy-object `--tagging-directive REPLACE --tagging laya-retention=expire` (`drift.py` 971); tagged put-object (976, 978); tag read-back before `run-task` (980-986); pack uploads tagged (`run_step.py` 88, 415) |
+| T-14-SC (20) | high | closed | standard library only |
+| T-14-95 | high | closed | T-14-92 / T-14-103 controls on the real generated file; pack LAYA_RUN_PREFIX is the drift prefix (`drift.py` 985); tracer stage ran first |
+| T-14-96 | medium | closed | accepted (AR-7); in code: approval variable (`drift.py` 1009), FARGATE (986), 1-5 repeats per argument (1014); realized: exactly 6 tasks, all self-stopped, longest ~17 min (14-DRIFT-EVIDENCE.json) |
+| T-14-97 | high | closed | D-15 reply `amend-per-study` in 14-DRIFT-EVIDENCE.json owner_replies (recorded_by orchestrator); contracts and decide crate equal HEAD |
+| T-14-98 | medium | closed | same scrub as T-14-93; 14-DRIFT-EVIDENCE.json and 14-DRIFT-DECISION-BRIEF.md scan clean |
+| T-14-SC (21) | high | closed | no package installed |
+| T-14-99 | high | closed | saved diff: 1 resource (Finalizer Code.S3Key), 0 IAM sections; 14-GAP-REDEPLOY-EVIDENCE.json finalizer.equal true (fc796b8b…3fab, sidecar commit 275ad9611); provenance verify OK at HEAD |
+| T-14-100 | high | closed | `cmd_deploy` revokes the grant before publishing (`ops.py` 1579; `revoke_grant` 1500); `cmd_grant` runs the auth-refusal check immediately before `put-role-policy` (1701, 1715); B0-B5 evidence, first 401 23:35:22Z, then GRANT OK |
+| T-14-101 | medium | closed | gitignored helper passes the presigned URL to curl on stdin (`-K -`), never prints it; `rm -f -- "${PKG:?}"` in an EXIT trap; package absent; BASHRS GATE PASS |
+| T-14-102 | high | closed | owner_replies 11/11 (14-GAP-REDEPLOY-EVIDENCE.json) and 4/4 (14-DRIFT-EVIDENCE.json) recorded_by orchestrator; every aws step in the runbook is a bang-prefixed owner command (procedural closure, as T-14-49) |
+| T-14-SC (22) | high | closed | no package installed; `laya-trainer-synth` refuses without cargo-zigbuild (justfile:1406) |
 
 Notes on closures:
 
@@ -143,6 +177,8 @@ Notes on closures:
 | AR-3 | T-14-SC (06) | apt packages in the train image are unpinned (declared in the Dockerfile header); the image digest is the identity. | recorded, not separately decided | 2026-10-29 |
 | AR-4 | T-14-70 | Dataset-prefix immutability is enforced by the operator script only; server roles hold no write on `datasets/*`. | recorded, not separately decided | 2026-10-29 |
 | AR-5 | T-14-23 | The container SIGTERM path itself was not exercised live (the cancelled job never started its container); the probe measured the grace (118 s) only. | recorded, not separately decided | 2026-10-29 |
+| AR-6 | T-14-86 | `caller_safe` is a blacklist over job-written trainer and packer lines, so an unknown shape can still reach `error` or `notes`. The backend and dispatch sinks are allowlists, and the Catch Cause is reduced to whitelisted keys (HOSTILE_UNLISTED proves it). Recorded in 14-FAILURE-SURFACE.md. | owner, 2026-10-30 (secure-phase gate) | 2026-10-30 |
+| AR-7 | T-14-96 | The drift script has no total task cap and its 45-minute cap stops only the watcher (no stop-task). The executed study ran exactly six tasks, all self-stopped, longest ~17 min. Any re-run is owner-run behind LAYA_DRIFT_APPROVED=graviton. Follow-up: a total cap plus stop-task. | owner, 2026-10-30 (secure-phase gate) | 2026-10-30 |
 
 ---
 
@@ -154,6 +190,8 @@ Notes on closures:
 | W-2 | low | `14-08-SUMMARY.md` names a real AWS account id (the shell's default profile account, not `ze-kasher-dev`). Account ids are not secrets, but this sits against T-14-39's intent. | Redact before any upstream PR. |
 | W-3 | low | The finalizer asset is not byte-reproducible across synths; the deployed `7288da6d...` is a rebuild of unchanged source (tests 60/60 on that source). Every later synth re-uploads it. | Accepted by the orchestrator in 14-IAM-FIX-NOTE.md; note for future deploys. |
 | W-4 | info | During the open window anonymous `initialize` and `tools/list` answered 200, disclosing the three tool names. Calls were refused; nothing was minted. | none |
+| W-5 | warning | The real account ids of ze-kasher-dev and augury-dev are in the committed `justfile` (target-account gate table and its case table) and `scripts/laya_gates.tsv`, added in 13-04; the gap round added none of these lines. Same class as W-2. | Parameterize or redact before any upstream PR, or record as accepted. |
+| W-6 | info | 14-22 B2 attempt 1 revoked the grant, then failed on an expired pmcp.run login before any upload (safe direction; maps to T-14-100). `_laya-crates-root-swap` mislabels its swap line as "decide config" (cosmetic, fails closed). | Follow-up: pmcp.run login precheck before the revoke; relabel the swap recipe and its selftest fixture together. |
 
 ---
 
@@ -172,4 +210,12 @@ Notes on closures:
 - [x] `threats_open: 0` confirmed
 - [x] `status: verified` set in frontmatter
 
-**Approval:** verified 2026-10-29
+**Approval:** verified 2026-10-29; gap round T-14-78..103 verified 2026-10-30 (31 mitigated, 2 accepted: AR-6, AR-7)
+
+## Security Audit 2026-10-31
+
+| Metric | Count |
+|---|---|
+| Threats found | 33 |
+| Closed | 33 |
+| Open | 0 |
