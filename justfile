@@ -1761,7 +1761,9 @@ laya-pack run data base out:
 # Deployment eligibility of the EXACT file <apr> (decide-apr-v1 deploy_eligibility; plan 08-09): the full
 # load ladder, the manifest bound to <run>/<data>, then every `laya-pack` check on those bytes. Prints
 # one JSON line with deploy_eligible only on accept; exit 3 = gate failed, 2 = any other refusal. This
-# is the ONLY eligibility check the deploy recipes use; the policy is read from the contracts.
+# is the eligibility check of a run with NO pack record, and an advisory cross-CPU check when a valid
+# Graviton pack record exists (Phase 15 D-08: scripts/laya_deploy/laya_eligibility.py decides what a
+# refusal means); the policy is read from the contracts.
 laya-verify apr run data base:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -2513,24 +2515,46 @@ laya-deploy apr run data base server env="dev" profile="ze-kasher-dev":
             exec python3 -I scripts/laya_deploy/m2m_token.py --file "$LAYA_M2M_FILE" --expect-host "$TH" --min-expires "$((10#$MINEXP))" -- just laya-deploy "$APR" "{{run}}" "{{data}}" "{{base}}" "$SERVER" "$ENV" "$PROFILE"
         fi
     fi
-    # (5) ELIGIBILITY -- the Rust verifier on the exact file (decide-apr-v1 deploy_eligibility),
-    # never `inspect`, and nothing below reaches AWS unless it accepted.
+    # (5) ELIGIBILITY (decide-apr-v1 deploy_eligibility; Phase 15 D-08/D-09) -- a run packed by the training
+    # server's Graviton pack task is judged by its recorded verify (logs/pack-outcome.json, bound to THESE bytes
+    # by apr_sha256), the local Rust verifier on the exact file still runs, and scripts/laya_deploy/
+    # laya_eligibility.py decides what its outcome means (never `inspect`). LAYA_PACK_OUTCOME names a record
+    # EXPLICITLY (an absent file refuses); otherwise a `<dir>/run` argument is looked up at
+    # <dir>/logs/pack-outcome.json, and an absent convention record is no record: the local gate decides, as
+    # before. Nothing below reaches AWS unless it accepted.
     mkdir -p "$SD"
     VLOG="$SD/eligibility-$SERVER.log"
+    ELIG_PY="scripts/laya_deploy/laya_eligibility.py"
+    REC="${LAYA_PACK_OUTCOME:-}"
+    if [ -z "$REC" ]; then
+        REC="$(python3 -I "$ELIG_PY" record-path --run "{{run}}")" || refuse eligibility "pack record discovery failed for {{run}}"
+    fi
+    if [ -n "$REC" ]; then
+        set +e
+        CROUT="$(python3 -I "$ELIG_PY" check-record --record "$REC" --apr-sha256 "$H" 2>&1)"
+        crc=$?
+        set -e
+        if [ "$crc" -ne 0 ]; then
+            echo "$CROUT" >&2
+            exit "$crc"
+        fi
+        echo "  record: $CROUT"
+    fi
     set +e
     just laya-verify "$APR" "{{run}}" "{{data}}" "{{base}}" > "$VLOG" 2>&1
     vrc=$?
-    set -e
-    if [ "$vrc" -ne 0 ]; then
-        refuse eligibility "$(grep -m 1 '^REFUSED' "$VLOG" || echo "laya-verify exited $vrc (log: $VLOG)")" "$vrc"
+    if [ -n "$REC" ]; then
+        JOUT="$(python3 -I "$ELIG_PY" judge --apr-sha256 "$H" --verify-rc "$vrc" --verify-log "$VLOG" --record "$REC" --finding-log "$SD/cross-cpu-finding-$SERVER.log" --server "$SERVER" 2>&1)"
+    else
+        JOUT="$(python3 -I "$ELIG_PY" judge --apr-sha256 "$H" --verify-rc "$vrc" --verify-log "$VLOG" 2>&1)"
     fi
-    python3 - "$VLOG" "$H" <<'PY' || refuse eligibility "laya-verify exited 0 without deploy_eligible true for sha256 $H (log: $VLOG)"
-    import json, sys
-    lines = [l for l in open(sys.argv[1]) if l.startswith("{")]
-    v = json.loads(lines[-1])
-    sys.exit(0 if v.get("deploy_eligible") is True and v.get("artifact_sha256") == sys.argv[2] else 1)
-    PY
-    echo "  eligible: laya-verify accepted $APR (sha256 $H)"
+    jrc=$?
+    set -e
+    if [ "$jrc" -ne 0 ]; then
+        echo "$JOUT" >&2
+        exit "$jrc"
+    fi
+    echo "  eligible: $JOUT"
     # (5b) the profile resolves to the table's account (live sts; a no-op under DRY_RUN=1).
     just _laya-account-check "$PROFILE" "$CFG_REGION"
     # (6) the uploaded object
@@ -3502,17 +3526,21 @@ laya-deploy-selftest:
     ELIG_UP="models/decide/eligibility-upload-$SRV.log"
     if [ -f "$ELIG" ]; then cp -p "$ELIG" "$BK/eligibility.log"; fi
     if [ -f "$ELIG_UP" ]; then cp -p "$ELIG_UP" "$BK/eligibility-upload.log"; fi
+    # The cross-CPU finding log (Phase 15 D-08): kept and removed the same way, so only this run's cases write it.
+    FIND="models/decide/cross-cpu-finding-$SRV.log"
+    if [ -f "$FIND" ]; then cp -p "$FIND" "$BK/cross-cpu-finding.log"; fi
     cleanup() {
         if [ -f "$ELIG" ]; then cp "$ELIG" "$CASES/eligibility-export-$SRV.log"; fi
         if [ -f "$ELIG_UP" ]; then cp "$ELIG_UP" "$CASES/eligibility-upload-export-$SRV.log"; fi
         if [ -f "$BK/eligibility.log" ]; then cp -p "$BK/eligibility.log" "$ELIG"; else rm -f "$ELIG"; fi
         if [ -f "$BK/eligibility-upload.log" ]; then cp -p "$BK/eligibility-upload.log" "$ELIG_UP"; else rm -f "$ELIG_UP"; fi
+        if [ -f "$BK/cross-cpu-finding.log" ]; then cp -p "$BK/cross-cpu-finding.log" "$FIND"; else rm -f "$FIND"; fi
         if [ -f "$BK/decide-deploy.toml" ]; then cp -p "$BK/decide-deploy.toml" "$CFG"; else rm -f "$CFG"; fi
         [ -f "$BK/resolver-proof.txt" ] && cp -p "$BK/resolver-proof.txt" "$PROOF"
         rm -rf "$BK"
     }
     trap cleanup EXIT
-    rm -f "$ELIG" "$ELIG_UP"
+    rm -f "$ELIG" "$ELIG_UP" "$FIND"
     # The shared deploy root's state (setfit-train's), before anything runs.
     ROOT_TOML_BEFORE="$(sha_or_absent crates/.pmcp/deploy.toml)"
     root_digest() {
@@ -3576,6 +3604,65 @@ laya-deploy-selftest:
     expect_refused 4 deploy-eligibility 'REFUSED eligibility: .*SyntheticNotDeployable' deploy_tiny
     expect_refused 5 upload-eligibility 'REFUSED eligibility: .*SyntheticNotDeployable' \
         just laya-upload "$A" "$T" "$T/data" "$T/checkpoint" "$SRV"
+    # Phase 15 D-08/D-09: the pack record as the eligibility authority, OFFLINE on the synthetic fixture (no
+    # real bytes, no real weights; the real-bytes path is the FULL-tier gates row upload-eligibility). The helper
+    # first (its own case table, both roles), then cases a-f through BOTH recipes with the aws recorder empty.
+    ELIG_PY="scripts/laya_deploy/laya_eligibility.py"
+    if python3 -I "$ELIG_PY" --selftest > "$CASES/eligibility-helper.log" 2>&1 \
+        && grep -Eq '^ELIGIBILITY SELFTEST OK [0-9]+ cases .*roles role-drift-advisory,role-all-advisory' "$CASES/eligibility-helper.log"; then
+        echo "CASE 60 eligibility-helper: $(tail -n 1 "$CASES/eligibility-helper.log")"
+    else
+        fail "CASE 60 eligibility-helper: laya_eligibility.py --selftest failed (log: $CASES/eligibility-helper.log)"
+        tail -5 "$CASES/eligibility-helper.log" >&2
+    fi
+    ROLE_NOW="$(python3 -I "$ELIG_PY" role)"
+    mkrec() {
+        python3 -I -c 'import json, sys; p, sha, acc = sys.argv[1:4]; json.dump({"schema": "laya-train-pack-outcome-v1", "accepted": acc == "true", "deploy_eligible": acc == "true", "apr_sha256": sha, "pack_image_digest": "sha256:" + "5" * 64, "parity_contract_sha256": "7" * 64}, open(p, "w"))' "$@"
+    }
+    mkrec "$CASES/record-valid.json" "$GOLDEN" true
+    mkrec "$CASES/record-zeros.json" "0000000000000000000000000000000000000000000000000000000000000000" true
+    mkrec "$CASES/record-unaccepted.json" "$GOLDEN" false
+    mkdir -p "$CASES/conv-bad/logs"
+    cp -R "$T" "$CASES/conv-absent-run-src" && mkdir -p "$CASES/conv-absent" && mv "$CASES/conv-absent-run-src" "$CASES/conv-absent/run"
+    cp -R "$T" "$CASES/conv-bad/run"
+    mkrec "$CASES/conv-bad/logs/pack-outcome.json" "$GOLDEN" false
+    RN=60
+    rcase() {
+        local letter="$1" recipe="$2" rec="$3" run="$4" pat="$5" n
+        RN=$((RN + 1)); n="$RN"
+        expect_refused "$n" "record-$letter-$recipe" "$pat" env LAYA_PACK_OUTCOME="$rec" just "laya-$recipe" "$A" "$run" "$T/data" "$T/checkpoint" "$SRV"
+    }
+    for recipe in deploy upload; do
+        # (a) a valid record: the signed role decides what the local SyntheticNotDeployable refusal means
+        if [ "$ROLE_NOW" = "role-drift-advisory" ]; then
+            FIND_BEFORE="$(sha_or_absent "$FIND")"
+            rcase a "$recipe" "$CASES/record-valid.json" "$T" 'REFUSED eligibility: .*SyntheticNotDeployable'
+            [ "$(sha_or_absent "$FIND")" = "$FIND_BEFORE" ] || fail "CASE record-a-$recipe: a non-drift refusal was logged as a cross-CPU finding"
+        else
+            RN=$((RN + 1)); n="$RN"
+            set +e
+            env LAYA_PACK_OUTCOME="$CASES/record-valid.json" just "laya-$recipe" "$A" "$T" "$T/data" "$T/checkpoint" "$SRV" > "$CASES/$n-record-a-$recipe.log" 2>&1
+            set -e
+            if grep -Fq "  eligible: ELIGIBLE pack-record sha256 $GOLDEN (CROSS-CPU FINDING: REFUSED SyntheticNotDeployable" "$CASES/$n-record-a-$recipe.log" \
+                && grep -Fq "local=REFUSED SyntheticNotDeployable" "$FIND"; then
+                echo "CASE $n record-a-$recipe: ELIGIBLE with a logged finding under $ROLE_NOW (the later DRY_RUN outcome is not asserted)"
+            else
+                fail "CASE $n record-a-$recipe: expected a logged SyntheticNotDeployable finding under $ROLE_NOW (log: $CASES/$n-record-a-$recipe.log)"
+            fi
+        fi
+        # (b) the record names other bytes; (c) the pack did not accept; (d) an explicit record that is absent
+        rcase b "$recipe" "$CASES/record-zeros.json" "$T" 'REFUSED eligibility: pack record apr_sha256 .* differs from the local file'
+        rcase c "$recipe" "$CASES/record-unaccepted.json" "$T" 'REFUSED eligibility: pack record accepted is not true'
+        rcase d "$recipe" "$CASES/no-such-record.json" "$T" 'REFUSED eligibility: pack record .* does not exist'
+        # (e) convention-absent: a `run` dir with no logs/pack-outcome.json beside it is no record, the local gate decides
+        rcase e "$recipe" "" "$CASES/conv-absent/run" 'REFUSED eligibility: .*SyntheticNotDeployable'
+        if grep -q 'pack record' "$CASES/$RN-record-e-$recipe.log"; then
+            fail "CASE $RN record-e-$recipe: an absent convention record was judged as a pack record"
+        fi
+        # (f) convention-present: the record beside the `run` dir is found and judged
+        rcase f "$recipe" "" "$CASES/conv-bad/run" 'REFUSED eligibility: pack record accepted is not true'
+    done
+    [ "$(wc -l < "$REC" | tr -d ' ')" -eq 0 ] || fail "CASE 6x record cases: the aws recorder was called ($(head -n 3 "$REC" | tr '\n' ';'))"
     # D-19, D-20: the retired id has no thin crate. Both AWS-writing recipes refuse it naming `server`, and they
     # do so BEFORE any file or AWS action: no eligibility log is written for it, and the recorder stays empty.
     expect_refused 5a retired-deploy 'REFUSED server: .*declares no bootstrap bin' \
@@ -4053,9 +4140,10 @@ laya-weights-bucket env="dev" profile="ze-kasher-dev" region="us-east-1":
     echo "  private, SSE-S3, tagged: s3://$BUCKET (region $R)"
 
 # Upload <apr> content-addressed to s3://aprender-decide-weights-<account>-<env>/decide/<server>/<sha256>.apr.
-# `just laya-verify` on the exact file runs FIRST and must accept it before any AWS call (sts
-# included): nothing leaves this machine that the Rust verifier did not accept. The key's hash is
-# verify's artifact_sha256; the upload is checked by head-object size and is idempotent.
+# Eligibility runs FIRST and must accept the file before any AWS call (sts included): the Graviton pack
+# record bound to these bytes (Phase 15 D-08/D-09; a local RescoreDrift is then a logged cross-CPU
+# finding), or, for a run with no pack record, `just laya-verify` on the exact file. The key's hash is the
+# file's sha256; the upload is checked by head-object size and is idempotent.
 laya-upload apr run data base server env="dev" profile="ze-kasher-dev":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -5619,6 +5707,10 @@ laya-gates-selftest:
             full_only "the real resolver proof (cargo-pmcp test in an SDK archive)"
         fi
     }
+    # A crafted pack record (Phase 15 D-08/D-09) for the synthetic fixture: gate_rec <path> <apr_sha256> <true|false>.
+    gate_rec() {
+        python3 -I -c 'import json, sys; p, sha, acc = sys.argv[1:4]; json.dump({"schema": "laya-train-pack-outcome-v1", "accepted": acc == "true", "deploy_eligible": acc == "true", "apr_sha256": sha, "pack_image_digest": "sha256:" + "5" * 64, "parity_contract_sha256": "7" * 64}, open(p, "w"))' "$@"
+    }
     row_deploy_selftest_skip() {
         tiny
         must_fail synthetic-armed 'FAIL positive dry run: exit 2 without DRY-RUN OK' \
@@ -5643,6 +5735,12 @@ laya-gates-selftest:
         must_fail placeholder 'REFUSED placeholder:' just laya-deploy "$W/tiny.apr" "$T" "$T/data" "$T/checkpoint" "$SRV"
         run regen just laya-deploy-config "$W/tiny.apr" off "$SRV"
         must_fail eligibility 'REFUSED eligibility: .*SyntheticNotDeployable' just laya-deploy "$W/tiny.apr" "$T" "$T/data" "$T/checkpoint" "$SRV"
+        gate_rec "$W/rec-zeros.json" 0000000000000000000000000000000000000000000000000000000000000000 true
+        gate_rec "$W/rec-unaccepted.json" "$GOLDEN" false
+        must_fail record-sha-mismatch 'REFUSED eligibility: pack record apr_sha256 .* differs from the local file' \
+            env LAYA_PACK_OUTCOME="$W/rec-zeros.json" just laya-deploy "$W/tiny.apr" "$T" "$T/data" "$T/checkpoint" "$SRV"
+        must_fail record-not-accepted 'REFUSED eligibility: pack record accepted is not true' \
+            env LAYA_PACK_OUTCOME="$W/rec-unaccepted.json" just laya-deploy "$W/tiny.apr" "$T" "$T/data" "$T/checkpoint" "$SRV"
         must_fail retired-id 'REFUSED server: ' just laya-deploy "$W/tiny.apr" "$T" "$T/data" "$T/checkpoint" "$RETIRED_SERVER"
         need_deployed || return 0
         armed_deploy_selftest
@@ -5655,12 +5753,33 @@ laya-gates-selftest:
     row_upload_eligibility() {
         tiny
         must_fail synthetic 'REFUSED eligibility: .*SyntheticNotDeployable' just laya-upload "$W/tiny.apr" "$T" "$T/data" "$T/checkpoint" "$SRV"
+        gate_rec "$W/rec-zeros.json" 0000000000000000000000000000000000000000000000000000000000000000 true
+        gate_rec "$W/rec-unaccepted.json" "$GOLDEN" false
+        must_fail record-sha-mismatch 'REFUSED eligibility: pack record apr_sha256 .* differs from the local file' \
+            env LAYA_PACK_OUTCOME="$W/rec-zeros.json" just laya-upload "$W/tiny.apr" "$T" "$T/data" "$T/checkpoint" "$SRV"
+        must_fail record-not-accepted 'REFUSED eligibility: pack record accepted is not true' \
+            env LAYA_PACK_OUTCOME="$W/rec-unaccepted.json" just laya-upload "$W/tiny.apr" "$T" "$T/data" "$T/checkpoint" "$SRV"
         must_fail retired-id 'REFUSED server: ' just laya-upload "$W/tiny.apr" "$T" "$T/data" "$T/checkpoint" "$RETIRED_SERVER"
         if [ "$FULL" = "1" ]; then
             need_deployed || return 0
             must_pass deployed '^DRY-RUN: would upload ' just laya-upload "$DEP_APR" "$DEP_RUN" "$DEP_DATA" "$BASE" "$SRV"
+            # The real-bytes record path (Phase 15 D-08): smoke-stance-64 was accepted by its Graviton pack task; the
+            # record is found by convention beside its `run` dir. Either local outcome is accepted (after plan 15-02 this
+            # Mac may accept outright); the case prints which. The server's finding log is kept and restored.
+            local SM="$MAIN/models/decide/smoke-stance-64" SMH="31ace8ea95ca0c750b6d007d0f4c68e4322d20363117f837673a936d6f696c85" FL="models/decide/cross-cpu-finding-$SRV.log" smp
+            for smp in "$SM/smoke-stance-64.apr" "$SM/run/gate-report.json" "$SM/data" "$SM/logs/pack-outcome.json"; do
+                [ -e "$smp" ] || { red "the smoke-stance-64 record case inputs are absent ($smp): this case cannot measure anything"; return 0; }
+            done
+            if [ -f "$FL" ]; then cp -p "$FL" "$W/finding.bk"; else rm -f "$W/finding.bk"; fi
+            must_pass smoke-record '^DRY-RUN: would upload ' just laya-upload "$SM/smoke-stance-64.apr" "$SM/run" "$SM/data" "$BASE" "$SRV"
+            if [ -f "$W/finding.bk" ]; then cp -p "$W/finding.bk" "$FL"; else rm -f "$FL"; fi
+            if grep -Fq "eligible: ELIGIBLE pack-record sha256 $SMH" "$(logof smoke-record)"; then
+                echo "  smoke-record: $(grep -Fm 1 'eligible: ELIGIBLE pack-record' "$(logof smoke-record)" | cut -c 1-200)"
+            else
+                red "smoke-record: no 'ELIGIBLE pack-record sha256 $SMH' line (log $(logof smoke-record))"
+            fi
         else
-            full_only "the DRY_RUN upload of the deployed artifact (laya-verify, multi-GB)"
+            full_only "the DRY_RUN uploads of the deployed artifact and of smoke-stance-64 through its pack record (laya-verify, multi-GB)"
         fi
     }
     row_verify() {
