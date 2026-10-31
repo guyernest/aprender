@@ -1,215 +1,237 @@
 ---
 phase: 14-laya-training-mcp-server-s3-dataset-in-apr-and-reports-out
-reviewed: 2026-10-29T00:00:00Z
+reviewed: 2026-10-30T00:00:00Z
 depth: standard
-files_reviewed: 36
+scope: incremental re-review of the gap-closure round 14-16..14-22 (diff base 2ead5836f)
+files_reviewed: 16
 files_reviewed_list:
-  - Cargo.toml
-  - crates/aprender-core/tests/monorepo_invariants.rs
-  - crates/aprender-mcp-laya-train-lambda/.pmcp/deploy.toml.template
-  - crates/aprender-mcp-laya-train-lambda/Cargo.toml
-  - crates/aprender-mcp-laya-train-lambda/src/bin/aprender-laya-train-finalizer.rs
-  - crates/aprender-mcp-laya-train-lambda/src/bin/bootstrap.rs
-  - crates/aprender-mcp-laya-train-lambda/src/compute.rs
-  - crates/aprender-mcp-laya-train-lambda/src/dataset.rs
   - crates/aprender-mcp-laya-train-lambda/src/finalizer.rs
-  - crates/aprender-mcp-laya-train-lambda/src/lib.rs
   - crates/aprender-mcp-laya-train-lambda/src/objects.rs
   - crates/aprender-mcp-laya-train-lambda/src/sfn.rs
-  - crates/aprender-mcp-laya-train/Cargo.toml
+  - crates/aprender-mcp-laya-train-lambda/src/bin/bootstrap.rs
+  - crates/aprender-mcp-laya-train-lambda/fixtures/failure-surface-v1.json
   - crates/aprender-mcp-laya-train/src/finalize.rs
   - crates/aprender-mcp-laya-train/src/layout.rs
   - crates/aprender-mcp-laya-train/src/lib.rs
-  - crates/aprender-mcp-laya-train/src/lock.rs
-  - crates/aprender-mcp-laya-train/src/validate.rs
-  - deploy-extensions/bin/app.ts
-  - deploy-extensions/container/pack-arm64/Dockerfile
-  - deploy-extensions/container/pack-arm64/smoke.sh
-  - deploy-extensions/lib/laya-trainer-images-stack.ts
-  - deploy-extensions/lib/laya-trainer-stack.ts
-  - justfile
-  - scripts/laya_deploy/laya_fetch.py
-  - scripts/laya_deploy/laya_repro_eval.py
+  - crates/aprender-mcp-laya-train/src/redact.rs
+  - scripts/laya_deploy/laya_failure_surface.py
+  - scripts/laya_deploy/laya_drift.py
   - scripts/laya_deploy/laya_trainer_ops.py
   - scripts/laya_deploy/laya_trainer_stack_check.py
-  - scripts/laya_deploy/train_call.py
-  - scripts/laya_train/container/Dockerfile.train
-  - scripts/laya_train/container/run_step.py
-  - scripts/laya_train/container/stage_base.py
-  - scripts/laya_train/data.py
-  - scripts/laya_train/data_cases_gen.py
-  - scripts/laya_train/pyproject.toml
-  - scripts/laya_train/train.py
+  - scripts/laya_gates.tsv
+  - justfile
+  - deploy-extensions/README.md
 findings:
   critical: 0
-  warning: 4
-  info: 3
-  total: 7
+  warning: 3
+  info: 9
+  total: 12
 status: issues_found
 ---
 
-# Phase 14: Code Review Report
+# Phase 14: Code Review Report (incremental, gap round 14-16..14-22)
 
-**Reviewed:** 2026-10-29
+**Reviewed:** 2026-10-30
 **Depth:** standard
-**Files Reviewed:** 36
+**Files Reviewed:** 16
 **Status:** issues_found
 
 ## Summary
 
-Scope was the Phase 14 Laya training server: the server library (validate, lock, finalize decision, layout), the Lambda
-deployment unit (S3 dataset source, Step Functions dispatcher and cancel sink, compute gate, finalizer), the two CDK
-stacks, the two container programs (`run_step.py` train and pack modes), and the owner-run tooling (`laya_trainer_ops.py`,
-`laya_fetch.py`, `train_call.py`, `laya_repro_eval.py`).
+This review replaces the 2026-10-29 report. It covers the changes since `2ead5836f`: outcome-first classification
+(14-17), total finalization over listed-but-absent objects (14-17), caller-safe text (14-18), finalizer provenance
+(14-19), the failure-surface enumeration and its checker (14-16, 14-19), the drift harness (14-20, 14-21), and the
+gate rows and recipes that wire them in.
 
-I found no injection, path-traversal, secret-handling or authorization defect. The path guards are consistent end to end:
-`parse_dataset_uri` and `segment_ok` on the request side, `guard_link_key` on presigning, `check_entry_path` and
-`dest_for` on fetch, and `parse_training_manifest` on the pack side. The wire shapes also agree across the three
-languages. I checked `Outcome`, `TrainingManifest`, `PackOutcome` and `ExecutionInput`, which are
-`deny_unknown_fields` in Rust, against what `run_step.py` and the CDK payloads write, and the field sets match. The IAM
-statements match the code paths that need them. The `train.py` to `data.validate_data_dir` refactor preserves the check
-order and still binds `seed`.
+All four prior warnings and IN-01 are fixed as the previous report asked. Each fix is in the code, not only in the
+documents, and has a test that drives both delivery paths or a planted failure. I found no injection, path-traversal
+or authorization defect in the new code. The generated Graviton script quotes every value it embeds and checks each
+one against a strict grammar first. The mutation runner restores files byte for byte and checks that it did. The
+failure-surface binding compares both directions.
 
-The defects that remain are behavioural. The most consequential is that the finalizer's refused, crash and timeout
-classification (including the D-08 `prefilter_disagreement` flag) is unreachable on the normal path. Next are a
-finalization wedge on a manifest entry whose object does not exist, client-visible AWS error text carrying account
-identifiers, and a finalizer asset deployed without provenance checks.
+What remains are three gaps, each a case the new protection does not reach:
 
-Out of scope and not re-reported, per the brief: the cancel-sink runtime-per-call concern, the deferred efficiency
-items, the justfile preamble duplication, the Mac-vs-Graviton parity bound (D-15), the untracked `.env.m2m`, and the
-Python/Rust validator mirror.
+- **WR-01:** in `finalize.rs`, job-written text is clipped before it is redacted, which defeats the truncation rule
+  `caller_safe` documents.
+- **WR-02:** the finalizer provenance record attests whatever binary sits at a hard-coded `target/` path, not the
+  binary the build just produced.
+- **WR-03:** the request function now holds the WR-03 redaction boundary, but it is deployed with no build record at
+  all. The WR-04 fix covered only one of the two Lambda binaries.
 
-Review depth note: `data_cases_gen.py` and `laya_trainer_stack_check.py` were skimmed (a generator and a mutation-tested
-template checker) and the `run_step.py` probe modes and selftest were not read line by line.
+### Prior findings: disposition with evidence
+
+| Prior | Status | Evidence |
+|-------|--------|----------|
+| WR-01 (classification unreachable) | **resolved** | `finalize.rs:533-546`: the `stage_error` early return is gone. The stage error is used only when `outcome` is `None`. A parsed outcome now decides every class: the refusal arm sets `prefilter_disagreement` true whatever the delivery path, and crash, timeout, device, missing gate report and missing pack record append `; stage error: ...` through `Builder::with_stage`. `CATCH_FED_CASES` together with `deliveries()` (`finalize.rs` tests) decide each of the five classes twice, once through `fixtures::through_catch` (the real `redact::stage_error` shape) and once with `stage_error: None`, and assert the same phase, `is_error` and D-08 flag both times. `KNOWN_DEFECTS` is empty (`finalizer.rs:3923`), and the shrink-only ratchet asserts that. |
+| WR-02 (wedge on listed-but-absent) | **resolved** | `finalizer.rs:573-604` (`drop_absent_entries`) removes every manifest entry the prefix listing does not hold before the decision, so the decision, the payload, `manifest.json` and the links are built only from objects that exist, and the dropped paths go into a bounded note (`finalize.rs` `dropped_note`). `publish` restricts the tag targets to a listing taken after `verdict.json`/`manifest.json` were written (`finalizer.rs:950-964`), so an adopted manifest that names a vanished object no longer fails `GetObjectTagging` forever. `list` is paginated (`objects.rs:182-205`). |
+| WR-03 (raw AWS text to callers) | **resolved, residual in WR-01 below** | Three boundaries are in place. (1) `StatusPayload::to_value` (`layout.rs:567-586`) passes `error`, `verdict.pack.line` and `notes` through `caller_safe`, and the stored result, `verdict.json`, `tasks/result` and `train_status` all serialize there (`finalize.rs:178-181`, `finalizer.rs:644`, `lib.rs:676,705`). (2) The Catch `{Error, Cause}` is *reduced*, not forwarded: `redact::stage_error` keeps an identifier name plus whitelisted reason keys, and `finalizer.rs:269-278` logs the full text server-side. (3) `RedactingBackend` wraps the DynamoDB backend in `bootstrap.rs`, and `start_error_label` (`sfn.rs:55-83`) turns a failed `StartExecution` into a bare code. `describe` and `stop` errors are log-only (`lib.rs:579-581`, `sfn.rs:487-499`). |
+| WR-04 (finalizer asset provenance) | **resolved for the finalizer, residuals in WR-02 and WR-03** | `laya-trainer-synth` writes `bootstrap.build.json` (`justfile:1417`, `laya_trainer_ops.py:792-832`). `cmd_infra` refuses `diff`/`deploy` on a missing sidecar, a sha mismatch, a dirty build closure, a non-ancestor commit, a closure changed since the build, or a closure dirty now (`laya_trainer_ops.py:738-763,937-947`), and does this before any `cdk` call. The closure comes from `cargo tree`. I re-derived it with `-e normal` and with `-e normal,build` for `aarch64-unknown-linux-gnu`: both give the same 12 local paths, so excluding build edges loses nothing today. |
+| IN-01 (inventories expire on a kept run) | **resolved** | `SELF_LISTING` now marks retention-tag targets (`finalizer.rs:65-75`). `publish` adds all five names and keeps the ones that exist (`finalizer.rs:962-964`). |
+| IN-02 (immutable tag blocks a re-build) | **open** | `cmd_image` still starts the CodeBuild build without first checking `ecr describe-images --image-ids imageTag=<HEAD>` (`laya_trainer_ops.py:556-592`). Carried as IN-04 below. |
+| IN-03 (gate-contract skew unobserved) | **open** | `Builder::manifest` still records `prefilter_gate` and `train_gate` and never compares them (`finalize.rs:338-349`). Carried as IN-05 below. |
 
 ## Warnings
 
-### WR-01: the refused / crash / timeout / D-08 classification in `finalize_run` is unreachable on the normal path
+### WR-01: job-written text is clipped to 1024 characters BEFORE redaction, so a partial account id or access key can survive
 
-**File:** `crates/aprender-mcp-laya-train/src/finalize.rs:430` (with `scripts/laya_train/container/run_step.py:193-195` and `deploy-extensions/lib/laya-trainer-stack.ts:508-509`)
-**Issue:** `run_step.py` exits 1 for every exit class except `pass` and `gate_fail` (`job_exit_code`), so a refused, crashed
-or timed-out trainer makes the SageMaker job `Failed`. The `Train` state then fails, and
-`train.addCatch(catchFinalize, { errors: [ALL], resultPath: '$.error' })` always hands the finalizer a populated `error`.
-`finalize_run` returns at `if let Some(error) = &input.stage_error { return b.failed(error, None, false); }` (line 430)
-before it reads `outcome.json`. Consequences:
-- A trainer refusal the pre-filter accepted never sets `prefilter_disagreement: true`. That is exactly the D-08 "defect to surface" row of the decision table.
-- The `REFUSED <rule>: ...` line the trainer recorded in `outcome.refused_line` never reaches the caller. They get the SFN Cause text instead.
-- The `Refused`, `Crash` and `Timeout` arms (lines 442-470) are reachable only through the Event and reconcile paths, which pass `stage_error: None`. The machine catches every Train failure and ends `SUCCEEDED`, so those paths do not see such runs.
-- The live gate run exercised the pack-refusal path, which exits 0, so no live evidence covers this.
+**File:** `crates/aprender-mcp-laya-train/src/finalize.rs:273-275` (`clip`), used at `:381` (`payload.error = error.map(|e| clip(&e))`) and `:443` (`pack_info`, `.map(|l| clip(&l))`); the redaction runs later, in `layout.rs:567-586`
+**Issue:** `caller_safe` redacts first and truncates second. Its truncation also refuses to leave a partial span that
+would be sensitive on its own (`redact.rs:244-264`; the module doc calls this the property that makes it idempotent
+and safe). `finalize.rs` reverses that order. `Builder::decide` and `pack_info` cut free text to `MAX_ERROR_CHARS` =
+1024 characters with a plain `chars().take(1024)`, and only afterwards does `to_value` redact. A 12-digit account id
+or a 20-character `AKIA…` key that straddles character 1024 is cut to its first 1-11 digits (or `AKIA` plus 15
+characters). The rule cannot recognise that fragment: `has_account_digits` needs a run of exactly 12, and
+`has_access_key` needs 16 tail characters. So the fragment reaches `error` / `verdict.pack.line` in the stored payload,
+`verdict.json`, `tasks/result` and `train_status`. Eleven of twelve digits is the account id up to ten guesses.
 
-**Fix:** When `outcome.json` parsed and names this task, let it decide the class and use `stage_error` only as the
-fallback when the outcome is absent (reorder the checks in `finalize_run`):
+The text clipped here is not limited to fixed sentences. It includes job-written lines:
+
+- `outcome.refused_line`, the first `REFUSED ` line of the trainer log, with no length bound (`run_step.py:198-207`), embedded in `format!("the trainer refused ...: {line}")`;
+- `packed_line` / `verify_line`, cut by the container to 4000 characters (`run_step.py:1443-1444`, also before any redaction).
+
+A pack or verify `REFUSED` line that quotes an S3 URI (the bucket is `aprender-laya-train-<env>-<account>`) or an ECR
+reference near offset 1024 is the realistic trigger. The redact test table never puts an identifier at the
+1024-character clip boundary, so the tests do not catch this.
+
+**Fix:** let the redaction see the whole span before anything is cut. Replace `clip` with the redaction-aware bound so
+there is one truncation rule:
 ```rust
-if input.outcome.is_none() {
-    if let Some(error) = &input.stage_error {
-        return b.failed(error, None, false);
-    }
-    return b.failed("outcome.json is missing: the training stage left no record", None, false);
+fn clip(text: &str) -> String {
+    // Redact first, then truncate (the partial-span rule lives in caller_safe).
+    crate::redact::caller_safe(text, MAX_ERROR_CHARS)
 }
-// then the existing `match outcome.exit_class { ... }`; attach stage_error as extra detail on the Crash arm
 ```
-Add a test with `stage_error: Some(..)` and an outcome `refused` (not `inputs-changed`) that asserts
-`prefilter_disagreement == true`. The existing tests almost certainly pass `stage_error: None` for these rows.
+Because `caller_safe` is idempotent, the second pass in `to_value` changes nothing. Add a must-redact row that places
+`987654321098` and `AKIAIOSFODNN7EXAMPLE` so they straddle character 1024 of a `refused_line`, and assert that no
+digit run of 6 or more and no `AKIA` prefix survives in `finalize_run(..).payload.to_value()`.
 
-### WR-02: finalization wedges permanently when a manifest lists an object that does not exist
+### WR-02: the provenance record attests the binary at a hard-coded `target/` path, not the binary the build produced
 
-**File:** `crates/aprender-mcp-laya-train-lambda/src/finalizer.rs:874-905` (with `scripts/laya_train/container/run_step.py:759` and `:1313`)
-**Issue:** `run_step.finish` appends an `outcome.json` entry to `training-manifest.json` before it uploads `outcome.json`
-(line 759, upload at line 764). `publish_pack` does the same for `pack-outcome.json` (line 1313). If that last upload
-fails after its retries, the job exits 1 and the manifest still lists an object that is not in S3.
-
-The finalizer then builds `targets` from every manifest entry (line 874) and calls `get_tag` on each. S3
-`GetObjectTagging` on a missing key returns NoSuchKey, which becomes `store_err` and returns `Err` from `publish`.
-
-The record was already settled at step 2, so the lock stays held. Every 10-minute sweep re-enters `finalize_task`, fails
-the same way and trips the FinalizerErrors alarm. This continues until the lease runs out (11 h), because
-`reconcile` filters on `!released`, not on liveness, so it keeps retrying after the lease expires too.
-
-Trigger probability is low (3 failed attempts at 900 s on the last upload), but the failure mode is an unbounded alarm
-storm plus up to 11 h of single-flight lockout, and nothing in the code can clear it.
-
-**Fix:** Tolerate a listed-but-absent object in the tagging pass. The `list(prefix)` result already computed above gives
-the set of existing keys:
-```rust
-let existing: BTreeSet<&str> = listed.iter().map(|(k, _)| k.as_str()).collect(); // hoist `listed` out of the manifest-building branch
-targets.retain(|key| existing.contains(key.as_str()));
+**File:** `justfile:1407-1417` (`cargo zigbuild ...`, then `BIN="target/{{target}}/release/aprender-laya-train-finalizer"`, `cp "$BIN"`, `finalizer-provenance write`); `scripts/laya_deploy/laya_trainer_ops.py:792-809` (`build_sidecar`)
+**Issue:** `finalizer-provenance write` hashes whatever file is at `$ASSET/bootstrap` and stamps it with
+`git rev-parse HEAD` and a clean-closure flag. The file it hashes is copied from a fixed `target/...` path. Cargo writes
+to `$CARGO_TARGET_DIR` (or a `build.target-dir` in a host-local `.cargo/config.toml`) when either is set. In that case
+`cargo zigbuild` puts the fresh binary somewhere else, and `cp` copies whatever older binary is still under `./target/`.
+The sidecar then records that stale binary as built from HEAD with `closure_clean: true`. `cmd_infra` accepts it,
+because the sha matches the sidecar, the commit is HEAD and the closure is clean. That is the WR-04 failure this round
+set out to close: a deploy silently ships an unreviewed or stale finalizer. The README states "this binary is the one
+the synth produced" (`deploy-extensions/README.md`, "What it proves"), and this case makes that statement false. The
+repo already knows the safe pattern. `laya_drift.py:binary_identity` takes the executable path from cargo's own
+`compiler-artifact` message, and the embed-probe recipe derives `TD` from `cargo metadata` (`justfile:8972-8974`).
+**Fix:** take the binary path from the build itself, for example:
+```bash
+TD=$(cargo metadata --no-deps --format-version 1 | python3 -I -c 'import json,sys;print(json.load(sys.stdin)["target_directory"])')
+BIN="$TD/{{target}}/release/aprender-laya-train-finalizer"
 ```
-Report the dropped paths in `FinalizeReport` (or bump `unlisted`) instead of failing. Alternatively have the containers
-write the manifest entry for `outcome.json` and `pack-outcome.json` only after the upload returned success, and rewrite
-the manifest if needed. That conflicts with the "outcome LAST is the completion marker" rule, so the finalizer-side fix
-is the safer one.
+Better still, have `finalizer-provenance write` run (or parse) `cargo zigbuild ... --message-format=json` and hash the
+`executable` it names. Also record cargo's `fresh` flag, so that a "built" binary which was really a cache hit from
+another tree is visible.
 
-### WR-03: raw AWS error text reaches API callers and the stored status payload, including account identifiers
+### WR-03: the request function (now the caller-facing redaction boundary) is deployed with no build attestation
 
-**File:** `crates/aprender-mcp-laya-train-lambda/src/sfn.rs:142-145`, `crates/aprender-mcp-laya-train/src/lib.rs:595`, `crates/aprender-mcp-laya-train-lambda/src/finalizer.rs:263-269` (stored at `finalize.rs:291`)
-**Issue:** Two paths pass infrastructure error text through to the client unmodified.
-
-1. **Dispatch.** `SfnExecutions::start` sets `StartError.message = DisplayErrorContext(&e).to_string()`. `submit` returns
-   `pmcp::Error::validation("REFUSED dispatch: {reason}")` with that text and also stores it in the compensated
-   payload's `error`. An AccessDenied on `states:StartExecution` carries the caller role ARN and the state machine ARN
-   (both embed the 12-digit account id). So do `ExecutionLimitExceeded`, throttling and DynamoDB or lock backend errors
-   (`AcquireError::Backend`).
-2. **Catch.** `bounded_error` forwards the SFN Catch `Error: Cause` text, truncated to 2048 and then 1024 characters.
-   For a failed `.sync` SageMaker job the `Cause` is the `DescribeTrainingJob` JSON, whose leading fields include
-   `AlgorithmSpecification.TrainingImage`. That is the ECR URI with the account id and, on the finalizer side, role and
-   resource ARNs. `train_status` serves it to the caller.
-
-The same module is careful elsewhere: `dataset.rs` documents "names the bucket and prefix, never the SDK text". The repo's
-own tooling is careful to print no 12-digit number. These two paths leak what that discipline protects.
-
-**Fix:** Log the full text server-side with `tracing::error!`. Return a fixed, caller-safe string built from the error
-name or kind only. For example, store `format!("dispatch failed ({kind:?})")`, and from the Catch keep only `Error`
-(for example `States.TaskFailed`) plus, where available, the SageMaker `FailureReason` line after a redaction pass that
-drops `arn:` tokens and 12-digit runs.
-
-### WR-04: the finalizer Lambda asset has no provenance or freshness check at deploy time
-
-**File:** `scripts/laya_deploy/laya_trainer_ops.py:670-675` (asset path at `:136`), `deploy-extensions/bin/app.ts` (finalizerAssetPath check)
-**Issue:** The two container images are built from `git archive HEAD` of a clean context and are tagged by commit. The
-finalizer is the "one writer of the terminal record, verdict, manifest, tags and lock release", yet `infra diff|deploy`
-and `cdk` only require that `deploy-extensions/assets/laya-finalizer/bootstrap` exists. That file is an untracked
-artifact written by `just laya-trainer-synth` from whatever the working tree held at the time. If the finalizer sources
-change after the last synth (or the tree was dirty or on another branch), `just laya-trainer-infra deploy` silently ships
-a stale or unreviewed binary. The CDK asset hash only changes when the binary does, so there is no signal.
-
-**Fix:** Have `laya-trainer-synth` write a sidecar next to the asset (`bootstrap.build.json` with `git rev-parse HEAD`, a
-clean-tree flag scoped to `crates/aprender-mcp-laya-train*` and `Cargo.lock`, and the binary sha256). Make `cmd_infra`
-refuse a deploy when the sidecar's commit is not `HEAD`, the tree for those paths is dirty, or the sha256 does not match
-the file. This mirrors the existing `image` recipe's clean-tree check.
+**File:** `scripts/laya_deploy/laya_trainer_ops.py:1557-1625` (`cmd_deploy`)
+**Issue:** WR-04 was fixed for the finalizer only. Since 14-18, the request function's binary holds most of the WR-03
+protection: `RedactingBackend` (`bootstrap.rs`), `start_error_label` (`sfn.rs`), and the `caller_safe` calls in `submit`
+and `status` (`lib.rs:584-597,659-667`). `cmd_deploy` builds that binary through `cargo pmcp deploy` from whatever the
+working tree holds. It never checks that the closure is clean or committed, and it records nothing about what it
+built. `deploy-<env>.json` holds only the endpoint and a timestamp. The checks it does make (the package name appears
+in the `Compiling` lines, the endpoint names the server) prove which crate was built, not from what source. A deploy
+from a tree where `redact.rs` or `lib.rs` is modified or reverted is indistinguishable from a reviewed one. That is the
+same class of gap WR-04 described, now on the binary that serves callers directly. This round's own redeploy (14-22)
+went through this path.
+**Fix:** reuse the 14-19 machinery. Derive the closure with `cargo tree -p aprender-mcp-laya-train-lambda --bin
+bootstrap ...` (the same `parse_closure`). Refuse a live `deploy` when `git_dirty` over that closure is non-empty, and
+write `commit`, `closure`, `closure_clean` and the deployed zip's sha256 (from the cargo-pmcp build output) into
+`deploy-<env>.json`. Then a later `verify` can say what is actually serving callers.
 
 ## Info
 
-### IN-01: `training-manifest.json`, `partial-manifest.json` and `pack-manifest.json` expire in 30 days even for a kept run
+### IN-01: stage-specific wording is wrong on two catch-fed paths
 
-**File:** `crates/aprender-mcp-laya-train-lambda/src/finalizer.rs:874-905` (with `SELF_LISTING` at `:67-73`; lifecycle rule at `deploy-extensions/lib/laya-trainer-stack.ts:127-134`)
-**Issue:** The retention tag is applied only to manifest entries plus `manifest.json`. The three manifests that cannot list
-themselves are in `SELF_LISTING`, so they keep the upload-time `laya-retention=expire` tag. For a `keep` run they are
-deleted after 30 days while the `.apr`, the reports and `verdict.json` stay. `manifest.json` carries the image digests
-and contract hashes, so provenance survives. The loss is only the per-stage inventories and the training-side
-`gate_contract_sha256` in their original form. If that is intended, say so in the `SELF_LISTING` doc comment. If not,
-add the three keys (when they exist) to `targets`.
+**File:** `crates/aprender-mcp-laya-train/src/finalize.rs:118-121` and `:450-457`
+**Issue:**
+- `NOTE_STAGE_ERROR_OVERRIDDEN` always says "the train job exited non-zero". The same note is attached when the stage
+  error came from the PackVerify Catch (`deploy-extensions/lib/laya-trainer-stack.ts:509`) and the pack records decided
+  `completed`.
+- When the Train job exits 1 after recording a `pass` (an upload failed), the machine skips PackVerify. The caller then
+  reads "pack-outcome.json is missing: the pack stage left no record". The pack stage never ran, so that sentence
+  points at the wrong stage.
 
-### IN-02: an immutable commit tag makes a failed or partial image build for a commit impossible to repeat
+**Fix:** make the note neutral ("a stage exited non-zero although ..."). In `decide_packed`, when `stage_error` is
+`Some` and `pack_outcome` is `None`, say "the pack stage did not run: the training stage failed after recording its
+outcome".
 
-**File:** `deploy-extensions/lib/laya-trainer-images-stack.ts:46-49` (buildspec) and `:84` (`IMMUTABLE`)
-**Issue:** The buildspec pushes `$REPO_URI:$GIT_COMMIT` into an IMMUTABLE repository. If a build pushed and then failed
-later (digest extraction, a timeout while polling), re-running `just laya-trainer-image` for the same `HEAD` fails at
-`docker push` ("tag ... cannot be overwritten"). The only way out is a new commit. Consider checking
-`aws ecr describe-images --image-ids imageTag=$GIT_COMMIT` first and printing that digest instead of rebuilding, which is
-also the correct behaviour since a rebuild would not be byte-identical.
+### IN-02: payloads stored before the 14-18 redeploy are re-served unredacted on two of the three doors
 
-### IN-03: pre-filter and trainer gate contracts can skew with no signal
+**File:** `crates/aprender-mcp-laya-train-lambda/src/finalizer.rs:626-641` (`Winner::from_result` keeps the stored text) and `:870-873` (verdict.json is that text byte for byte)
+**Issue:** `train_status` re-parses a stored result and re-serializes it through `to_value` (`lib.rs:666-676`), so it
+redacts old records. pmcp's own `tasks/result` serves the stored text verbatim, and a re-finalization copies it
+verbatim into `verdict.json`. A record written by the pre-14-18 finalizer with a raw SFN Cause keeps that text on
+those two doors until its TTL expires. This is bounded by the task TTL, so the exposure ends on its own. It is
+recorded so the "every door" claim in `layout.rs:556-565` is read with that caveat.
 
-**File:** `crates/aprender-mcp-laya-train/src/finalize.rs:212-232` (the `Contracts` assembly in `Builder::manifest`)
-**Issue:** `Manifest.contracts` records `prefilter_gate` (the request function's embedded contract hash) and `train_gate`
-(the trainer image's). Neither `finalize_run` nor the finalizer compares them. The request function and the training
-image are deployed by different recipes, so they can sit on different contract versions, and the epoch rule or
-calibration constants the pre-filter judged by would then differ from the trainer's. Only a human diffing the manifest
-would notice. Given WR-01, the `prefilter_disagreement` flag is also not set on that path. A one-line comparison that
-adds `error`/a note or sets a manifest flag when both are present and differ would make the skew observable.
+**Fix:** none needed if the pre-redeploy records have expired. Otherwise re-serialize in `Winner::from_result`
+(`payload.to_value().to_string()`) when `verdict.json` is written.
+
+### IN-03: known blind spots of the redaction blacklist
+
+**File:** `crates/aprender-mcp-laya-train/src/redact.rs:158-208`
+**Issue:** The rule does not redact these forms, as written and as tested:
+- the console's hyphenated account form `9876-5432-1098`;
+- a 12-digit run directly preceded or followed by an ASCII letter (`acct987654321098`);
+- IAM unique-id prefixes other than `AKIA`/`ASIA` (`AROA…`, `AIDA…`). These are not secrets, but they identify principals.
+
+`stage_error(Some("AKIA…"), None)` also swallows the separator ("[redacted] no cause recorded"). None of these forms
+appears in an AWS SDK message I know of. They are listed so the doc's "no account id ... reaches a caller" is read as
+"no account id in a known shape".
+
+**Fix:** add `\d{4}-\d{4}-\d{4}` and the `A[RI]DA`/`AGPA`/`ANPA` prefixes to `sensitive`, with case-table rows.
+Optional.
+
+### IN-04: (carried, prior IN-02) an immutable commit tag still makes a partial image build for a commit impossible to repeat
+
+**File:** `scripts/laya_deploy/laya_trainer_ops.py:556-592`; `deploy-extensions/lib/laya-trainer-images-stack.ts:72`
+**Issue:** Unchanged since the prior review.
+**Fix:** As before, check `describe-images --image-ids imageTag=<HEAD>` before `start-build`. If the tag exists,
+record that digest and do not rebuild.
+
+### IN-05: (carried, prior IN-03) pre-filter and trainer gate contracts can still skew with no signal
+
+**File:** `crates/aprender-mcp-laya-train/src/finalize.rs:338-349`
+**Issue:** Unchanged. `prefilter_gate` and `train_gate` are both recorded and never compared. With WR-01 (prior)
+fixed, a trainer refusal does now set `prefilter_disagreement`. A skew that changes no refusal, such as the
+calibration constants, is still invisible.
+**Fix:** As before. When both hashes are present and differ, add a fixed `notes` entry (the 14-18 notes field is the
+natural place).
+
+### IN-06: (known, agreed) `_laya-crates-root-swap` is labelled as a decide-side recipe
+
+**File:** `justfile:2286-2297`
+**Issue:** The trainer deploy uses it, but it refuses with "decide config ... does not exist" and backs up to
+`models/decide/swap-backup/`. The label is cosmetic and the behaviour is correct.
+
+### IN-07: (known, agreed) no pmcp.run login precheck before the grant revoke
+
+**File:** `scripts/laya_deploy/laya_trainer_ops.py:1500-1548,1578-1580`
+**Issue:** `cmd_deploy` revokes the grant (`revoke_grant`) before `cargo pmcp deploy`. An expired pmcp.run login makes
+the deploy fail after the revoke, which leaves the function with no grant until a re-run.
+**Fix:** probe the pmcp.run session (or `cargo pmcp` auth status) before `revoke_grant`.
+
+### IN-08: (known, accepted AR-7) the generated drift script has no total task cap and no stop-task on timeout
+
+**File:** `scripts/laya_deploy/laya_drift.py:992-996` (the template's `TIMEOUT ... it is still running` branch) and `:1022-1032` (the repeat loop)
+**Issue:** One invocation runs up to 5 repeats per leg with no total cap, and the 45-minute poll timeout exits and
+leaves the Fargate task running. This was accepted as AR-7 and I agree with the acceptance. Every write is still
+expire-tagged and read back before a task starts.
+
+### IN-09: (known, W-5) real account ids in the committed justfile target table
+
+**Issue:** This predates the round and is recorded in 14-SECURITY.md W-5. It is mentioned only so this report does not
+appear to have missed it. The new files in scope carry only the reserved fixture ids `111122223333` and
+`999988887777` (`laya_drift.py`), and none in `failure-surface-v1.json` or the README. I checked with a 12-digit scan.
 
 ---
 
-_Reviewed: 2026-10-29_
+_Reviewed: 2026-10-30_
 _Reviewer: Claude (gsd-code-reviewer)_
 _Depth: standard_
