@@ -160,11 +160,13 @@ proof_obligations:
     property: 'A probe record of profile fixed never carries a cross, and never records the D-04 gate as a limitation'
     formal: '∀ rec: rec.profile == fixed ⇒ (∀ p ∈ rec.probes: p.verdict ≠ ✗) ∧ verdict(rec, no Authorization header) == ✓'
     applies_to: all
+    prose: true
 
   - type: invariant
     property: 'A probe record of profile baseline has exactly the four spike-029 crosses'
     formal: '∀ rec: rec.profile == baseline ⇒ |{p ∈ rec.probes: p.verdict == ✗}| == 4'
     applies_to: all
+    prose: true
 
   - type: bound
     property: 'Probe names are unique within a record, so no repeat can hide a cross'
