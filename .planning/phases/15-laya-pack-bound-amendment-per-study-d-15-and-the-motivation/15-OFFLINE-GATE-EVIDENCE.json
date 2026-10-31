@@ -38,5 +38,195 @@
       "NOISE which=zero_shot max_abs=3.106277e-08 bound=1.000000e-05 argmax=9/9 t_applied=1.750000"
     ],
     "fail_closed_line": "FAIL-CLOSED VECTORS REFUSED 2/2 (387 s, ARCH aarch64)"
-  }
+  },
+  "status": "blocked",
+  "blocked_reason": "laya-gap-regression is not green and the exemption conditions of plan 15-04 Task 2 are not met: HYGIENE and REGRESSION fail at stages that reproduce byte-for-byte at dd3c96937 (a pre-existing, Phase 9 origin defect), but later stages of the same classes also fail, so under the plan the failures are not exempt. No baseline or contract was edited. See deferred-items.md.",
+  "claims": {
+    "rc": 0,
+    "last_line": "LAYA CLAIMS OK 147 rows"
+  },
+  "readme_contract": {
+    "rc": 0,
+    "result": "test result: ok. 16 passed; 0 failed"
+  },
+  "ratchet": {
+    "last_line": "PASS"
+  },
+  "graph": {
+    "stale": true,
+    "regenerated_in": "ce6e91a8a",
+    "method": "pv extract contracts in a clean git worktree of c9f735278; contracts.nt +15 triples (aprender_decide::verify::decide_pilot_waiver), shapes.ttl unchanged",
+    "check_after": "pv extract contracts --check in a clean worktree of HEAD: rc 0, \"check\": []"
+  },
+  "gates_early": {
+    "rc": 0,
+    "last_line": "LAYA GATES ROWS OK 1 of 56 (LAYA_GATES_ONLY=deploy-selftest-skip; not a full sweep)",
+    "row": "ROW deploy-selftest-skip: GREEN (1677 s)"
+  },
+  "role": "role-drift-advisory",
+  "gap_regression": {
+    "full_run": {
+      "rc": 1,
+      "last_line": "FAIL HYGIENE pv-lint: exit 1 (log <tmp>/laya-gap-regression.cD2MOQ/HYGIENE-pv-lint.log)",
+      "head_tree": "364f12a6a21af419aa27cbfd7eafb21bb0ca9146",
+      "log": "models/laya-trainer/p15-gap/head-full-sweep.log"
+    },
+    "classes": {
+      "A": {
+        "rc": 0,
+        "pass_line": "PASS CLASS A",
+        "fail_line": null,
+        "source": "full sweep (ran before the first failure)"
+      },
+      "B": {
+        "rc": 0,
+        "pass_line": "PASS CLASS B",
+        "fail_line": null,
+        "source": "full sweep (ran before the first failure)"
+      },
+      "C": {
+        "rc": 0,
+        "pass_line": "PASS CLASS C",
+        "fail_line": null,
+        "source": "full sweep (ran before the first failure); includes ok contract-audit-phase8 and LAYA GATES SELFTEST OK 56 rows"
+      },
+      "D": {
+        "rc": 0,
+        "pass_line": "PASS CLASS D",
+        "fail_line": null,
+        "source": "full sweep (ran before the first failure); LAYA CLAIMS OK 147 rows"
+      },
+      "E": {
+        "rc": 0,
+        "pass_line": "PASS CLASS E",
+        "fail_line": null,
+        "source": "full sweep (ran before the first failure)"
+      },
+      "HYGIENE": {
+        "rc": 1,
+        "pass_line": null,
+        "fail_line": "FAIL HYGIENE pv-lint: exit 1",
+        "source": "own run, LAYA_GAP_ONLY=HYGIENE"
+      },
+      "REGRESSION": {
+        "rc": 1,
+        "pass_line": null,
+        "fail_line": "FAIL REGRESSION contracts-cli: exit 101",
+        "source": "own run, LAYA_GAP_ONLY=REGRESSION"
+      }
+    },
+    "pre_existing": [
+      {
+        "class": "HYGIENE",
+        "stage": "pv-lint",
+        "head_fail_line": "FAIL HYGIENE pv-lint: exit 1",
+        "baseline_fail_line": "FAIL HYGIENE pv-lint: exit 1",
+        "head_log": "models/laya-trainer/p15-gap/head-HYGIENE-pv-lint.log",
+        "baseline_log": "models/laya-trainer/p15-gap/baseline-HYGIENE-pv-lint.log",
+        "cause": "pv lint contracts: 2 PV-ONT-003 errors (proof_obligations[2/3].formal carry U+2717) in contracts/llm-endpoint-openai-conformance-v1.yaml (Phase 9, untouched since 7e7e111f3f); armed meet Fail (reverse-coverage, valid-under not armed); identical error lines at dd3c96937 and HEAD",
+        "stages_in_class": [
+          "pv-lint",
+          "graph-fresh",
+          "contracts-lib",
+          "contracts-corpus"
+        ],
+        "after_failure": [
+          {
+            "stage": "graph-fresh",
+            "command": "pv extract contracts --check (clean worktree of HEAD)",
+            "rc": 0,
+            "evidence_ok": true,
+            "log": "models/laya-trainer/p15-gap/head-HYGIENE-graph-fresh.log"
+          },
+          {
+            "stage": "contracts-lib",
+            "command": "cargo test -p aprender-contracts --lib",
+            "rc": 101,
+            "evidence_ok": false,
+            "detail": "1670 passed, 1 failed: lint::tests::lint_passes_on_real_contracts (same PV-ONT-003 cause); fails identically at dd3c96937 (1 test run)",
+            "log": "models/laya-trainer/p15-gap/head-HYGIENE-contracts-lib.log",
+            "baseline_log": "models/laya-trainer/p15-gap/baseline-HYGIENE-contracts-lib.log"
+          },
+          {
+            "stage": "contracts-corpus",
+            "command": "cargo test -p aprender-contracts --test validate_contracts",
+            "rc": 101,
+            "evidence_ok": false,
+            "detail": "9 passed, 1 failed: contract_data_integrity \"Data integrity violations rose to 445 (ceiling 444)\"; the 447-line violation list is byte-identical at dd3c96937 and HEAD (md5 cffd4b4bd6aaa07c5d9ebcffb7baba6e)",
+            "log": "models/laya-trainer/p15-gap/head-HYGIENE-contracts-corpus.log",
+            "baseline_log": "models/laya-trainer/p15-gap/baseline-HYGIENE-contracts-corpus.log"
+          }
+        ]
+      },
+      {
+        "class": "REGRESSION",
+        "stage": "contracts-cli",
+        "head_fail_line": "FAIL REGRESSION contracts-cli: exit 101",
+        "baseline_fail_line": null,
+        "head_log": "models/laya-trainer/p15-gap/head-REGRESSION-contracts-cli.log",
+        "baseline_log": null,
+        "cause": "ont2b_sigma_gate::the_repo_corpus_passes_the_sigma_gate reports the same PV-ONT-003 pair in llm-endpoint-openai-conformance-v1.yaml. Baseline NOT run for this class: same root cause as HYGIENE pv-lint, whose baseline reproduces",
+        "stages_in_class": [
+          "decide-crates",
+          "clippy",
+          "fmt",
+          "pv-decide-tool-boundary-v1",
+          "pv-laya-finetune-gate-v1",
+          "pv-laya-parity-v1",
+          "pv-decide-apr-v1",
+          "invariants",
+          "contract-cycle",
+          "contracts-cli",
+          "verify-suite",
+          "laya-verify"
+        ],
+        "passed_before_failure": {
+          "decide-crates": "294 passed",
+          "clippy": "clean",
+          "fmt": "clean",
+          "pv validate x4": "0 error(s)",
+          "invariants": "31 passed",
+          "contract-cycle": "3 passed"
+        },
+        "after_failure": [
+          {
+            "stage": "verify-suite",
+            "command": "just laya-verify-suite (Task 1 run, at c9f735278; no decide-crate or script change since)",
+            "rc": 0,
+            "evidence_ok": true,
+            "log": "models/laya-trainer/p15-gap/head-REGRESSION-verify-suite-task1.log"
+          },
+          {
+            "stage": "laya-verify",
+            "command": "just laya-verify <deployed laya-stance-64.apr> ... (recipe arguments)",
+            "rc": 0,
+            "evidence_ok": true,
+            "detail": "deploy_eligible true, artifact_sha256 24a44d7e...275a, shipped_seed 17, argmax 459/459, noise 8.339e-6",
+            "log": "models/laya-trainer/p15-gap/head-REGRESSION-laya-verify.log"
+          },
+          {
+            "stage": "contracts-cli (remaining test binaries after ont2b_sigma_gate)",
+            "command": "not run",
+            "rc": null,
+            "evidence_ok": null
+          }
+        ]
+      }
+    ]
+  },
+  "sc1": {
+    "anchor": "91969e11ee25d21d3101134657472d25065788d3",
+    "commits": [
+      "ce6e91a8a2093910aefcffa14b1715b466d70b3d",
+      "05421e2c6ee95aa2608634a09b8a62e703f972b9",
+      "8e1176c6ce627ee6546275d1b6b2c1b1c9dfc48a",
+      "6a13fac43b1f517b67b05bfde490a51d3691c17f",
+      "c717b85ecadb4851b6a8804046f216e10dc7d84b",
+      "860c53bba7d596c14450044bee5fb21fc442ce60",
+      "8b251702947081684a225f26ab5dbcc58e8aef25",
+      "270ca045c377133914f7a75d403aa4062feecb03"
+    ]
+  },
+  "image_head_candidate": "364f12a6a21af419aa27cbfd7eafb21bb0ca9146",
+  "image_context_clean": true
 }
