@@ -287,3 +287,17 @@ no_text_rule: >
 anchoring: >
   D-16: with annotation_mode prediction_shown the expert sees motivation-v1's prediction, so the
   labels may be anchored to it. The hand-off of any retrain on such data must say so.
+
+# One equation, so the data-integrity corpus count (contract_data_integrity: every contract names at least one
+# equation) stays at its ceiling. It restates `no_text_rule` above and nothing else; no rule of either format
+# changes, and the validators and their mirror checks do not read this key.
+equations:
+  refusal_never_names_a_value:
+    formula: |
+      A refusal names a row number (the header is row 0, the posts are rows 1 to N), a field and at most a
+      character count, never a value (the no_text_rule above, restated).
+    domain: every refusal of the ingest, by its name in `refusals`
+    codomain: bool
+    invariants:
+      - "a refusal message carries no text, label or identifier value from the enrichment file"
+      - "the ingest prints counts and sha256 values only"
