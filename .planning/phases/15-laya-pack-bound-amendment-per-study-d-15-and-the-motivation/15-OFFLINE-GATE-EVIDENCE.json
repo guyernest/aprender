@@ -39,24 +39,26 @@
     ],
     "fail_closed_line": "FAIL-CLOSED VECTORS REFUSED 2/2 (387 s, ARCH aarch64)"
   },
-  "status": "blocked",
-  "blocked_reason": "laya-gap-regression is not green and the exemption conditions of plan 15-04 Task 2 are not met: HYGIENE and REGRESSION fail at stages that reproduce byte-for-byte at dd3c96937 (a pre-existing, Phase 9 origin defect), but later stages of the same classes also fail, so under the plan the failures are not exempt. No baseline or contract was edited. See deferred-items.md.",
+  "status": "complete",
   "claims": {
     "rc": 0,
     "last_line": "LAYA CLAIMS OK 147 rows"
   },
   "readme_contract": {
     "rc": 0,
-    "result": "test result: ok. 16 passed; 0 failed"
+    "result": "test result: ok. 16 passed; 0 failed",
+    "also": "REGRESSION invariants stage after the repair: 31 passed (monorepo_invariants + readme_contract)"
   },
   "ratchet": {
-    "last_line": "PASS"
+    "last_line": "PASS",
+    "after_repair": true
   },
   "graph": {
     "stale": true,
     "regenerated_in": "ce6e91a8a",
     "method": "pv extract contracts in a clean git worktree of c9f735278; contracts.nt +15 triples (aprender_decide::verify::decide_pilot_waiver), shapes.ttl unchanged",
-    "check_after": "pv extract contracts --check in a clean worktree of HEAD: rc 0, \"check\": []"
+    "check_after": "pv extract contracts --check in a clean worktree of HEAD: rc 0, \"check\": []",
+    "check_after_repair": "pv extract contracts --check in a clean worktree of 9b5e17101: rc 0, \"check\": [] (the two repair edits do not change the graph)"
   },
   "gates_early": {
     "rc": 0,
@@ -76,46 +78,66 @@
         "rc": 0,
         "pass_line": "PASS CLASS A",
         "fail_line": null,
-        "source": "full sweep (ran before the first failure)"
+        "source": "first full sweep at 364f12a6a (ran before its first failure); the repair edits two contracts none of which classes A-C read"
       },
       "B": {
         "rc": 0,
         "pass_line": "PASS CLASS B",
         "fail_line": null,
-        "source": "full sweep (ran before the first failure)"
+        "source": "first full sweep at 364f12a6a (ran before its first failure); the repair edits two contracts none of which classes A-C read"
       },
       "C": {
         "rc": 0,
         "pass_line": "PASS CLASS C",
         "fail_line": null,
-        "source": "full sweep (ran before the first failure); includes ok contract-audit-phase8 and LAYA GATES SELFTEST OK 56 rows"
+        "source": "first full sweep at 364f12a6a (ran before its first failure); the repair edits two contracts none of which classes A-C read"
       },
       "D": {
         "rc": 0,
         "pass_line": "PASS CLASS D",
         "fail_line": null,
-        "source": "full sweep (ran before the first failure); LAYA CLAIMS OK 147 rows"
+        "source": "own run after the repair at 9b5e17101; LAYA CLAIMS OK 147 rows"
       },
       "E": {
         "rc": 0,
         "pass_line": "PASS CLASS E",
         "fail_line": null,
-        "source": "full sweep (ran before the first failure)"
+        "source": "own run after the repair at 9b5e17101 (the repair edits motivation-enrichment-v1, read by scripts/laya_train)"
       },
       "HYGIENE": {
-        "rc": 1,
-        "pass_line": null,
-        "fail_line": "FAIL HYGIENE pv-lint: exit 1",
-        "source": "own run, LAYA_GAP_ONLY=HYGIENE"
+        "rc": 0,
+        "pass_line": "PASS HYGIENE",
+        "fail_line": null,
+        "source": "own run after the repair at 9b5e17101: pv-lint PASS, graph-fresh, contracts-lib 1671 passed, contracts-corpus 10 passed"
       },
       "REGRESSION": {
-        "rc": 1,
-        "pass_line": null,
-        "fail_line": "FAIL REGRESSION contracts-cli: exit 101",
-        "source": "own run, LAYA_GAP_ONLY=REGRESSION"
+        "rc": 0,
+        "pass_line": "PASS REGRESSION",
+        "fail_line": null,
+        "source": "own run after the repair at 9b5e17101: decide-crates 294, clippy, fmt, 4 x pv validate, invariants 31, contract-cycle 3, contracts-cli 394 passed, verify-suite, laya-verify (deployed artifact)"
       }
     },
-    "pre_existing": [
+    "pre_existing": []
+  },
+  "sc1": {
+    "anchor": "91969e11ee25d21d3101134657472d25065788d3",
+    "commits": [
+      "9b5e171019c1b39d595d9a57f20796c67d5922f4",
+      "49a8df03123ec9bd8c1c916081a9146551006337",
+      "ce6e91a8a2093910aefcffa14b1715b466d70b3d",
+      "05421e2c6ee95aa2608634a09b8a62e703f972b9",
+      "8e1176c6ce627ee6546275d1b6b2c1b1c9dfc48a",
+      "6a13fac43b1f517b67b05bfde490a51d3691c17f",
+      "c717b85ecadb4851b6a8804046f216e10dc7d84b",
+      "860c53bba7d596c14450044bee5fb21fc442ce60",
+      "8b251702947081684a225f26ab5dbcc58e8aef25",
+      "270ca045c377133914f7a75d403aa4062feecb03"
+    ]
+  },
+  "image_context_clean": true,
+  "pre_repair_findings": {
+    "note": "first sweep at 364f12a6a ended FAIL HYGIENE pv-lint; HYGIENE and REGRESSION were red from a defect predating Phase 15 (reproduced at dd3c96937), repaired inline in 49a8df031 and 9b5e17101 with the user's authorisation (option a)",
+    "pre_existing_records": [
       {
         "class": "HYGIENE",
         "stage": "pv-lint",
@@ -212,21 +234,23 @@
           }
         ]
       }
-    ]
+    ],
+    "logs_dir": "models/laya-trainer/p15-gap/"
   },
-  "sc1": {
-    "anchor": "91969e11ee25d21d3101134657472d25065788d3",
+  "repair": {
     "commits": [
-      "ce6e91a8a2093910aefcffa14b1715b466d70b3d",
-      "05421e2c6ee95aa2608634a09b8a62e703f972b9",
-      "8e1176c6ce627ee6546275d1b6b2c1b1c9dfc48a",
-      "6a13fac43b1f517b67b05bfde490a51d3691c17f",
-      "c717b85ecadb4851b6a8804046f216e10dc7d84b",
-      "860c53bba7d596c14450044bee5fb21fc442ce60",
-      "8b251702947081684a225f26ab5dbcc58e8aef25",
-      "270ca045c377133914f7a75d403aa4062feecb03"
+      "49a8df03123ec9bd8c1c916081a9146551006337",
+      "9b5e171019c1b39d595d9a57f20796c67d5922f4"
+    ],
+    "what": [
+      "contracts/llm-endpoint-openai-conformance-v1.yaml: prose: true on proof_obligations[2] and [3] (U+2717 not in Sigma; ontology.yaml says prose: true for such glyphs)",
+      "contracts/motivation-enrichment-v1.yaml: one equation restating its own no_text_rule, because contract_data_integrity (445 vs ceiling 444) counted the schema contract with no equation as the 445th violation"
+    ],
+    "untouched": [
+      "CEILING in validate_contracts.rs",
+      "contracts/lint-baseline.json",
+      "every ratchet baseline"
     ]
   },
-  "image_head_candidate": "364f12a6a21af419aa27cbfd7eafb21bb0ca9146",
-  "image_context_clean": true
+  "image_head": "9b5e171019c1b39d595d9a57f20796c67d5922f4"
 }
