@@ -40,7 +40,10 @@
 //! `calibration_slice_min_per_class`, the `base` block and the `seed_policy` (selection, seeds,
 //! rank_scale, tie_break) are read from `contracts/laya-finetune-gate-v1.yaml`, and the
 //! re-score floor `pack_rescore_probs_abs`, the
-//! noise multiplier `pack_rescore_noise_k` and the ceiling `pack_rescore_bound_max_abs` from
+//! noise multiplier `pack_rescore_noise_k` and the ceiling `pack_rescore_bound_max_abs` (the A1
+//! record stamp and the absent-record floor) and, since amendment A2, the six per-set ENFORCED
+//! keys `pack_rescore_noise_k_{fine_tuned,zero_shot}`, `pack_rescore_floor_{fine_tuned,zero_shot}`
+//! and `pack_rescore_bound_max_abs_{fine_tuned,zero_shot}` from
 //! `contracts/laya-parity-v1.yaml`, at run time, into the library's typed views and through
 //! its one mapping `VerifyPolicy::from_contract_views` (the tests use the same). The CLI
 //! accepts only the path arguments above and reads no environment variable: there is no way to
