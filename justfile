@@ -4083,26 +4083,46 @@ laya-upload apr run data base server env="dev" profile="ze-kasher-dev":
     unset PMCP_API_URL AWS_DEFAULT_REGION
     SD="$(just _laya-state-dir "$P")"
     H_LOCAL="$(sha256 "$APR")"
-    # ELIGIBILITY FIRST -- the Rust verifier on the exact file (decide-apr-v1 deploy_eligibility).
+    # ELIGIBILITY FIRST (decide-apr-v1 deploy_eligibility; Phase 15 D-08/D-09). A run packed by the training
+    # server's Graviton pack task is judged by its recorded verify (logs/pack-outcome.json, bound to THESE bytes
+    # by apr_sha256); the local Rust verifier on the exact file still runs, and scripts/laya_deploy/
+    # laya_eligibility.py decides what its outcome means. LAYA_PACK_OUTCOME names a record EXPLICITLY (an absent
+    # file refuses); otherwise a `<dir>/run` argument is looked up at <dir>/logs/pack-outcome.json, and an absent
+    # convention record is no record: the local gate decides, exactly as before.
     mkdir -p "$SD"
     VLOG="$SD/eligibility-upload-$SERVER.log"
+    ELIG_PY="scripts/laya_deploy/laya_eligibility.py"
+    REC="${LAYA_PACK_OUTCOME:-}"
+    if [ -z "$REC" ]; then
+        REC="$(python3 -I "$ELIG_PY" record-path --run "{{run}}")" || refuse eligibility "pack record discovery failed for {{run}}"
+    fi
+    if [ -n "$REC" ]; then
+        set +e
+        CROUT="$(python3 -I "$ELIG_PY" check-record --record "$REC" --apr-sha256 "$H_LOCAL" 2>&1)"
+        crc=$?
+        set -e
+        if [ "$crc" -ne 0 ]; then
+            echo "$CROUT" >&2
+            exit "$crc"
+        fi
+        echo "  record: $CROUT"
+    fi
     set +e
     just laya-verify "$APR" "{{run}}" "{{data}}" "{{base}}" > "$VLOG" 2>&1
     vrc=$?
-    set -e
-    if [ "$vrc" -ne 0 ]; then
-        refuse eligibility "$(grep -m 1 '^REFUSED' "$VLOG" || echo "laya-verify exited $vrc (log: $VLOG)")" "$vrc"
+    if [ -n "$REC" ]; then
+        JOUT="$(python3 -I "$ELIG_PY" judge --apr-sha256 "$H_LOCAL" --verify-rc "$vrc" --verify-log "$VLOG" --record "$REC" --finding-log "$SD/cross-cpu-finding-$SERVER.log" --server "$SERVER" 2>&1)"
+    else
+        JOUT="$(python3 -I "$ELIG_PY" judge --apr-sha256 "$H_LOCAL" --verify-rc "$vrc" --verify-log "$VLOG" 2>&1)"
     fi
-    H="$(python3 - "$VLOG" <<'PY'
-    import json, sys
-    lines = [l for l in open(sys.argv[1]) if l.startswith("{")]
-    v = json.loads(lines[-1])
-    if v.get("deploy_eligible") is not True:
-        sys.exit(1)
-    print(v["artifact_sha256"])
-    PY
-    )" || refuse eligibility "laya-verify exited 0 without deploy_eligible true (log: $VLOG)"
-    [ "$H" = "$H_LOCAL" ] || refuse eligibility "laya-verify accepted sha256 $H but $APR hashes to $H_LOCAL"
+    jrc=$?
+    set -e
+    if [ "$jrc" -ne 0 ]; then
+        echo "$JOUT" >&2
+        exit "$jrc"
+    fi
+    echo "  eligible: $JOUT"
+    H="$H_LOCAL"
     KEY="decide/$SERVER/$H.apr"
     SIZE="$(wc -c < "$APR" | tr -d ' ')"
     # The account, live, only after the verifier accepted the file (a no-op under DRY_RUN=1).
