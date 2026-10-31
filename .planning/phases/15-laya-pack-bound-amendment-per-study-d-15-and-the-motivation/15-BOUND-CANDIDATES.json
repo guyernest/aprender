@@ -1,0 +1,874 @@
+{
+  "schema": "laya-bound-candidates-v1",
+  "plan": "15-01",
+  "sources": {
+    "drift": {
+      "path": ".planning/phases/14-laya-training-mcp-server-s3-dataset-in-apr-and-reports-out/14-DRIFT-EVIDENCE.json",
+      "sha256": "8954c5359757d976c738c4ae1f14d38e34d2cbd94101039c09eacf7724bb574f"
+    },
+    "gate_run": {
+      "path": ".planning/phases/14-laya-training-mcp-server-s3-dataset-in-apr-and-reports-out/14-GATE-RUN-EVIDENCE.json",
+      "sha256": "fd3bcf3a5af8f5017143914e87f176300200a70c2c778dac06a5994d36dd0ca1"
+    },
+    "parity_contract": {
+      "path": "contracts/laya-parity-v1.yaml",
+      "sha256": "7c646b74835f8d0d5bf0916056aae1eb909cfa6770d58e17bf65c4069b267878"
+    }
+  },
+  "stamp": {
+    "noise_k": 4,
+    "floor_abs": 1e-05,
+    "bound_max_abs": 0.001
+  },
+  "points": [
+    {
+      "id": "G-motiv-zs",
+      "cpu": "graviton",
+      "authority": true,
+      "artifact": "motivation-v1-sm",
+      "set": "zero_shot",
+      "trained_on": "cuda",
+      "source": "drift",
+      "observed_key": "rows[8].max_abs",
+      "observed_max_abs": 1.728534698486328e-05,
+      "observed_is_upper_bound": false,
+      "noise_key": "a10g_noise.motivation-v1-sm.sets.zero_shot.max_abs",
+      "noise": 1.7265105816122173e-06
+    },
+    {
+      "id": "G-smoke-ft",
+      "cpu": "graviton",
+      "authority": true,
+      "artifact": "smoke-stance-64",
+      "set": "fine_tuned",
+      "trained_on": "cuda",
+      "source": "drift",
+      "observed_key": "rows[11].max_abs",
+      "observed_max_abs": 2.7477741241455078e-05,
+      "observed_is_upper_bound": false,
+      "noise_key": "a10g_noise.smoke-stance-64.sets.fine_tuned.max_abs",
+      "noise": 8.147599085628343e-06
+    },
+    {
+      "id": "G-smoke-zs",
+      "cpu": "graviton",
+      "authority": true,
+      "artifact": "smoke-stance-64",
+      "set": "zero_shot",
+      "trained_on": "cuda",
+      "source": "drift",
+      "observed_key": "rows[12].max_abs",
+      "observed_max_abs": 1.5079975128173828e-05,
+      "observed_is_upper_bound": false,
+      "noise_key": "a10g_noise.smoke-stance-64.sets.zero_shot.max_abs",
+      "noise": 4.70304053501458e-06
+    },
+    {
+      "id": "G-motiv-ft",
+      "cpu": "graviton",
+      "authority": true,
+      "artifact": "motivation-v1-sm",
+      "set": "fine_tuned",
+      "trained_on": "cuda",
+      "source": "drift",
+      "observed_key": "a10g_noise.motivation-v1-sm.sets.fine_tuned.bound",
+      "observed_max_abs": 1.3021142293956345e-05,
+      "observed_is_upper_bound": true,
+      "noise_key": "a10g_noise.motivation-v1-sm.sets.fine_tuned.max_abs",
+      "noise": 3.255285573489086e-06
+    },
+    {
+      "id": "M-smoke-ft",
+      "cpu": "mac",
+      "authority": false,
+      "artifact": "smoke-stance-64",
+      "set": "fine_tuned",
+      "trained_on": "cuda",
+      "source": "drift",
+      "observed_key": "rows[0].max_abs",
+      "observed_max_abs": 3.439188003540039e-05,
+      "observed_is_upper_bound": false,
+      "noise_key": "rows[0].noise",
+      "noise": 8.147599085628343e-06
+    },
+    {
+      "id": "M-motiv-zs",
+      "cpu": "mac",
+      "authority": false,
+      "artifact": "motivation-v1-sm",
+      "set": "zero_shot",
+      "trained_on": "cuda",
+      "source": "drift",
+      "observed_key": "rows[1].max_abs",
+      "observed_max_abs": 1.4901161193847656e-05,
+      "observed_is_upper_bound": false,
+      "noise_key": "rows[1].noise",
+      "noise": 1.7265105816122173e-06
+    },
+    {
+      "id": "M-mps-2",
+      "cpu": "mac",
+      "authority": false,
+      "artifact": "laya-motivation-v1",
+      "set": "fine_tuned",
+      "trained_on": "mps",
+      "source": "drift",
+      "observed_key": "rows[2].max_abs",
+      "observed_max_abs": 9.149312973022461e-06,
+      "observed_is_upper_bound": false,
+      "noise_key": "rows[2].noise",
+      "noise": 1.820794164297812e-05
+    },
+    {
+      "id": "M-mps-3",
+      "cpu": "mac",
+      "authority": false,
+      "artifact": "laya-motivation-v1",
+      "set": "zero_shot",
+      "trained_on": "mps",
+      "source": "drift",
+      "observed_key": "rows[3].max_abs",
+      "observed_max_abs": 3.337860107421875e-06,
+      "observed_is_upper_bound": false,
+      "noise_key": "rows[3].noise",
+      "noise": 1.2524598510976759e-05
+    },
+    {
+      "id": "M-mps-4",
+      "cpu": "mac",
+      "authority": false,
+      "artifact": "laya-stance-64",
+      "set": "fine_tuned",
+      "trained_on": "mps",
+      "source": "drift",
+      "observed_key": "rows[4].max_abs",
+      "observed_max_abs": 1.1324882507324219e-05,
+      "observed_is_upper_bound": false,
+      "noise_key": "rows[4].noise",
+      "noise": 8.33931784072206e-06
+    },
+    {
+      "id": "M-mps-5",
+      "cpu": "mac",
+      "authority": false,
+      "artifact": "laya-stance-64",
+      "set": "zero_shot",
+      "trained_on": "mps",
+      "source": "drift",
+      "observed_key": "rows[5].max_abs",
+      "observed_max_abs": 7.3462724685668945e-06,
+      "observed_is_upper_bound": false,
+      "noise_key": "rows[5].noise",
+      "noise": 1.495515496430233e-05
+    },
+    {
+      "id": "M-mps-6",
+      "cpu": "mac",
+      "authority": false,
+      "artifact": "laya-antisemitism-v1",
+      "set": "fine_tuned",
+      "trained_on": "mps",
+      "source": "drift",
+      "observed_key": "rows[6].max_abs",
+      "observed_max_abs": 7.554888725280762e-06,
+      "observed_is_upper_bound": false,
+      "noise_key": "rows[6].noise",
+      "noise": 3.592973853439041e-06
+    },
+    {
+      "id": "M-mps-7",
+      "cpu": "mac",
+      "authority": false,
+      "artifact": "laya-antisemitism-v1",
+      "set": "zero_shot",
+      "trained_on": "mps",
+      "source": "drift",
+      "observed_key": "rows[7].max_abs",
+      "observed_max_abs": 1.195073127746582e-05,
+      "observed_is_upper_bound": false,
+      "noise_key": "rows[7].noise",
+      "noise": 1.5070898052527149e-05
+    }
+  ],
+  "options": [
+    {
+      "id": "a1-today",
+      "selectable": false,
+      "structure": "S-B",
+      "params": {
+        "fine_tuned": {
+          "noise_k": 4,
+          "floor_abs": 1e-05,
+          "bound_max_abs": 0.001
+        },
+        "zero_shot": {
+          "noise_k": 4,
+          "floor_abs": 1e-05,
+          "bound_max_abs": 0.001
+        }
+      },
+      "rationale": "The A1 stamp applied to both sets: what the verifier refuses today (Graviton motivation-v1-sm zero_shot 1.728534698486328e-05 against 1e-05)."
+    },
+    {
+      "id": "sb-recommended",
+      "selectable": true,
+      "structure": "S-B",
+      "params": {
+        "fine_tuned": {
+          "noise_k": 4,
+          "floor_abs": 5e-05,
+          "bound_max_abs": 0.001
+        },
+        "zero_shot": {
+          "noise_k": 4,
+          "floor_abs": 3e-05,
+          "bound_max_abs": 0.001
+        }
+      },
+      "rationale": "fine_tuned is a fresh draw on every run (Graviton 2.7477741241455078e-05 on 459 rows, at most 1.3021142293956345e-05 on 100 rows), zero_shot is the fixed base on the eval rows (1.728534698486328e-05 and 1.5079975128173828e-05), so the fine_tuned floor carries more absolute slack; a single-attempt reproduction (D-12) cannot afford a post-gate pack refusal."
+    },
+    {
+      "id": "sb-minimal",
+      "selectable": true,
+      "structure": "S-B",
+      "params": {
+        "fine_tuned": {
+          "noise_k": 4,
+          "floor_abs": 1e-05,
+          "bound_max_abs": 0.001
+        },
+        "zero_shot": {
+          "noise_k": 4,
+          "floor_abs": 2.5e-05,
+          "bound_max_abs": 0.001
+        }
+      },
+      "rationale": "Smallest blast radius: fine_tuned unchanged, only the zero_shot cell that refused moves; the unmeasured motivation-v1-sm fine_tuned Graviton cell is bounded only at 1.00x."
+    },
+    {
+      "id": "sb-uniform",
+      "selectable": true,
+      "structure": "S-B",
+      "params": {
+        "fine_tuned": {
+          "noise_k": 4,
+          "floor_abs": 5e-05,
+          "bound_max_abs": 0.001
+        },
+        "zero_shot": {
+          "noise_k": 4,
+          "floor_abs": 5e-05,
+          "bound_max_abs": 0.001
+        }
+      },
+      "rationale": "One number for both sets; loosens zero_shot, the deterministic base re-score, more than any cell needs."
+    },
+    {
+      "id": "sa-record-v2",
+      "selectable": true,
+      "structure": "S-A",
+      "params": null,
+      "consequence": "the Phase 15 plans are revised before any edit",
+      "rationale": "Per-set k and floor carried in a v2 rescore-noise record; changes RescoreNoise, train.py, lifecycle.py, laya-finetune-gate-v1 and the train image, and strands the retained motivation-v1-sm v1 record."
+    },
+    {
+      "id": "custom",
+      "selectable": true,
+      "structure": "S-B",
+      "params": null,
+      "constraints": "every value, noise_k included, a finite number (not a bool), noise_k > 0, 1e-05 <= floor_abs <= bound_max_abs <= 0.001, and every measured Graviton cell passing the full acceptance (policy, stamp ceiling, enforced ceiling, drift), checked by Task 3",
+      "rationale": "The owner's own six numbers."
+    }
+  ],
+  "grid": [
+    {
+      "option": "a1-today",
+      "point": "G-motiv-zs",
+      "stamp_bound": 1e-05,
+      "bound": 1e-05,
+      "headroom": 0.5785246896551725,
+      "noise_engaged": false,
+      "verdict": "fail"
+    },
+    {
+      "option": "a1-today",
+      "point": "G-smoke-ft",
+      "stamp_bound": 3.259039634251337e-05,
+      "bound": 3.259039634251337e-05,
+      "headroom": 1.1860653339782143,
+      "noise_engaged": true,
+      "verdict": "pass"
+    },
+    {
+      "option": "a1-today",
+      "point": "G-smoke-zs",
+      "stamp_bound": 1.881216214005832e-05,
+      "bound": 1.881216214005832e-05,
+      "headroom": 1.247492915615734,
+      "noise_engaged": true,
+      "verdict": "pass"
+    },
+    {
+      "option": "a1-today",
+      "point": "G-motiv-ft",
+      "stamp_bound": 1.3021142293956345e-05,
+      "bound": 1.3021142293956345e-05,
+      "headroom": 1.0,
+      "noise_engaged": true,
+      "verdict": "pass (>=)"
+    },
+    {
+      "option": "a1-today",
+      "point": "M-smoke-ft",
+      "stamp_bound": 3.259039634251337e-05,
+      "bound": 3.259039634251337e-05,
+      "headroom": 0.9476189236810344,
+      "noise_engaged": true,
+      "verdict": "fail"
+    },
+    {
+      "option": "a1-today",
+      "point": "M-motiv-zs",
+      "stamp_bound": 1e-05,
+      "bound": 1e-05,
+      "headroom": 0.67108864,
+      "noise_engaged": false,
+      "verdict": "fail"
+    },
+    {
+      "option": "a1-today",
+      "point": "M-mps-2",
+      "stamp_bound": 7.283176657191248e-05,
+      "bound": 7.283176657191248e-05,
+      "headroom": 7.960353611977559,
+      "noise_engaged": true,
+      "verdict": "pass"
+    },
+    {
+      "option": "a1-today",
+      "point": "M-mps-3",
+      "stamp_bound": 5.0098394043907035e-05,
+      "bound": 5.0098394043907035e-05,
+      "headroom": 15.009135323709675,
+      "noise_engaged": true,
+      "verdict": "pass"
+    },
+    {
+      "option": "a1-today",
+      "point": "M-mps-4",
+      "stamp_bound": 3.335727136288824e-05,
+      "bound": 3.335727136288824e-05,
+      "headroom": 2.9454849832936336,
+      "noise_engaged": true,
+      "verdict": "pass"
+    },
+    {
+      "option": "a1-today",
+      "point": "M-mps-5",
+      "stamp_bound": 5.982061985720932e-05,
+      "bound": 5.982061985720932e-05,
+      "headroom": 8.142989538322839,
+      "noise_engaged": true,
+      "verdict": "pass"
+    },
+    {
+      "option": "a1-today",
+      "point": "M-mps-6",
+      "stamp_bound": 1.4371895413756164e-05,
+      "bound": 1.4371895413756164e-05,
+      "headroom": 1.9023305221774873,
+      "noise_engaged": true,
+      "verdict": "pass"
+    },
+    {
+      "option": "a1-today",
+      "point": "M-mps-7",
+      "stamp_bound": 6.0283592210108594e-05,
+      "bound": 6.0283592210108594e-05,
+      "headroom": 5.044343380373612,
+      "noise_engaged": true,
+      "verdict": "pass"
+    },
+    {
+      "option": "sb-recommended",
+      "point": "G-motiv-zs",
+      "stamp_bound": 1e-05,
+      "bound": 3e-05,
+      "headroom": 1.7355740689655172,
+      "noise_engaged": false,
+      "verdict": "pass"
+    },
+    {
+      "option": "sb-recommended",
+      "point": "G-smoke-ft",
+      "stamp_bound": 3.259039634251337e-05,
+      "bound": 5e-05,
+      "headroom": 1.8196546637744035,
+      "noise_engaged": false,
+      "verdict": "pass"
+    },
+    {
+      "option": "sb-recommended",
+      "point": "G-smoke-zs",
+      "stamp_bound": 1.881216214005832e-05,
+      "bound": 3e-05,
+      "headroom": 1.9893932015810276,
+      "noise_engaged": false,
+      "verdict": "pass"
+    },
+    {
+      "option": "sb-recommended",
+      "point": "G-motiv-ft",
+      "stamp_bound": 1.3021142293956345e-05,
+      "bound": 5e-05,
+      "headroom": 3.8399088859667163,
+      "noise_engaged": false,
+      "verdict": "pass (>=)"
+    },
+    {
+      "option": "sb-recommended",
+      "point": "M-smoke-ft",
+      "stamp_bound": 3.259039634251337e-05,
+      "bound": 5e-05,
+      "headroom": 1.4538315424610053,
+      "noise_engaged": false,
+      "verdict": "pass"
+    },
+    {
+      "option": "sb-recommended",
+      "point": "M-motiv-zs",
+      "stamp_bound": 1e-05,
+      "bound": 3e-05,
+      "headroom": 2.0132659200000003,
+      "noise_engaged": false,
+      "verdict": "pass"
+    },
+    {
+      "option": "sb-recommended",
+      "point": "M-mps-2",
+      "stamp_bound": 7.283176657191248e-05,
+      "bound": 7.283176657191248e-05,
+      "headroom": 7.960353611977559,
+      "noise_engaged": true,
+      "verdict": "pass"
+    },
+    {
+      "option": "sb-recommended",
+      "point": "M-mps-3",
+      "stamp_bound": 5.0098394043907035e-05,
+      "bound": 5.0098394043907035e-05,
+      "headroom": 15.009135323709675,
+      "noise_engaged": true,
+      "verdict": "pass"
+    },
+    {
+      "option": "sb-recommended",
+      "point": "M-mps-4",
+      "stamp_bound": 3.335727136288824e-05,
+      "bound": 5e-05,
+      "headroom": 4.415056842105264,
+      "noise_engaged": false,
+      "verdict": "pass"
+    },
+    {
+      "option": "sb-recommended",
+      "point": "M-mps-5",
+      "stamp_bound": 5.982061985720932e-05,
+      "bound": 5.982061985720932e-05,
+      "headroom": 8.142989538322839,
+      "noise_engaged": true,
+      "verdict": "pass"
+    },
+    {
+      "option": "sb-recommended",
+      "point": "M-mps-6",
+      "stamp_bound": 1.4371895413756164e-05,
+      "bound": 5e-05,
+      "headroom": 6.618231163708087,
+      "noise_engaged": false,
+      "verdict": "pass"
+    },
+    {
+      "option": "sb-recommended",
+      "point": "M-mps-7",
+      "stamp_bound": 6.0283592210108594e-05,
+      "bound": 6.0283592210108594e-05,
+      "headroom": 5.044343380373612,
+      "noise_engaged": true,
+      "verdict": "pass"
+    },
+    {
+      "option": "sb-minimal",
+      "point": "G-motiv-zs",
+      "stamp_bound": 1e-05,
+      "bound": 2.5e-05,
+      "headroom": 1.446311724137931,
+      "noise_engaged": false,
+      "verdict": "pass"
+    },
+    {
+      "option": "sb-minimal",
+      "point": "G-smoke-ft",
+      "stamp_bound": 3.259039634251337e-05,
+      "bound": 3.259039634251337e-05,
+      "headroom": 1.1860653339782143,
+      "noise_engaged": true,
+      "verdict": "pass"
+    },
+    {
+      "option": "sb-minimal",
+      "point": "G-smoke-zs",
+      "stamp_bound": 1.881216214005832e-05,
+      "bound": 2.5e-05,
+      "headroom": 1.65782766798419,
+      "noise_engaged": false,
+      "verdict": "pass"
+    },
+    {
+      "option": "sb-minimal",
+      "point": "G-motiv-ft",
+      "stamp_bound": 1.3021142293956345e-05,
+      "bound": 1.3021142293956345e-05,
+      "headroom": 1.0,
+      "noise_engaged": true,
+      "verdict": "pass (>=)"
+    },
+    {
+      "option": "sb-minimal",
+      "point": "M-smoke-ft",
+      "stamp_bound": 3.259039634251337e-05,
+      "bound": 3.259039634251337e-05,
+      "headroom": 0.9476189236810344,
+      "noise_engaged": true,
+      "verdict": "fail"
+    },
+    {
+      "option": "sb-minimal",
+      "point": "M-motiv-zs",
+      "stamp_bound": 1e-05,
+      "bound": 2.5e-05,
+      "headroom": 1.6777216000000001,
+      "noise_engaged": false,
+      "verdict": "pass"
+    },
+    {
+      "option": "sb-minimal",
+      "point": "M-mps-2",
+      "stamp_bound": 7.283176657191248e-05,
+      "bound": 7.283176657191248e-05,
+      "headroom": 7.960353611977559,
+      "noise_engaged": true,
+      "verdict": "pass"
+    },
+    {
+      "option": "sb-minimal",
+      "point": "M-mps-3",
+      "stamp_bound": 5.0098394043907035e-05,
+      "bound": 5.0098394043907035e-05,
+      "headroom": 15.009135323709675,
+      "noise_engaged": true,
+      "verdict": "pass"
+    },
+    {
+      "option": "sb-minimal",
+      "point": "M-mps-4",
+      "stamp_bound": 3.335727136288824e-05,
+      "bound": 3.335727136288824e-05,
+      "headroom": 2.9454849832936336,
+      "noise_engaged": true,
+      "verdict": "pass"
+    },
+    {
+      "option": "sb-minimal",
+      "point": "M-mps-5",
+      "stamp_bound": 5.982061985720932e-05,
+      "bound": 5.982061985720932e-05,
+      "headroom": 8.142989538322839,
+      "noise_engaged": true,
+      "verdict": "pass"
+    },
+    {
+      "option": "sb-minimal",
+      "point": "M-mps-6",
+      "stamp_bound": 1.4371895413756164e-05,
+      "bound": 1.4371895413756164e-05,
+      "headroom": 1.9023305221774873,
+      "noise_engaged": true,
+      "verdict": "pass"
+    },
+    {
+      "option": "sb-minimal",
+      "point": "M-mps-7",
+      "stamp_bound": 6.0283592210108594e-05,
+      "bound": 6.0283592210108594e-05,
+      "headroom": 5.044343380373612,
+      "noise_engaged": true,
+      "verdict": "pass"
+    },
+    {
+      "option": "sb-uniform",
+      "point": "G-motiv-zs",
+      "stamp_bound": 1e-05,
+      "bound": 5e-05,
+      "headroom": 2.892623448275862,
+      "noise_engaged": false,
+      "verdict": "pass"
+    },
+    {
+      "option": "sb-uniform",
+      "point": "G-smoke-ft",
+      "stamp_bound": 3.259039634251337e-05,
+      "bound": 5e-05,
+      "headroom": 1.8196546637744035,
+      "noise_engaged": false,
+      "verdict": "pass"
+    },
+    {
+      "option": "sb-uniform",
+      "point": "G-smoke-zs",
+      "stamp_bound": 1.881216214005832e-05,
+      "bound": 5e-05,
+      "headroom": 3.31565533596838,
+      "noise_engaged": false,
+      "verdict": "pass"
+    },
+    {
+      "option": "sb-uniform",
+      "point": "G-motiv-ft",
+      "stamp_bound": 1.3021142293956345e-05,
+      "bound": 5e-05,
+      "headroom": 3.8399088859667163,
+      "noise_engaged": false,
+      "verdict": "pass (>=)"
+    },
+    {
+      "option": "sb-uniform",
+      "point": "M-smoke-ft",
+      "stamp_bound": 3.259039634251337e-05,
+      "bound": 5e-05,
+      "headroom": 1.4538315424610053,
+      "noise_engaged": false,
+      "verdict": "pass"
+    },
+    {
+      "option": "sb-uniform",
+      "point": "M-motiv-zs",
+      "stamp_bound": 1e-05,
+      "bound": 5e-05,
+      "headroom": 3.3554432000000003,
+      "noise_engaged": false,
+      "verdict": "pass"
+    },
+    {
+      "option": "sb-uniform",
+      "point": "M-mps-2",
+      "stamp_bound": 7.283176657191248e-05,
+      "bound": 7.283176657191248e-05,
+      "headroom": 7.960353611977559,
+      "noise_engaged": true,
+      "verdict": "pass"
+    },
+    {
+      "option": "sb-uniform",
+      "point": "M-mps-3",
+      "stamp_bound": 5.0098394043907035e-05,
+      "bound": 5.0098394043907035e-05,
+      "headroom": 15.009135323709675,
+      "noise_engaged": true,
+      "verdict": "pass"
+    },
+    {
+      "option": "sb-uniform",
+      "point": "M-mps-4",
+      "stamp_bound": 3.335727136288824e-05,
+      "bound": 5e-05,
+      "headroom": 4.415056842105264,
+      "noise_engaged": false,
+      "verdict": "pass"
+    },
+    {
+      "option": "sb-uniform",
+      "point": "M-mps-5",
+      "stamp_bound": 5.982061985720932e-05,
+      "bound": 5.982061985720932e-05,
+      "headroom": 8.142989538322839,
+      "noise_engaged": true,
+      "verdict": "pass"
+    },
+    {
+      "option": "sb-uniform",
+      "point": "M-mps-6",
+      "stamp_bound": 1.4371895413756164e-05,
+      "bound": 5e-05,
+      "headroom": 6.618231163708087,
+      "noise_engaged": false,
+      "verdict": "pass"
+    },
+    {
+      "option": "sb-uniform",
+      "point": "M-mps-7",
+      "stamp_bound": 6.0283592210108594e-05,
+      "bound": 6.0283592210108594e-05,
+      "headroom": 5.044343380373612,
+      "noise_engaged": true,
+      "verdict": "pass"
+    }
+  ],
+  "red_line": {
+    "smallest_cited_regression_abs": 0.014,
+    "source": "contracts/laya-parity-v1.yaml equations.window_mutation.invariants: 'proves the window boundary rather than guessing it: spike 025 measured |dp| 1.4e-2 (63) and 2.8e-2 (65), flipping an argmax at 65' (the local-window off-by-one, half window 64 mutated to 63 and 65)",
+    "argmax_exact": true,
+    "options": {
+      "sb-recommended": {
+        "max_floor": 5e-05,
+        "floor_headroom": 280.0,
+        "max_ceiling": 0.001,
+        "ceiling_headroom": 14.0,
+        "noise_engages_above": {
+          "fine_tuned": 1.25e-05,
+          "zero_shot": 7.5e-06
+        },
+        "noise_engaged_cells": [
+          "M-mps-2",
+          "M-mps-3",
+          "M-mps-5",
+          "M-mps-7"
+        ]
+      },
+      "sb-minimal": {
+        "max_floor": 2.5e-05,
+        "floor_headroom": 560.0,
+        "max_ceiling": 0.001,
+        "ceiling_headroom": 14.0,
+        "noise_engages_above": {
+          "fine_tuned": 2.5e-06,
+          "zero_shot": 6.25e-06
+        },
+        "noise_engaged_cells": [
+          "G-smoke-ft",
+          "G-motiv-ft",
+          "M-smoke-ft",
+          "M-mps-2",
+          "M-mps-3",
+          "M-mps-4",
+          "M-mps-5",
+          "M-mps-6",
+          "M-mps-7"
+        ]
+      },
+      "sb-uniform": {
+        "max_floor": 5e-05,
+        "floor_headroom": 280.0,
+        "max_ceiling": 0.001,
+        "ceiling_headroom": 14.0,
+        "noise_engages_above": {
+          "fine_tuned": 1.25e-05,
+          "zero_shot": 1.25e-05
+        },
+        "noise_engaged_cells": [
+          "M-mps-2",
+          "M-mps-3",
+          "M-mps-5",
+          "M-mps-7"
+        ]
+      }
+    }
+  },
+  "limits": [
+    "x86_64 CPU: there is no x86_64 pack binary or image (new infrastructure, not planned)",
+    "Graviton generation split: the production pack image cannot print its CPU generation, so host heterogeneity on Fargate is observable only as run-to-run spread across repeats",
+    "a fresh A10G run: the A10G noise is already recorded in each run's rescore-noise.json; no GPU job is started",
+    "the second set of a refused leg: pack_laya reports only the FIRST drifted set (exposing it is a decide-crate change, D-15)",
+    "eval size differs (100 rows motivation, 459 rows smoke) and a larger eval set makes the max harder (spike 028)",
+    "the P14-D-16 rerun's fine_tuned drift is a fresh draw",
+    "[ASSUMED] the stable absolute drift is the CUDA-versus-CPU term, which no measurement isolates",
+    "[ASSUMED] no porting regression of interest lies between the bound and 1.4e-2; that region is unmeasured"
+  ],
+  "structures": {
+    "S-B": {
+      "recommended": true,
+      "summary": "additive per-set constants (six numbers) alongside the A1 stamp scalars, record v1 unchanged",
+      "reasons": [
+        "no change to RescoreNoise (deny_unknown_fields), train.py, lifecycle.py, laya-finetune-gate-v1 rescore_noise_schema or the train image",
+        "the retained motivation-v1-sm v1 record stays verifiable before its S3 objects expire (about 2026-11-28), which keeps SC3 safe",
+        "old records and old artifacts stay valid"
+      ],
+      "accepted_debt": "k and floor have two meanings in one contract: the stamp the trainer writes versus the enforced per-set bound",
+      "promote_trigger": "a trainer that must stamp per-set values, a third scored set, or retiring the A1 stamp"
+    },
+    "S-A": {
+      "recommended": false,
+      "summary": "record v2 carrying per-set k and floor_abs",
+      "costs": [
+        "changes RescoreNoise (deny_unknown_fields) in Rust",
+        "changes write_noise_record and check_noise_record in Python (train.py, lifecycle.py)",
+        "changes rescore_noise_schema in laya-finetune-gate-v1.yaml",
+        "forces a train-image rebuild",
+        "makes the retained motivation-v1-sm v1 record unverifiable unless a v1 reader is kept, which puts SC3 at risk before 2026-11-28"
+      ]
+    }
+  },
+  "verify_roles": [
+    {
+      "id": "role-drift-advisory",
+      "recommended": true,
+      "meaning": "With a valid pack record (accepted true, deploy_eligible true, apr_sha256 equal to the local file's sha256), ONLY a local `REFUSED RescoreDrift` is logged as a cross-CPU finding; every other local refusal still blocks; no record keeps today's local gate.",
+      "consequences": {
+        "rescore_drift": "logged",
+        "other_local_refusal": "blocks",
+        "gate_failed_exit_3": "blocks",
+        "record_invalid_or_sha_mismatch": "blocks",
+        "explicit_record_absent": "blocks",
+        "convention_record_absent": "local gate",
+        "no_record": "local gate"
+      }
+    },
+    {
+      "id": "role-all-advisory",
+      "recommended": false,
+      "meaning": "With a valid pack record every local refusal is logged and none blocks; no record keeps today's local gate.",
+      "consequences": {
+        "rescore_drift": "logged",
+        "other_local_refusal": "logged",
+        "gate_failed_exit_3": "logged",
+        "record_invalid_or_sha_mismatch": "blocks",
+        "explicit_record_absent": "blocks",
+        "convention_record_absent": "local gate",
+        "no_record": "local gate"
+      }
+    }
+  ],
+  "open_questions": [
+    {
+      "id": "Q1",
+      "question": "which structure",
+      "proposed": "decided here: S-B recommended, S-A listed with its cost"
+    },
+    {
+      "id": "Q2",
+      "question": "what the local laya-verify may demote, and no-record behaviour",
+      "proposed": "decided here (verify_roles): role-drift-advisory recommended; a run with no record keeps the local gate"
+    },
+    {
+      "id": "Q3",
+      "question": "recipe_id before the run",
+      "proposed": "computed offline with scripts/laya_train/contract.py recipe_id_for at plan 15-07"
+    },
+    {
+      "id": "Q4",
+      "question": "which training levers may move",
+      "proposed": "only max epochs within [4, 12] and the dataset are movable without a laya-finetune-gate-v1 edit; decided at plan 15-07's checkpoint"
+    },
+    {
+      "id": "Q5",
+      "question": "fetching the re-packed .apr",
+      "proposed": "not needed: D-09 is shown on real bytes by smoke-stance-64 (plan 15-03) and by the reproduction's fetched artifact (plan 15-08)"
+    }
+  ],
+  "assumption_delta": {
+    "primary_noun": "the ENFORCED per-set re-score parameters (k_s, floor_s, ceiling_s for s in fine_tuned, zero_shot)",
+    "recommended": "add-alongside",
+    "accepted_debt": "k and floor have two meanings in one contract: the stamp the trainer writes versus the enforced per-set bound",
+    "promote_trigger": "a trainer that must stamp per-set values, a third scored set, or retiring the A1 stamp"
+  }
+}
