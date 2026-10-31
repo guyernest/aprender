@@ -1124,7 +1124,7 @@ Round 2 disposition (owner answers in 14-GAP-ROUND-2-OWNER-DECISIONS.md): Deferr
   4. Per truth 12 (D-16): after criterion 1 lands, a fresh owner-run SageMaker reproduction of motivation-v1 under a new committed declaration passes the gate and lands in the owner-approved band (Phase 14's declaration: margin [0.30, 0.45], post-calibration ECE [0.07, 0.12]; any band change is the owner's, decided at the new declaration's checkpoint and committed before the paid run) with an accepted, deploy-eligible `.apr` from the Graviton pack task; the Phase 15 gate-run evidence records next_trusted true; no waiver and no override entry stands in for it, and the Phase 14 training server is trusted only after it.
   5. Every AWS command is owner-run with the bang prefix and each paid run is approved by the owner (the CLAUDE.md check-in for compute above 1 hr on a non-lambda-vector host; approved in principle on 2026-10-30; Phase 14's attempt 1 billed 1346 s of ml.g5.xlarge plus a 124 s Fargate pack).
 
-**Plans:** 4/8 plans executed in 8 waves (sequential: owner checkpoints and the D-17 order gate every step)
+**Plans:** 5/8 plans executed in 8 waves (sequential: owner checkpoints and the D-17 order gate every step)
 
 Plans:
 **Wave 1**
@@ -1140,7 +1140,7 @@ Plans:
 - [x] 15-04-PLAN.md — Real-weights proof (trainer records under A2, gap regression), CLAUDE.md and claims coherence, clean closure for the image (wave 4)
 
 **Wave 5** *(blocked on Wave 4 completion)*
-- [ ] 15-05-PLAN.md — Owner rebuilds the pack image from the amended HEAD; offline synth and predicted stack diff (wave 5)
+- [x] 15-05-PLAN.md — Owner rebuilds the pack image from the amended HEAD; offline synth and predicted stack diff (wave 5)
 
 **Wave 6** *(blocked on Wave 5 completion)*
 - [ ] 15-06-PLAN.md — Owner deploys the stack and re-packs motivation-v1-sm on Graviton: accepted, deploy-eligible .apr (SC3, D-15) (wave 6)
