@@ -1998,6 +1998,503 @@ fn noise_k_mismatch() {
 }
 
 // ===========================================================================
+// Plan 15-02 Task 2: the per-set A2 re-score bound (laya-parity-v1 amendment A2)
+// ===========================================================================
+
+/// The CONTRACT's A2 policy with the metric recompute widened: a probability file moved by up to
+/// ~5e-5 on one row also moves the reported NLL by ~1e-5, which `ReportedMetricMismatch` would
+/// refuse AFTER the re-score. These tests pin the re-score rule only, so the metric clause is
+/// out of scope here (it keeps its own tests).
+fn a2_base() -> VerifyPolicy {
+    VerifyPolicy {
+        metric_recompute_abs: 1.0,
+        ..permissive_policy()
+    }
+}
+
+/// `set` of a policy as the A1 STAMP says it (what A1 enforced for both sets).
+fn stamp_set(policy: &VerifyPolicy) -> RescoreSetPolicy {
+    RescoreSetPolicy {
+        noise_k: policy.rescore_noise_k,
+        floor_abs: policy.rescore_probs_abs,
+        bound_max_abs: policy.rescore_bound_max_abs,
+    }
+}
+
+/// `permissive_policy()` with explicit per-set A2 parameters (so the rule is pinned for any
+/// signed values).
+fn a2_policy(ft: RescoreSetPolicy, zs: RescoreSetPolicy) -> VerifyPolicy {
+    VerifyPolicy {
+        rescore_fine_tuned: ft,
+        rescore_zero_shot: zs,
+        ..a2_base()
+    }
+}
+
+/// A production copy carrying a noise record, per set `(drift, noise)`: the probability file is
+/// `drift` away from what Rust re-scores (row 3, via `shift_prob`), and the float64 reference
+/// is `noise` away from that FILE (row 5, via `nudge` into the argmax component, which cannot
+/// flip it). Returns the copy and the two noises `write_noise_record` recorded.
+fn drift_noise_copy(policy: &VerifyPolicy, ft: (f64, f64), zs: (f64, f64)) -> (Run, [f64; 2]) {
+    let run = production_copy(policy, true);
+    for (file, (drift, _)) in [("eval-probs.json", ft), ("zero-shot-probs.json", zs)] {
+        if drift != 0.0 {
+            shift_prob(&run, file, 3, 0, drift);
+        }
+    }
+    let mut ft_ref = f64_rows(&run, "eval-probs.json");
+    let mut zs_ref = f64_rows(&run, "zero-shot-probs.json");
+    if ft.1 != 0.0 {
+        nudge(&mut ft_ref, 5, ft.1);
+    }
+    if zs.1 != 0.0 {
+        nudge(&mut zs_ref, 5, zs.1);
+    }
+    let noises = write_noise_record(&run, policy, &ft_ref, &zs_ref);
+    (run, noises)
+}
+
+/// The enforced bound a set of `policy` derives from `noise`.
+fn enforced(policy: &VerifyPolicy, which: ProbsWhich, noise: f64) -> f64 {
+    let p = policy.rescore_set(which);
+    p.floor_abs.max(p.noise_k * noise)
+}
+
+/// The Graviton cells of 15-BOUND-CANDIDATES.json (D-04), as `(point id, set, drift, noise)`.
+/// G-motiv-ft is an upper bound on drift (a record bound, never an observed max) and has no
+/// observed row, so it is the one Graviton cell not replayed as a drift.
+const GRAVITON_CELLS: [(&str, ProbsWhich, f64, f64); 3] = [
+    (
+        "G-motiv-zs",
+        ProbsWhich::ZeroShot,
+        1.728_534_698_486_328e-5,
+        1.726_510_581_612_217_3e-6,
+    ),
+    (
+        "G-smoke-ft",
+        ProbsWhich::FineTuned,
+        2.747_774_124_145_507_8e-5,
+        8.147_599_085_628_343e-6,
+    ),
+    (
+        "G-smoke-zs",
+        ProbsWhich::ZeroShot,
+        1.507_997_512_817_382_8e-5,
+        4.703_040_535_014_58e-6,
+    ),
+];
+
+/// A copy whose ONE drifted set is `which` (the other is exact, noise 0).
+fn cell_copy(policy: &VerifyPolicy, which: ProbsWhich, drift: f64, noise: f64) -> (Run, [f64; 2]) {
+    match which {
+        ProbsWhich::ZeroShot => drift_noise_copy(policy, (0.0, 0.0), (drift, noise)),
+        _ => drift_noise_copy(policy, (drift, noise), (0.0, 0.0)),
+    }
+}
+
+#[test]
+fn noise_per_set_graviton_cells() {
+    let policy = a2_base();
+    for (id, which, drift, noise) in GRAVITON_CELLS {
+        let (run, noises) = cell_copy(&policy, which, drift, noise);
+        let recorded = if which == ProbsWhich::ZeroShot {
+            noises[1]
+        } else {
+            noises[0]
+        };
+        assert!(
+            (recorded - noise).abs() < 1e-12,
+            "{id}: the recorded noise is the cell's: {recorded} vs {noise}"
+        );
+        let report = run
+            .verify(&policy)
+            .unwrap_or_else(|e| panic!("{id} must be ACCEPTED under the signed policy: {e}"));
+        let want_ft = enforced(&policy, ProbsWhich::FineTuned, noises[0]);
+        let want_zs = enforced(&policy, ProbsWhich::ZeroShot, noises[1]);
+        assert_eq!(report.rescore_bound.to_bits(), want_ft.to_bits(), "{id}");
+        assert_eq!(report.zs_rescore_bound.to_bits(), want_zs.to_bits(), "{id}");
+        let (observed, bound) = if which == ProbsWhich::ZeroShot {
+            (report.zs_rescore_max_abs, report.zs_rescore_bound)
+        } else {
+            (report.rescore_max_abs, report.rescore_bound)
+        };
+        assert!(
+            (observed - drift).abs() < 1e-7 && within(observed, bound),
+            "{id}: drift {observed} against bound {bound}"
+        );
+    }
+}
+
+/// G-motiv-zs under the A1 policy (per-set values equal to the stamp): drift 1.7285e-5 against
+/// max(1e-5, 4 x 1.7265e-6) = 1e-5. This is the cell the amendment exists for.
+#[test]
+fn noise_per_set_a1_policy_refuses_motivation_zero_shot() {
+    let signed = a2_base();
+    let a1 = a2_policy(stamp_set(&signed), stamp_set(&signed));
+    let (id, which, drift, noise) = GRAVITON_CELLS[0];
+    assert_eq!(id, "G-motiv-zs");
+    let (run, _) = cell_copy(&a1, which, drift, noise);
+    let e = expect_err(run.verify(&a1));
+    assert!(
+        matches!(e, VerifyError::RescoreDrift { which: ProbsWhich::ZeroShot, bound, .. }
+            if bound.to_bits() == signed.rescore_probs_abs.to_bits()),
+        "{e:?}"
+    );
+    // The same bytes under the signed policy are accepted.
+    run.verify(&signed)
+        .expect("the signed policy accepts what A1 refused");
+}
+
+#[test]
+fn noise_per_set_boundary() {
+    let policy = a2_base();
+    for which in [ProbsWhich::FineTuned, ProbsWhich::ZeroShot] {
+        let bound = enforced(&policy, which, 0.0);
+        let (run, _) = cell_copy(&policy, which, 0.9 * bound, 0.0);
+        run.verify(&policy)
+            .unwrap_or_else(|e| panic!("{which}: 0.9 x the bound is accepted: {e}"));
+        let (run, _) = cell_copy(&policy, which, 1.1 * bound, 0.0);
+        let e = expect_err(run.verify(&policy));
+        assert!(
+            matches!(e, VerifyError::RescoreDrift { which: w, row: 3, bound: b, .. }
+                if w == which && b.to_bits() == bound.to_bits()),
+            "{which}: 1.1 x the bound is refused naming it: {e:?}"
+        );
+    }
+}
+
+/// fine_tuned floor 5e-5 and zero_shot floor 3e-5: a 4e-5 drift is inside the first and over
+/// the second. A policy that read the wrong set's parameters turns this red both ways.
+#[test]
+fn noise_per_set_fields_not_swapped() {
+    let set = |floor_abs| RescoreSetPolicy {
+        noise_k: 4.0,
+        floor_abs,
+        bound_max_abs: 1.0e-3,
+    };
+    let policy = a2_policy(set(5.0e-5), set(3.0e-5));
+    let (run, _) = cell_copy(&policy, ProbsWhich::FineTuned, 4.0e-5, 0.0);
+    run.verify(&policy)
+        .expect("4e-5 on fine_tuned is inside its 5e-5 floor");
+    let (run, _) = cell_copy(&policy, ProbsWhich::ZeroShot, 4.0e-5, 0.0);
+    let e = expect_err(run.verify(&policy));
+    assert!(
+        matches!(e, VerifyError::RescoreDrift { which: ProbsWhich::ZeroShot, bound, .. }
+            if bound.to_bits() == 3.0e-5_f64.to_bits()),
+        "4e-5 on zero_shot is over its 3e-5 floor: {e:?}"
+    );
+    // And the accessor itself, both ways round.
+    assert_eq!(policy.rescore_set(ProbsWhich::FineTuned), set(5.0e-5));
+    assert_eq!(policy.rescore_set(ProbsWhich::ZeroShot), set(3.0e-5));
+}
+
+/// A noise-1e-5 record: the A1 STAMP max(1e-5, 4 x 1e-5) = 4e-5 passes the stamp ceiling 1e-3
+/// AND sits below the per-set ceiling 1e-4, while the ENFORCED k_s = 16 gives 1.6e-4 > 1e-4:
+/// ONLY the per-set check refuses, and the refusal names the per-set ceiling, never 1e-3.
+#[test]
+fn noise_per_set_ceiling() {
+    let base = a2_base();
+    let tight = RescoreSetPolicy {
+        noise_k: 16.0,
+        floor_abs: 5.0e-5,
+        bound_max_abs: 1.0e-4,
+    };
+    let plain = stamp_set(&base);
+    for which in [ProbsWhich::FineTuned, ProbsWhich::ZeroShot] {
+        let policy = if which == ProbsWhich::ZeroShot {
+            a2_policy(plain, tight)
+        } else {
+            a2_policy(tight, plain)
+        };
+        let (run, noises) = cell_copy(&policy, which, 2.0e-5, 1.0e-5);
+        let noise = if which == ProbsWhich::ZeroShot {
+            noises[1]
+        } else {
+            noises[0]
+        };
+        let stamp = policy.rescore_probs_abs.max(policy.rescore_noise_k * noise);
+        assert!(
+            stamp <= tight.bound_max_abs && stamp <= policy.rescore_bound_max_abs,
+            "the fixture's stamp {stamp} passes BOTH ceilings"
+        );
+        let want = tight.floor_abs.max(tight.noise_k * noise);
+        assert!(want > tight.bound_max_abs, "the enforced bound is over it");
+        let e = expect_err(run.verify(&policy));
+        assert!(
+            matches!(e, VerifyError::RescoreBoundCeiling { which: w, bound, ceiling }
+                if w == which
+                    && bound.to_bits() == want.to_bits()
+                    && ceiling.to_bits() == tight.bound_max_abs.to_bits()),
+            "{which}: {e:?}"
+        );
+    }
+}
+
+/// A per-set ceiling EXACTLY equal to the enforced bound accepts; one ULP below refuses.
+#[test]
+fn noise_per_set_ceiling_inclusive() {
+    let base = a2_base();
+    let k = 16.0;
+    let (run, noises) = drift_noise_copy(&base, (0.0, 1.0e-5), (0.0, 0.0));
+    let want = 5.0e-5_f64.max(k * noises[0]);
+    assert!(want > 5.0e-5, "k x noise is above the floor");
+    let set = |ceiling| RescoreSetPolicy {
+        noise_k: k,
+        floor_abs: 5.0e-5,
+        bound_max_abs: ceiling,
+    };
+    let at = a2_policy(set(want), stamp_set(&base));
+    let report = run
+        .verify(&at)
+        .expect("a ceiling equal to the enforced bound accepts");
+    assert_eq!(report.rescore_bound.to_bits(), want.to_bits());
+    let below = f64::from_bits(want.to_bits() - 1);
+    assert!(below >= 5.0e-5);
+    let e = expect_err(run.verify(&a2_policy(set(below), stamp_set(&base))));
+    assert!(
+        matches!(e, VerifyError::RescoreBoundCeiling { which: ProbsWhich::FineTuned, bound, ceiling }
+            if bound.to_bits() == want.to_bits() && ceiling.to_bits() == below.to_bits()),
+        "{e:?}"
+    );
+}
+
+/// The comparison layer itself: `|dp| <= tol` is INCLUSIVE. `rescore` with a tol equal to the
+/// exact row delta accepts; one ULP below refuses naming row 0 and that tol.
+#[test]
+fn noise_per_set_drift_inclusive() {
+    let texts = vec!["row".to_string()];
+    let file = vec![vec![0.75f32, 0.25]];
+    let served = vec![0.750_03f32, 0.249_97];
+    let d = row_max_abs(&served, &file[0]);
+    assert!(d > 0.0 && d < 1e-4, "{d}");
+    let decision = || {
+        vec![Decision {
+            label_index: argmax(&served),
+            probabilities: served.clone(),
+            tokens: 1,
+            truncated: false,
+        }]
+    };
+    let ok = rescore(ProbsWhich::FineTuned, |_| Ok(decision()), &texts, &file, d)
+        .expect("tol equal to the exact delta accepts");
+    assert_eq!(ok.max_abs.to_bits(), d.to_bits());
+    let below = f64::from_bits(d.to_bits() - 1);
+    let e = rescore(
+        ProbsWhich::FineTuned,
+        |_| Ok(decision()),
+        &texts,
+        &file,
+        below,
+    )
+    .expect_err("one ULP below refuses");
+    assert!(
+        matches!(e, VerifyError::RescoreDrift { which: ProbsWhich::FineTuned, row: 0, bound, .. }
+            if bound.to_bits() == below.to_bits()),
+        "{e:?}"
+    );
+}
+
+/// OMISSION ONLY TIGHTENS: with no record both sets are held to `float_tolerance` whatever the
+/// per-set floors are, and `stamp_bound` is that floor too.
+#[test]
+fn noise_per_set_absent_record_floor() {
+    let base = a2_base();
+    let set = RescoreSetPolicy {
+        noise_k: 4.0,
+        floor_abs: 5.0e-4,
+        bound_max_abs: 1.0e-3,
+    };
+    let policy = a2_policy(set, set);
+    assert!(set.floor_abs > policy.rescore_probs_abs);
+    let run = production_copy(&policy, true);
+    let (inputs, ft, zs) = validated(&run);
+    assert!(inputs.rescore_noise_json.is_none());
+    for b in rescore_bounds(&inputs, &ft, &zs, &policy).expect("no record: the floor") {
+        assert_eq!(b.bound.to_bits(), base.rescore_probs_abs.to_bits());
+        assert_eq!(b.stamp_bound.to_bits(), base.rescore_probs_abs.to_bits());
+        assert_eq!(b.noise, None);
+    }
+    shift_prob(&run, "eval-probs.json", 3, 0, 2.0e-5);
+    run.rehash();
+    let e = expect_err(run.verify(&policy));
+    assert!(
+        matches!(e, VerifyError::RescoreDrift { which: ProbsWhich::FineTuned, bound, .. }
+            if bound.to_bits() == base.rescore_probs_abs.to_bits()),
+        "a 2e-5 drift is refused at the floor, not waved through by a 5e-4 per-set floor: {e:?}"
+    );
+}
+
+/// The record STAMP is unchanged by A2: a record stamped k = 4 / floor 1e-5 verifies and its
+/// `stamp_bound` is the A1 formula; a record stamped with another k is still refused.
+#[test]
+fn noise_per_set_stamp_unchanged() {
+    let policy = a2_base();
+    let (run, noises) = drift_noise_copy(&policy, (0.0, 2.0e-5), (0.0, 0.0));
+    let (inputs, ft, zs) = validated(&run);
+    let bounds = rescore_bounds(&inputs, &ft, &zs, &policy).expect("an A1-stamped record verifies");
+    let a1 = policy
+        .rescore_probs_abs
+        .max(policy.rescore_noise_k * noises[0]);
+    assert_eq!(bounds[0].stamp_bound.to_bits(), a1.to_bits());
+    assert_eq!(
+        bounds[0].bound.to_bits(),
+        enforced(&policy, ProbsWhich::FineTuned, noises[0]).to_bits()
+    );
+    assert_eq!(
+        bounds[1].stamp_bound.to_bits(),
+        policy.rescore_probs_abs.to_bits()
+    );
+    run.verify(&policy).expect("and the whole run verifies");
+    run.edit_json("rescore-noise.json", |v| v["k"] = 6.0.into());
+    run.rehash();
+    let e = expect_err(run.verify(&policy));
+    assert!(
+        matches!(
+            &e,
+            VerifyError::RescoreNoiseInvalid {
+                which: None,
+                field: "k",
+                ..
+            }
+        ),
+        "{e:?}"
+    );
+}
+
+/// A per-set value the verifier cannot honour is refused BEFORE any bound is derived, naming
+/// the set and the field; exit status 2.
+#[test]
+fn noise_per_set_policy_invalid() {
+    let base = a2_base();
+    let run = production_copy(&base, true);
+    let (inputs, ft, zs) = validated(&run);
+    let good = stamp_set(&base);
+    let cases: Vec<(&str, ProbsWhich, &str, RescoreSetPolicy)> = vec![
+        (
+            "floor below float_tolerance",
+            ProbsWhich::FineTuned,
+            "floor_abs",
+            RescoreSetPolicy {
+                floor_abs: base.rescore_probs_abs * 0.5,
+                ..good
+            },
+        ),
+        (
+            "ceiling below floor",
+            ProbsWhich::ZeroShot,
+            "bound_max_abs",
+            RescoreSetPolicy {
+                floor_abs: 3.0e-5,
+                bound_max_abs: 2.0e-5,
+                ..good
+            },
+        ),
+        (
+            "ceiling above the A1 ceiling",
+            ProbsWhich::ZeroShot,
+            "bound_max_abs",
+            RescoreSetPolicy {
+                bound_max_abs: base.rescore_bound_max_abs * 2.0,
+                ..good
+            },
+        ),
+        (
+            "NaN multiplier",
+            ProbsWhich::FineTuned,
+            "noise_k",
+            RescoreSetPolicy {
+                noise_k: f64::NAN,
+                ..good
+            },
+        ),
+        (
+            "NaN floor",
+            ProbsWhich::ZeroShot,
+            "floor_abs",
+            RescoreSetPolicy {
+                floor_abs: f64::NAN,
+                ..good
+            },
+        ),
+        (
+            "NaN ceiling",
+            ProbsWhich::FineTuned,
+            "bound_max_abs",
+            RescoreSetPolicy {
+                bound_max_abs: f64::NAN,
+                ..good
+            },
+        ),
+        (
+            "zero multiplier",
+            ProbsWhich::ZeroShot,
+            "noise_k",
+            RescoreSetPolicy {
+                noise_k: 0.0,
+                ..good
+            },
+        ),
+    ];
+    for (name, which, field, bad) in cases {
+        let policy = if which == ProbsWhich::ZeroShot {
+            a2_policy(good, bad)
+        } else {
+            a2_policy(bad, good)
+        };
+        let e = rescore_bounds(&inputs, &ft, &zs, &policy)
+            .expect_err(&format!("{name}: refused before any bound is derived"));
+        assert!(
+            matches!(&e, VerifyError::RescorePolicyInvalid { which: w, field: f, .. }
+                if *w == which && *f == field),
+            "{name}: {e:?}"
+        );
+        assert_eq!(e.variant_name(), "RescorePolicyInvalid");
+        assert!(
+            e.to_string()
+                .starts_with(&format!("which={which} field={field} value=")),
+            "{name}: {e}"
+        );
+        assert_eq!(e.exit_code(), 2, "{name}");
+    }
+}
+
+/// On the REAL contract: the per-set values are the six constants, each floor sits between
+/// `float_tolerance` and its ceiling, and each ceiling only tightens the A1 ceiling.
+#[test]
+fn noise_per_set_contract_invariants() {
+    let policy = contract_policy();
+    let c = |k: &str| constant_f64("laya-parity-v1.yaml", k);
+    for (which, suffix) in [
+        (ProbsWhich::FineTuned, "fine_tuned"),
+        (ProbsWhich::ZeroShot, "zero_shot"),
+    ] {
+        let p = policy.rescore_set(which);
+        assert_eq!(
+            p.noise_k.to_bits(),
+            c(&format!("pack_rescore_noise_k_{suffix}")).to_bits()
+        );
+        assert_eq!(
+            p.floor_abs.to_bits(),
+            c(&format!("pack_rescore_floor_{suffix}")).to_bits()
+        );
+        assert_eq!(
+            p.bound_max_abs.to_bits(),
+            c(&format!("pack_rescore_bound_max_abs_{suffix}")).to_bits()
+        );
+        assert!(
+            p.noise_k > 0.0 && p.floor_abs >= policy.rescore_probs_abs,
+            "{suffix}: {p:?}"
+        );
+        assert!(p.floor_abs <= p.bound_max_abs, "{suffix}: {p:?}");
+        assert!(p.bound_max_abs <= policy.rescore_bound_max_abs, "{suffix}");
+    }
+    // The A1 STAMP keys are untouched.
+    assert_eq!(policy.rescore_noise_k, 4.0);
+    assert_eq!(policy.rescore_probs_abs, 1.0e-5);
+    assert_eq!(policy.rescore_bound_max_abs, 1.0e-3);
+}
+
+// ===========================================================================
 // Plan 08-15 Task 2: the median-seed re-derivation (A3), the legacy refusal order, and the
 // shift probe (A2)
 // ===========================================================================

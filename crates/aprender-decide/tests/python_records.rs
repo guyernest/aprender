@@ -13,9 +13,11 @@
 //!   cargo test -p aprender-decide --test python_records -- --nocapture
 //! ```
 //!
-//! It prints one `NOISE which=<set> rust=<noise> python=<reported> bound=<bound>` line per set:
-//! the noise Rust RECOMPUTES from the stored float64 rows and the torch probability file must
-//! equal the `max_abs` Python reported, and the derived bound Python's `bound`, to the bit.
+//! It prints one `NOISE which=<set> rust=<noise> python=<reported> stamp=<stamp_bound> bound=<bound>`
+//! line per set: the noise Rust RECOMPUTES from the stored float64 rows and the torch probability
+//! file must equal the `max_abs` Python reported, Rust's A1 `stamp_bound` Python's `bound`, to the
+//! bit, and the ENFORCED `bound` (laya-parity-v1 A2) must equal `max(floor_s, k_s x noise)` of the
+//! contract's per-set constants.
 //!
 //! It then re-derives the seed selection (A3) from the per-seed probability files and prints
 //! `MEDIAN rust=<seed> python=<seed>`: Rust's median of its OWN recomputed ECEs must be the seed
@@ -81,16 +83,26 @@ fn python_run_dir_records_match_rust() {
         let python = set["max_abs"].as_f64().expect("reported max_abs");
         let python_bound = set["bound"].as_f64().expect("reported bound");
         let rust = b.noise.expect("a record yields a recomputed noise");
+        // A2: `stamp_bound` is the A1 formula Python reports; `bound` is the ENFORCED per-set
+        // value, `max(floor_s, k_s x noise)` of the contract's A2 constants for this set.
+        let p = policy.rescore_set(b.which);
+        let enforced = p.floor_abs.max(p.noise_k * rust);
         println!(
-            "NOISE which={} rust={rust:e} python={python:e} bound={:e}",
-            b.which, b.bound
+            "NOISE which={} rust={rust:e} python={python:e} stamp={:e} bound={:e}",
+            b.which, b.stamp_bound, b.bound
         );
         assert_eq!(set["which"].as_str(), Some(b.which.to_string().as_str()));
         assert_eq!(rust.to_bits(), python.to_bits(), "{}: noise", b.which);
         assert_eq!(
-            b.bound.to_bits(),
+            b.stamp_bound.to_bits(),
             python_bound.to_bits(),
-            "{}: bound",
+            "{}: stamp bound",
+            b.which
+        );
+        assert_eq!(
+            b.bound.to_bits(),
+            enforced.to_bits(),
+            "{}: enforced bound",
             b.which
         );
     }
