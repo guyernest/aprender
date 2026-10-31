@@ -1058,7 +1058,7 @@ Owner decisions already made (2026-10-28), to be recorded in this phase's CONTEX
 Known constraints: Laya training does not fit Lambda (CPU, 900 s cap) — Phase 10's gate run took 16,822 s on Apple MPS for three seeds and Phase 12's pilot 752 s; SageMaker GPU instances are x86_64 + CUDA while every Laya parity and pack-tolerance number is aarch64 (`contracts/laya-parity-v1.yaml` A1; `--device cuda` exists and the noise record is written per run), so a one-cell probe comes before any gate run is trusted there; `pack_laya` is a cargo example, not a shipped binary, and no `apr decide` subcommand exists (Phase 8 D-02); the base snapshot (`convaiinnovations/laya` @ 55cf4c4e, 0.84 GB, sha-pinned) must reach the job from S3, never baked into the image; the Lambda crate's `bootstrap` bin needs a FALSIFY-MONO-011 allowlist entry (baseline 27); reading a prefix needs prefix-scoped `s3:ListBucket` or a missing key answers 403, not 404 (the SetFit server's lesson); CI never installs torch, so the container's lifecycle check is local-only like `laya-verify-suite`; no AWS call without the owner.
 **Requirements**: none mapped; the plans implement CONTEXT decisions
 **Depends on:** Phase 13
-**Plans:** 22/22 plans executed
+**Plans:** 22/23 plans executed
 
 Plans:
 **Wave 1**
@@ -1104,3 +1104,16 @@ Plans:
 - [x] 14-22-PLAN.md — owner-run finalizer redeploy with hash check; request-function redeploy decision (wave 4, owner-gated)
 
 Not planned in the gap round (still open in 14-VERIFICATION human_verification): D-16 second reproduction or waiver (owner's); packing-stage cancel live check (about 62 min paid compute, owner-accepted); IN-02, IN-03.
+
+**Gap closure, round 2** *(from 14-VERIFICATION.md gaps_found 13/16 of 2026-10-30 and the owner answers in 14-GAP-ROUND-2-OWNER-DECISIONS.md; waves restart at 1)*
+- [ ] 14-23-PLAN.md — hand-off of the two open truths (the D-16 reproduction, the CUDA pack bound) to Phase 15: its success criteria, the inherited-facts seed and the deferral record; planning files only (wave 1)
+
+### Phase 15: Laya pack-bound amendment per study (D-15) and the motivation-v1 re-reproduction (D-16)
+
+**Goal:** Carry out the owner's D-15 decision (amend-per-study) and then close D-16. First, amend the pack/verify re-score bound in `contracts/laya-parity-v1.yaml` per set (fine_tuned, zero_shot), argued from `14-DRIFT-EVIDENCE.json`, and state the role of the local `laya-verify`. The plan argues the parameters, and the owner signs off at a `checkpoint:decision` before any contract edit. Then run a fresh, owner-run SageMaker reproduction of motivation-v1 under a new declaration, which must land in the D-16 band with an accepted, deploy-eligible `.apr` from the Graviton pack task before the Phase 14 training server is trusted. Inherits two items from Phase 14: truths 12 (D-16) and 13 (a gate-passing CUDA checkpoint yields a deploy-eligible `.apr`). Owner decisions: `.planning/phases/14-laya-training-mcp-server-s3-dataset-in-apr-and-reports-out/14-GAP-ROUND-2-OWNER-DECISIONS.md`.
+**Requirements**: TBD
+**Depends on:** Phase 14
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 15 to break down)
