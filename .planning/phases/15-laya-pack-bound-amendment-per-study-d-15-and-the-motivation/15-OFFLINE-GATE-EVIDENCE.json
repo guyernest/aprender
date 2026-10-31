@@ -1,0 +1,42 @@
+{
+  "schema": "laya-offline-gate-evidence-v1",
+  "plan": "15-04",
+  "head": "8a5e8642825daa7e010edfd0c197fb9b8e8c2638",
+  "params": {
+    "fine_tuned": {
+      "noise_k": 4,
+      "floor_abs": 5e-05,
+      "bound_max_abs": 0.001
+    },
+    "zero_shot": {
+      "noise_k": 4,
+      "floor_abs": 3e-05,
+      "bound_max_abs": 0.001
+    }
+  },
+  "verify_suite": {
+    "rc": 0,
+    "last_line": "LAYA VERIFY SUITE OK",
+    "legs": [
+      "LEG OK: laya_parity",
+      "LEG OK: fail_closed_vectors",
+      "LEG OK: demo_run",
+      "LEG OK: python_records"
+    ],
+    "noise_lines": [
+      "NOISE which=fine_tuned rust=4.2993464954843574e-8 python=4.2993464954843574e-8 stamp=1e-5 bound=5e-5",
+      "NOISE which=zero_shot rust=3.1062774519252656e-8 python=3.1062774519252656e-8 stamp=1e-5 bound=3e-5"
+    ],
+    "lifecycle_noise_lines": [
+      "NOISE which=fine_tuned max_abs=3.752272e-08 bound=1.000000e-05 argmax=9/9 t_applied=1.496108",
+      "NOISE which=zero_shot max_abs=3.106277e-08 bound=1.000000e-05 argmax=9/9 t_applied=1.750000",
+      "NOISE which=fine_tuned max_abs=3.752272e-08 bound=1.000000e-05 argmax=9/9 t_applied=1.496108",
+      "NOISE which=zero_shot max_abs=3.106277e-08 bound=1.000000e-05 argmax=9/9 t_applied=1.750000",
+      "NOISE which=fine_tuned max_abs=4.299346e-08 bound=1.000000e-05 argmax=9/9 t_applied=1.479579",
+      "NOISE which=zero_shot max_abs=3.106277e-08 bound=1.000000e-05 argmax=9/9 t_applied=1.750000",
+      "NOISE which=fine_tuned max_abs=4.299346e-08 bound=1.000000e-05 argmax=9/9 t_applied=1.479579",
+      "NOISE which=zero_shot max_abs=3.106277e-08 bound=1.000000e-05 argmax=9/9 t_applied=1.750000"
+    ],
+    "fail_closed_line": "FAIL-CLOSED VECTORS REFUSED 2/2 (387 s, ARCH aarch64)"
+  }
+}
