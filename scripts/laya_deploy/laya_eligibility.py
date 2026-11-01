@@ -139,19 +139,24 @@ def _exit_code(rc):
 def judge(h, rc, log_text, log_path, record=None, finding_log=None, server=None, role=ROLE, now=None):
     """Return (exit_code, verdict_line). `role` is a parameter only so the selftest can exercise both tables."""
     first = (refused_lines(log_text) or [None])[0]
+
+    def local_refusal():
+        return _exit_code(rc), "REFUSED eligibility: %s" % (first or "laya-verify exited %d (log: %s)" % (rc, log_path))
+
+    def accepted_or_refused(ok_line):
+        if local_accepts(log_text, h):
+            return 0, ok_line
+        return 2, "REFUSED eligibility: laya-verify exited 0 without deploy_eligible true for sha256 %s (log: %s)" % (h, log_path)
+
     if record is None:
         if rc != 0:
-            return _exit_code(rc), "REFUSED eligibility: %s" % (first or "laya-verify exited %d (log: %s)" % (rc, log_path))
-        if local_accepts(log_text, h):
-            return 0, "ELIGIBLE local-verify sha256 %s" % h
-        return 2, "REFUSED eligibility: laya-verify exited 0 without deploy_eligible true for sha256 %s (log: %s)" % (h, log_path)
+            return local_refusal()
+        return accepted_or_refused("ELIGIBLE local-verify sha256 %s" % h)
     reason, info = check_record(record, h)
     if reason is not None:
         return 2, "REFUSED eligibility: pack record %s" % reason
     if rc == 0:
-        if local_accepts(log_text, h):
-            return 0, "ELIGIBLE pack-record sha256 %s (local verify accepted)" % h
-        return 2, "REFUSED eligibility: laya-verify exited 0 without deploy_eligible true for sha256 %s (log: %s)" % (h, log_path)
+        return accepted_or_refused("ELIGIBLE pack-record sha256 %s (local verify accepted)" % h)
     demote = False
     if first is not None:
         if role == "role-drift-advisory":
@@ -163,15 +168,13 @@ def judge(h, rc, log_text, log_path, record=None, finding_log=None, server=None,
         else:
             return 2, "REFUSED eligibility: unknown role %s" % role
     if not demote:
-        return _exit_code(rc), "REFUSED eligibility: %s" % (first or "laya-verify exited %d (log: %s)" % (rc, log_path))
+        return local_refusal()
     stamp = (now or datetime.datetime.now(datetime.timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
     srv = server if isinstance(server, str) and SERVER_RE.fullmatch(server) else "unknown"
     line = "CROSS-CPU FINDING %s server=%s sha256=%s pack_image=%s parity_contract=%s local=%s" % (
         stamp, srv, h, info["pack_image"], info["parity_contract"], first)
     if finding_log:
-        d = os.path.dirname(finding_log)
-        if d:
-            os.makedirs(d, exist_ok=True)
+        os.makedirs(os.path.dirname(finding_log) or ".", exist_ok=True)
         with open(finding_log, "a", encoding="utf-8") as f:
             f.write(line + "\n")
     return 0, "ELIGIBLE pack-record sha256 %s (CROSS-CPU FINDING: %s)" % (h, first)
