@@ -3,7 +3,7 @@
   "phase": "16",
   "plan": "16-02",
   "kind": "pipeline-equivalence-control",
-  "status": "staged-validated",
+  "status": "ready-for-owner-run",
   "next_trusted": false,
   "sets_next_trusted": false,
   "declaration_path": ".planning/phases/16-laya-pipeline-equivalence-control-antisemitism-v1-on-sagemak/16-CONTROL-DECLARATION.json",
@@ -112,7 +112,11 @@
   "owner_commands": {
     "P0": "T() { python3 -I -c \"import json,sys;print(json.load(open('models/laya-trainer/outputs-dev.json'))['trainer'][sys.argv[1]])\" \"$1\"; }; BUCKET=$(T BucketName); URL=$(python3 -I -c \"import json;print(json.load(open('models/laya-trainer/deploy-dev.json'))['endpoint'])\"); URL=\"${URL%/mcp}/mcp\"; export LAYA_M2M_FILE=$(cat models/laya-trainer/m2m-file-path); export SSL_CERT_FILE=\"${SSL_CERT_FILE:-/etc/ssl/cert.pem}\"; unset APRENDER_DECIDE_PROBE_TOKEN",
     "S0": "! assume ze-kasher-dev && just laya-trainer-stage dataset data/decide/goldstandard-2024 goldstandard-2024 dev ze-kasher-dev --expect antisemitism-v1 > models/laya-trainer/ctl-stage.out 2>&1; echo \"rc=$?\"; python3 -I scripts/laya_deploy/laya_control.py check-stage --stage-out models/laya-trainer/ctl-stage.out --state models/laya-trainer/datasets-dev.json --declaration .planning/phases/16-laya-pipeline-equivalence-control-antisemitism-v1-on-sagemak/16-CONTROL-DECLARATION.json",
-    "V": "! T() { python3 -I -c \"import json,sys;print(json.load(open('models/laya-trainer/outputs-dev.json'))['trainer'][sys.argv[1]])\" \"$1\"; }; BUCKET=$(T BucketName); URL=$(python3 -I -c \"import json;print(json.load(open('models/laya-trainer/deploy-dev.json'))['endpoint'])\"); URL=\"${URL%/mcp}/mcp\"; export LAYA_M2M_FILE=$(cat models/laya-trainer/m2m-file-path); export SSL_CERT_FILE=\"${SSL_CERT_FILE:-/etc/ssl/cert.pem}\"; unset APRENDER_DECIDE_PROBE_TOKEN && assume ze-kasher-dev && just laya-trainer-call ze-kasher-dev \"$URL\" validate \"s3://$BUCKET/datasets/goldstandard-2024/\" > models/laya-trainer/ctl-validate.out 2>&1; echo \"rc=$?\"; python3 -I scripts/laya_deploy/laya_control.py check-validate --reply models/laya-trainer/ctl-validate.out --declaration .planning/phases/16-laya-pipeline-equivalence-control-antisemitism-v1-on-sagemak/16-CONTROL-DECLARATION.json --evidence .planning/phases/16-laya-pipeline-equivalence-control-antisemitism-v1-on-sagemak/16-CONTROL-RUN-EVIDENCE.json"
+    "V": "! T() { python3 -I -c \"import json,sys;print(json.load(open('models/laya-trainer/outputs-dev.json'))['trainer'][sys.argv[1]])\" \"$1\"; }; BUCKET=$(T BucketName); URL=$(python3 -I -c \"import json;print(json.load(open('models/laya-trainer/deploy-dev.json'))['endpoint'])\"); URL=\"${URL%/mcp}/mcp\"; export LAYA_M2M_FILE=$(cat models/laya-trainer/m2m-file-path); export SSL_CERT_FILE=\"${SSL_CERT_FILE:-/etc/ssl/cert.pem}\"; unset APRENDER_DECIDE_PROBE_TOKEN && assume ze-kasher-dev && just laya-trainer-call ze-kasher-dev \"$URL\" validate \"s3://$BUCKET/datasets/goldstandard-2024/\" > models/laya-trainer/ctl-validate.out 2>&1; echo \"rc=$?\"; python3 -I scripts/laya_deploy/laya_control.py check-validate --reply models/laya-trainer/ctl-validate.out --declaration .planning/phases/16-laya-pipeline-equivalence-control-antisemitism-v1-on-sagemak/16-CONTROL-DECLARATION.json --evidence .planning/phases/16-laya-pipeline-equivalence-control-antisemitism-v1-on-sagemak/16-CONTROL-RUN-EVIDENCE.json",
+    "R": "! T() { python3 -I -c \"import json,sys;print(json.load(open('models/laya-trainer/outputs-dev.json'))['trainer'][sys.argv[1]])\" \"$1\"; }; BUCKET=$(T BucketName); URL=$(python3 -I -c \"import json;print(json.load(open('models/laya-trainer/deploy-dev.json'))['endpoint'])\"); URL=\"${URL%/mcp}/mcp\"; export LAYA_M2M_FILE=$(cat models/laya-trainer/m2m-file-path); export SSL_CERT_FILE=\"${SSL_CERT_FILE:-/etc/ssl/cert.pem}\"; unset APRENDER_DECIDE_PROBE_TOKEN && assume ze-kasher-dev && just laya-trainer-call ze-kasher-dev \"$URL\" train \"s3://$BUCKET/datasets/goldstandard-2024/\" antisemitism-v1-cuda-ctl 4 > models/laya-trainer/ctl-train.out; echo \"rc=$?\"; cat models/laya-trainer/ctl-train.out | cut -c1-600; grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' models/laya-trainer/ctl-train.out | head -1 > models/laya-trainer/ctl-task-id; echo \"TASK_ID $(cat models/laya-trainer/ctl-task-id)\"",
+    "S": "! T() { python3 -I -c \"import json,sys;print(json.load(open('models/laya-trainer/outputs-dev.json'))['trainer'][sys.argv[1]])\" \"$1\"; }; BUCKET=$(T BucketName); URL=$(python3 -I -c \"import json;print(json.load(open('models/laya-trainer/deploy-dev.json'))['endpoint'])\"); URL=\"${URL%/mcp}/mcp\"; export LAYA_M2M_FILE=$(cat models/laya-trainer/m2m-file-path); export SSL_CERT_FILE=\"${SSL_CERT_FILE:-/etc/ssl/cert.pem}\"; unset APRENDER_DECIDE_PROBE_TOKEN && assume ze-kasher-dev && TASK_ID=$(cat models/laya-trainer/ctl-task-id) && i=0 && PH= && while [ \"$i\" -le 119 ]; do LINE=$(just laya-trainer-call ze-kasher-dev \"$URL\" status \"$TASK_ID\" 2>&1); echo \"$(date -u +%FT%TZ) $LINE\" | cut -c1-400 >> models/laya-trainer/ctl-poll.log; PH=$(printf '%s' \"$LINE\" | grep -oE 'phase[^a-z_]{1,6}(completed|gate_failed|failed|cancelled)' | head -n 1 | grep -oE '(completed|gate_failed|failed|cancelled)$'); if [ -n \"$PH\" ]; then echo \"POLL DONE $PH\"; break; fi; i=$((i+1)); sleep 60; done; [ -n \"$PH\" ] || echo \"POLL CAP $(tail -n 1 models/laya-trainer/ctl-poll.log | cut -c1-160)\"",
+    "F": "! T() { python3 -I -c \"import json,sys;print(json.load(open('models/laya-trainer/outputs-dev.json'))['trainer'][sys.argv[1]])\" \"$1\"; }; BUCKET=$(T BucketName); URL=$(python3 -I -c \"import json;print(json.load(open('models/laya-trainer/deploy-dev.json'))['endpoint'])\"); URL=\"${URL%/mcp}/mcp\"; export LAYA_M2M_FILE=$(cat models/laya-trainer/m2m-file-path); export SSL_CERT_FILE=\"${SSL_CERT_FILE:-/etc/ssl/cert.pem}\"; unset APRENDER_DECIDE_PROBE_TOKEN && assume ze-kasher-dev && just laya-fetch antisemitism-v1-cuda-ctl \"$(cat models/laya-trainer/ctl-task-id)\" \"$BUCKET\"",
+    "H": "! T() { python3 -I -c \"import json,sys;print(json.load(open('models/laya-trainer/outputs-dev.json'))['trainer'][sys.argv[1]])\" \"$1\"; }; BUCKET=$(T BucketName); URL=$(python3 -I -c \"import json;print(json.load(open('models/laya-trainer/deploy-dev.json'))['endpoint'])\"); URL=\"${URL%/mcp}/mcp\"; export LAYA_M2M_FILE=$(cat models/laya-trainer/m2m-file-path); export SSL_CERT_FILE=\"${SSL_CERT_FILE:-/etc/ssl/cert.pem}\"; unset APRENDER_DECIDE_PROBE_TOKEN && assume ze-kasher-dev && echo \"training_jobs_inprogress $(aws sagemaker list-training-jobs --profile ze-kasher-dev --status-equals InProgress --query 'length(TrainingJobSummaries)' --output text)\" && echo \"ecs_tasks_running $(aws ecs list-tasks --profile ze-kasher-dev --cluster \"$(T ClusterArn)\" --desired-status RUNNING --query 'length(taskArns)' --output text)\" && echo \"state_machine_execution $(aws stepfunctions list-executions --profile ze-kasher-dev --state-machine-arn \"$(T StateMachineArn)\" --max-results 1 --query 'executions[0].status' --output text)\" && echo \"lock $(aws dynamodb get-item --profile ze-kasher-dev --table-name \"$(T TableName)\" --key '{\"owner_id\":{\"S\":\"laya-train#single-flight\"},\"task_id\":{\"S\":\"lock\"}}' --output json | tr -d '\\n ' | cut -c1-300)\""
   },
   "owner_replies": [
     {
@@ -128,6 +132,469 @@
       "verbatim": "rc=0 | VALIDATE CHECK OK rows=8510/2129 shots_per_class=7016 labels=not_antisemitic,antisemitic epochs_range=4-12 inputs=match deferred_rules=0 prefix=goldstandard-2024  (session-credentials line elided)"
     }
   ],
-  "deviations": [],
-  "evidence_incomplete": []
+  "deviations": [
+    {
+      "rule": "Rule 3",
+      "note": "Phase 15's consumption_rule list carries a header line plus four steps; the plan's verify requires exactly four entries, so the four numbered steps are copied verbatim into consumption_rule and the header line into consumption_rule_subject"
+    }
+  ],
+  "evidence_incomplete": [
+    "awaiting the owner run"
+  ],
+  "readiness_completed_by_plan": "16-03",
+  "attempt_number": 1,
+  "authorization": {
+    "source": "16-RUN-GO.json",
+    "go_commit": "946df1793661b82110aa18a3d8d2634c5dd20efb",
+    "declaration_commit": "a3d4d2baa59af8b48399409e1b36ae3fdd14da2c",
+    "declaration_sha256": "600b64947ab8c058e5b52cf4f3227aca2eeb2a887d3d1dbaae2a41932fb5f096",
+    "note": "recorded by the orchestrator (schema laya-run-go-v1, interpreted_as run-go) and committed alone; check-run-go printed RUN-GO OK against the declaration blob materialized from its first-add commit; the run was authorized by those fields, not by a substring of the owner's words; this executor wrote no go and relayed no approval"
+  },
+  "rehearsal": {
+    "cases": [
+      {
+        "band": {
+          "ece_post": true,
+          "margin": true
+        },
+        "class": "pass",
+        "defect_reasons": [],
+        "must": {
+          "deploy_eligible": true,
+          "device_prefix": true,
+          "inputs_sha256": true,
+          "recipe_id": true,
+          "seeds": true
+        },
+        "name": "in-band",
+        "rule": null,
+        "rule_reason": null,
+        "verdict_if_final": "reproduced"
+      },
+      {
+        "band": {
+          "ece_post": true,
+          "margin": true
+        },
+        "class": "pass",
+        "defect_reasons": [],
+        "must": {
+          "deploy_eligible": true,
+          "device_prefix": true,
+          "inputs_sha256": true,
+          "recipe_id": true,
+          "seeds": true
+        },
+        "name": "mean-rule",
+        "rule": null,
+        "rule_reason": null,
+        "verdict_if_final": "reproduced"
+      },
+      {
+        "band": {
+          "ece_post": true,
+          "margin": false
+        },
+        "class": "defect",
+        "defect_reasons": [
+          "out-of-band: margin 0.208 is outside [0.209, 0.269]"
+        ],
+        "must": {
+          "deploy_eligible": true,
+          "device_prefix": true,
+          "inputs_sha256": true,
+          "recipe_id": true,
+          "seeds": true
+        },
+        "name": "mean-below-floor",
+        "rule": null,
+        "rule_reason": null,
+        "verdict_if_final": "not-reproduced"
+      },
+      {
+        "band": {
+          "ece_post": true,
+          "margin": true
+        },
+        "class": "defect",
+        "defect_reasons": [
+          "device: device_used 'mps:0' is not the declared 'cuda' (device_is_cpu False)"
+        ],
+        "must": {
+          "deploy_eligible": true,
+          "device_prefix": false,
+          "inputs_sha256": true,
+          "recipe_id": true,
+          "seeds": true
+        },
+        "name": "device-mps",
+        "rule": null,
+        "rule_reason": null,
+        "verdict_if_final": "not-reproduced"
+      },
+      {
+        "band": {
+          "ece_post": true,
+          "margin": false
+        },
+        "class": "defect",
+        "defect_reasons": [
+          "out-of-band: margin 0.27 is outside [0.209, 0.269]"
+        ],
+        "must": {
+          "deploy_eligible": true,
+          "device_prefix": true,
+          "inputs_sha256": true,
+          "recipe_id": true,
+          "seeds": true
+        },
+        "name": "mean-above-ceiling",
+        "rule": null,
+        "rule_reason": null,
+        "verdict_if_final": "not-reproduced"
+      },
+      {
+        "band": {
+          "ece_post": true,
+          "margin": true
+        },
+        "class": "pass",
+        "defect_reasons": [],
+        "must": {
+          "deploy_eligible": true,
+          "device_prefix": true,
+          "inputs_sha256": true,
+          "recipe_id": true,
+          "seeds": true
+        },
+        "name": "edge-low-inside",
+        "rule": null,
+        "rule_reason": null,
+        "verdict_if_final": "reproduced"
+      },
+      {
+        "band": {
+          "ece_post": true,
+          "margin": true
+        },
+        "class": "pass",
+        "defect_reasons": [],
+        "must": {
+          "deploy_eligible": true,
+          "device_prefix": true,
+          "inputs_sha256": true,
+          "recipe_id": true,
+          "seeds": true
+        },
+        "name": "edge-high-inside",
+        "rule": null,
+        "rule_reason": null,
+        "verdict_if_final": "reproduced"
+      },
+      {
+        "band": {
+          "ece_post": false,
+          "margin": true
+        },
+        "class": "defect",
+        "defect_reasons": [
+          "out-of-band: ece_post 0.11 is outside [0.0, 0.1]"
+        ],
+        "must": {
+          "deploy_eligible": false,
+          "device_prefix": true,
+          "inputs_sha256": true,
+          "recipe_id": true,
+          "seeds": true
+        },
+        "name": "ece-over-bar",
+        "rule": null,
+        "rule_reason": null,
+        "verdict_if_final": "not-reproduced"
+      },
+      {
+        "band": {
+          "ece_post": false,
+          "margin": true
+        },
+        "class": "defect",
+        "defect_reasons": [
+          "out-of-band: ece_post 0.11 is outside [0.0, 0.1]"
+        ],
+        "must": {
+          "deploy_eligible": true,
+          "device_prefix": true,
+          "inputs_sha256": true,
+          "recipe_id": true,
+          "seeds": true
+        },
+        "name": "ece-over-bar-waiver-claimed",
+        "rule": null,
+        "rule_reason": null,
+        "verdict_if_final": "not-reproduced"
+      },
+      {
+        "band": {
+          "ece_post": true,
+          "margin": true
+        },
+        "class": "defect",
+        "defect_reasons": [
+          "device: device_used 'cpu' is not the declared 'cuda' (device_is_cpu True)"
+        ],
+        "must": {
+          "deploy_eligible": true,
+          "device_prefix": false,
+          "inputs_sha256": true,
+          "recipe_id": true,
+          "seeds": true
+        },
+        "name": "device-cpu",
+        "rule": null,
+        "rule_reason": null,
+        "verdict_if_final": "not-reproduced"
+      },
+      {
+        "band": {
+          "ece_post": true,
+          "margin": true
+        },
+        "class": "defect",
+        "defect_reasons": [
+          "recipe-mismatch: recipe_id '070c3f3da0daae129f3ee1ce928eb21a0ef71a83a6f09dc18e0621f3cc8adcbc' is not the declared one"
+        ],
+        "must": {
+          "deploy_eligible": true,
+          "device_prefix": true,
+          "inputs_sha256": true,
+          "recipe_id": false,
+          "seeds": true
+        },
+        "name": "wrong-recipe",
+        "rule": null,
+        "rule_reason": null,
+        "verdict_if_final": "not-reproduced"
+      },
+      {
+        "band": {
+          "ece_post": true,
+          "margin": true
+        },
+        "class": "defect",
+        "defect_reasons": [
+          "inputs-mismatch: train_jsonl differ from the declaration"
+        ],
+        "must": {
+          "deploy_eligible": true,
+          "device_prefix": true,
+          "inputs_sha256": false,
+          "recipe_id": true,
+          "seeds": true
+        },
+        "name": "changed-input",
+        "rule": null,
+        "rule_reason": null,
+        "verdict_if_final": "not-reproduced"
+      },
+      {
+        "band": {
+          "ece_post": true,
+          "margin": false
+        },
+        "class": "defect",
+        "defect_reasons": [
+          "report-malformed: per-seed margins are not exactly the declared seeds with a finite margin each",
+          "out-of-band: margin None is outside [0.209, 0.269]",
+          "seeds: ran [13, 17], declared [13, 17, 23]"
+        ],
+        "must": {
+          "deploy_eligible": true,
+          "device_prefix": true,
+          "inputs_sha256": true,
+          "recipe_id": true,
+          "seeds": false
+        },
+        "name": "two-seeds",
+        "rule": null,
+        "rule_reason": null,
+        "verdict_if_final": "not-reproduced"
+      },
+      {
+        "band": {
+          "ece_post": true,
+          "margin": true
+        },
+        "class": "defect",
+        "defect_reasons": [
+          "pack-refused: the gate passed but the pack was not accepted and deploy-eligible"
+        ],
+        "must": {
+          "deploy_eligible": false,
+          "device_prefix": true,
+          "inputs_sha256": true,
+          "recipe_id": true,
+          "seeds": true
+        },
+        "name": "pack-refused",
+        "rule": null,
+        "rule_reason": null,
+        "verdict_if_final": "not-reproduced"
+      },
+      {
+        "band": {
+          "ece_post": true,
+          "margin": true
+        },
+        "class": "in-band-gate-fail",
+        "defect_reasons": [],
+        "must": {
+          "deploy_eligible": false,
+          "device_prefix": true,
+          "inputs_sha256": true,
+          "recipe_id": true,
+          "seeds": true
+        },
+        "name": "gate-fail-mean-in-band",
+        "rule": null,
+        "rule_reason": null,
+        "verdict_if_final": "inconclusive"
+      },
+      {
+        "band": {
+          "ece_post": true,
+          "margin": true
+        },
+        "class": "waived",
+        "defect_reasons": [],
+        "must": {
+          "deploy_eligible": true,
+          "device_prefix": true,
+          "inputs_sha256": true,
+          "recipe_id": true,
+          "seeds": true
+        },
+        "name": "gate-fail-mean-in-band-waived",
+        "rule": null,
+        "rule_reason": null,
+        "verdict_if_final": "inconclusive"
+      },
+      {
+        "band": {
+          "ece_post": false,
+          "margin": false
+        },
+        "class": "defect",
+        "defect_reasons": [
+          "missing-file: /var/folders/3s/xftgktnj6qs681vbh0tg5hmc0000gn/T/laya-control-rehearse-2g5cqls8/failure-gate-report-missing/run/gate-report.json"
+        ],
+        "must": {
+          "deploy_eligible": true,
+          "device_prefix": false,
+          "inputs_sha256": false,
+          "recipe_id": false,
+          "seeds": false
+        },
+        "name": "failure-gate-report-missing",
+        "rule": "consumed",
+        "rule_reason": "exit_class is pass: the gate executed",
+        "verdict_if_final": "not-reproduced"
+      },
+      {
+        "band": {
+          "ece_post": true,
+          "margin": true
+        },
+        "class": "defect",
+        "defect_reasons": [
+          "missing-file: /var/folders/3s/xftgktnj6qs681vbh0tg5hmc0000gn/T/laya-control-rehearse-2g5cqls8/failure-pack-outcome-missing/logs/pack-outcome.json"
+        ],
+        "must": {
+          "deploy_eligible": false,
+          "device_prefix": true,
+          "inputs_sha256": true,
+          "recipe_id": true,
+          "seeds": true
+        },
+        "name": "failure-pack-outcome-missing",
+        "rule": "consumed",
+        "rule_reason": "exit_class is pass: the gate executed",
+        "verdict_if_final": "not-reproduced"
+      },
+      {
+        "band": {
+          "ece_post": false,
+          "margin": false
+        },
+        "class": "defect",
+        "defect_reasons": [
+          "missing-file: /var/folders/3s/xftgktnj6qs681vbh0tg5hmc0000gn/T/laya-control-rehearse-2g5cqls8/failure-pre-verdict/run/gate-report.json"
+        ],
+        "must": {
+          "deploy_eligible": true,
+          "device_prefix": false,
+          "inputs_sha256": false,
+          "recipe_id": false,
+          "seeds": false
+        },
+        "name": "failure-pre-verdict",
+        "rule": "pre-verdict",
+        "rule_reason": "exit_class is crash with no gate report and no GATE line",
+        "verdict_if_final": "not-reproduced"
+      },
+      {
+        "band": {
+          "ece_post": true,
+          "margin": true
+        },
+        "class": "pass",
+        "defect_reasons": [],
+        "must": {
+          "deploy_eligible": true,
+          "device_prefix": true,
+          "inputs_sha256": true,
+          "recipe_id": true,
+          "seeds": true
+        },
+        "name": "failure-manifest-missing",
+        "rule": "unresolved",
+        "rule_reason": "manifest.json is absent (the fetch failed or never ran)",
+        "verdict_if_final": "reproduced"
+      }
+    ]
+  },
+  "failure_path_controls": {
+    "no-report": {
+      "rule": "consumed",
+      "rule_reason": "exit_class is pass: the gate executed",
+      "evaluator_class": "defect",
+      "missing_file_reason": "missing-file: <tmp>/failure-gate-report-missing/run/gate-report.json"
+    },
+    "no-pack": {
+      "rule": "consumed",
+      "rule_reason": "exit_class is pass: the gate executed",
+      "evaluator_class": "defect",
+      "missing_file_reason": "missing-file: <tmp>/failure-pack-outcome-missing/logs/pack-outcome.json"
+    },
+    "crash": {
+      "rule": "pre-verdict",
+      "rule_reason": "exit_class is crash with no gate report and no GATE line",
+      "evaluator_class": null,
+      "missing_file_reason": null
+    },
+    "no-fetch": {
+      "rule": "unresolved",
+      "rule_reason": "manifest.json is absent (the fetch failed or never ran)",
+      "evaluator_class": null,
+      "missing_file_reason": null
+    }
+  },
+  "consumption_rule": [
+    "1. R/manifest.json absent (the fetch failed or never ran), or R/logs/outcome.json absent or not JSON with a string exit_class -> unresolved.",
+    "2. exit_class in {pass, gate_fail}, or R/run/gate-report.json exists, or R/logs/train.log has a line equal to `GATE PASS` or `GATE FAIL` -> consumed (the gate executed; the evaluator judges whatever evidence was fetched, and a missing report or pack record is its `missing-file` defect, final under cap 1).",
+    "3. exit_class in {refused, crash} with none of the gate evidence of step 2 -> pre-verdict (not consumed, D-12).",
+    "4. Anything else -> unresolved (never counted as not consumed; the plan stops at CHECKPOINT REACHED and the owner decides; nothing is re-run)."
+  ],
+  "pre_verdict_failures": [],
+  "attempts": [],
+  "consumption_rule_subject": "R = models/decide/<run.name>, evaluated in this order:"
 }
