@@ -214,6 +214,12 @@ def mean_of(xs):
     return math.fsum(xs) / len(xs)
 
 
+def median_of(xs):
+    v = sorted(xs)
+    m = len(v) // 2
+    return v[m] if len(v) % 2 else (v[m - 1] + v[m]) / 2.0
+
+
 def sd_of(xs):
     """Sample standard deviation, ddof 1."""
     m = mean_of(xs)
@@ -617,6 +623,344 @@ def cmd_snapshot(opts):
     return 0
 
 
+# ---- analyze: the class diagnosis (plan 15-09 task 2, after RULE_SPEC was committed) ---------------------------------
+
+DIAGNOSIS_SCHEMA = "laya-class-diagnosis-v1"
+DRAFTS_PATH = _PH15 + "/15-DECLARATION-DRAFTS.json"
+OPTION_IDS = ("stop-accept", "redraw", "mean-rule", "mean-rule-retry", "floor-rule")
+RUN_NAME = "motivation-v1-p15b"
+DATASET_PREFIX = "datasets/motivation-v1/"
+CLAIM_PREFIX = "gate outcome and band only; not an identical reproduction of attempt 1 or of Phase 12: "
+PACK_IMAGE = "sha256:dd38865c43aba2f3819e50addcf6db5e9da94ef84e762d93cf6b2c132f1d17e2"
+RESAMPLE_BASIS = ("a resampling estimate over the six CUDA seed-runs (all 216 ordered triples with replacement, median-ECE "
+                  "ship rule); it is not a confidence interval")
+
+# (tracked path, exact single-line needle): the provenance of the band, each found by exact-string count.
+CITATIONS = (
+    (_PH14 + "/14-RESEARCH.md", "the researcher's proposal, [ASSUMED]"),
+    (_PH14 + "/14-RESEARCH.md", "around 0.3780 / 0.0936"),
+    (_PH14 + "/14-RESEARCH.md", "the median-of-three on a different device is a fresh draw"),
+    (_PH15 + "/15-RESEARCH.md", "D-16 outcome: LOW (single draw)"),
+    (_PH15 + "/15-REVIEWS.md", "The paid-run outcome is a draw by construction"),
+    (".claude/skills/spike-findings-aprender/references/laya-calibration-gate-and-pack-tolerance.md",
+     "report pass rates with a CI, not a verdict"),
+    (".claude/skills/spike-findings-aprender/references/laya-calibration-gate-and-pack-tolerance.md", "MPS replicates moved"),
+    ("contracts/laya-finetune-gate-v1.yaml", "measured MPS training as not bitwise reproducible"),
+)
+
+
+def f4(x):
+    return "%.4f" % x
+
+
+def p3(x):
+    return "%.3f" % x
+
+
+def _stats(xs):
+    return {"n": len(xs), "mean": mean_of(xs), "sd": sd_of(xs)}
+
+
+def build_options(res, floor_value, recipe_id, billable, pack_seconds):
+    """The five owner options. Probabilities come from the resample block; nothing is typed by hand."""
+    cost = ("report-only: about %d s of ml.g5.xlarge billed on attempt 1 plus about %d s of Fargate pack"
+            % (billable, int(round(pack_seconds / 10.0)) * 10))
+    common = {"epochs": 12, "recipe_id": recipe_id, "run_name": RUN_NAME, "dataset_prefix": DATASET_PREFIX,
+              "ece_band": [ECE_LO, ECE_HI], "cost_report_only": cost}
+
+    def paid(judging, margin_lo, cap, retry, supersedes, block, rule_change):
+        within = block["within_cap2"] if cap > 1 else block["p_pass"]
+        lo_k, hi_k = ("loo_within_cap2_min", "loo_within_cap2_max") if cap > 1 else ("loo_min", "loo_max")
+        o = dict(common)
+        o.update({"paid_run": True, "judging": judging, "margin_band": [margin_lo, CEILING], "attempt_cap": cap,
+                  "retry_classes": retry, "supersedes": supersedes, "p_pass": block["p_pass"], "within_cap": within,
+                  "loo_min": block[lo_k], "loo_max": block[hi_k], "claim_scope": CLAIM_PREFIX + rule_change})
+        return o
+
+    opts = {
+        "stop-accept": {k: None for k in ("judging", "margin_band", "ece_band", "attempt_cap", "retry_classes", "epochs",
+                                          "recipe_id", "run_name", "dataset_prefix", "p_pass", "within_cap", "loo_min",
+                                          "loo_max", "cost_report_only", "claim_scope")},
+        "redraw": paid("shipped_seed", FLOOR, 1, [], [], res["declared"],
+                       "no rule change; the Phase 12 and attempt 1 recipe (12 epochs) is drawn again, the shipped seed's margin "
+                       "judged in [0.3000, 0.4500] as before"),
+        "mean-rule": paid("seed_mean", FLOOR, 1, [], ["D-11"], res["mean_rule"],
+                          "the margin clause is judged on the mean of the three seed margins in [0.3000, 0.4500] instead of "
+                          "the shipped seed's margin (D-11 superseded); the ECE clause and the gate stay on the shipped seed"),
+        "mean-rule-retry": paid("seed_mean", FLOOR, 2, ["in-band-gate-fail"], ["D-11", "D-12"], res["mean_rule"],
+                                "the mean-of-three margin rule (D-11 superseded) and one second paid run allowed after an "
+                                "in-band-gate-fail (D-12 superseded); a defect is never retried"),
+        "floor-rule": paid("shipped_seed", floor_value, 1, [], ["D-11"], res["floor_rule"],
+                           "the shipped seed's margin floor moves from 0.3000 to %s (D-11 superseded); ceiling 0.4500 and "
+                           "the ECE clause unchanged" % f4(floor_value)),
+    }
+    opts["stop-accept"]["paid_run"] = False
+    opts["stop-accept"]["supersedes"] = []
+    return opts
+
+
+def citation_rows(reader):
+    rows = []
+    for path, needle in CITATIONS:
+        try:
+            text = reader(path).decode("utf-8")
+            count = text.count(needle)
+        except (Refused, UnicodeDecodeError):
+            count = 0
+        rows.append({"path": path, "needle": needle, "count": count, "found": count >= 1})
+    return rows
+
+
+def analyze_obj(fx, raw_inputs, reader, B=None):
+    """Pure and deterministic: the same fixture and tracked files give the same object. `reader(path)` returns the
+    bytes of a tracked file (raises Refused if missing). B overrides the bootstrap size for the selftest only."""
+    verify_inputs_obj(fx, lambda rid, path: reader(path))
+    S = RULE_SPEC
+    B = S["bootstrap"]["B"] if B is None else B
+    y, zpred, zs_f1 = fx["eval"]["y"], fx["zero_shot"]["pred"], macro_f1(fx["eval"]["y"], fx["zero_shot"]["pred"])
+    evid = {rid: parse_json_bytes(reader(RUNS[rid]["evidence"]), RUNS[rid]["evidence"]) for rid in RUN_IDS}
+    thr = (evid["p15"].get("gate") or {}).get("thresholds") or {}
+    if thr.get("min_macro_f1_margin") != GATE_MIN_MARGIN or thr.get("max_ece") != GATE_MAX_ECE:
+        raise Refused("analyze", "RULE_SPEC gate thresholds differ from 15-GATE-RUN-EVIDENCE.json gate.thresholds %r" % (thr,))
+    drafts = parse_json_bytes(reader(DRAFTS_PATH), DRAFTS_PATH)
+    redraw = ((drafts.get("drafts") or {}).get("epochs-12-redraw") or {})
+    recipe_id = (redraw.get("must") or {}).get("recipe_id")
+    billable = ((redraw.get("report_only") or {}).get("references") or {}).get("attempt_1_billable_seconds")
+    if not isinstance(recipe_id, str) or not is_num(billable):
+        raise Refused("analyze", "15-DECLARATION-DRAFTS.json lacks drafts.epochs-12-redraw must.recipe_id or report_only references")
+    pack_seconds = evid["p15"].get("pack_task_seconds")
+    if not is_num(pack_seconds):
+        raise Refused("analyze", "15-GATE-RUN-EVIDENCE.json lacks pack_task_seconds")
+
+    # Per seed-run values, in the fixed order p12, p14, p15 x 13, 17, 23.
+    sr = {}
+    recompute_rows = []
+    for e in sorted(fx["seed_runs"], key=lambda e: (RUN_IDS.index(e["run"]), e["seed"])):
+        row = _evidence_row(evid[e["run"]], e["seed"])
+        margin = macro_f1(y, e["pred"]) - zs_f1
+        ece = ece_top_label(y, e["pred"], e["conf"])
+        exact = abs(margin - row["margin"]) <= TOL and abs(ece - row["ece_post"]) <= TOL
+        sr[(e["run"], e["seed"])] = {"run": e["run"], "seed": e["seed"], "margin": margin, "ece": ece, "pred": e["pred"]}
+        recompute_rows.append({"run": e["run"], "seed": e["seed"], "device": fx["runs"][e["run"]]["device"],
+                               "recorded_margin": row["margin"], "recomputed_margin": margin,
+                               "recorded_ece_post": row["ece_post"], "recomputed_ece_post": ece, "exact": exact})
+    all_exact = all(r["exact"] for r in recompute_rows)
+
+    def margins(rid):
+        return [sr[(rid, s)]["margin"] for s in SEEDS]
+
+    cuda_units = [dict(sr[(rid, s)]) for rid in ("p14", "p15") for s in SEEDS]
+    for u in cuda_units:
+        u.pop("pred")
+    cuda_margins = [u["margin"] for u in cuda_units]
+    cm, csd = mean_of(cuda_margins), sd_of(cuda_margins)
+    sem = csd / math.sqrt(len(cuda_margins))
+    spread = {rid: dict(_stats(margins(rid)), sd_ddof=1) for rid in RUN_IDS}
+    spread["cuda"] = {"n": 6, "mean": cm, "sd": csd, "sem": sem, "lower90": cm - Z90 * sem, "upper90": cm + Z90 * sem,
+                      "mean_minus_floor_in_sd": (cm - FLOOR) / csd, "runs": ["p14", "p15"]}
+    spread["mps"] = dict(spread["p12"], run="p12")
+
+    shipped15 = fx["runs"]["p15"]["shipped_seed"]
+    shipped_margin = sr[("p15", shipped15)]["margin"]
+    shortfall = {"run": "p15", "shipped_seed": shipped15, "shipped_margin": shipped_margin, "floor": FLOOR,
+                 "shortfall": FLOOR - shipped_margin}
+
+    sets = bootstrap_index_sets(len(y), B, S["bootstrap"]["seed"])
+    per_run = []
+    for key in sorted(sr, key=lambda k: (RUN_IDS.index(k[0]), k[1])):
+        bm = sorted(bootstrap_margins(y, sr[key]["pred"], zpred, sets))
+        per_run.append({"run": key[0], "seed": key[1], "margin": sr[key]["margin"], "se": sd_of(bm),
+                        "p05": bm[int(0.05 * B)], "p95": bm[int(0.95 * B)],
+                        "p_ge_floor": sum(1 for v in bm if v >= FLOOR) / B})
+    ses = sorted(r["se"] for r in per_run)
+    median_se = median_of(ses)
+    measurement = {"B": B, "seed": S["bootstrap"]["seed"], "per_seed_run": per_run, "median_se": median_se,
+                   "min_se": ses[0], "max_se": ses[-1], "shortfall_over_median_se": shortfall["shortfall"] / median_se}
+
+    by_run = {}
+    for rid in RUN_IDS:
+        sh = fx["runs"][rid]["shipped_seed"]
+        ms = margins(rid)
+        by_run[rid] = {"shipped_seed": sh, "shipped_margin": sr[(rid, sh)]["margin"], "run_mean_margin": mean_of(ms),
+                       "delta": sr[(rid, sh)]["margin"] - mean_of(ms), "shipped_is_lowest_margin": sr[(rid, sh)]["margin"] == min(ms)}
+    all_keys = sorted(sr, key=lambda k: (RUN_IDS.index(k[0]), k[1]))
+    cuda_keys = [k for k in all_keys if k[0] in ("p14", "p15")]
+    selection = {"by_run": by_run,
+                 "pearson_margin_ece_all9": pearson([sr[k]["margin"] for k in all_keys], [sr[k]["ece"] for k in all_keys]),
+                 "pearson_margin_ece_cuda6": pearson([sr[k]["margin"] for k in cuda_keys], [sr[k]["ece"] for k in cuda_keys])}
+
+    diffs = [sr[("p12", s)]["margin"] - sr[("p14", s)]["margin"] for s in SEEDS]
+    dm, dsd, dt, dp = paired_t_df2(diffs)
+    dstatus, same_sign = device_status(diffs)
+    device_gap = {"pairs": [{"seed": s, "mps_p12": sr[("p12", s)]["margin"], "cuda_p14": sr[("p14", s)]["margin"], "diff": d}
+                            for s, d in zip(SEEDS, diffs)],
+                  "mean_diff": dm, "sd_diff": dsd, "t": dt, "df": 2, "p_two_sided": dp, "all_same_sign": same_sign,
+                  "status": dstatus}
+
+    e12, e4 = spread["p14"], spread["p15"]
+    lever_se = math.sqrt(e12["sd"] ** 2 / 3.0 + e4["sd"] ** 2 / 3.0)
+    lever_z = (e4["mean"] - e12["mean"]) / lever_se
+    pooled = math.sqrt((e12["sd"] ** 2 + e4["sd"] ** 2) / 2.0)
+    epochs_lever = {"epochs12": {"run": "p14", "mean": e12["mean"], "sd": e12["sd"]},
+                    "epochs4": {"run": "p15", "mean": e4["mean"], "sd": e4["sd"]},
+                    "diff": e4["mean"] - e12["mean"], "se": lever_se, "z": lever_z,
+                    "detectable": abs(lever_z) >= S["lever"]["detectable_abs_z"],
+                    "mde_normal_approx": S["lever"]["mde_multiplier"] * pooled * math.sqrt(2.0 / 3.0),
+                    "best_epochs": {rid: [e["local"]["best_epoch"] for e in sorted(fx["seed_runs"], key=lambda e: e["seed"])
+                                          if e["run"] == rid] for rid in RUN_IDS}}
+
+    floor_value = floor_rule_value(cm, csd)
+    resample = {"basis": RESAMPLE_BASIS,
+                "declared": resample_with_loo(cuda_units, "shipped", FLOOR),
+                "mean_rule": resample_with_loo(cuda_units, "mean", FLOOR),
+                "floor_rule": resample_with_loo(cuda_units, "shipped", floor_value),
+                "floor_rule_value": floor_value}
+    resample["p_both_miss_if_independent"] = (1.0 - resample["declared"]["p_pass"]) ** 2
+
+    full_status = deficiency_status(cm, csd, 6)
+    jack = []
+    for d, u in enumerate(cuda_units):
+        rest = [m for i, m in enumerate(cuda_margins) if i != d]
+        jack.append({"dropped": "%s:%s" % (u["run"], u["seed"]), "mean": mean_of(rest), "sd": sd_of(rest),
+                     "status": deficiency_status(mean_of(rest), sd_of(rest), 5)})
+    name, preds = class_rule(full_status, [j["status"] for j in jack], shortfall["shortfall"], csd, median_se,
+                             resample["declared"]["p_pass"])
+    tests = {"deficiency": {"status": full_status, "jackknife": jack},
+             "single_draw": dict(preds),
+             "device_anchoring": {"status": dstatus, "band_midpoint": (FLOOR + CEILING) / 2.0,
+                                  "p12_shipped_margin": by_run["p12"]["shipped_margin"],
+                                  "mps_mean": spread["p12"]["mean"], "cuda_mean": cm}}
+    klass = {"name": name, "rule_sha256": rule_sha256(),
+             "evidence": {"nine_seed_run_margins": {"%s:%d" % k: sr[k]["margin"] for k in all_keys},
+                          "cuda_mean": cm, "cuda_sd": csd, "cuda_n": 6, "shortfall": shortfall["shortfall"],
+                          "median_row_resampling_se": median_se, "declared_p_pass": resample["declared"]["p_pass"],
+                          "declared_loo_min": resample["declared"]["loo_min"], "declared_loo_max": resample["declared"]["loo_max"],
+                          "deficiency_full": full_status, "deficiency_loo": [j["status"] for j in jack],
+                          "epochs_12_to_4_diff": epochs_lever["diff"], "epochs_lever_se": lever_se}}
+    rejudge = {"consumed_run_mean_margins": {"p14": spread["p14"]["mean"], "p15": spread["p15"]["mean"]},
+               "exploratory": True, "sets_next_trusted": False,
+               "note": "post hoc, a statistic chosen after seeing both misses; it is information, not trust"}
+    options = build_options(resample, floor_value, recipe_id, billable, pack_seconds)
+    rec_ok = name == "single-draw-acceptance" and options["mean-rule"]["p_pass"] > options["redraw"]["p_pass"]
+    recommended = {"option": "mean-rule" if rec_ok else "stop-accept",
+                   "rule_text": "mean-rule iff class.name is single-draw-acceptance AND the mean-rule p_pass exceeds the "
+                                "redraw p_pass, else stop-accept"}
+    diag = {"schema": DIAGNOSIS_SCHEMA,
+            "generated_from": {"inputs_sha256": sha256_hex(raw_inputs),
+                               "evidence_sha256": {rid: fx["runs"][rid]["evidence_sha256"] for rid in RUN_IDS},
+                               "drafts_sha256": sha256_hex(reader(DRAFTS_PATH))},
+            "rule_spec": RULE_SPEC, "rule_sha256": rule_sha256(),
+            "recompute": {"seed_runs": recompute_rows, "all_exact": all_exact},
+            "spread": spread, "shortfall": shortfall, "measurement": measurement, "selection": selection,
+            "device_gap": device_gap, "epochs_lever": epochs_lever, "resample": resample,
+            "provenance": {"citations": citation_rows(reader)}, "tests": tests, "class": klass, "rejudge": rejudge,
+            "options": options,
+            "options_common": {"seeds": list(SEEDS), "device": "cuda", "pack_image": PACK_IMAGE,
+                               "recipe_note": "the Phase 12 and attempt 1 recipe, the closest reproduction (the epochs-4 lever showed no effect)"},
+            "recommended": recommended, "next_trusted_effect": "none"}
+    diag["brief_facts"] = brief_facts(diag, fx)
+    return diag
+
+
+def brief_facts(d, fx):
+    """Single-line strings the brief must contain verbatim. Floats to four decimals, probabilities to three."""
+    f = []
+    f.append("class: %s" % d["class"]["name"])
+    sh = d["shortfall"]
+    f.append("shortfall: the shipped seed %d margin %s is below the %s floor by %s"
+             % (sh["shipped_seed"], f4(sh["shipped_margin"]), f4(sh["floor"]), f4(sh["shortfall"])))
+    c = d["spread"]["cuda"]
+    f.append("CUDA seed-runs: n=%d, mean %s, sd %s" % (c["n"], f4(c["mean"]), f4(c["sd"])))
+    m = d["measurement"]
+    f.append("row-resampling se of one seed's margin on 100 rows: median %s, range %s to %s"
+             % (f4(m["median_se"]), f4(m["min_se"]), f4(m["max_se"])))
+    r = d["resample"]
+    f.append("declared criterion: p_pass %s (n=6 seed-runs, resampling estimate), leave-one-out range %s to %s"
+             % (p3(r["declared"]["p_pass"]), p3(r["declared"]["loo_min"]), p3(r["declared"]["loo_max"])))
+    f.append("mean-rule p_pass %s; mean-rule-retry within cap %s; floor-rule with floor %s p_pass %s"
+             % (p3(r["mean_rule"]["p_pass"]), p3(r["mean_rule"]["within_cap2"]), f4(r["floor_rule_value"]),
+                p3(r["floor_rule"]["p_pass"])))
+    l = d["epochs_lever"]
+    f.append("epochs lever (12 -> 4 on CUDA): difference %s, se %s, z %s, minimum detectable %s"
+             % ("%+.4f" % l["diff"], f4(l["se"]), "%+.4f" % l["z"], f4(l["mde_normal_approx"])))
+    g = d["device_gap"]
+    f.append("device gap (MPS minus CUDA by seed): %s, mean %s, t %s, p %s, %s (n=3)"
+             % (" / ".join("%+.4f" % p["diff"] for p in g["pairs"]), "%+.4f" % g["mean_diff"], f4(g["t"]), f4(g["p_two_sided"]),
+                g["status"]))
+    t = d["tests"]["deficiency"]
+    f.append("deficiency: %s on the full set; leave-one-out %s" % (t["status"], ", ".join(j["status"] for j in t["jackknife"])))
+    f.append("independent re-draw: two misses in a row under the declared rule have probability %s" % p3(r["p_both_miss_if_independent"]))
+    f.append("best epoch per seed: " + "; ".join("%s %s" % (rid, d["epochs_lever"]["best_epochs"][rid]) for rid in RUN_IDS))
+    f.append("recommended: %s" % d["recommended"]["option"])
+    rows = {(x["run"], x["seed"]): x for x in d["recompute"]["seed_runs"]}
+    for rid in RUN_IDS:
+        for s in SEEDS:
+            x = rows[(rid, s)]
+            f.append("| %s | %s | %d | %d | %s | %s | %s |"
+                     % (rid, x["device"], fx["runs"][rid]["epochs"], s,
+                        "yes" if fx["runs"][rid]["shipped_seed"] == s else "no", f4(x["recomputed_margin"]),
+                        f4(x["recomputed_ece_post"])))
+    return f
+
+
+def make_reader(root):
+    def reader(path):
+        return read_bytes(os.path.join(root, path), "analyze")
+    return reader
+
+
+def cmd_analyze(opts):
+    raw = read_bytes(opts["--inputs"], "analyze")
+    fx = parse_json_bytes(raw, opts["--inputs"])
+    diag = analyze_obj(fx, raw, make_reader(REPO))
+    write_text(opts["--out"], dumps(diag))
+    print("ANALYZE OK class=%s recommended=%s" % (diag["class"]["name"], diag["recommended"]["option"]))
+    return 0
+
+
+def _true_next_trusted(o):
+    if isinstance(o, dict):
+        for k, v in o.items():
+            if k == "next_trusted" and v is True:
+                return True
+            if _true_next_trusted(v):
+                return True
+    elif isinstance(o, list):
+        return any(_true_next_trusted(v) for v in o)
+    return False
+
+
+def check_diagnosis_obj(diag_text, fx, raw_inputs, reader, B=None):
+    """Structural refusals first (each named), then byte equality with a fresh in-memory analyze."""
+    d = parse_json_bytes(diag_text.encode("utf-8"), "the diagnosis")
+    if not isinstance(d, dict) or d.get("schema") != DIAGNOSIS_SCHEMA:
+        raise Refused("diagnosis", "SCHEMA the diagnosis schema is not %r" % DIAGNOSIS_SCHEMA)
+    if d.get("rule_sha256") != rule_sha256():
+        raise Refused("diagnosis", "RULE-HASH rule_sha256 differs from the hash of the current RULE_SPEC")
+    if d.get("next_trusted_effect") != "none" or _true_next_trusted(d):
+        raise Refused("diagnosis", "TRUST next_trusted_effect is not none, or a next_trusted true exists")
+    if (d.get("rejudge") or {}).get("sets_next_trusted") is not False:
+        raise Refused("diagnosis", "TRUST rejudge.sets_next_trusted is not false")
+    if (d.get("recompute") or {}).get("all_exact") is not True:
+        raise Refused("diagnosis", "RECOMPUTE all_exact is not true")
+    for c in ((d.get("provenance") or {}).get("citations") or []):
+        if c.get("found") is not True:
+            raise Refused("diagnosis", "CITATION not found: %s" % c.get("needle"))
+    fresh = dumps(analyze_obj(fx, raw_inputs, reader, B))
+    if fresh != diag_text:
+        raise Refused("diagnosis", "STALE the file differs from a fresh in-memory analyze of the same fixture")
+    return d
+
+
+def cmd_check_diagnosis(opts):
+    raw = read_bytes(opts["--inputs"], "diagnosis")
+    fx = parse_json_bytes(raw, opts["--inputs"])
+    text = read_bytes(opts["--diagnosis"], "diagnosis").decode("utf-8")
+    d = check_diagnosis_obj(text, fx, raw, make_reader(REPO))
+    print("DIAGNOSIS OK class=%s recommended=%s" % (d["class"]["name"], d["recommended"]["option"]))
+    return 0
+
+
 # ---- the selftest ------------------------------------------------------------------------------------------------
 
 class Cases:
@@ -670,7 +1014,9 @@ def synth_fixture(seed=7):
             per_seed.append({"seed": s, "macro_f1": f1, "margin": f1 - zs_f1, "ece_post": ece_top_label(y, pred, conf)})
         doc = {"epochs": RUNS[rid]["epochs"], "device_used": "mps:0" if rid == "p12" else "cuda:0",
                "recipe_id_written": "ab" * 32, "seeds": {"shipped": 13, "per_seed": per_seed},
-               "gate": {"zero_shot_macro_f1": zs_f1}}
+               "gate": {"zero_shot_macro_f1": zs_f1,
+                        "thresholds": {"min_macro_f1_margin": 0.05, "max_ece": 0.10, "ece_bins": 15}},
+               "pack_task_seconds": 149.31}
         raw = json.dumps(doc, sort_keys=True).encode("utf-8")
         evidence[rid] = raw
         fx["runs"][rid] = {"phase": RUNS[rid]["phase"], "device": doc["device_used"], "epochs": RUNS[rid]["epochs"],
@@ -837,7 +1183,97 @@ def selftest_rule(c):
     c.check("RULE_SPEC: a changed constant changes rule_sha256", rule_sha256(changed) != rule_sha256() and rule_sha256() == rule_sha256(_clone(RULE_SPEC)))
 
 
-SELFTEST_SECTIONS = [selftest_inputs, selftest_rule]
+def synth_reader(evidence):
+    """A tracked-file reader over synthetic bytes: the three evidence files, the drafts file and every cited file."""
+    files = {RUNS[rid]["evidence"]: evidence[rid] for rid in RUN_IDS}
+    files[DRAFTS_PATH] = json.dumps({"drafts": {"epochs-12-redraw": {
+        "must": {"recipe_id": "cd" * 32}, "report_only": {"references": {"attempt_1_billable_seconds": 1346}}}}}).encode("utf-8")
+    for path, needle in CITATIONS:
+        files[path] = (files.get(path, b"") + b"x " + needle.encode("utf-8") + b" y\n")
+
+    def reader(path):
+        if path not in files:
+            raise Refused("analyze", "%s is missing" % path)
+        return files[path]
+    return reader
+
+
+def selftest_analyze(c):
+    """Task 2 cases after the rule: the assembled diagnosis, its determinism and its refusals."""
+    fx, evidence = synth_fixture()
+    raw = dumps(fx).encode("utf-8")
+    reader = synth_reader(evidence)
+    d1 = analyze_obj(fx, raw, reader, B=40)
+    d2 = analyze_obj(fx, raw, reader, B=40)
+    c.check("analyze: a second run on the same fixture is byte-identical", dumps(d1) == dumps(d2))
+    c.check("analyze: the recompute block shows 9 of 9 exact", len(d1["recompute"]["seed_runs"]) == 9 and d1["recompute"]["all_exact"] is True)
+    c.check("analyze: five option ids with the plan's key set, a paid_run flag and a supersedes list each",
+            sorted(d1["options"]) == sorted(OPTION_IDS) and all(
+                sorted(o) == sorted(["paid_run", "judging", "margin_band", "ece_band", "attempt_cap", "retry_classes", "epochs",
+                                     "recipe_id", "run_name", "dataset_prefix", "supersedes", "p_pass", "within_cap", "loo_min",
+                                     "loo_max", "cost_report_only", "claim_scope"]) and isinstance(o["supersedes"], list)
+                for o in d1["options"].values()))
+    o = d1["options"]
+    c.check("analyze: supersedes lists (redraw none, mean-rule D-11, mean-rule-retry D-11 and D-12, floor-rule D-11, stop-accept none)",
+            [o[k]["supersedes"] for k in ("redraw", "mean-rule", "mean-rule-retry", "floor-rule", "stop-accept")]
+            == [[], ["D-11"], ["D-11", "D-12"], ["D-11"], []])
+    c.check("analyze: every paid claim_scope starts with the literal prefix; run name motivation-v1-p15b; 12 epochs",
+            all(o[k]["claim_scope"].startswith(CLAIM_PREFIX) and o[k]["run_name"] == "motivation-v1-p15b" and o[k]["epochs"] == 12
+                for k in OPTION_IDS if k != "stop-accept") and o["stop-accept"]["paid_run"] is False)
+    c.check("analyze: the retry option is the only one with attempt_cap 2 and within_cap above its p_pass",
+            o["mean-rule-retry"]["attempt_cap"] == 2 and o["mean-rule"]["attempt_cap"] == 1
+            and o["mean-rule-retry"]["within_cap"] >= o["mean-rule-retry"]["p_pass"] and o["mean-rule"]["within_cap"] == o["mean-rule"]["p_pass"])
+    c.check("analyze: recommended is rule-derived (mean-rule iff single-draw-acceptance and mean p_pass above redraw p_pass)",
+            d1["recommended"]["option"] == ("mean-rule" if (d1["class"]["name"] == "single-draw-acceptance"
+                                                            and o["mean-rule"]["p_pass"] > o["redraw"]["p_pass"]) else "stop-accept"))
+    c.check("analyze: next_trusted_effect none, rejudge exploratory and not trust-setting, no next_trusted true",
+            d1["next_trusted_effect"] == "none" and d1["rejudge"]["sets_next_trusted"] is False
+            and d1["rejudge"]["exploratory"] is True and not _true_next_trusted(d1))
+    c.check("analyze: every brief fact is a single line", all("\n" not in x for x in d1["brief_facts"]) and len(d1["brief_facts"]) >= 20)
+    text = dumps(d1)
+    try:
+        ok = check_diagnosis_obj(text, fx, raw, reader, B=40)["class"]["name"] == d1["class"]["name"]
+        c.check("check-diagnosis: the untouched diagnosis is accepted", ok)
+    except Refused as ex:
+        c.check("check-diagnosis: the untouched diagnosis is accepted", False, str(ex))
+
+    def corrupt(fn):
+        m = _clone(d1)
+        fn(m)
+        return dumps(m)
+
+    c.refused("check-diagnosis: one statistic corrupted (the CUDA mean) is refused",
+              lambda: check_diagnosis_obj(corrupt(lambda m: m["spread"]["cuda"].update({"mean": m["spread"]["cuda"]["mean"] + 1e-9})),
+                                          fx, raw, reader, B=40), "STALE")
+    c.refused("check-diagnosis: one resampled pass probability corrupted is refused",
+              lambda: check_diagnosis_obj(corrupt(lambda m: m["resample"]["declared"].update({"p_pass": 0.5})), fx, raw, reader, B=40),
+              "STALE")
+    c.refused("check-diagnosis: a brief fact edited is refused",
+              lambda: check_diagnosis_obj(corrupt(lambda m: m["brief_facts"].__setitem__(0, "class: x")), fx, raw, reader, B=40), "STALE")
+    c.refused("check-diagnosis: a changed rule hash is refused",
+              lambda: check_diagnosis_obj(corrupt(lambda m: m.update({"rule_sha256": "0" * 64})), fx, raw, reader, B=40), "RULE-HASH")
+    c.refused("check-diagnosis: a true next_trusted at depth is refused",
+              lambda: check_diagnosis_obj(corrupt(lambda m: m["rejudge"].update({"next_trusted": True})), fx, raw, reader, B=40), "TRUST")
+    c.refused("check-diagnosis: next_trusted_effect other than none is refused",
+              lambda: check_diagnosis_obj(corrupt(lambda m: m.update({"next_trusted_effect": "sets"})), fx, raw, reader, B=40), "TRUST")
+    c.refused("check-diagnosis: all_exact false is refused",
+              lambda: check_diagnosis_obj(corrupt(lambda m: m["recompute"].update({"all_exact": False})), fx, raw, reader, B=40), "RECOMPUTE")
+    c.refused("check-diagnosis: a citation not found is refused",
+              lambda: check_diagnosis_obj(corrupt(lambda m: m["provenance"]["citations"][0].update({"found": False})), fx, raw, reader, B=40),
+              "CITATION")
+    # A fixture whose evidence disagrees refuses before any statistic is produced.
+    bad = _clone(fx)
+    bad["seed_runs"][0]["pred"][0] = (bad["seed_runs"][0]["pred"][0] + 1) % 3
+    c.refused("analyze: a fixture that is not bit-exact against the evidence is refused", lambda: analyze_obj(bad, raw, reader, B=40), "MISMATCH")
+    fx2, ev2 = synth_fixture()
+    doc = json.loads(ev2["p15"].decode("utf-8"))
+    doc["gate"]["thresholds"]["max_ece"] = 0.2
+    ev2["p15"] = json.dumps(doc, sort_keys=True).encode("utf-8")
+    fx2["runs"]["p15"]["evidence_sha256"] = sha256_hex(ev2["p15"])
+    c.refused("analyze: gate thresholds that differ from RULE_SPEC are refused",
+              lambda: analyze_obj(fx2, dumps(fx2).encode("utf-8"), synth_reader(ev2), B=40), "thresholds")
+
+SELFTEST_SECTIONS = [selftest_inputs, selftest_rule, selftest_analyze]
 
 
 def selftest():
@@ -856,6 +1292,8 @@ def selftest():
 COMMANDS = {
     "snapshot": (cmd_snapshot, {"--out": True, "--local-root": False}),
     "verify-inputs": (cmd_verify_inputs, {"--inputs": True}),
+    "analyze": (cmd_analyze, {"--inputs": True, "--out": True}),
+    "check-diagnosis": (cmd_check_diagnosis, {"--diagnosis": True, "--inputs": True}),
 }
 
 

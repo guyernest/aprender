@@ -1,0 +1,824 @@
+{
+  "brief_facts": [
+    "class: single-draw-acceptance",
+    "shortfall: the shipped seed 13 margin 0.2795 is below the 0.3000 floor by 0.0205",
+    "CUDA seed-runs: n=6, mean 0.3279, sd 0.0441",
+    "row-resampling se of one seed's margin on 100 rows: median 0.0642, range 0.0568 to 0.0765",
+    "declared criterion: p_pass 0.259 (n=6 seed-runs, resampling estimate), leave-one-out range 0.104 to 0.352",
+    "mean-rule p_pass 0.634; mean-rule-retry within cap 0.799; floor-rule with floor 0.2300 p_pass 0.741",
+    "epochs lever (12 -> 4 on CUDA): difference +0.0023, se 0.0403, z +0.0579, minimum detectable 0.1127",
+    "device gap (MPS minus CUDA by seed): +0.0380 / +0.0641 / +0.0168, mean +0.0397, t 2.8990, p 0.1012, unproven (n=3)",
+    "deficiency: refuted on the full set; leave-one-out undetermined, refuted, undetermined, refuted, refuted, undetermined",
+    "independent re-draw: two misses in a row under the declared rule have probability 0.549",
+    "best epoch per seed: p12 [2, 2, 2]; p14 [2, 2, 1]; p15 [1, 1, 2]",
+    "recommended: mean-rule",
+    "| p12 | mps:0 | 12 | 13 | yes | 0.3780 | 0.0936 |",
+    "| p12 | mps:0 | 12 | 17 | no | 0.3502 | 0.1197 |",
+    "| p12 | mps:0 | 12 | 23 | no | 0.3709 | 0.0914 |",
+    "| p14 | cuda:0 | 12 | 13 | no | 0.3400 | 0.1124 |",
+    "| p14 | cuda:0 | 12 | 17 | yes | 0.2860 | 0.0964 |",
+    "| p14 | cuda:0 | 12 | 23 | no | 0.3541 | 0.0767 |",
+    "| p15 | cuda:0 | 4 | 13 | yes | 0.2795 | 0.0973 |",
+    "| p15 | cuda:0 | 4 | 17 | no | 0.3122 | 0.0923 |",
+    "| p15 | cuda:0 | 4 | 23 | no | 0.3955 | 0.1096 |"
+  ],
+  "class": {
+    "evidence": {
+      "cuda_mean": 0.3278832743552063,
+      "cuda_n": 6,
+      "cuda_sd": 0.04412368663280948,
+      "declared_loo_max": 0.352,
+      "declared_loo_min": 0.104,
+      "declared_p_pass": 0.25925925925925924,
+      "deficiency_full": "refuted",
+      "deficiency_loo": [
+        "undetermined",
+        "refuted",
+        "undetermined",
+        "refuted",
+        "refuted",
+        "undetermined"
+      ],
+      "epochs_12_to_4_diff": 0.00232991122947912,
+      "epochs_lever_se": 0.04026238087190484,
+      "median_row_resampling_se": 0.06424527594781647,
+      "nine_seed_run_margins": {
+        "p12:13": 0.3780294827021587,
+        "p12:17": 0.35017561525275404,
+        "p12:23": 0.37091097308488613,
+        "p14:13": 0.3400236527815074,
+        "p14:17": 0.2860488947445468,
+        "p14:23": 0.3540824086953462,
+        "p15:13": 0.27953446837732215,
+        "p15:17": 0.31215712390550493,
+        "p15:23": 0.3954530976270106
+      },
+      "shortfall": 0.020465531622677835
+    },
+    "name": "single-draw-acceptance",
+    "rule_sha256": "7f94f41789ced078b7a3c56be3fb1c6bd383846fc177851b6607a10a3b6998e5"
+  },
+  "device_gap": {
+    "all_same_sign": true,
+    "df": 2,
+    "mean_diff": 0.03965370493946615,
+    "p_two_sided": 0.10124268613618981,
+    "pairs": [
+      {
+        "cuda_p14": 0.3400236527815074,
+        "diff": 0.03800582992065127,
+        "mps_p12": 0.3780294827021587,
+        "seed": 13
+      },
+      {
+        "cuda_p14": 0.2860488947445468,
+        "diff": 0.06412672050820722,
+        "mps_p12": 0.35017561525275404,
+        "seed": 17
+      },
+      {
+        "cuda_p14": 0.3540824086953462,
+        "diff": 0.016828564389539946,
+        "mps_p12": 0.37091097308488613,
+        "seed": 23
+      }
+    ],
+    "sd_diff": 0.023692098094400194,
+    "status": "unproven",
+    "t": 2.8989510084686794
+  },
+  "epochs_lever": {
+    "best_epochs": {
+      "p12": [
+        2,
+        2,
+        2
+      ],
+      "p14": [
+        2,
+        2,
+        1
+      ],
+      "p15": [
+        1,
+        1,
+        2
+      ]
+    },
+    "detectable": false,
+    "diff": 0.00232991122947912,
+    "epochs12": {
+      "mean": 0.3267183187404668,
+      "run": "p14",
+      "sd": 0.03591536844557158
+    },
+    "epochs4": {
+      "mean": 0.3290482299699459,
+      "run": "p15",
+      "sd": 0.059776786881211894
+    },
+    "mde_normal_approx": 0.11273466644133354,
+    "se": 0.04026238087190484,
+    "z": 0.05786819306319106
+  },
+  "generated_from": {
+    "drafts_sha256": "cbe4c7a036072148d61ae63fce50ba2c35bd90c994a9243449c155db79d38bde",
+    "evidence_sha256": {
+      "p12": "960d561c76d75bb3f139d62c86c6fdfd930e44e8463d42e3a340f7970241993a",
+      "p14": "fd3bcf3a5af8f5017143914e87f176300200a70c2c778dac06a5994d36dd0ca1",
+      "p15": "d0d389f63000bf581b14816cbd9316d03d8081d61fa3a8a6339699bd91aa674a"
+    },
+    "inputs_sha256": "1d3197ec56385572b589b501f74663d0b403d35109ad6b625ef54615cca4dcf4"
+  },
+  "measurement": {
+    "B": 2000,
+    "max_se": 0.07648215145225709,
+    "median_se": 0.06424527594781647,
+    "min_se": 0.056757372284541655,
+    "per_seed_run": [
+      {
+        "margin": 0.3780294827021587,
+        "p05": 0.27689123364357965,
+        "p95": 0.47832169417618975,
+        "p_ge_floor": 0.8935,
+        "run": "p12",
+        "se": 0.06254616424630628,
+        "seed": 13
+      },
+      {
+        "margin": 0.35017561525275404,
+        "p05": 0.24732429990966576,
+        "p95": 0.4475944729788614,
+        "p_ge_floor": 0.7875,
+        "run": "p12",
+        "se": 0.0611380508587025,
+        "seed": 17
+      },
+      {
+        "margin": 0.37091097308488613,
+        "p05": 0.25904715518686106,
+        "p95": 0.4767455461378941,
+        "p_ge_floor": 0.839,
+        "run": "p12",
+        "se": 0.06718485621024177,
+        "seed": 23
+      },
+      {
+        "margin": 0.3400236527815074,
+        "p05": 0.23171209778152663,
+        "p95": 0.4452991452991454,
+        "p_ge_floor": 0.7205,
+        "run": "p14",
+        "se": 0.06451423418057946,
+        "seed": 13
+      },
+      {
+        "margin": 0.2860488947445468,
+        "p05": 0.15914361158263596,
+        "p95": 0.41244219546106337,
+        "p_ge_floor": 0.423,
+        "run": "p14",
+        "se": 0.07648215145225709,
+        "seed": 17
+      },
+      {
+        "margin": 0.3540824086953462,
+        "p05": 0.26234690374225256,
+        "p95": 0.44847179487502464,
+        "p_ge_floor": 0.825,
+        "run": "p14",
+        "se": 0.056757372284541655,
+        "seed": 23
+      },
+      {
+        "margin": 0.27953446837732215,
+        "p05": 0.1717203158956459,
+        "p95": 0.38100874663722273,
+        "p_ge_floor": 0.3665,
+        "run": "p15",
+        "se": 0.06424527594781647,
+        "seed": 13
+      },
+      {
+        "margin": 0.31215712390550493,
+        "p05": 0.1941662476956595,
+        "p95": 0.41895480974292276,
+        "p_ge_floor": 0.56,
+        "run": "p15",
+        "se": 0.06983780605648945,
+        "seed": 17
+      },
+      {
+        "margin": 0.3954530976270106,
+        "p05": 0.29949536633828766,
+        "p95": 0.4928817710044508,
+        "p_ge_floor": 0.948,
+        "run": "p15",
+        "se": 0.05869142067543056,
+        "seed": 23
+      }
+    ],
+    "seed": 20261031,
+    "shortfall_over_median_se": 0.3185530970292829
+  },
+  "next_trusted_effect": "none",
+  "options": {
+    "floor-rule": {
+      "attempt_cap": 1,
+      "claim_scope": "gate outcome and band only; not an identical reproduction of attempt 1 or of Phase 12: the shipped seed's margin floor moves from 0.3000 to 0.2300 (D-11 superseded); ceiling 0.4500 and the ECE clause unchanged",
+      "cost_report_only": "report-only: about 1346 s of ml.g5.xlarge billed on attempt 1 plus about 150 s of Fargate pack",
+      "dataset_prefix": "datasets/motivation-v1/",
+      "ece_band": [
+        0.07,
+        0.12
+      ],
+      "epochs": 12,
+      "judging": "shipped_seed",
+      "loo_max": 0.896,
+      "loo_min": 0.648,
+      "margin_band": [
+        0.23,
+        0.45
+      ],
+      "p_pass": 0.7407407407407407,
+      "paid_run": true,
+      "recipe_id": "f88f5b71ef925fdabb30d26a15c2eb5195a151dadfe0882c858b73ca7bf54d7e",
+      "retry_classes": [],
+      "run_name": "motivation-v1-p15b",
+      "supersedes": [
+        "D-11"
+      ],
+      "within_cap": 0.7407407407407407
+    },
+    "mean-rule": {
+      "attempt_cap": 1,
+      "claim_scope": "gate outcome and band only; not an identical reproduction of attempt 1 or of Phase 12: the margin clause is judged on the mean of the three seed margins in [0.3000, 0.4500] instead of the shipped seed's margin (D-11 superseded); the ECE clause and the gate stay on the shipped seed",
+      "cost_report_only": "report-only: about 1346 s of ml.g5.xlarge billed on attempt 1 plus about 150 s of Fargate pack",
+      "dataset_prefix": "datasets/motivation-v1/",
+      "ece_band": [
+        0.07,
+        0.12
+      ],
+      "epochs": 12,
+      "judging": "seed_mean",
+      "loo_max": 0.736,
+      "loo_min": 0.464,
+      "margin_band": [
+        0.3,
+        0.45
+      ],
+      "p_pass": 0.6342592592592593,
+      "paid_run": true,
+      "recipe_id": "f88f5b71ef925fdabb30d26a15c2eb5195a151dadfe0882c858b73ca7bf54d7e",
+      "retry_classes": [],
+      "run_name": "motivation-v1-p15b",
+      "supersedes": [
+        "D-11"
+      ],
+      "within_cap": 0.6342592592592593
+    },
+    "mean-rule-retry": {
+      "attempt_cap": 2,
+      "claim_scope": "gate outcome and band only; not an identical reproduction of attempt 1 or of Phase 12: the mean-of-three margin rule (D-11 superseded) and one second paid run allowed after an in-band-gate-fail (D-12 superseded); a defect is never retried",
+      "cost_report_only": "report-only: about 1346 s of ml.g5.xlarge billed on attempt 1 plus about 150 s of Fargate pack",
+      "dataset_prefix": "datasets/motivation-v1/",
+      "ece_band": [
+        0.07,
+        0.12
+      ],
+      "epochs": 12,
+      "judging": "seed_mean",
+      "loo_max": 0.832832,
+      "loo_min": 0.627328,
+      "margin_band": [
+        0.3,
+        0.45
+      ],
+      "p_pass": 0.6342592592592593,
+      "paid_run": true,
+      "recipe_id": "f88f5b71ef925fdabb30d26a15c2eb5195a151dadfe0882c858b73ca7bf54d7e",
+      "retry_classes": [
+        "in-band-gate-fail"
+      ],
+      "run_name": "motivation-v1-p15b",
+      "supersedes": [
+        "D-11",
+        "D-12"
+      ],
+      "within_cap": 0.7986968449931413
+    },
+    "redraw": {
+      "attempt_cap": 1,
+      "claim_scope": "gate outcome and band only; not an identical reproduction of attempt 1 or of Phase 12: no rule change; the Phase 12 and attempt 1 recipe (12 epochs) is drawn again, the shipped seed's margin judged in [0.3000, 0.4500] as before",
+      "cost_report_only": "report-only: about 1346 s of ml.g5.xlarge billed on attempt 1 plus about 150 s of Fargate pack",
+      "dataset_prefix": "datasets/motivation-v1/",
+      "ece_band": [
+        0.07,
+        0.12
+      ],
+      "epochs": 12,
+      "judging": "shipped_seed",
+      "loo_max": 0.352,
+      "loo_min": 0.104,
+      "margin_band": [
+        0.3,
+        0.45
+      ],
+      "p_pass": 0.25925925925925924,
+      "paid_run": true,
+      "recipe_id": "f88f5b71ef925fdabb30d26a15c2eb5195a151dadfe0882c858b73ca7bf54d7e",
+      "retry_classes": [],
+      "run_name": "motivation-v1-p15b",
+      "supersedes": [],
+      "within_cap": 0.25925925925925924
+    },
+    "stop-accept": {
+      "attempt_cap": null,
+      "claim_scope": null,
+      "cost_report_only": null,
+      "dataset_prefix": null,
+      "ece_band": null,
+      "epochs": null,
+      "judging": null,
+      "loo_max": null,
+      "loo_min": null,
+      "margin_band": null,
+      "p_pass": null,
+      "paid_run": false,
+      "recipe_id": null,
+      "retry_classes": null,
+      "run_name": null,
+      "supersedes": [],
+      "within_cap": null
+    }
+  },
+  "options_common": {
+    "device": "cuda",
+    "pack_image": "sha256:dd38865c43aba2f3819e50addcf6db5e9da94ef84e762d93cf6b2c132f1d17e2",
+    "recipe_note": "the Phase 12 and attempt 1 recipe, the closest reproduction (the epochs-4 lever showed no effect)",
+    "seeds": [
+      13,
+      17,
+      23
+    ]
+  },
+  "provenance": {
+    "citations": [
+      {
+        "count": 1,
+        "found": true,
+        "needle": "the researcher's proposal, [ASSUMED]",
+        "path": ".planning/phases/14-laya-training-mcp-server-s3-dataset-in-apr-and-reports-out/14-RESEARCH.md"
+      },
+      {
+        "count": 1,
+        "found": true,
+        "needle": "around 0.3780 / 0.0936",
+        "path": ".planning/phases/14-laya-training-mcp-server-s3-dataset-in-apr-and-reports-out/14-RESEARCH.md"
+      },
+      {
+        "count": 1,
+        "found": true,
+        "needle": "the median-of-three on a different device is a fresh draw",
+        "path": ".planning/phases/14-laya-training-mcp-server-s3-dataset-in-apr-and-reports-out/14-RESEARCH.md"
+      },
+      {
+        "count": 1,
+        "found": true,
+        "needle": "D-16 outcome: LOW (single draw)",
+        "path": ".planning/phases/15-laya-pack-bound-amendment-per-study-d-15-and-the-motivation/15-RESEARCH.md"
+      },
+      {
+        "count": 1,
+        "found": true,
+        "needle": "The paid-run outcome is a draw by construction",
+        "path": ".planning/phases/15-laya-pack-bound-amendment-per-study-d-15-and-the-motivation/15-REVIEWS.md"
+      },
+      {
+        "count": 1,
+        "found": true,
+        "needle": "report pass rates with a CI, not a verdict",
+        "path": ".claude/skills/spike-findings-aprender/references/laya-calibration-gate-and-pack-tolerance.md"
+      },
+      {
+        "count": 1,
+        "found": true,
+        "needle": "MPS replicates moved",
+        "path": ".claude/skills/spike-findings-aprender/references/laya-calibration-gate-and-pack-tolerance.md"
+      },
+      {
+        "count": 1,
+        "found": true,
+        "needle": "measured MPS training as not bitwise reproducible",
+        "path": "contracts/laya-finetune-gate-v1.yaml"
+      }
+    ]
+  },
+  "recommended": {
+    "option": "mean-rule",
+    "rule_text": "mean-rule iff class.name is single-draw-acceptance AND the mean-rule p_pass exceeds the redraw p_pass, else stop-accept"
+  },
+  "recompute": {
+    "all_exact": true,
+    "seed_runs": [
+      {
+        "device": "mps:0",
+        "exact": true,
+        "recomputed_ece_post": 0.09355141013860704,
+        "recomputed_margin": 0.3780294827021587,
+        "recorded_ece_post": 0.09355141013860704,
+        "recorded_margin": 0.3780294827021587,
+        "run": "p12",
+        "seed": 13
+      },
+      {
+        "device": "mps:0",
+        "exact": true,
+        "recomputed_ece_post": 0.11968235582113264,
+        "recomputed_margin": 0.35017561525275404,
+        "recorded_ece_post": 0.11968235582113264,
+        "recorded_margin": 0.35017561525275404,
+        "run": "p12",
+        "seed": 17
+      },
+      {
+        "device": "mps:0",
+        "exact": true,
+        "recomputed_ece_post": 0.09142689019441604,
+        "recomputed_margin": 0.37091097308488613,
+        "recorded_ece_post": 0.09142689019441604,
+        "recorded_margin": 0.37091097308488613,
+        "run": "p12",
+        "seed": 23
+      },
+      {
+        "device": "cuda:0",
+        "exact": true,
+        "recomputed_ece_post": 0.11244125694036478,
+        "recomputed_margin": 0.3400236527815074,
+        "recorded_ece_post": 0.11244125694036478,
+        "recorded_margin": 0.3400236527815074,
+        "run": "p14",
+        "seed": 13
+      },
+      {
+        "device": "cuda:0",
+        "exact": true,
+        "recomputed_ece_post": 0.09636022716760634,
+        "recomputed_margin": 0.2860488947445468,
+        "recorded_ece_post": 0.09636022716760634,
+        "recorded_margin": 0.2860488947445468,
+        "run": "p14",
+        "seed": 17
+      },
+      {
+        "device": "cuda:0",
+        "exact": true,
+        "recomputed_ece_post": 0.07670962929725647,
+        "recomputed_margin": 0.3540824086953462,
+        "recorded_ece_post": 0.07670962929725647,
+        "recorded_margin": 0.3540824086953462,
+        "run": "p14",
+        "seed": 23
+      },
+      {
+        "device": "cuda:0",
+        "exact": true,
+        "recomputed_ece_post": 0.09729856818914415,
+        "recomputed_margin": 0.27953446837732215,
+        "recorded_ece_post": 0.09729856818914415,
+        "recorded_margin": 0.27953446837732215,
+        "run": "p15",
+        "seed": 13
+      },
+      {
+        "device": "cuda:0",
+        "exact": true,
+        "recomputed_ece_post": 0.09227829813957215,
+        "recomputed_margin": 0.31215712390550493,
+        "recorded_ece_post": 0.09227829813957215,
+        "recorded_margin": 0.31215712390550493,
+        "run": "p15",
+        "seed": 17
+      },
+      {
+        "device": "cuda:0",
+        "exact": true,
+        "recomputed_ece_post": 0.10959439009428028,
+        "recomputed_margin": 0.3954530976270106,
+        "recorded_ece_post": 0.10959439009428028,
+        "recorded_margin": 0.3954530976270106,
+        "run": "p15",
+        "seed": 23
+      }
+    ]
+  },
+  "rejudge": {
+    "consumed_run_mean_margins": {
+      "p14": 0.3267183187404668,
+      "p15": 0.3290482299699459
+    },
+    "exploratory": true,
+    "note": "post hoc, a statistic chosen after seeing both misses; it is information, not trust",
+    "sets_next_trusted": false
+  },
+  "resample": {
+    "basis": "a resampling estimate over the six CUDA seed-runs (all 216 ordered triples with replacement, median-ECE ship rule); it is not a confidence interval",
+    "declared": {
+      "loo": [
+        {
+          "dropped": "p14:13",
+          "p_pass": 0.352,
+          "within_cap2": 0.38860799999999995
+        },
+        {
+          "dropped": "p14:17",
+          "p_pass": 0.352,
+          "within_cap2": 0.475904
+        },
+        {
+          "dropped": "p14:23",
+          "p_pass": 0.104,
+          "within_cap2": 0.14060799999999998
+        },
+        {
+          "dropped": "p15:13",
+          "p_pass": 0.352,
+          "within_cap2": 0.475904
+        },
+        {
+          "dropped": "p15:17",
+          "p_pass": 0.104,
+          "within_cap2": 0.14060799999999998
+        },
+        {
+          "dropped": "p15:23",
+          "p_pass": 0.352,
+          "within_cap2": 0.38860799999999995
+        }
+      ],
+      "loo_max": 0.352,
+      "loo_min": 0.104,
+      "loo_within_cap2_max": 0.475904,
+      "loo_within_cap2_min": 0.14060799999999998,
+      "p_defect": 0.48148148148148145,
+      "p_gate": 0.7407407407407407,
+      "p_in_band_gate_fail": 0.25925925925925924,
+      "p_pass": 0.25925925925925924,
+      "triples": 216,
+      "within_cap2": 0.32647462277091904
+    },
+    "floor_rule": {
+      "loo": [
+        {
+          "dropped": "p14:13",
+          "p_pass": 0.896,
+          "within_cap2": 0.9891840000000001
+        },
+        {
+          "dropped": "p14:17",
+          "p_pass": 0.648,
+          "within_cap2": 0.876096
+        },
+        {
+          "dropped": "p14:23",
+          "p_pass": 0.648,
+          "within_cap2": 0.876096
+        },
+        {
+          "dropped": "p15:13",
+          "p_pass": 0.648,
+          "within_cap2": 0.876096
+        },
+        {
+          "dropped": "p15:17",
+          "p_pass": 0.648,
+          "within_cap2": 0.876096
+        },
+        {
+          "dropped": "p15:23",
+          "p_pass": 0.896,
+          "within_cap2": 0.9891840000000001
+        }
+      ],
+      "loo_max": 0.896,
+      "loo_min": 0.648,
+      "loo_within_cap2_max": 0.9891840000000001,
+      "loo_within_cap2_min": 0.876096,
+      "p_defect": 0.0,
+      "p_gate": 0.7407407407407407,
+      "p_in_band_gate_fail": 0.25925925925925924,
+      "p_pass": 0.7407407407407407,
+      "triples": 216,
+      "within_cap2": 0.9327846364883401
+    },
+    "floor_rule_value": 0.23,
+    "mean_rule": {
+      "loo": [
+        {
+          "dropped": "p14:13",
+          "p_pass": 0.736,
+          "within_cap2": 0.8125439999999999
+        },
+        {
+          "dropped": "p14:17",
+          "p_pass": 0.592,
+          "within_cap2": 0.800384
+        },
+        {
+          "dropped": "p14:23",
+          "p_pass": 0.464,
+          "within_cap2": 0.627328
+        },
+        {
+          "dropped": "p15:13",
+          "p_pass": 0.616,
+          "within_cap2": 0.832832
+        },
+        {
+          "dropped": "p15:17",
+          "p_pass": 0.56,
+          "within_cap2": 0.75712
+        },
+        {
+          "dropped": "p15:23",
+          "p_pass": 0.712,
+          "within_cap2": 0.786048
+        }
+      ],
+      "loo_max": 0.736,
+      "loo_min": 0.464,
+      "loo_within_cap2_max": 0.832832,
+      "loo_within_cap2_min": 0.627328,
+      "p_defect": 0.10648148148148148,
+      "p_gate": 0.7407407407407407,
+      "p_in_band_gate_fail": 0.25925925925925924,
+      "p_pass": 0.6342592592592593,
+      "triples": 216,
+      "within_cap2": 0.7986968449931413
+    },
+    "p_both_miss_if_independent": 0.5486968449931412
+  },
+  "rule_sha256": "7f94f41789ced078b7a3c56be3fb1c6bd383846fc177851b6607a10a3b6998e5",
+  "rule_spec": {
+    "bootstrap": {
+      "B": 2000,
+      "design": "paired row bootstrap: B resamples of 100 row indices drawn with replacement by random.Random(seed).randrange(100), the SAME indices for the fine-tuned and the zero-shot macro-F1 of one resample; the same index sets serve every seed-run",
+      "percentiles": "p05 = sorted[int(0.05 * B)], p95 = sorted[int(0.95 * B)]",
+      "seed": 20261031
+    },
+    "ceiling": 0.45,
+    "class_rule": "deficiency is supported iff cuda_mean + z * sem < floor, refuted iff cuda_mean - z * sem >= floor, else undetermined (z = z_one_sided_90, sem = sd / sqrt(n), sd with ddof 1); single_draw_acceptance holds iff (shortfall <= cuda_sd) AND (shortfall <= median row-resampling se) AND (declared-criterion pass probability < 0.5) AND (deficiency is not supported on the full set nor on any leave-one-out set); class = recipe-deficiency if deficiency is supported on the full set, else single-draw-acceptance if that predicate holds, else undetermined",
+    "device_anchoring": "supported iff the three paired MPS-minus-CUDA differences share a sign and the df 2 two-sided p (1 - |t| / sqrt(t^2 + 2)) is below 0.05, else unproven; informational, never selects the class",
+    "ece_band": [
+      0.07,
+      0.12
+    ],
+    "floor": 0.3,
+    "floor_rule": "the CUDA seed-run mean minus 2 sd (ddof 1), rounded DOWN to hundredths",
+    "gate": {
+      "max_ece": 0.1,
+      "min_margin": 0.05
+    },
+    "lever": {
+      "detectable_abs_z": 2.0,
+      "mde_multiplier": 2.8
+    },
+    "rank_scale": 10000,
+    "version": 1,
+    "z_one_sided_90": 1.2815515655446004
+  },
+  "schema": "laya-class-diagnosis-v1",
+  "selection": {
+    "by_run": {
+      "p12": {
+        "delta": 0.011657459022225702,
+        "run_mean_margin": 0.366372023679933,
+        "shipped_is_lowest_margin": false,
+        "shipped_margin": 0.3780294827021587,
+        "shipped_seed": 13
+      },
+      "p14": {
+        "delta": -0.040669423995919995,
+        "run_mean_margin": 0.3267183187404668,
+        "shipped_is_lowest_margin": true,
+        "shipped_margin": 0.2860488947445468,
+        "shipped_seed": 17
+      },
+      "p15": {
+        "delta": -0.04951376159262377,
+        "run_mean_margin": 0.3290482299699459,
+        "shipped_is_lowest_margin": true,
+        "shipped_margin": 0.27953446837732215,
+        "shipped_seed": 13
+      }
+    },
+    "pearson_margin_ece_all9": 0.1128958710619395,
+    "pearson_margin_ece_cuda6": 0.20873876800117552
+  },
+  "shortfall": {
+    "floor": 0.3,
+    "run": "p15",
+    "shipped_margin": 0.27953446837732215,
+    "shipped_seed": 13,
+    "shortfall": 0.020465531622677835
+  },
+  "spread": {
+    "cuda": {
+      "lower90": 0.3047981482188436,
+      "mean": 0.3278832743552063,
+      "mean_minus_floor_in_sd": 0.6319343754579402,
+      "n": 6,
+      "runs": [
+        "p14",
+        "p15"
+      ],
+      "sd": 0.04412368663280948,
+      "sem": 0.018013419636807675,
+      "upper90": 0.350968400491569
+    },
+    "mps": {
+      "mean": 0.366372023679933,
+      "n": 3,
+      "run": "p12",
+      "sd": 0.014471041056115993,
+      "sd_ddof": 1
+    },
+    "p12": {
+      "mean": 0.366372023679933,
+      "n": 3,
+      "sd": 0.014471041056115993,
+      "sd_ddof": 1
+    },
+    "p14": {
+      "mean": 0.3267183187404668,
+      "n": 3,
+      "sd": 0.03591536844557158,
+      "sd_ddof": 1
+    },
+    "p15": {
+      "mean": 0.3290482299699459,
+      "n": 3,
+      "sd": 0.059776786881211894,
+      "sd_ddof": 1
+    }
+  },
+  "tests": {
+    "deficiency": {
+      "jackknife": [
+        {
+          "dropped": "p14:13",
+          "mean": 0.32545519866994616,
+          "sd": 0.048881571334070506,
+          "status": "undetermined"
+        },
+        {
+          "dropped": "p14:17",
+          "mean": 0.33625015027733823,
+          "sd": 0.04368741303127632,
+          "status": "refuted"
+        },
+        {
+          "dropped": "p14:23",
+          "mean": 0.3226434474871784,
+          "sd": 0.04719858324712887,
+          "status": "undetermined"
+        },
+        {
+          "dropped": "p15:13",
+          "mean": 0.3375530355507832,
+          "sd": 0.04162141925429544,
+          "status": "refuted"
+        },
+        {
+          "dropped": "p15:17",
+          "mean": 0.33102850444514664,
+          "sd": 0.04857397564743871,
+          "status": "refuted"
+        },
+        {
+          "dropped": "p15:23",
+          "mean": 0.3143693097008455,
+          "sd": 0.03261779188561214,
+          "status": "undetermined"
+        }
+      ],
+      "status": "refuted"
+    },
+    "device_anchoring": {
+      "band_midpoint": 0.375,
+      "cuda_mean": 0.3278832743552063,
+      "mps_mean": 0.366372023679933,
+      "p12_shipped_margin": 0.3780294827021587,
+      "status": "unproven"
+    },
+    "single_draw": {
+      "declared_p_pass_lt_half": true,
+      "deficiency_not_supported_any_loo": true,
+      "deficiency_not_supported_full": true,
+      "shortfall_le_cuda_sd": true,
+      "shortfall_le_median_se": true,
+      "single_draw_acceptance": true
+    }
+  }
+}
