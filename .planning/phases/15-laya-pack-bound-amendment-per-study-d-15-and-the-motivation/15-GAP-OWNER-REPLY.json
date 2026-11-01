@@ -1,0 +1,12 @@
+{
+  "schema": "laya-gap-owner-reply-v1",
+  "recorded_by": "orchestrator",
+  "recorded_at": "2026-11-01T15:37:17Z",
+  "owner_reply_verbatim": "mean-rule; run flag asked separately, answered: run-go",
+  "option": "mean-rule",
+  "run_go": true,
+  "supersedes": [
+    "D-11"
+  ],
+  "brief_sha256": "3cba575347e3b08a5bac192e7227b56f14c0b2715bf8de5fcf607f0ef1ccf863"
+}
