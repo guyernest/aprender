@@ -1353,6 +1353,18 @@ laya-fetch *args:
     set -euo pipefail
     exec python3 -I scripts/laya_deploy/laya_fetch.py "$@"
 
+# Name the CLASS of the SC4 margin miss from evidence already on disk (plan 15-09, D-13): `just laya-margin-diagnosis
+# snapshot --out FILE [--local-root DIR]` (the only step that reads the gitignored fetched runs; it writes a text-free
+# fixture of class indices and floats), `verify-inputs --inputs FILE` (bit-exact recompute of the nine recorded
+# margins and ECEs), `analyze`, `check-diagnosis`, `check-brief`, `check-reply`, `write-disposition`,
+# `check-disposition`, and `--selftest`. Spends nothing, sets no trust. A thin wrapper: the script owns every refusal.
+# Row gap diagnosis.
+[positional-arguments]
+laya-margin-diagnosis *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    exec python3 -I scripts/laya_deploy/laya_margin_diagnosis.py "$@"
+
 # The cross-CPU re-score drift study (plan 14-20; 14-VERIFICATION gap 2; D-14, D-15): `just laya-drift local [--only
 # LEG,..] [--repeats N] [--out DIR] [--controls] [--evidence FILE]` measures the retained runs on THIS machine with the
 # pinned pack_laya binary (path from cargo's own message, sha256 and commit recorded, a dirty closure refused) and a
