@@ -1164,3 +1164,5 @@ Plans:
 
 **Wave 12** *(conditional; blocked on Wave 11 and the owner's go)*
 - [x] 15-12-PLAN.md — The owner-run attempt under the new declaration, evaluated; 15-GAP-RUN-EVIDENCE.json next_trusted (SC4) (wave 12)
+
+**Status: closed 2026-11-01 by owner decision, SC4 carried unmet.** SC1, SC2, SC3 and SC5 verified. SC4 (D-16) was not reproduced: the mean-rule attempt `motivation-v1-p15b` was consumed, class waived, verdict inconclusive, `next_trusted` false. The owner chose `accept-inconclusive` (`15-GAP-OWNER-ACCEPT.json`). This is not an override or a waiver (D-02): `15-VERIFICATION.md` stays `gaps_found`, and the Phase 14 training server stays untrusted until a new owner-approved declaration and paid run pass the gate unwaived.
