@@ -326,10 +326,178 @@ def _expect_pass(ev, rule):
     return ok, "class=%s verdict=%s" % (ev["class"], ev["verdict_if_final"])
 
 
+def _rows(p):
+    return p["report"]["seeds"]["per_seed"]
+
+
+def set_margins(p, ms):
+    """Per-seed margins in declared order; the report's top-level margin is the shipped seed's."""
+    for r, m in zip(_rows(p), ms):
+        r["margin"] = m
+    p["report"]["margin"] = next(r["margin"] for r in _rows(p) if r["seed"] == p["shipped"])
+
+
+def set_all_margins(p, m):
+    set_margins(p, [m] * len(_rows(p)))
+
+
+def set_shipped_margin_keeping_mean(p, sm):
+    """The shipped seed's margin sm, the others equal so the three-seed mean stays the band middle."""
+    n = len(_rows(p))
+    other = (n * p["mid"] - sm) / (n - 1)
+    set_margins(p, [sm if r["seed"] == p["shipped"] else other for r in _rows(p)])
+
+
+def set_ece(p, e):
+    p["report"]["fine_tuned"]["ece_post"] = e
+    for r in _rows(p):
+        if r["seed"] == p["shipped"]:
+            r["ece_post"] = e
+
+
+def fail_gate(p):
+    """The gate failed, the pack task skipped (the evaluator selftest's skipped_pack shape)."""
+    p["report"]["pass"] = False
+    for r in _rows(p):
+        if r["seed"] == p["shipped"]:
+            r["pass"] = False
+    pk = clone(p["accepted_pack"])
+    pk.update({"ran": False, "skipped": "gate_fail", "exit_code": None, "accepted": False, "apr_sha256": None,
+               "shipped_seed": None, "waived": None, "packed_line": None, "verify_line": None, "deploy_eligible": False})
+    p["pack"] = pk
+    p["verdict"] = {"phase": "gate_failed", "verdict": {"pass": False, "waived": None}}
+    p["outcome"]["exit_class"] = "gate_fail"
+    p["train_log"] = "GATE FAIL\n"
+
+
+WAIVER_ID = "W-rehearsal"
+
+
+def claim_waiver(p):
+    """The report claims a pilot waiver and an accepted, deploy-eligible pack carries it (mirrors the evaluator's eval-waived)."""
+    p["report"]["pilot_waiver"] = {"id": WAIVER_ID, "waives": ["ece_post"]}
+    pk = clone(p["accepted_pack"])
+    pk["waived"] = WAIVER_ID
+    p["pack"] = pk
+    p["verdict"] = {"phase": "completed", "verdict": {"pass": False, "waived": WAIVER_ID}}
+
+
+def refuse_pack_after_pass(p):
+    pk = clone(p["accepted_pack"])
+    pk.update({"ran": True, "skipped": None, "exit_code": 1, "accepted": False, "apr_sha256": None, "waived": None,
+               "deploy_eligible": False})
+    p["pack"] = pk
+    p["verdict"] = {"phase": "gate_failed", "verdict": {"pass": True, "waived": None}}
+
+
+def flip_hex(h):
+    return ("0" if h[0] != "0" else "1") + h[1:]
+
+
+def _expect(klass, final, reasons=(), band=None, must=None, rule=None, missing_file=False):
+    def fn(ev, cl):
+        ok = ev["class"] == klass and ev["verdict_if_final"] == final and ev["retry_allowed"] is False
+        if klass != "defect":
+            ok = ok and ev["defect_reasons"] == []
+        for needle in reasons:
+            ok = ok and any(needle in r for r in ev["defect_reasons"])
+        if missing_file:
+            ok = ok and any("missing-file" in r for r in ev["defect_reasons"])
+        for k, v in (band or {}).items():
+            ok = ok and ev["band"].get(k) is v
+        for k, v in (must or {}).items():
+            ok = ok and ev["must"].get(k) is v
+        if rule is not None:
+            ok = ok and cl is not None and cl["class"] == rule
+        return ok, "class=%s verdict=%s%s" % (ev["class"], ev["verdict_if_final"], (" rule=" + cl["class"]) if cl else "")
+    return fn
+
+
+def _b_mean_rule(p):
+    m = p["mid"]
+    set_margins(p, [m - 0.08, m + 0.04, m + 0.04][:len(_rows(p))])
+
+
+def _b_ece_over(p):
+    set_ece(p, p["band"]["ece_post"][1] + 0.01)
+    fail_gate(p)
+
+
+def _b_ece_over_waiver(p):
+    _b_ece_over(p)
+    claim_waiver(p)
+
+
+def _b_cpu(p):
+    p["report"]["device_used"], p["report"]["device_is_cpu"] = "cpu", True
+
+
+def _b_two_seeds(p):
+    p["report"]["seeds"]["per_seed"].pop()
+    p["report"]["seeds"]["n"] = len(_rows(p))
+
+
+def _b_corner(p):
+    set_shipped_margin_keeping_mean(p, 0.04)
+    fail_gate(p)
+
+
+def _b_corner_waived(p):
+    _b_corner(p)
+    claim_waiver(p)
+
+
+def _b_pre_verdict(p):
+    p["drop"].add("run/gate-report.json")
+    p["outcome"]["exit_class"] = "crash"
+    p["train_log"] = "Traceback (most recent call last): synthetic crash before any gate\n"
+
+
 # Each case: name, build(parts) mutating the in-band parts, expect(evaluation, classify-or-None) -> (ok, detail).
-# Plan 16-01 Task 1 holds the tracer's one row; Task 3 completes the table.
+# Rows 1 to 16 are judged by the evaluator alone; rows 17 to 20 are the four failure-path copies of one in-band run
+# and are also classified by classify-run (the CONSUMPTION RULE): consumed, consumed, pre-verdict, unresolved.
 CASES = [
     {"name": "in-band", "build": lambda p: None, "expect": _expect_pass, "classify": False},
+    {"name": "mean-rule", "build": _b_mean_rule, "expect": _expect("pass", "reproduced", band={"margin": True, "ece_post": True}),
+     "classify": False},
+    {"name": "mean-below-floor", "build": lambda p: set_all_margins(p, p["band"]["margin"][0] - 0.001),
+     "expect": _expect("defect", "not-reproduced", ["out-of-band: margin"], band={"margin": False}), "classify": False},
+    {"name": "device-mps", "build": lambda p: p["report"].__setitem__("device_used", "mps:0"),
+     "expect": _expect("defect", "not-reproduced", ["device:"], must={"device_prefix": False}), "classify": False},
+    {"name": "mean-above-ceiling", "build": lambda p: set_all_margins(p, p["band"]["margin"][1] + 0.001),
+     "expect": _expect("defect", "not-reproduced", ["out-of-band: margin"], band={"margin": False}), "classify": False},
+    {"name": "edge-low-inside", "build": lambda p: set_all_margins(p, p["band"]["margin"][0] + 0.001),
+     "expect": _expect("pass", "reproduced", band={"margin": True}), "classify": False},
+    {"name": "edge-high-inside", "build": lambda p: set_all_margins(p, p["band"]["margin"][1] - 0.001),
+     "expect": _expect("pass", "reproduced", band={"margin": True}), "classify": False},
+    {"name": "ece-over-bar", "build": _b_ece_over,
+     "expect": _expect("defect", "not-reproduced", ["out-of-band: ece_post"], band={"ece_post": False}), "classify": False},
+    {"name": "ece-over-bar-waiver-claimed", "build": _b_ece_over_waiver,
+     "expect": _expect("defect", "not-reproduced", ["out-of-band: ece_post"], band={"ece_post": False}), "classify": False},
+    {"name": "device-cpu", "build": _b_cpu,
+     "expect": _expect("defect", "not-reproduced", ["device:"], must={"device_prefix": False}), "classify": False},
+    {"name": "wrong-recipe", "build": lambda p: p["report"].__setitem__("recipe_id", flip_hex(p["report"]["recipe_id"])),
+     "expect": _expect("defect", "not-reproduced", ["recipe-mismatch"], must={"recipe_id": False}), "classify": False},
+    {"name": "changed-input", "build": lambda p: p["report"]["inputs_sha256"].__setitem__(
+        "train_jsonl", flip_hex(p["report"]["inputs_sha256"]["train_jsonl"])),
+     "expect": _expect("defect", "not-reproduced", ["inputs-mismatch"], must={"inputs_sha256": False}), "classify": False},
+    {"name": "two-seeds", "build": _b_two_seeds,
+     "expect": _expect("defect", "not-reproduced", ["seeds:"], must={"seeds": False}), "classify": False},
+    {"name": "pack-refused", "build": refuse_pack_after_pass,
+     "expect": _expect("defect", "not-reproduced", ["pack-refused"], band={"margin": True, "ece_post": True},
+                       must={"deploy_eligible": False}), "classify": False},
+    {"name": "gate-fail-mean-in-band", "build": _b_corner,
+     "expect": _expect("in-band-gate-fail", "inconclusive", band={"margin": True, "ece_post": True}), "classify": False},
+    {"name": "gate-fail-mean-in-band-waived", "build": _b_corner_waived,
+     "expect": _expect("waived", "inconclusive", band={"margin": True, "ece_post": True}), "classify": False},
+    {"name": "failure-gate-report-missing", "build": lambda p: p["drop"].add("run/gate-report.json"),
+     "expect": _expect("defect", "not-reproduced", missing_file=True, rule="consumed"), "classify": True},
+    {"name": "failure-pack-outcome-missing", "build": lambda p: p["drop"].add("logs/pack-outcome.json"),
+     "expect": _expect("defect", "not-reproduced", missing_file=True, rule="consumed"), "classify": True},
+    {"name": "failure-pre-verdict", "build": _b_pre_verdict,
+     "expect": _expect("defect", "not-reproduced", rule="pre-verdict"), "classify": True},
+    {"name": "failure-manifest-missing", "build": lambda p: p["drop"].add("manifest.json"),
+     "expect": _expect("pass", "reproduced", rule="unresolved"), "classify": True},
 ]
 
 
@@ -379,6 +547,84 @@ def cmd_rehearse(opts, out):
             out("  %-4s rehearse:%s  %s" % ("ok" if r["ok"] else "FAIL", r["name"], r["detail"]))
         out("REHEARSAL FAILED" if bad else "REHEARSAL OK cases=%d" % len(results))
     return 1 if bad else 0
+
+
+# ---- the paired report (descriptive only) ---------------------------------------------------------------------------
+
+PAIRED_SCHEMA = "laya-control-paired-v1"
+# A verdict-shaped key anywhere in the paired output would let a reader mistake a description for a judgment (D-04).
+FORBIDDEN_KEYS = frozenset(("pass", "fail", "verdict", "class", "ok", "reproduced", "equivalent", "within", "band"))
+PAIRED_NUMERIC = ("macro_f1", "t_applied", "best_epoch", "train_seconds")
+
+
+def read_report(run_dir):
+    return parse_json_bytes(read_bytes(os.path.join(run_dir, "run", "gate-report.json"), "paired-run"), "paired-run",
+                            "run/gate-report.json")
+
+
+def build_paired(ref, report):
+    """The descriptive per-seed CUDA-minus-MPS differences. A pure function of the reference and one gate report: it has no
+    parameter for a declaration and prints no verdict-shaped key."""
+    if not isinstance(ref, dict) or ref.get("schema") != REF_SCHEMA or [r.get("seed") for r in ref.get("per_seed", [])] != list(SEEDS):
+        raise Refused("paired-reference", "the reference is not a laya-control-reference-v1 fixture over seeds 13, 17, 23")
+    seeds_obj = report.get("seeds") if isinstance(report, dict) else None
+    rows = seeds_obj.get("per_seed") if isinstance(seeds_obj, dict) else None
+    if (not isinstance(rows, list) or not all(isinstance(r, dict) and is_int(r.get("seed")) for r in rows)
+            or sorted(r["seed"] for r in rows) != list(SEEDS)):
+        raise Refused("paired-seeds", "the report's per-seed rows are not exactly the reference seeds %s" % (list(SEEDS),))
+    by_seed = {r["seed"]: r for r in rows}
+    out_rows = []
+    for rr in ref["per_seed"]:
+        run = by_seed[rr["seed"]]
+        row = {"seed": rr["seed"]}
+        for k in ("margin", "ece_post") + PAIRED_NUMERIC:
+            v = run.get(k)
+            if k in ("margin", "ece_post"):
+                if not is_num(v):
+                    raise Refused("paired-fields", "seed %d: %s is absent or not a finite number" % (rr["seed"], k))
+            elif v is not None and not is_num(v):
+                raise Refused("paired-fields", "seed %d: %s is present but not a finite number" % (rr["seed"], k))
+            row[k] = {"reference": rr[k], "run": v, "diff": (v - rr[k]) if v is not None else None}
+        ch = run.get("clamp_hit")
+        row["clamp_hit"] = {"reference": rr["clamp_hit"], "run": ch if isinstance(ch, bool) else None}
+        out_rows.append(row)
+    run_margins = [row["margin"]["run"] for row in out_rows]
+    diffs = [row["margin"]["diff"] for row in out_rows]
+    run_mean = math.fsum(run_margins) / len(run_margins)
+    shipped = seeds_obj.get("shipped")
+    dev = report.get("device_used")
+    return {
+        "schema": PAIRED_SCHEMA,
+        "descriptive_only": True,
+        "reference_device": ref["device"],
+        "run_device": dev if isinstance(dev, str) and 0 < len(dev) <= 40 and set(dev) <= ID_CHARS else None,
+        "per_seed": out_rows,
+        "mean_margin": {"reference": ref["three_seed_mean_margin"], "run": run_mean, "diff": run_mean - ref["three_seed_mean_margin"]},
+        "shipped": {"reference_seed": ref["shipped_seed"], "run_seed": shipped if is_int(shipped) else None,
+                    "same_seed": shipped == ref["shipped_seed"]},
+        "max_abs_margin_diff": max(abs(x) for x in diffs),
+        "mean_abs_margin_diff": math.fsum(abs(x) for x in diffs) / len(diffs),
+    }
+
+
+def cmd_paired_report(opts, out):
+    ref = parse_json_bytes(read_bytes(opts["--reference"], "paired-reference"), "paired-reference", opts["--reference"])
+    out(json.dumps(build_paired(ref, read_report(opts["--run-dir"])), sort_keys=True, separators=(",", ":")))
+    return 0
+
+
+def json_rehearsal(decl_path, ref_path):
+    o, e = [], []
+    rc = main(["rehearse", "--declaration", decl_path, "--reference", ref_path, "--json"], out=o.append, err=e.append)
+    if rc != 0 or len(o) != 1:
+        return False, "rc=%s %s" % (rc, e)
+    cases = json.loads(o[0])["cases"]
+    rules = {c["name"]: c["rule"] for c in cases}
+    want = {"failure-gate-report-missing": "consumed", "failure-pack-outcome-missing": "consumed",
+            "failure-pre-verdict": "pre-verdict", "failure-manifest-missing": "unresolved"}
+    ok = all(rules.get(k) == v for k, v in want.items()) and all(v is None for k, v in rules.items() if k not in want)
+    ok = ok and all(set(c) == {"name", "class", "verdict_if_final", "band", "must", "defect_reasons", "rule", "rule_reason"} for c in cases)
+    return ok, "%d cases" % len(cases)
 
 
 # ---- the selftest ------------------------------------------------------------------------------------------------
@@ -586,7 +832,10 @@ def selftest():
             c.check("rehearse: the table runs", lambda: (False, "crashed with %r" % (ex,)))
         for r in results:
             c.check("rehearse:" + r["name"], lambda r=r: (r["ok"], r["detail"]))
-        c.check("rehearse: at least the in-band row ran", lambda: len(results) >= 1)
+        c.check("rehearse: the table holds at least 20 rows", lambda: (len(results) >= 20, "%d rows" % len(results)))
+        names = [r["name"] for r in results]
+        c.check("rehearse: both narrow-corner rows are in the table",
+                lambda: "gate-fail-mean-in-band" in names and "gate-fail-mean-in-band-waived" in names)
 
         def unknown_clause():
             d = synth_decl(fx)
@@ -603,6 +852,121 @@ def selftest():
             _write(p, _dumps(d))
             return rehearse(p, fxp)
         c.refused("rehearse: a declaration whose recipe differs from the reference is refused", other_recipe, "rehearse-reference")
+
+        def shipped_statistic():
+            d = synth_decl(fx)
+            d.pop("judging")
+            p = os.path.join(work, "decl-shipped.json")
+            _write(p, _dumps(d))
+            return [r["name"] for r in rehearse(p, fxp) if not r["ok"]]
+        c.check("rehearse: a declaration without the seed_mean statistic FAILS the mean-rule and corner rows (the table can fail)",
+                lambda: (set(shipped_statistic()) == {"mean-rule", "gate-fail-mean-in-band", "gate-fail-mean-in-band-waived"},
+                         str(shipped_statistic())))
+        c.check("rehearse: --json prints one object with a case list carrying the failure-path rule fields",
+                lambda: json_rehearsal(dcp, fxp))
+
+        # --- paired-report ----------------------------------------------------------------------------------
+        base = load_base()
+        pdecl = synth_decl(fx)
+        paired_dir = {"n": 0}
+
+        def paired_run(edit=None, raw_report=None):
+            q = synth_parts(pdecl, base)
+            for r, m, e in zip(q["report"]["seeds"]["per_seed"], (0.25, 0.20, 0.30), (0.02, 0.03, 0.04)):
+                r["margin"], r["ece_post"] = m, e
+            if edit:
+                edit(q)
+            paired_dir["n"] += 1
+            run = write_run(work, "paired%d" % paired_dir["n"], q)
+            if raw_report is not None:
+                _write(os.path.join(run, "run", "gate-report.json"), raw_report)
+            return run
+
+        def paired(run):
+            return build_paired(fx, read_report(run))
+
+        def by_seed(o):
+            return {r["seed"]: r for r in o["per_seed"]}
+
+        def exact():
+            o = by_seed(paired(paired_run()))
+            ref = {r["seed"]: r for r in fx["per_seed"]}
+            ok = True
+            for s_, m, e in ((13, 0.25, 0.02), (17, 0.20, 0.03), (23, 0.30, 0.04)):
+                ok = ok and o[s_]["margin"] == {"reference": ref[s_]["margin"], "run": m, "diff": m - ref[s_]["margin"]}
+                ok = ok and o[s_]["ece_post"]["diff"] == e - ref[s_]["ece_post"]
+                ok = ok and o[s_]["macro_f1"]["diff"] == 0.8 - ref[s_]["macro_f1"]
+                ok = ok and o[s_]["t_applied"]["diff"] == 1.4 - ref[s_]["t_applied"]
+                ok = ok and o[s_]["best_epoch"]["diff"] == 1 - ref[s_]["best_epoch"]
+                ok = ok and o[s_]["train_seconds"]["diff"] == 100.0 - ref[s_]["train_seconds"]
+            return ok
+        c.check("paired: exact per-seed CUDA-minus-MPS differences for all six fields", exact)
+
+        def optional_null():
+            def drop(q):
+                for r in q["report"]["seeds"]["per_seed"]:
+                    for k in ("best_epoch", "train_seconds", "clamp_hit", "t_applied"):
+                        r.pop(k, None)
+            o = by_seed(paired(paired_run(drop)))
+            return all(o[s_][k] == {"reference": o[s_][k]["reference"], "run": None, "diff": None}
+                       for s_ in (13, 17, 23) for k in ("best_epoch", "train_seconds", "t_applied")) \
+                and o[13]["clamp_hit"]["run"] is None
+        c.check("paired: an optional field absent from the run row is null, never a zero", optional_null)
+
+        def forbidden_walk():
+            bad = []
+
+            def walk(x, path=""):
+                if isinstance(x, dict):
+                    for k, v in x.items():
+                        if k.lower() in FORBIDDEN_KEYS:
+                            bad.append(path + k)
+                        walk(v, path + k + ".")
+                elif isinstance(x, list):
+                    for i, v in enumerate(x):
+                        walk(v, path + "[%d]." % i)
+            walk(paired(paired_run()))
+            return (not bad, str(bad))
+        c.check("paired: no pass, fail, verdict, class, ok, reproduced, equivalent, within or band key at any depth", forbidden_walk)
+        c.check("paired: the output is descriptive_only and carries the schema",
+                lambda: paired(paired_run())["descriptive_only"] is True and paired(paired_run())["schema"] == "laya-control-paired-v1")
+        c.check("paired: a different shipped seed is reported, not judged",
+                lambda: paired(paired_run(lambda q: q["report"]["seeds"].__setitem__("shipped", 13)))["shipped"]
+                == {"reference_seed": 23, "run_seed": 13, "same_seed": False})
+
+        def summary_numbers():
+            o = paired(paired_run())
+            diffs = [m - r["margin"] for m, r in zip((0.25, 0.20, 0.30), fx["per_seed"])]
+            return (o["max_abs_margin_diff"] == max(abs(x) for x in diffs)
+                    and o["mean_abs_margin_diff"] == math.fsum(abs(x) for x in diffs) / 3
+                    and o["mean_margin"]["run"] == math.fsum((0.25, 0.20, 0.30)) / 3
+                    and o["mean_margin"]["diff"] == o["mean_margin"]["run"] - fx["three_seed_mean_margin"])
+        c.check("paired: the mean margin and the absolute-difference summaries are the plain arithmetic", summary_numbers)
+        c.refused("paired: a missing seed is refused", lambda: paired(paired_run(lambda q: q["report"]["seeds"]["per_seed"].pop())), "paired-seeds")
+
+        def extra_seed():
+            def add(q):
+                r = json.loads(json.dumps(q["report"]["seeds"]["per_seed"][0]))
+                r["seed"] = 29
+                q["report"]["seeds"]["per_seed"].append(r)
+            return paired(paired_run(add))
+        c.refused("paired: an extra seed is refused", extra_seed, "paired-seeds")
+        c.check("paired: rows in another order give the same output",
+                lambda: paired(paired_run(lambda q: q["report"]["seeds"]["per_seed"].reverse())) == paired(paired_run()))
+        c.refused("paired: a non-finite number is refused",
+                  lambda: paired(paired_run(raw_report='{"seeds": {"per_seed": [{"seed": 13, "margin": NaN}]}}')), "paired-run")
+        c.refused("paired: a row without a margin is refused",
+                  lambda: paired(paired_run(lambda q: q["report"]["seeds"]["per_seed"][1].pop("margin"))), "paired-fields")
+        c.refused("paired: a non-numeric ece_post is refused",
+                  lambda: paired(paired_run(lambda q: q["report"]["seeds"]["per_seed"][1].__setitem__("ece_post", "0.1"))), "paired-fields")
+        orun = paired_run()
+        o, e = [], []
+        rc = main(["paired-report", "--reference", fxp, "--run-dir", orun, "--declaration", dcp], out=o.append, err=e.append)
+        c.check("paired: the command accepts no declaration (it never reads one)", lambda: rc == 2 and o == [] and "unknown option" in e[0])
+        o, e = [], []
+        rc = main(["paired-report", "--reference", fxp, "--run-dir", orun], out=o.append, err=e.append)
+        c.check("paired: the command prints exactly one JSON line",
+                lambda: (rc == 0 and len(o) == 1 and json.loads(o[0])["schema"] == "laya-control-paired-v1", str(e)))
 
         # --- the tracer: main() end to end over a temp directory ------------------------------------------------
         def drive(argv):
@@ -622,6 +986,10 @@ def selftest():
         rc3, o3, e3 = drive(["rehearse", "--declaration", tdc, "--reference", tfx])
         c.check("tracer:rehearse judges a synthetic CUDA run by the committed evaluator through main()",
                 lambda: (rc3 == 0 and bool(o3) and o3[-1].startswith("REHEARSAL OK cases="), "%s %s" % (o3[-1:], e3)))
+        trun = paired_run()
+        rc5, o5, e5 = drive(["paired-report", "--reference", tfx, "--run-dir", trun])
+        c.check("tracer:paired-report describes the synthetic CUDA run against the pinned reference through main()",
+                lambda: (rc5 == 0 and len(o5) == 1 and json.loads(o5[0])["descriptive_only"] is True, str(e5)))
         os.remove(tfx)
         rc4, o4, e4 = drive(["check-reference", "--fixture", tfx, "--evidence", evp])
         c.check("tracer:a cut link (the fixture removed) is refused, never passed", lambda: rc4 == 2 and bool(e4) and e4[0].startswith("REFUSED "))
@@ -641,6 +1009,7 @@ COMMANDS = {
     "snapshot-reference": (cmd_snapshot_reference, {"--evidence": True, "--out": True}),
     "check-reference": (cmd_check_reference, {"--fixture": True, "--evidence": True, "--draft": False}),
     "rehearse": (cmd_rehearse, {"--declaration": True, "--reference": True, "--json": "flag"}),
+    "paired-report": (cmd_paired_report, {"--reference": True, "--run-dir": True}),
 }
 
 
