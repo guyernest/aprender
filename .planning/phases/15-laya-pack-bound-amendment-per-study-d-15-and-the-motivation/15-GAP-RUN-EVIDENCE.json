@@ -118,7 +118,38 @@
     "parity_contract_sha256": "466891faa5e3e1e092a5483bafcdf2ba8c5c835c9cdda5aaff896d2e893584e9"
   },
   "pre_verdict_failures": [],
-  "owner_replies": [],
+  "owner_replies": [
+    {
+      "recorded_by": "orchestrator",
+      "recorded_at": "2026-11-01T17:51:37Z",
+      "step": "V",
+      "verbatim": "{\"tool\":\"validate_dataset\",\"ok\":true,\"valid\":true,\"labels\":[\"social_affiliative\",\"conspiratorial\",\"other\"],\"rows\":{\"train\":295,\"eval\":100},\"epochs_range\":[4,12]}  (account id elided)"
+    },
+    {
+      "recorded_by": "orchestrator",
+      "recorded_at": "2026-11-01T17:51:37Z",
+      "step": "R",
+      "verbatim": "rc=0 | TASK_ID 42d8eb1e-ee3b-43ca-b6d9-0235a66e1f7f | status working, createdAt 2026-11-01T16:25:41Z  (account id elided)"
+    },
+    {
+      "recorded_by": "orchestrator",
+      "recorded_at": "2026-11-01T17:51:37Z",
+      "step": "S",
+      "verbatim": "POLL DONE completed"
+    },
+    {
+      "recorded_by": "orchestrator",
+      "recorded_at": "2026-11-01T17:51:37Z",
+      "step": "F",
+      "verbatim": "FETCH OK phase completed apr dcc123ae0ea54af11969561f7c0fafbd5d4a589135ee69d9e9d8c7a36210afac  (owner-run verify/deploy lines printed, not executed)"
+    },
+    {
+      "recorded_by": "orchestrator",
+      "recorded_at": "2026-11-01T17:51:37Z",
+      "step": "H",
+      "verbatim": "training_jobs_inprogress 0 | ecs_tasks_running 0 | state_machine_execution SUCCEEDED | lock status completed (holder_owner id elided)"
+    }
+  ],
   "owner_commands": {
     "P0": "T() { python3 -I -c \"import json,sys;print(json.load(open('models/laya-trainer/outputs-dev.json'))['trainer'][sys.argv[1]])\" \"$1\"; }; BUCKET=$(T BucketName); URL=$(python3 -I -c \"import json;print(json.load(open('models/laya-trainer/deploy-dev.json'))['endpoint'])\"); URL=\"${URL%/mcp}/mcp\"; export LAYA_M2M_FILE=$(cat models/laya-trainer/m2m-file-path); export SSL_CERT_FILE=\"${SSL_CERT_FILE:-/etc/ssl/cert.pem}\"; unset APRENDER_DECIDE_PROBE_TOKEN",
     "V": "! T() { python3 -I -c \"import json,sys;print(json.load(open('models/laya-trainer/outputs-dev.json'))['trainer'][sys.argv[1]])\" \"$1\"; }; BUCKET=$(T BucketName); URL=$(python3 -I -c \"import json;print(json.load(open('models/laya-trainer/deploy-dev.json'))['endpoint'])\"); URL=\"${URL%/mcp}/mcp\"; export LAYA_M2M_FILE=$(cat models/laya-trainer/m2m-file-path); export SSL_CERT_FILE=\"${SSL_CERT_FILE:-/etc/ssl/cert.pem}\"; unset APRENDER_DECIDE_PROBE_TOKEN && assume ze-kasher-dev && just laya-trainer-call ze-kasher-dev \"$URL\" validate \"s3://$BUCKET/datasets/motivation-v1/\"",
