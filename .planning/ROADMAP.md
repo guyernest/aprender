@@ -1170,9 +1170,24 @@ Plans:
 ### Phase 16: Laya pipeline-equivalence control (antisemitism-v1, CUDA vs Mac)
 
 **Goal:** Show whether the SageMaker CUDA training pipeline reproduces the Mac (MPS) Phase 10 antisemitism-v1 result on identical inputs and recipe, separating "pipeline/device" from "small noisy dataset" in the motivation-v1 misses of Phases 14 and 15. One owner-run attempt, judged on the three-seed mean margin in the owner-approved band [0.209, 0.269] (Mac reference 0.2392 +/- 0.030) with the gate passing unwaived (shipped-seed ECE <= 0.10). Claim scope is pipeline equivalence on this task only: it does not reproduce motivation-v1, does not set `next_trusted` for the Phase 14 server and does not change D-16; whether a pass redefines trust is a separate owner ruling. Draft declaration: the Phase 16 context file (seeded from the session draft).
-**Requirements**: TBD
+**Requirements**: D-01 to D-09 (the phase decisions in `16-CONTEXT.md`; REQUIREMENTS.md holds no entries for this phase)
 **Depends on:** Phase 15
-**Plans:** 0 plans
+**Success Criteria** (what must be TRUE):
+
+  1. Per D-01, D-02, D-03 and D-08: a declaration of the control (antisemitism-v1, recipe `d70c3f3d...`, 4 epochs, seeds 13/17/23, cuda, one attempt, no retry class, no waiver) judging the three-seed mean margin in [0.209, 0.269] and the shipped-seed ece_post in [0.0, 0.10] is committed ALONE before any staging or paid step; the committed evaluator is reused unchanged and a rehearsal shows the declaration can be passed and can be failed.
+  2. Per D-04: the Phase 10 Mac per-seed numbers are a tracked, text-free fixture with an integrity check against 10-GATE-RUN-EVIDENCE.json, and the run's per-seed CUDA-minus-MPS differences are reported descriptively, never judged.
+  3. Per D-01 and D-07: the dataset is staged once under `datasets/goldstandard-2024/` with Phase 10's exact sha256 digests (owner-run, bang prefix, replies recorded by the orchestrator) and `validate_dataset` accepts the 8,510 train and 2,129 eval rows with the same digests before any paid step.
+  4. Per D-06, D-07 and D-09: one owner-run SageMaker CUDA attempt (a per-run go recorded by the orchestrator; compute above 1 h) is fetched, classified by the consumption rule and judged by the committed evaluator over the declaration's first-add blob; the CUDA wall time is measured; a pre-verdict stop is not the attempt.
+  5. Per D-05: the evidence states pipeline equivalence on THIS task only, with `next_trusted` false and `sets_next_trusted` false whatever the verdict; it does not reproduce motivation-v1, does not change D-16 and does not lift the Phase 14 server's untrusted state.
+
+**Plans:** 3 plans in 3 waves (sequential: the declaration is committed first, the owner-run stage and the owner-run attempt each gate the next step; 16-02 and 16-03 carry owner checkpoints)
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 16 to break down)
+**Wave 1**
+- [ ] 16-01-PLAN.md — Text-free Mac reference fixture, offline recipe preflight, rehearsed declaration of the control committed alone before any staging or spend (D-01..D-09, wave 1)
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 16-02-PLAN.md — Stager byte pin for antisemitism-v1, check-stage and check-validate, owner-run stage and validate_dataset checkpoint (wave 2)
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 16-03-PLAN.md — Per-run owner go, the one owner-run SageMaker CUDA attempt, classify-run, evaluation over the first-add blob, descriptive paired report, evidence with next_trusted false (wave 3)
