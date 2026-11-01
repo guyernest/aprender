@@ -1,0 +1,11 @@
+{
+  "schema": "laya-run-go-v1",
+  "recorded_by": "orchestrator",
+  "recorded_at": "2026-11-01T20:42:43Z",
+  "owner_reply_verbatim": "run-go (Recommended)",
+  "interpreted_as": "run-go",
+  "in_answer_to": "Approve ONE paid SageMaker run: antisemitism-v1 on CUDA, run antisemitism-v1-cuda-ctl, 4 epochs, seeds 13/17/23; ml.g5.xlarge unmeasured 2-6 h against the 21,600 s cap, then a Graviton pack of 2,129 rows; attempt cap 1.",
+  "declaration_path": "16-CONTROL-DECLARATION.json",
+  "declaration_commit": "a3d4d2baa59af8b48399409e1b36ae3fdd14da2c",
+  "declaration_sha256": "600b64947ab8c058e5b52cf4f3227aca2eeb2a887d3d1dbaae2a41932fb5f096"
+}
