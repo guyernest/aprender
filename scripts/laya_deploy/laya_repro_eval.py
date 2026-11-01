@@ -39,6 +39,15 @@ retry_allowed = class in retry_classes AND attempt < attempt_cap, for any cap.
 verdict_if_final: pass -> reproduced; waived -> reproduced only under waiver_rule counts, else inconclusive;
 in-band-gate-fail -> inconclusive; defect -> not-reproduced.
 
+judging (optional, plan 15-11): a top-level `judging {margin_statistic, note}` declares which statistic the margin clause
+judges. margin_statistic is shipped_seed (the default, and the behaviour of a declaration with no `judging` key: the
+report's top-level margin, the shipped seed's) or seed_mean (the mean of the declared seeds' per-seed margins,
+seeds.per_seed[].margin). Any other key or statistic is refused by check-declaration, so a declared statistic can
+never be silently ignored. Under seed_mean ONLY, metrics gains margin_statistic ("seed_mean") and shipped_seed_margin
+(the report's top-level margin); the ece clause, the gate, the pack and every other clause are untouched. If the
+report's per-seed rows are not exactly the declared seeds with a finite margin each, the margin stays null, its band
+clause is false and a `report-malformed: per-seed margins` reason is listed.
+
 stdlib only.
 """
 
@@ -55,6 +64,8 @@ MUST_KEYS = ("deploy_eligible", "device_prefix", "recipe_id", "inputs_sha256", "
 REQUIRED_INPUTS = ("task_json", "train_jsonl", "eval_jsonl")
 BAND_KEYS = ("margin", "ece_post")
 RETRIABLE = ("in-band-gate-fail", "waived")
+JUDGING_STATS = ("shipped_seed", "seed_mean")
+JUDGING_KEYS = ("margin_statistic", "note")
 WAIVER_RULES = ("inconclusive", "counts")
 CLASSES = ("pass", "waived", "in-band-gate-fail", "defect")
 SHA_RE = re.compile(r"[0-9a-f]{64}")
@@ -182,6 +193,17 @@ def check_declaration_obj(d):
                 % (c, " and ".join(RETRIABLE)))
     if d.get("waiver_rule") not in WAIVER_RULES:
         bad("waiver_rule %r is not one of %s" % (d.get("waiver_rule"), ", ".join(WAIVER_RULES)))
+    if "judging" in d:
+        j = d["judging"]
+        if not isinstance(j, dict):
+            bad("judging must be an object")
+        for k in j:
+            if k not in JUDGING_KEYS:
+                bad("judging carries the unknown key %r (it would never be evaluated)" % k)
+        if j.get("margin_statistic") not in JUDGING_STATS:
+            bad("judging.margin_statistic %r is not one of %s" % (j.get("margin_statistic"), ", ".join(JUDGING_STATS)))
+        if "note" in j and not isinstance(j["note"], str):
+            bad("judging.note must be a string")
     return d
 
 
@@ -217,6 +239,9 @@ def evaluate_run(decl, run_dir, attempt):
     clause = {k: False for k in MUST_KEYS}
     bclause = {k: False for k in BAND_KEYS}
     metrics = {"margin": None, "ece_post": None, "gate_pass": None}
+    judging = decl.get("judging")
+    stat = judging["margin_statistic"] if isinstance(judging, dict) else "shipped_seed"
+    seed_mean = stat == "seed_mean"
     recorded = {"device_used": None, "recipe_id": None, "inputs_sha256": None, "seeds": None, "shipped_seed": None}
     waived = None
 
@@ -226,6 +251,21 @@ def evaluate_run(decl, run_dir, attempt):
         ece = ft.get("ece_post") if isinstance(ft, dict) else None
         gate_pass = report.get("pass")
         metrics["margin"] = margin if is_num(margin) else None
+        if seed_mean:
+            metrics["margin_statistic"] = "seed_mean"
+            metrics["shipped_seed_margin"] = metrics["margin"]
+            metrics["margin"] = None
+            sdm = report.get("seeds")
+            rows = sdm.get("per_seed") if isinstance(sdm, dict) else None
+            ms = None
+            if (isinstance(rows, list) and all(isinstance(r, dict) and is_int(r.get("seed")) for r in rows)
+                    and sorted(r["seed"] for r in rows) == sorted(must["seeds"])
+                    and all(is_num(r.get("margin")) for r in rows)):
+                ms = [r["margin"] for r in rows]
+            if ms is None:
+                reasons.append("report-malformed: per-seed margins are not exactly the declared seeds with a finite margin each")
+            else:
+                metrics["margin"] = math.fsum(ms) / len(ms)
         metrics["ece_post"] = ece if is_num(ece) else None
         if isinstance(gate_pass, bool):
             metrics["gate_pass"] = gate_pass
@@ -814,6 +854,68 @@ def selftest():
         os.symlink(os.path.join(lk, "verdict-real.json"), os.path.join(lk, "verdict.json"))
         r = ev(lk)
         case("eval-missing-file: a symlinked input is never followed", r["class"] == "defect" and any(x.startswith("missing-file") for x in r["defect_reasons"]))
+
+        # --- judging (plan 15-11): the declared margin statistic -------------------------------------------
+        def sm_decl(stat="seed_mean"):
+            return decl_with(lambda d: d.__setitem__("judging", {"margin_statistic": stat, "note": "selftest"}))
+
+        def sm_report(shipped, per):
+            r = make_report()
+            r["margin"] = shipped
+            for row, m in zip(r["seeds"]["per_seed"], per):
+                row["margin"] = m
+            return r
+
+        dmean = sm_decl()
+        r0 = ev(make_run())
+        case("judging-default: a declaration with no judging key keeps exactly the three metrics keys",
+             sorted(r0["metrics"]) == ["ece_post", "gate_pass", "margin"] and r0["class"] == "pass", str(sorted(r0["metrics"])))
+        r1 = ev(make_run(), 1, sm_decl("shipped_seed"))
+        case("judging-default: an explicit shipped_seed evaluates byte for byte as no judging key",
+             json.dumps(r1, sort_keys=True) == json.dumps(r0, sort_keys=True))
+        rep = sm_report(0.05, [0.12, 0.15, 0.18])
+        r = ev(make_run(report=rep), 1, dmean)
+        case("judging-seed-mean: shipped margin below the floor but the mean inside it passes (the Phase 15 shape)",
+             r["class"] == "pass" and r["band"]["margin"] is True and r["verdict_if_final"] == "reproduced", str(r["defect_reasons"]))
+        r = ev(make_run(report=rep), 1, decl)
+        case("judging-seed-mean: the same run under the default statistic is a defect (shipped margin 0.05 out of band)",
+             r["class"] == "defect" and r["band"]["margin"] is False)
+        rep = sm_report(0.17, [0.05, 0.06, 0.07])
+        r = ev(make_run(report=rep), 1, dmean)
+        case("judging-seed-mean: the mean below the floor is a defect although the shipped margin is inside",
+             r["class"] == "defect" and r["band"]["margin"] is False and any(x.startswith("out-of-band: margin") for x in r["defect_reasons"]))
+        per = [0.11, 0.2, 0.29]
+        r = ev(make_run(report=sm_report(0.2, per)), 1, dmean)
+        case("judging-seed-mean: the judged margin is exactly fsum(per-seed margins) / 3",
+             r["metrics"]["margin"] == math.fsum(per) / 3 and r["metrics"]["margin_statistic"] == "seed_mean"
+             and r["metrics"]["shipped_seed_margin"] == 0.2)
+        case("judging-seed-mean: margin_statistic and shipped_seed_margin appear only under seed_mean",
+             "margin_statistic" not in ev(make_run(), 1, sm_decl("shipped_seed"))["metrics"]
+             and "shipped_seed_margin" not in r0["metrics"])
+        rep = sm_report(0.2, [0.2, 0.2, 0.2])
+        rep["seeds"]["per_seed"][2]["seed"] = 99
+        r = ev(make_run(report=rep), 1, dmean)
+        case("judging-malformed: per-seed rows that are not the declared seeds -> defect, margin null, band false",
+             r["class"] == "defect" and r["metrics"]["margin"] is None and r["band"]["margin"] is False
+             and any(x.startswith("report-malformed: per-seed margins") for x in r["defect_reasons"]))
+        rep = sm_report(0.2, [0.2, 0.2, 0.2])
+        rep["seeds"]["per_seed"][1].pop("margin")
+        r = ev(make_run(report=rep), 1, dmean)
+        case("judging-malformed: a per-seed row without a margin -> defect, margin null",
+             r["class"] == "defect" and r["metrics"]["margin"] is None)
+        r = refused(sm_decl("median"))
+        case("judging-refused: an unknown statistic is refused, naming it", bool(r) and "median" in r, str(r))
+        r = refused(decl_with(lambda d: d.__setitem__("judging", {"margin_statistic": "seed_mean", "weight": 2})))
+        case("judging-refused: an extra key inside judging is refused", bool(r) and "weight" in r, str(r))
+        r = refused(decl_with(lambda d: d.__setitem__("judging", "seed_mean")))
+        case("judging-refused: a judging value that is not an object is refused", bool(r) and "object" in r, str(r))
+        r = refused(decl_with(lambda d: d.__setitem__("judging", {})))
+        case("judging-refused: an empty judging object is refused (no statistic named)", bool(r), str(r))
+        mpath = os.path.join(work, "decl-mean.json")
+        write(mpath, dmean)
+        rc, o, e = cli(["check-declaration", mpath])
+        case("judging-check: check-declaration prints DECLARATION OK for a seed_mean declaration",
+             rc == 0 and o == ["DECLARATION OK"] and e == [])
 
         # --- purity ---------------------------------------------------------------------------------------
         import ast
