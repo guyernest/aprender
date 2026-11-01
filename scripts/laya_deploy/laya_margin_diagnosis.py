@@ -17,6 +17,7 @@ Exit codes: 0 ok, 1 selftest failure, 2 refusal printed as exactly one `REFUSED 
 stdlib only. This file grows across plan 15-09 tasks; each section says which task added it.
 """
 
+import datetime
 import hashlib
 import itertools
 import json
@@ -892,6 +893,28 @@ def brief_facts(d, fx):
     f.append("independent re-draw: two misses in a row under the declared rule have probability %s" % p3(r["p_both_miss_if_independent"]))
     f.append("best epoch per seed: " + "; ".join("%s %s" % (rid, d["epochs_lever"]["best_epochs"][rid]) for rid in RUN_IDS))
     f.append("recommended: %s" % d["recommended"]["option"])
+    f.append("the floor sits %s sd below the CUDA mean" % f4(c["mean_minus_floor_in_sd"]))
+    sel = d["selection"]["by_run"]
+    f.append("the shipped seed is the lowest-margin seed of its run: " + ", ".join("%s %s" % (rid, "yes" if sel[rid]["shipped_is_lowest_margin"] else "no") for rid in RUN_IDS))
+    f.append("gate (shipped ECE at most %s) passes with probability %s under every rule; declared criterion: defect probability %s, in-band gate fail %s"
+             % (f4(GATE_MAX_ECE), p3(r["declared"]["p_gate"]), p3(r["declared"]["p_defect"]), p3(r["declared"]["p_in_band_gate_fail"])))
+    f.append("post hoc view of the consumed runs (exploratory, sets nothing): p14 mean margin %s, p15 mean margin %s"
+             % (f4(d["rejudge"]["consumed_run_mean_margins"]["p14"]), f4(d["rejudge"]["consumed_run_mean_margins"]["p15"])))
+    for oid in OPTION_IDS:
+        o = d["options"][oid]
+        if not o["paid_run"]:
+            f.append("option %s: no paid run, supersedes none, SC4 stays unmet" % oid)
+            continue
+        f.append("option %s: judging %s, margin band [%s, %s], ece band [%s, %s], attempt cap %d, retry classes %s, supersedes %s, "
+                 "p_pass %s, within cap %s, leave-one-out %s to %s"
+                 % (oid, o["judging"], f4(o["margin_band"][0]), f4(o["margin_band"][1]), f4(o["ece_band"][0]), f4(o["ece_band"][1]),
+                    o["attempt_cap"], ", ".join(o["retry_classes"]) or "none", ", ".join(o["supersedes"]) or "none",
+                    p3(o["p_pass"]), p3(o["within_cap"]), p3(o["loo_min"]), p3(o["loo_max"])))
+        f.append("option %s claim scope: %s" % (oid, o["claim_scope"]))
+    po = d["options"]["redraw"]
+    f.append("each paid option: run name %s, dataset prefix %s, epochs %d, recipe %s, seeds %s, device %s, pack image %s; %s"
+             % (po["run_name"], po["dataset_prefix"], po["epochs"], po["recipe_id"], d["options_common"]["seeds"],
+                d["options_common"]["device"], d["options_common"]["pack_image"], po["cost_report_only"]))
     rows = {(x["run"], x["seed"]): x for x in d["recompute"]["seed_runs"]}
     for rid in RUN_IDS:
         for s in SEEDS:
@@ -958,6 +981,190 @@ def cmd_check_diagnosis(opts):
     text = read_bytes(opts["--diagnosis"], "diagnosis").decode("utf-8")
     d = check_diagnosis_obj(text, fx, raw, make_reader(REPO))
     print("DIAGNOSIS OK class=%s recommended=%s" % (d["class"]["name"], d["recommended"]["option"]))
+    return 0
+
+
+# ---- the owner's brief, reply and disposition (plan 15-09 task 3) ------------------------------------------------------
+#
+# Nothing here asks for, relays or infers an approval. The owner's reply is written by the orchestrator (plan 15-10);
+# these functions only VALIDATE its fields and derive the disposition from them. No function judges a substring of
+# owner_reply_verbatim: a literal reply such as `go` is judged on its option and run_go fields.
+
+BRIEF_HEADINGS = ("## Question", "## The class", "## Evidence", "## What the epochs lever did", "## Options",
+                  "## Recommendation", "## Safeguards", "## What each reply authorizes", "## Limits of the claim",
+                  "## Reply format")
+REPLY_SCHEMA = "laya-gap-owner-reply-v1"
+DISPOSITION_SCHEMA = "laya-gap-disposition-v1"
+REPLY_KEYS = ("schema", "recorded_by", "recorded_at", "owner_reply_verbatim", "option", "run_go", "supersedes", "brief_sha256")
+FORBIDDEN_KEYS = ("overrides", "waiver")
+STOP_ACCEPT_STATE = ("SC4 stays unmet by the owner's decision; the training server stays untrusted; this is not an override")
+PAID_STATE = ("SC4 stays unmet until a NEW run under a declaration committed before it meets its declared band; the training "
+              "server stays untrusted; no waiver and no override applies")
+
+
+def _diag_options(diag):
+    if not isinstance(diag, dict) or diag.get("schema") != DIAGNOSIS_SCHEMA:
+        raise Refused("diagnosis", "SCHEMA the diagnosis schema is not %r" % DIAGNOSIS_SCHEMA)
+    opts = diag.get("options")
+    if not isinstance(opts, dict) or sorted(opts) != sorted(OPTION_IDS):
+        raise Refused("diagnosis", "COUNT the diagnosis does not carry exactly the five option ids")
+    return opts
+
+
+def check_brief_text(text, diag):
+    """Every brief_facts string verbatim, the ten headings once and in order, all five option ids."""
+    _diag_options(diag)
+    facts = diag.get("brief_facts")
+    if not isinstance(facts, list) or not facts or not all(isinstance(f, str) and f and "\n" not in f for f in facts):
+        raise Refused("brief", "FACTS the diagnosis brief_facts is not a non-empty list of single-line strings")
+    for f in facts:
+        if f not in text:
+            raise Refused("brief", "FACT missing from the brief: %s" % f[:100])
+    pos = []
+    for h in BRIEF_HEADINGS:
+        if text.count("\n" + h + "\n") + (1 if text.startswith(h + "\n") else 0) != 1:
+            raise Refused("brief", "HEADING %r must appear exactly once as its own line" % h)
+        pos.append(text.index(h + "\n"))
+    if pos != sorted(pos):
+        raise Refused("brief", "HEADING order: the ten headings are not in the required order")
+    for o in OPTION_IDS:
+        if o not in text:
+            raise Refused("brief", "OPTION %s is not named in the brief" % o)
+    return len(facts)
+
+
+def cmd_check_brief(opts):
+    text = read_bytes(opts["--brief"], "brief").decode("utf-8")
+    diag = read_json(opts["--diagnosis"], "brief")
+    n = check_brief_text(text, diag)
+    print("BRIEF OK facts=%d options=%d" % (n, len(OPTION_IDS)))
+    return 0
+
+
+def check_reply_obj(reply, diag, brief_sha256=None):
+    """Validate the orchestrator-recorded owner reply by its FIELDS. brief_sha256=None skips only the digest comparison
+    (write-disposition has no brief; check-reply always has one)."""
+    opts = _diag_options(diag)
+    if not isinstance(reply, dict):
+        raise Refused("reply", "SHAPE the reply is not a JSON object")
+    for k in reply:
+        if k not in REPLY_KEYS:
+            raise Refused("reply", "KEY the reply carries the unknown key %r" % k)
+    for k in REPLY_KEYS:
+        if k not in reply:
+            raise Refused("reply", "KEY the reply lacks %r" % k)
+    if reply["schema"] != REPLY_SCHEMA:
+        raise Refused("reply", "SCHEMA the reply schema is not %r" % REPLY_SCHEMA)
+    if reply["recorded_by"] != "orchestrator":
+        raise Refused("reply", "RECORDED-BY must be exactly 'orchestrator', never a relayed approval")
+    ts = reply["recorded_at"]
+    try:
+        if not isinstance(ts, str) or not ts.endswith("Z"):
+            raise ValueError
+        datetime.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        raise Refused("reply", "RECORDED-AT must be an ISO 8601 UTC string like 2026-11-01T05:36:02Z")
+    if not isinstance(reply["owner_reply_verbatim"], str) or not reply["owner_reply_verbatim"].strip():
+        raise Refused("reply", "VERBATIM owner_reply_verbatim must be a non-empty string")
+    opt = reply["option"]
+    if not isinstance(opt, str) or opt not in OPTION_IDS:
+        raise Refused("reply", "OPTION %r is not one of %s" % (opt, ", ".join(OPTION_IDS)))
+    paid = opts[opt]["paid_run"]
+    go = reply["run_go"]
+    if paid and not isinstance(go, bool):
+        raise Refused("reply", "RUN-GO must be a boolean for the paid option %s" % opt)
+    if not paid and go is not None:
+        raise Refused("reply", "RUN-GO must be null for stop-accept")
+    if reply["supersedes"] != opts[opt]["supersedes"]:
+        raise Refused("reply", "SUPERSEDES %r differs from the option's %r" % (reply["supersedes"], opts[opt]["supersedes"]))
+    if brief_sha256 is not None and reply["brief_sha256"] != brief_sha256:
+        raise Refused("reply", "BRIEF-DIGEST brief_sha256 is not the sha256 of the brief file")
+    return opt, go
+
+
+def cmd_check_reply(opts):
+    reply = read_json(opts["--reply"], "reply")
+    diag = read_json(opts["--diagnosis"], "reply")
+    brief_sha = sha256_hex(read_bytes(opts["--brief"], "reply"))
+    opt, go = check_reply_obj(reply, diag, brief_sha)
+    print("REPLY OK option=%s run_go=%s" % (opt, "null" if go is None else ("true" if go else "false")))
+    return 0
+
+
+def build_disposition(reply, diag):
+    opts = _diag_options(diag)
+    opt, go = check_reply_obj(reply, diag, None)
+    o = opts[opt]
+    sel = diag["selection"]["by_run"]
+    return {"schema": DISPOSITION_SCHEMA, "gap": "SC4", "option": opt, "paid_run_planned": o["paid_run"], "run_go": go,
+            "supersedes": o["supersedes"], "rule": None if not o["paid_run"] else o,
+            "band_before": {"margin": [FLOOR, CEILING], "ece_post": [ECE_LO, ECE_HI]},
+            "class": diag["class"]["name"],
+            "consumed_attempts": [
+                {"phase": "14", "attempt": 1, "run": "p14", "shipped_seed": sel["p14"]["shipped_seed"],
+                 "shipped_margin": sel["p14"]["shipped_margin"], "rejudged_for_trust": False},
+                {"phase": "15", "attempt": 1, "run": "p15", "shipped_seed": sel["p15"]["shipped_seed"],
+                 "shipped_margin": sel["p15"]["shipped_margin"], "rejudged_for_trust": False}],
+            "next_trusted": False, "trust_basis": "none", "declaration_pending": bool(o["paid_run"]),
+            "phase_state": PAID_STATE if o["paid_run"] else STOP_ACCEPT_STATE,
+            "reply_brief_sha256": reply["brief_sha256"]}
+
+
+def _has_forbidden_key(o):
+    if isinstance(o, dict):
+        for k, v in o.items():
+            if k in FORBIDDEN_KEYS or _has_forbidden_key(v):
+                return True
+    elif isinstance(o, list):
+        return any(_has_forbidden_key(v) for v in o)
+    return False
+
+
+def check_disposition_obj(disp, reply, diag):
+    opts = _diag_options(diag)
+    if not isinstance(disp, dict) or disp.get("schema") != DISPOSITION_SCHEMA:
+        raise Refused("disposition", "SCHEMA the disposition schema is not %r" % DISPOSITION_SCHEMA)
+    if disp.get("next_trusted") is not False:
+        raise Refused("disposition", "TRUST next_trusted must be exactly false")
+    if disp.get("trust_basis") != "none":
+        raise Refused("disposition", "TRUST trust_basis must be none")
+    att = disp.get("consumed_attempts")
+    if not isinstance(att, list) or len(att) != 2 or not all(isinstance(a, dict) and a.get("rejudged_for_trust") is False for a in att):
+        raise Refused("disposition", "REJUDGE two consumed attempts, each with rejudged_for_trust exactly false")
+    if _has_forbidden_key(disp):
+        raise Refused("disposition", "OVERRIDE a key named overrides or waiver exists (D-02)")
+    opt, go = check_reply_obj(reply, diag, None)
+    if disp.get("option") != opt:
+        raise Refused("disposition", "OPTION %r differs from the reply's %r" % (disp.get("option"), opt))
+    if disp.get("supersedes") != opts[opt]["supersedes"]:
+        raise Refused("disposition", "SUPERSEDES differs from the option's")
+    want_rule = opts[opt] if opts[opt]["paid_run"] else None
+    if disp.get("rule") != want_rule:
+        raise Refused("disposition", "RULE differs from the option's block")
+    if disp.get("run_go") != go or disp.get("paid_run_planned") != opts[opt]["paid_run"]:
+        raise Refused("disposition", "RUN-GO or paid_run_planned differs from the reply's and the option's")
+    if disp.get("declaration_pending") is not bool(opts[opt]["paid_run"]):
+        raise Refused("disposition", "DECLARATION declaration_pending must be true exactly for a paid option")
+    if disp.get("class") != diag["class"]["name"] or disp.get("reply_brief_sha256") != reply["brief_sha256"]:
+        raise Refused("disposition", "CLASS or reply_brief_sha256 differs from the diagnosis and the reply")
+    return opt
+
+
+def cmd_write_disposition(opts):
+    reply = read_json(opts["--reply"], "disposition")
+    diag = read_json(opts["--diagnosis"], "disposition")
+    disp = build_disposition(reply, diag)
+    write_text(opts["--out"], dumps(disp))
+    print("DISPOSITION WRITTEN option=%s next_trusted=false" % disp["option"])
+    return 0
+
+
+def cmd_check_disposition(opts):
+    disp = read_json(opts["--disposition"], "disposition")
+    reply = read_json(opts["--reply"], "disposition")
+    diag = read_json(opts["--diagnosis"], "disposition")
+    opt = check_disposition_obj(disp, reply, diag)
+    print("DISPOSITION OK option=%s next_trusted=false" % opt)
     return 0
 
 
@@ -1273,7 +1480,109 @@ def selftest_analyze(c):
     c.refused("analyze: gate thresholds that differ from RULE_SPEC are refused",
               lambda: analyze_obj(fx2, dumps(fx2).encode("utf-8"), synth_reader(ev2), B=40), "thresholds")
 
-SELFTEST_SECTIONS = [selftest_inputs, selftest_rule, selftest_analyze]
+def _good_reply(diag, opt, brief_sha, go=None):
+    paid = diag["options"][opt]["paid_run"]
+    return {"schema": REPLY_SCHEMA, "recorded_by": "orchestrator", "recorded_at": "2026-11-01T06:00:00Z",
+            "owner_reply_verbatim": "%s %s" % (opt, "run-hold" if paid else ""), "option": opt,
+            "run_go": (False if go is None else go) if paid else None,
+            "supersedes": diag["options"][opt]["supersedes"], "brief_sha256": brief_sha}
+
+
+def selftest_decision(c):
+    """Task 3 cases: the brief check, the reply check, the disposition and its refusals."""
+    fx, evidence = synth_fixture()
+    raw = dumps(fx).encode("utf-8")
+    diag = analyze_obj(fx, raw, synth_reader(evidence), B=40)
+    brief = "\n\n".join(h + "\n\n" + "body" for h in BRIEF_HEADINGS) + "\n\n" + "\n".join(diag["brief_facts"]) + "\n" + " ".join(OPTION_IDS) + "\n"
+    brief_sha = sha256_hex(brief.encode("utf-8"))
+    try:
+        n = check_brief_text(brief, diag)
+        c.check("check-brief: a brief containing every fact, the ten headings and the five ids is accepted", n == len(diag["brief_facts"]))
+    except Refused as ex:
+        c.check("check-brief: a brief containing every fact, the ten headings and the five ids is accepted", False, str(ex))
+    c.refused("check-brief: a removed fact is refused", lambda: check_brief_text(brief.replace(diag["brief_facts"][2], ""), diag), "FACT")
+    digit_fact = diag["brief_facts"][2]
+    changed = digit_fact.replace(digit_fact[-1], "9" if digit_fact[-1] != "9" else "8")
+    c.refused("check-brief: one changed digit is refused", lambda: check_brief_text(brief.replace(digit_fact, changed), diag), "FACT")
+    c.refused("check-brief: a missing heading is refused", lambda: check_brief_text(brief.replace("## Safeguards\n", "## Safe\n"), diag), "HEADING")
+    swapped = brief.replace("## Options\n", "## TMP\n").replace("## Evidence\n", "## Options\n").replace("## TMP\n", "## Evidence\n")
+    c.refused("check-brief: headings out of order are refused", lambda: check_brief_text(swapped, diag), "HEADING order")
+    c.refused("check-brief: a missing option id is refused",
+              lambda: check_brief_text(brief.replace("floor-rule", "floorrule"), dict(diag, brief_facts=[f for f in diag["brief_facts"] if "floor-rule" not in f])), "OPTION")
+    # check-reply: each of the five options, then the red side.
+    for opt in OPTION_IDS:
+        try:
+            got = check_reply_obj(_good_reply(diag, opt, brief_sha), diag, brief_sha)
+            c.check("check-reply: a well-formed reply for %s is accepted" % opt, got[0] == opt)
+        except Refused as ex:
+            c.check("check-reply: a well-formed reply for %s is accepted" % opt, False, str(ex))
+
+    def rep(**kw):
+        r = _good_reply(diag, "mean-rule", brief_sha)
+        r.update(kw)
+        return r
+
+    c.refused("check-reply: recorded_by other than orchestrator is refused", lambda: check_reply_obj(rep(recorded_by="executor"), diag, brief_sha), "RECORDED-BY")
+    c.refused("check-reply: an option outside the five is refused", lambda: check_reply_obj(rep(option="epochs-4"), diag, brief_sha), "OPTION")
+    c.refused("check-reply: a brief digest that is not the brief's is refused", lambda: check_reply_obj(rep(brief_sha256="0" * 64), diag, brief_sha), "BRIEF-DIGEST")
+    c.refused("check-reply: a supersedes list that differs from the option's is refused", lambda: check_reply_obj(rep(supersedes=[]), diag, brief_sha), "SUPERSEDES")
+    c.refused("check-reply: run_go null on a paid option is refused", lambda: check_reply_obj(rep(run_go=None), diag, brief_sha), "RUN-GO")
+    c.refused("check-reply: run_go as the string 'true' is refused", lambda: check_reply_obj(rep(run_go="true"), diag, brief_sha), "RUN-GO")
+    c.refused("check-reply: run_go non-null on stop-accept is refused",
+              lambda: check_reply_obj(dict(_good_reply(diag, "stop-accept", brief_sha), run_go=False), diag, brief_sha), "RUN-GO")
+    c.refused("check-reply: a timestamp that is not ISO 8601 UTC is refused", lambda: check_reply_obj(rep(recorded_at="yesterday"), diag, brief_sha), "RECORDED-AT")
+    c.refused("check-reply: an empty verbatim reply is refused", lambda: check_reply_obj(rep(owner_reply_verbatim="  "), diag, brief_sha), "VERBATIM")
+    c.refused("check-reply: an unknown key such as overrides is refused", lambda: check_reply_obj(rep(overrides={}), diag, brief_sha), "KEY")
+    # The reply is judged on its fields, never on a substring of the verbatim text (the lesson of 15-RUN-GO.json).
+    go_reply = rep(owner_reply_verbatim="go", run_go=True)
+    hold_with_go_word = rep(owner_reply_verbatim="mean-rule run-go", run_go=False)
+    c.check("check-reply: the literal reply 'go' is judged on option and run_go, not on its text",
+            check_reply_obj(go_reply, diag, brief_sha) == ("mean-rule", True)
+            and build_disposition(go_reply, diag)["run_go"] is True)
+    c.check("check-reply: a verbatim text containing 'run-go' with run_go false stays false in the disposition",
+            build_disposition(hold_with_go_word, diag)["run_go"] is False)
+    c.check("check-reply: a verbatim text naming another option does not change the recorded option",
+            build_disposition(rep(owner_reply_verbatim="stop-accept"), diag)["option"] == "mean-rule")
+    # write-disposition and check-disposition.
+    for opt in OPTION_IDS:
+        r = _good_reply(diag, opt, brief_sha)
+        try:
+            d = build_disposition(r, diag)
+            check_disposition_obj(d, r, diag)
+            ok = (d["next_trusted"] is False and d["trust_basis"] == "none" and d["gap"] == "SC4"
+                  and d["declaration_pending"] is diag["options"][opt]["paid_run"] and len(d["consumed_attempts"]) == 2)
+            c.check("write-disposition: %s is derived from the reply and the diagnosis and check-disposition accepts it" % opt, ok)
+        except Refused as ex:
+            c.check("write-disposition: %s is derived from the reply and the diagnosis and check-disposition accepts it" % opt, False, str(ex))
+    r0 = _good_reply(diag, "mean-rule", brief_sha)
+    d0 = build_disposition(r0, diag)
+    c.check("write-disposition: stop-accept says SC4 stays unmet and is not an override",
+            "this is not an override" in build_disposition(_good_reply(diag, "stop-accept", brief_sha), diag)["phase_state"])
+
+    def disp_with(fn):
+        m = _clone(d0)
+        fn(m)
+        return m
+
+    c.refused("check-disposition: next_trusted true is refused", lambda: check_disposition_obj(disp_with(lambda m: m.update({"next_trusted": True})), r0, diag), "TRUST")
+    c.refused("check-disposition: next_trusted absent is refused", lambda: check_disposition_obj(disp_with(lambda m: m.pop("next_trusted")), r0, diag), "TRUST")
+    c.refused("check-disposition: trust_basis other than none is refused", lambda: check_disposition_obj(disp_with(lambda m: m.update({"trust_basis": "mean-view"})), r0, diag), "TRUST")
+    c.refused("check-disposition: a consumed attempt re-judged for trust is refused",
+              lambda: check_disposition_obj(disp_with(lambda m: m["consumed_attempts"][1].update({"rejudged_for_trust": True})), r0, diag), "REJUDGE")
+    c.refused("check-disposition: an overrides key at depth is refused",
+              lambda: check_disposition_obj(disp_with(lambda m: m["rule"].update({"overrides": {}})), r0, diag), "OVERRIDE")
+    c.refused("check-disposition: a waiver key is refused", lambda: check_disposition_obj(disp_with(lambda m: m.update({"waiver": "x"})), r0, diag), "OVERRIDE")
+    c.refused("check-disposition: an option that differs from the reply's is refused",
+              lambda: check_disposition_obj(disp_with(lambda m: m.update({"option": "redraw"})), r0, diag), "OPTION")
+    c.refused("check-disposition: a rule that differs from the option's block is refused",
+              lambda: check_disposition_obj(disp_with(lambda m: m["rule"].update({"p_pass": 0.99})), r0, diag), "RULE")
+    c.refused("check-disposition: a supersedes list that differs is refused",
+              lambda: check_disposition_obj(disp_with(lambda m: m.update({"supersedes": []})), r0, diag), "SUPERSEDES")
+    c.refused("check-disposition: a flipped run_go is refused",
+              lambda: check_disposition_obj(disp_with(lambda m: m.update({"run_go": True})), r0, diag), "RUN-GO")
+
+
+SELFTEST_SECTIONS = [selftest_inputs, selftest_rule, selftest_analyze, selftest_decision]
 
 
 def selftest():
@@ -1294,6 +1603,10 @@ COMMANDS = {
     "verify-inputs": (cmd_verify_inputs, {"--inputs": True}),
     "analyze": (cmd_analyze, {"--inputs": True, "--out": True}),
     "check-diagnosis": (cmd_check_diagnosis, {"--diagnosis": True, "--inputs": True}),
+    "check-brief": (cmd_check_brief, {"--brief": True, "--diagnosis": True}),
+    "check-reply": (cmd_check_reply, {"--reply": True, "--brief": True, "--diagnosis": True}),
+    "write-disposition": (cmd_write_disposition, {"--reply": True, "--diagnosis": True, "--out": True}),
+    "check-disposition": (cmd_check_disposition, {"--disposition": True, "--reply": True, "--diagnosis": True}),
 }
 
 
