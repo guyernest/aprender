@@ -1,0 +1,80 @@
+{
+  "schema": "laya-control-declaration-draft-v1",
+  "status": "DRAFT carried into Phase 16 planning. Band and time estimate accepted by the owner 2026-11-01; not committed as a declaration and not authorized for a paid run.",
+  "purpose": "Pipeline-equivalence control: does the SageMaker CUDA pipeline reproduce the Mac (MPS) Phase 10 antisemitism-v1 result on identical inputs and recipe? Separates 'device/pipeline' from 'small noisy dataset' in the motivation-v1 misses.",
+  "reference": {
+    "source": ".planning/phases/10-antisemitism-v1-decide-server-for-experiment-coach/10-GATE-RUN-EVIDENCE.json",
+    "device": "mps:0",
+    "epochs": 4,
+    "recipe_id": "d70c3f3da0daae129f3ee1ce928eb21a0ef71a83a6f09dc18e0621f3cc8adcbc",
+    "per_seed_margin": {
+      "13": 0.23577475716083562,
+      "17": 0.24581950308743183,
+      "23": 0.23603720989749355
+    },
+    "three_seed_mean_margin": 0.2392,
+    "per_seed_ece_post": {
+      "13": 0.011745857430937867,
+      "17": 0.045630826195286335,
+      "23": 0.04236402879471284
+    },
+    "shipped_seed": 23,
+    "shipped_ece_post": 0.04236402879471284,
+    "clamp_hit_seeds": [
+      17
+    ]
+  },
+  "must": {
+    "device_prefix": "cuda",
+    "recipe_id": "d70c3f3da0daae129f3ee1ce928eb21a0ef71a83a6f09dc18e0621f3cc8adcbc",
+    "seeds": [
+      13,
+      17,
+      23
+    ],
+    "inputs_sha256": {
+      "task_json": "33fd8d7cd51b1b2864033ee313d30ae445e76120cc2b26e3849369c0602248e3",
+      "train_jsonl": "81a923d4b1b05bfd809e1c04534f714c2bc57c3d3a5e11e33c79fa44f7a79a9e",
+      "eval_jsonl": "f4a0cf7c2ea6d2ebce8580a82287410daa4106688d3e224e081a04fe141b38a8"
+    },
+    "gate_pass_unwaived": true,
+    "deploy_eligible": true
+  },
+  "band": {
+    "judged_statistic": "three-seed mean margin",
+    "margin_mean": "OWNER: proposed [0.209, 0.269] = reference mean 0.2392 +/- 0.030. Rationale: the reference seeds span 0.010 and the 2,129-row eval set puts sampling noise near 0.01; +/-0.030 is about three times either. Tighter bands give a sharper device test but fail more often by chance.",
+    "ece_post_shipped_seed": "gate bar only: <= 0.10 (reference 0.042). OWNER may add a lower bound; none proposed.",
+    "paired_report_only": "per-seed CUDA minus MPS margin and ECE, descriptive, never pass/fail (same seed gives different numbers across devices)."
+  },
+  "waiver_rule": "no waiver exists or is allowed for these inputs (pilot waiver motivation-v1-pilot-ece binds the motivation-v1 input hashes only); a gate FAIL is a miss.",
+  "retry": {
+    "attempt_cap": 1,
+    "retry_classes": [],
+    "rule": "as in the Phase 15 declaration: a run ending before any gate verdict is not the attempt and re-running needs a new owner approval."
+  },
+  "run": {
+    "name": "antisemitism-v1-cuda-ctl",
+    "dataset_prefix": "datasets/goldstandard-2024/",
+    "epochs": 4
+  },
+  "claim_scope": "Pipeline equivalence on THIS task only. It does not reproduce motivation-v1, does not set next_trusted for the Phase 14 server, and does not change D-16. Whether a pass redefines trust is a separate owner ruling.",
+  "sets_next_trusted": false,
+  "compute": {
+    "mps_reference": "wall 16,822 s; ~4,900 s per seed; 4.13 h three-seed training (s_per_step 1.47 on MPS)",
+    "cuda_estimate": "UNMEASURED. Scaling the motivation-v1 CUDA run (295 rows x 12 epochs = 3,540 row-epochs in 1,203 s) to 8,510 x 4 = 34,040 row-epochs gives ~3.2 h, but sequence lengths differ, so treat it as 2-6 h.",
+    "server_runtime_cap_s": 21600,
+    "risk": "a run over the 6 h cap ends as a timeout (pre-verdict, not an attempt) after the money is spent. The first step is a cheaper measurement, see next_steps."
+  },
+  "next_steps": [
+    "owner-run: stage the dataset (not staged today; datasets-dev.json lists only motivation-v1, tweet-stance-16, tweet-stance-64), then validate_dataset on it. Both are AWS calls.",
+    "optional measurement before the paid run: none exists that is free; the first paid minutes show s_per_step in the poll log, and the owner may cancel only by deciding to waste the attempt (D-16 says do not cancel).",
+    "owner sets the OWNER fields, then a plan commits the declaration alone before any paid run"
+  ],
+  "owner_decisions": {
+    "recorded_by": "orchestrator",
+    "recorded_on": "2026-11-01",
+    "margin_band": "[0.209, 0.269] accepted: 'Acceptable.'",
+    "cuda_time_estimate_2_to_6h_vs_6h_cap": "accepted: 'Acceptable.'",
+    "plan_request": "'Make it so.' (plan the phase; declaration committed alone before any paid run)"
+  }
+}

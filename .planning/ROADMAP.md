@@ -1166,3 +1166,13 @@ Plans:
 - [x] 15-12-PLAN.md — The owner-run attempt under the new declaration, evaluated; 15-GAP-RUN-EVIDENCE.json next_trusted (SC4) (wave 12)
 
 **Status: closed 2026-11-01 by owner decision, SC4 carried unmet.** SC1, SC2, SC3 and SC5 verified. SC4 (D-16) was not reproduced: the mean-rule attempt `motivation-v1-p15b` was consumed, class waived, verdict inconclusive, `next_trusted` false. The owner chose `accept-inconclusive` (`15-GAP-OWNER-ACCEPT.json`). This is not an override or a waiver (D-02): `15-VERIFICATION.md` stays `gaps_found`, and the Phase 14 training server stays untrusted until a new owner-approved declaration and paid run pass the gate unwaived.
+
+### Phase 16: Laya pipeline-equivalence control (antisemitism-v1, CUDA vs Mac)
+
+**Goal:** Show whether the SageMaker CUDA training pipeline reproduces the Mac (MPS) Phase 10 antisemitism-v1 result on identical inputs and recipe, separating "pipeline/device" from "small noisy dataset" in the motivation-v1 misses of Phases 14 and 15. One owner-run attempt, judged on the three-seed mean margin in the owner-approved band [0.209, 0.269] (Mac reference 0.2392 +/- 0.030) with the gate passing unwaived (shipped-seed ECE <= 0.10). Claim scope is pipeline equivalence on this task only: it does not reproduce motivation-v1, does not set `next_trusted` for the Phase 14 server and does not change D-16; whether a pass redefines trust is a separate owner ruling. Draft declaration: the Phase 16 context file (seeded from the session draft).
+**Requirements**: TBD
+**Depends on:** Phase 15
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 16 to break down)
