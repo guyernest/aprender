@@ -4,6 +4,9 @@
     python3 -I scripts/laya_deploy/laya_control.py snapshot-reference --evidence FILE --out FILE
     python3 -I scripts/laya_deploy/laya_control.py check-reference --fixture FILE --evidence FILE [--draft FILE]
     python3 -I scripts/laya_deploy/laya_control.py rehearse --declaration FILE --reference FILE [--json]
+    python3 -I scripts/laya_deploy/laya_control.py paired-report --reference FILE --run-dir DIR
+    python3 -I scripts/laya_deploy/laya_control.py check-stage --stage-out FILE --state FILE --declaration FILE [--prefix NAME]
+    python3 -I scripts/laya_deploy/laya_control.py check-validate --reply FILE --declaration FILE --evidence FILE [--prefix NAME]
     python3 -I scripts/laya_deploy/laya_control.py --selftest
 
 `snapshot-reference` copies the Phase 10 Mac (mps:0) per-seed numbers into a text-free fixture (numbers and hashes only).
@@ -11,6 +14,10 @@
 cross-checks the owner-accepted declaration draft. `rehearse` builds synthetic fetched CUDA runs from a declaration and
 judges each by the COMMITTED evaluator laya_repro_eval.py (a subprocess, never an import, never edited), so the
 declaration is shown to be both passable and failable before any paid step.
+
+`check-stage` and `check-validate` (plan 16-02) judge the owner's local stage and validate output against the declaration's
+three input digests and the evidence's preflight record; they print one fixed line, never a line of the owner's files.
+`--prefix NAME` is the declared dataset prefix, or it plus a single -b to -z (a dead prefix is never reused).
 
 No network, no AWS, no environment reads, no write outside --out and mktemp directories (the selftest and rehearse
 remove every directory they make). Exit codes: 0 ok, 1 selftest or rehearsal failure, 2 refusal printed as exactly one
@@ -21,6 +28,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -627,6 +635,211 @@ def json_rehearsal(decl_path, ref_path):
     return ok, "%d cases" % len(cases)
 
 
+# ---- check-stage and check-validate (plan 16-02) -----------------------------------------------------------------
+# Both judge OWNER-SUPPLIED files that hold target, token and bucket lines. The only text they ever print is a fixed
+# sentence, a count, a prefix name that passed the name rule, or eight hex digits of a digest the declaration names:
+# never a line of the file, never the text of an exception raised while parsing it.
+
+STAGE_FILES = ("task.json", "train.jsonl", "eval.jsonl")
+HASH_LINE = re.compile(r"  (task\.json|train\.jsonl|eval\.jsonl|shift\.jsonl) sha256 ([0-9a-f]{64})")
+EPOCHS_RANGE = [4, 12]                    # the server's epoch rule above 16 shots per class (validate.rs EpochRule lo, hi)
+RULE_NAME = re.compile(r"REFUSED ([a-z][a-z0-9_-]{0,39}):")
+
+
+def hash_line(line):
+    """(file name, digest) for one stager hash line, else None. Two leading spaces, lowercase 64-hex, nothing after."""
+    m = HASH_LINE.fullmatch(line)
+    return (m.group(1), m.group(2)) if m else None
+
+
+def owner_lines(path, rule):
+    """The lines of an owner file, split on LF only (a bare CR is not a line break), a trailing CR dropped."""
+    raw = read_bytes(path, rule)
+    return [x[:-1] if x.endswith("\r") else x for x in raw.decode("utf-8", errors="replace").split("\n")]
+
+
+def load_owner_json(raw, rule, what):
+    """parse_json_bytes without the parser's own message (a duplicate-key message would echo a key of the file)."""
+    try:
+        return json.loads(raw.decode("utf-8"), object_pairs_hook=_pairs, parse_constant=_const)
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        raise Refused(rule, "%s is not valid JSON (no duplicate keys, no NaN)" % what)
+
+
+def declared_inputs(decl, rule):
+    """(base prefix name, {file name: digest}, {input key: digest}) from a declaration."""
+    run = decl.get("run") if isinstance(decl, dict) else None
+    dp = run.get("dataset_prefix") if isinstance(run, dict) else None
+    segs = [s for s in dp.split("/") if s] if isinstance(dp, str) else []
+    if len(segs) != 2 or segs[0] != "datasets" or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,40}", segs[1]):
+        raise Refused(rule, "the declaration's run.dataset_prefix is not datasets/<name>/")
+    must = decl.get("must")
+    ins = must.get("inputs_sha256") if isinstance(must, dict) else None
+    want = {}
+    for key, fname in INPUT_KEYS:
+        if not isinstance(ins, dict) or not is_hex64(ins.get(key)):
+            raise Refused(rule, "the declaration's must.inputs_sha256 lacks a 64-character hex %s" % key)
+        want[fname] = ins[key]
+    return segs[1], want, {key: ins[key] for key, _ in INPUT_KEYS}
+
+
+def prefix_name(given, base, rule):
+    """NAME: the declared prefix segment, or that segment plus a single -b to -z. Anything else is refused unread."""
+    if given is None:
+        return base
+    if given == base or re.fullmatch(re.escape(base) + "-[b-z]", given):
+        return given
+    raise Refused(rule, "prefix is not the declared prefix or the declared prefix plus a single -b to -z")
+
+
+def check_stage(stage_out, state_path, decl_path, prefix=None):
+    """STAGE CHECK OK, or Refused stage-check. The stager's own output and record against the declaration's digests."""
+    rule = "stage-check"
+    decl = parse_json_bytes(read_bytes(decl_path, rule), rule, "the declaration")
+    base, want, _keys = declared_inputs(decl, rule)
+    name = prefix_name(prefix, base, rule)
+    lines = owner_lines(stage_out, rule)
+    if any(x.startswith("STAGE FAILED") for x in lines):
+        raise Refused(rule, "STAGE FAILED line in the stage output")
+    if lines.count("STAGE OK dataset %s" % name) != 1:
+        raise Refused(rule, "STAGE OK line missing, duplicated or for another prefix")
+    got = {}
+    n_hash = 0
+    for x in lines:
+        h = hash_line(x)
+        if h is not None:
+            n_hash += 1
+            got[h[0]] = h[1]
+    if n_hash != 3 or sorted(got) != sorted(STAGE_FILES):
+        raise Refused(rule, "hash lines are not exactly one each for task.json, train.jsonl and eval.jsonl")
+    for f in STAGE_FILES:
+        if got[f] != want[f]:
+            raise Refused(rule, "digest of %s in the stage output is not the declaration's" % f)
+    state = load_owner_json(read_bytes(state_path, rule), rule, "the state file")
+    ds = state.get("datasets") if isinstance(state, dict) else None
+    rec = ds.get(name) if isinstance(ds, dict) else None
+    if not isinstance(rec, dict):
+        raise Refused(rule, "state file does not record the prefix")
+    if rec.get("prefix") != "datasets/%s/" % name:
+        raise Refused(rule, "state record names another prefix")
+    if rec.get("files") != want:
+        raise Refused(rule, "state record's files are not exactly the declaration's three digests")
+    return "STAGE CHECK OK prefix=%s task=%s train=%s eval=%s" % (name, want["task.json"][:8], want["train.jsonl"][:8], want["eval.jsonl"][:8])
+
+
+def cmd_check_stage(opts, out):
+    out(check_stage(opts["--stage-out"], opts["--state"], opts["--declaration"], opts.get("--prefix")))
+    return 0
+
+
+def _recorded_validate(evid, name, base):
+    """The evidence must hold the owner command that asked the server about datasets/NAME/ (V, or Vb and Vc for a fallback)."""
+    rule = "validate-check"
+    cmds = evid.get("owner_commands") if isinstance(evid, dict) else None
+    ok = False
+    if isinstance(cmds, dict):
+        for k, v in cmds.items():
+            if not (isinstance(k, str) and k.startswith("V") and isinstance(v, str)):
+                continue
+            if not (v.startswith("! ") and "check-validate" in v and "datasets/%s/" % name in v):
+                continue
+            if name != base and not re.search(r"--prefix %s(?![A-Za-z0-9-])" % re.escape(name), v):
+                continue
+            ok = True
+    if not ok:
+        raise Refused(rule, "prefix has no recorded owner command (V, or Vb/Vc with --prefix) in the evidence")
+    st = evid.get("staging")
+    if st is not None and (not isinstance(st, dict) or st.get("prefix_used") != name):
+        raise Refused(rule, "prefix differs from the evidence's staging.prefix_used")
+
+
+def _server_rule(text):
+    """The rule name of the last 'REFUSED <rule>:' line in `text`, else None (the message after the colon is dropped)."""
+    found = None
+    for x in text.split("\n"):
+        m = RULE_NAME.match(x)
+        if m:
+            found = m.group(1)
+    return found
+
+
+def _content_text(res):
+    c = res.get("content") if isinstance(res, dict) else None
+    if isinstance(c, list) and c and isinstance(c[0], dict) and isinstance(c[0].get("text"), str):
+        return c[0]["text"]
+    return None
+
+
+def _need(ok, rule, what):
+    if not ok:
+        raise Refused(rule, what)
+
+
+def check_validate(reply_path, decl_path, evid_path, prefix=None):
+    """VALIDATE CHECK OK, or Refused validate-check. The server's own validate_dataset answer against the preflight record."""
+    rule = "validate-check"
+    decl = parse_json_bytes(read_bytes(decl_path, rule), rule, "the declaration")
+    base, want, keyed = declared_inputs(decl, rule)
+    name = prefix_name(prefix, base, rule)
+    evid = parse_json_bytes(read_bytes(evid_path, rule), rule, "the evidence")
+    _recorded_validate(evid, name, base)
+    pre = evid.get("preflight") if isinstance(evid, dict) else None
+    if not isinstance(pre, dict) or pre.get("inputs_sha256") != keyed:
+        raise Refused(rule, "the evidence's preflight record does not hold the declaration's digests")
+    lines = owner_lines(reply_path, rule)
+    cands = [x for x in lines if x.startswith("{")]
+    if not cands:
+        r = _server_rule("\n".join(lines))
+        raise Refused(rule, "server refused rule %s" % r if r else "reply holds no JSON answer line")
+    try:
+        ans = json.loads(cands[-1], object_pairs_hook=_pairs, parse_constant=_const)
+    except (ValueError, RecursionError):
+        raise Refused(rule, "reply's last JSON line is not valid JSON (no duplicate keys, no NaN)")
+    if not isinstance(ans, dict):
+        raise Refused(rule, "reply's last JSON line is not an object")
+    res = ans.get("result") if isinstance(ans.get("result"), dict) else None
+    if ans.get("ok") is not True or (res is not None and res.get("isError") is True):
+        txt = _content_text(res) if res is not None else None
+        r = _server_rule(txt) if txt else None
+        raise Refused(rule, "server refused rule %s" % r if r else "reply is not ok (ok false or isError)")
+    summ = None
+    txt = _content_text(res) if res is not None else None
+    if txt is not None:
+        r = _server_rule(txt)
+        if r:
+            raise Refused(rule, "server refused rule %s" % r)
+        summ = load_owner_json(txt.encode("utf-8"), rule, "the text content item")
+    elif res is not None and isinstance(res.get("structuredContent"), dict):
+        summ = res["structuredContent"]
+    else:
+        summ = ans
+    if not isinstance(summ, dict) or summ.get("valid") is not True:
+        raise Refused(rule, "reply's summary is not valid (valid is not true)")
+    need = lambda ok, what: _need(ok, rule, what)  # noqa: E731
+    need(summ.get("labels") == pre.get("labels") and isinstance(summ.get("labels"), list), "labels differ from the preflight record")
+    cc = summ.get("class_counts")
+    need(isinstance(cc, dict) and cc == pre.get("class_counts") and all(is_int(v) for v in cc.values()), "class_counts differ from the preflight record")
+    need(is_int(summ.get("shots_per_class")) and summ.get("shots_per_class") == pre.get("shots_per_class"), "shots_per_class differs from the preflight record")
+    rows = summ.get("rows")
+    pr = pre.get("rows")
+    need(isinstance(rows, dict) and isinstance(pr, dict) and rows.get("train") == pr.get("train") and rows.get("eval") == pr.get("eval")
+         and is_int(rows.get("train")) and is_int(rows.get("eval")) and rows.get("shift") is None and set(rows) <= {"train", "eval", "shift"},
+         "rows differ from the preflight record, or a shift row count is present")
+    need(summ.get("shift_present") is False, "shift_present is not false")
+    need(summ.get("epochs_required") is True and summ.get("epochs_range") == EPOCHS_RANGE and summ.get("epochs_fixed") is None,
+         "epochs rule is not 'required, range 4 to 12'")
+    need(summ.get("inputs_sha256") == want, "inputs_sha256 is not exactly the declaration's three digests")
+    dr = summ.get("deferred_rules")
+    need(isinstance(dr, list), "deferred_rules is not a list")
+    return "VALIDATE CHECK OK rows=%d/%d shots_per_class=%d labels=%s epochs_range=%d-%d inputs=match deferred_rules=%d prefix=%s" % (
+        rows["train"], rows["eval"], summ["shots_per_class"], ",".join(pre["labels"]), EPOCHS_RANGE[0], EPOCHS_RANGE[1], len(dr), name)
+
+
+def cmd_check_validate(opts, out):
+    out(check_validate(opts["--reply"], opts["--declaration"], opts["--evidence"], opts.get("--prefix")))
+    return 0
+
+
 # ---- the selftest ------------------------------------------------------------------------------------------------
 # RED FIRST (plan 16-01 Task 1): this table was written before any subcommand existed.
 
@@ -658,6 +871,26 @@ class Cases:
                 return (False, "crashed with %r" % (ex,))
             return (False, "was accepted")
         self.check(label, run)
+
+    def refused_with(self, label, fn, rule, word):
+        """Like refused, and the reason must start with `word` (one rule name, several distinct reasons)."""
+        def run():
+            try:
+                fn()
+            except Refused as ex:
+                return (ex.rule == rule and ex.reason.startswith(word), "refused with %s: %s" % (ex.rule, ex.reason[:90]))
+            except Exception as ex:
+                return (False, "crashed with %r" % (ex,))
+            return (False, "was accepted")
+        self.check(label, run)
+
+
+def _reason_of(fn):
+    try:
+        fn()
+    except Refused as ex:
+        return ex.reason
+    return None
 
 
 def _dumps(obj):
@@ -968,6 +1201,227 @@ def selftest():
         c.check("paired: the command prints exactly one JSON line",
                 lambda: (rc == 0 and len(o) == 1 and json.loads(o[0])["schema"] == "laya-control-paired-v1", str(e)))
 
+        # --- check-stage and check-validate (plan 16-02 Task 2) -------------------------------------------------
+        ck = os.path.join(work, "ck")
+        S_DIG = {"task.json": "33" * 32, "train.jsonl": "81" * 32, "eval.jsonl": "f4" * 32}
+        S_DECL = {"run": {"dataset_prefix": "datasets/goldstandard-2024/"},
+                  "must": {"inputs_sha256": {"task_json": S_DIG["task.json"], "train_jsonl": S_DIG["train.jsonl"], "eval_jsonl": S_DIG["eval.jsonl"]}}}
+        S_DPATH = os.path.join(ck, "decl.json")
+        _write(S_DPATH, _dumps(S_DECL))
+        FAKE = ("123456789012", "aprender-laya-train-dev-123456789012", "eyJhbGciOiJSUzI1NiJ9.fake.token", "abc123.execute-api.us-east-1.amazonaws.com")
+        NOISE = ["target: https://%s/mcp account %s" % (FAKE[3], FAKE[0]), "bucket %s token %s" % (FAKE[1], FAKE[2])]
+        n_files = {"n": 0}
+
+        def fresh(name):
+            n_files["n"] += 1
+            return os.path.join(ck, "%s-%d" % (name, n_files["n"]))
+
+        def stage_text(prefix="goldstandard-2024", digests=None, drop=(), extra=(), ok_lines=None, failed=False, tail=()):
+            dg = dict(S_DIG if digests is None else digests)
+            lines = list(NOISE)
+            for n_ in ("eval.jsonl", "task.json", "train.jsonl"):
+                if n_ not in drop:
+                    lines.append("  %s sha256 %s" % (n_, dg[n_]))
+            lines.extend(extra)
+            lines.extend(["STAGE OK dataset %s" % prefix] if ok_lines is None else ok_lines)
+            if failed:
+                lines.append("STAGE FAILED dataset UPLOAD")
+            lines.extend(tail)
+            return "\n".join(lines) + "\n"
+
+        def state_obj(prefix="goldstandard-2024", files=None, key=None):
+            return {"schema": "laya-trainer-datasets-v1", "env": "dev",
+                    "datasets": {key or prefix: {"prefix": "datasets/%s/" % prefix, "files": dict(S_DIG if files is None else files),
+                                                 "staged_at": "2026-11-01T18:00:00Z"}}}
+
+        def run_stage(text=None, state=None, prefix=None):
+            so, st = fresh("stage-out"), fresh("state")
+            _write(so, stage_text() if text is None else text)
+            _write(st, _dumps(state_obj() if state is None else state))
+            return check_stage(so, st, S_DPATH, prefix)
+
+        c.check("check-stage: the matching output and state record are accepted",
+                lambda: run_stage() == "STAGE CHECK OK prefix=goldstandard-2024 task=33333333 train=81818181 eval=f4f4f4f4")
+        c.refused_with("check-stage: no STAGE OK line is refused", lambda: run_stage(stage_text(ok_lines=[])), "stage-check", "STAGE OK")
+        c.refused_with("check-stage: a STAGE FAILED line is refused even beside a STAGE OK line", lambda: run_stage(stage_text(failed=True)),
+                       "stage-check", "STAGE FAILED")
+        c.refused_with("check-stage: the wrong prefix name on the STAGE OK line is refused",
+                       lambda: run_stage(stage_text(prefix="goldstandard-2024-b")), "stage-check", "STAGE OK")
+        for n_ in ("task.json", "train.jsonl", "eval.jsonl"):
+            bad_d = dict(S_DIG)
+            bad_d[n_] = bad_d[n_][:-1] + ("0" if bad_d[n_][-1] != "0" else "1")
+            c.refused_with("check-stage: one changed digit in the %s line is refused" % n_, lambda bad_d=bad_d: run_stage(stage_text(digests=bad_d)),
+                           "stage-check", "digest")
+        c.refused_with("check-stage: a missing file line is refused", lambda: run_stage(stage_text(drop=("train.jsonl",))), "stage-check", "hash lines")
+        c.refused_with("check-stage: an extra shift.jsonl line is refused",
+                       lambda: run_stage(stage_text(extra=["  shift.jsonl sha256 " + "9" * 64])), "stage-check", "hash lines")
+        c.refused_with("check-stage: an uppercase digest is refused",
+                       lambda: run_stage(stage_text(digests=dict(S_DIG, **{"eval.jsonl": S_DIG["eval.jsonl"].upper()}))), "stage-check", "hash lines")
+        c.refused_with("check-stage: a 63-character digest is refused",
+                       lambda: run_stage(stage_text(digests=dict(S_DIG, **{"eval.jsonl": S_DIG["eval.jsonl"][:63]}))), "stage-check", "hash lines")
+        c.refused_with("check-stage: a duplicated file line is refused",
+                       lambda: run_stage(stage_text(extra=["  task.json sha256 " + S_DIG["task.json"]])), "stage-check", "hash lines")
+        c.refused_with("check-stage: a duplicated STAGE OK line is refused",
+                       lambda: run_stage(stage_text(ok_lines=["STAGE OK dataset goldstandard-2024", "STAGE OK dataset goldstandard-2024"])),
+                       "stage-check", "STAGE OK")
+        c.refused_with("check-stage: a state file lacking the prefix is refused",
+                       lambda: run_stage(state=state_obj(prefix="goldstandard-2024-b")), "stage-check", "state")
+        c.refused_with("check-stage: a state record whose files differ is refused",
+                       lambda: run_stage(state=state_obj(files=dict(S_DIG, **{"train.jsonl": "00" * 32}))), "stage-check", "state")
+        c.refused_with("check-stage: a state record with an extra file is refused",
+                       lambda: run_stage(state=state_obj(files=dict(S_DIG, **{"shift.jsonl": "00" * 32}))), "stage-check", "state")
+        c.refused_with("check-stage: a state record whose prefix field names another prefix is refused",
+                       lambda: run_stage(state=state_obj(prefix="elsewhere", key="goldstandard-2024")), "stage-check", "state")
+        HASH_MATCH = ["  task.json sha256 " + "a" * 64, "  train.jsonl sha256 " + "0" * 64, "  eval.jsonl sha256 " + "f" * 64]
+        HASH_NOT = [" task.json sha256 " + "a" * 64, "   task.json sha256 " + "a" * 64, "\ttask.json sha256 " + "a" * 64, "  task.json sha256 " + "A" * 64,
+                    "  task.json sha256 " + "a" * 63, "  task.json sha256 " + "a" * 65, "  task.json sha256 " + "a" * 64 + " ", "  task.json sha256  " + "a" * 64,
+                    "  task.json sha256 " + "a" * 63 + "g", "  other.json sha256 " + "a" * 64, "task.json sha256 " + "a" * 64, "  task.json sha256", ""]
+        c.check("check-stage: the hash-line pattern matches the %d good lines and none of the %d near misses" % (len(HASH_MATCH), len(HASH_NOT)),
+                lambda: (all(hash_line(x) is not None for x in HASH_MATCH) and all(hash_line(x) is None for x in HASH_NOT),
+                         str([x for x in HASH_MATCH if hash_line(x) is None] + [x for x in HASH_NOT if hash_line(x) is not None])[:120]))
+        c.check("check-stage: --prefix goldstandard-2024-b with its own output and state record is accepted",
+                lambda: run_stage(stage_text(prefix="goldstandard-2024-b"), state_obj(prefix="goldstandard-2024-b"), "goldstandard-2024-b").startswith(
+                    "STAGE CHECK OK prefix=goldstandard-2024-b "))
+        c.refused_with("check-stage: --prefix -b against the default prefix's output is refused",
+                       lambda: run_stage(prefix="goldstandard-2024-b"), "stage-check", "STAGE OK")
+        for bad_p in ("goldstandard-2024-B", "goldstandard-2024-bb", "goldstandard-2024-a", "goldstandard-2024-", "../x", "other", "goldstandard-2024/b", ""):
+            c.refused_with("check-stage: the prefix name %r is outside the rule, refused before any file is read" % bad_p,
+                           lambda bad_p=bad_p: check_stage(fresh("missing"), fresh("missing"), S_DPATH, bad_p), "stage-check", "prefix")
+        o_ = []
+        e_ = []
+        rc_ = main(["check-stage", "--stage-out", (lambda p: (_write(p, stage_text(digests=dict(S_DIG, **{"eval.jsonl": "0" * 64}))), p)[1])(fresh("noecho")),
+                    "--state", (lambda p: (_write(p, _dumps(state_obj())), p)[1])(fresh("noecho-state")), "--declaration", S_DPATH],
+                   out=o_.append, err=e_.append)
+        c.check("check-stage: a refusal prints one REFUSED line and no line of the input (fake identifiers never reach stdout or stderr)",
+                lambda: (rc_ == 2 and not o_ and len(e_) == 1 and e_[0].startswith("REFUSED stage-check: ") and not any(f in e_[0] for f in FAKE), str(e_)[:120]))
+        o_, e_ = [], []
+        rc_ = main(["check-stage", "--stage-out", (lambda p: (_write(p, stage_text()), p)[1])(fresh("noecho2")),
+                    "--state", (lambda p: (_write(p, _dumps(state_obj())), p)[1])(fresh("noecho-state2")), "--declaration", S_DPATH],
+                   out=o_.append, err=e_.append)
+        c.check("check-stage: an acceptance prints exactly one line and no line of the input",
+                lambda: (rc_ == 0 and not e_ and len(o_) == 1 and o_[0].startswith("STAGE CHECK OK ") and not any(f in o_[0] for f in FAKE), str(o_)[:120]))
+
+        V_SUM = {"valid": True, "labels": ["not_antisemitic", "antisemitic"], "class_counts": {"not_antisemitic": 7016, "antisemitic": 1494},
+                 "shots_per_class": 7016, "rows": {"train": 8510, "eval": 2129, "shift": None}, "shift_present": False, "epochs_required": True,
+                 "epochs_range": [4, 12], "epochs_fixed": None, "inputs_sha256": dict(S_DIG), "deferred_rules": []}
+        V_PRE = {"labels": ["not_antisemitic", "antisemitic"], "class_counts": {"not_antisemitic": 7016, "antisemitic": 1494}, "shots_per_class": 7016,
+                 "rows": {"train": 8510, "eval": 2129}, "inputs_sha256": dict(S_DECL["must"]["inputs_sha256"])}
+        V_BANG = "! T() { true; }; BUCKET=$(T BucketName); unset X && assume ze-kasher-dev && just laya-trainer-call ze-kasher-dev \"$URL\" validate \"s3://$BUCKET/datasets/%s/\" > models/laya-trainer/ctl-validate.out 2>&1; echo \"rc=$?\"; python3 -I scripts/laya_deploy/laya_control.py check-validate --reply models/laya-trainer/ctl-validate.out --declaration D --evidence E%s"
+
+        def ev_obj(extra_cmds=(), staging=None, v=None):
+            cmds = {"P0": "T() { true; }", "S0": "! just laya-trainer-stage dataset d goldstandard-2024 dev p", "V": V_BANG % ("goldstandard-2024", "") if v is None else v}
+            cmds.update(dict(extra_cmds))
+            return {"preflight": dict(V_PRE), "owner_commands": cmds, "staging": staging}
+
+        def sub(**kw):
+            s = clone(V_SUM)
+            for k, v in kw.items():
+                s[k] = v
+            return s
+
+        def reply_text(summary, shape="text", ok=True, is_error=False, lines_after=()):
+            if shape == "top":
+                obj = {"method": "tools/call", "tool": "validate_dataset", "ok": ok}
+                obj.update(summary)
+            elif shape == "text":
+                res = {"content": [{"type": "text", "text": json.dumps(summary)}]}
+                obj = {"method": "tools/call", "tool": "validate_dataset", "ok": ok, "result": res}
+            else:
+                obj = {"method": "tools/call", "tool": "validate_dataset", "ok": ok, "result": {"structuredContent": summary, "content": []}}
+            if is_error:
+                obj.setdefault("result", {})["isError"] = True
+            return "\n".join(NOISE + [json.dumps(obj)] + list(lines_after)) + "\n"
+
+        def run_validate(text, prefix=None, ev=None):
+            rp, ep = fresh("reply"), fresh("evid")
+            _write(rp, text)
+            _write(ep, _dumps(ev_obj() if ev is None else ev))
+            return check_validate(rp, S_DPATH, ep, prefix)
+
+        V_OK = "VALIDATE CHECK OK rows=8510/2129 shots_per_class=7016 labels=not_antisemitic,antisemitic epochs_range=4-12 inputs=match deferred_rules=0 prefix=goldstandard-2024"
+        for shape in ("top", "text", "structured"):
+            c.check("check-validate: the server's answer as %s is accepted, after non-JSON lines" % {"top": "top-level fields", "text": "a text content item", "structured": "structuredContent"}[shape],
+                    lambda shape=shape: run_validate(reply_text(V_SUM, shape)) == V_OK)
+        c.refused_with("check-validate: ok false is refused", lambda: run_validate(reply_text(V_SUM, ok=False)), "validate-check", "reply")
+        c.refused_with("check-validate: valid false is refused", lambda: run_validate(reply_text(sub(valid=False))), "validate-check", "reply")
+        c.refused_with("check-validate: an isError result is refused", lambda: run_validate(reply_text(V_SUM, is_error=True)), "validate-check", "reply")
+        c.refused_with("check-validate: a reply with no JSON line is refused", lambda: run_validate("\n".join(NOISE) + "\n"), "validate-check", "reply")
+        c.refused_with("check-validate: swapped labels are refused", lambda: run_validate(reply_text(sub(labels=["antisemitic", "not_antisemitic"]))),
+                       "validate-check", "labels")
+        c.refused_with("check-validate: other row counts are refused", lambda: run_validate(reply_text(sub(rows={"train": 8510, "eval": 2128, "shift": None}))),
+                       "validate-check", "rows")
+        c.refused_with("check-validate: a shift row count is refused", lambda: run_validate(reply_text(sub(rows={"train": 8510, "eval": 2129, "shift": 5}))),
+                       "validate-check", "rows")
+        c.refused_with("check-validate: other class counts are refused",
+                       lambda: run_validate(reply_text(sub(class_counts={"not_antisemitic": 7015, "antisemitic": 1495}))), "validate-check", "class_counts")
+        c.refused_with("check-validate: other shots_per_class is refused", lambda: run_validate(reply_text(sub(shots_per_class=7015))),
+                       "validate-check", "shots_per_class")
+        c.refused_with("check-validate: an epochs_range other than [4, 12] is refused", lambda: run_validate(reply_text(sub(epochs_range=[4, 16]))),
+                       "validate-check", "epochs")
+        c.refused_with("check-validate: shift_present true is refused", lambda: run_validate(reply_text(sub(shift_present=True))), "validate-check", "shift")
+        c.refused_with("check-validate: epochs_required false is refused", lambda: run_validate(reply_text(sub(epochs_required=False))),
+                       "validate-check", "epochs")
+        for n_ in ("task.json", "train.jsonl", "eval.jsonl"):
+            c.refused_with("check-validate: a server digest for %s that differs is refused" % n_,
+                           lambda n_=n_: run_validate(reply_text(sub(inputs_sha256=dict(S_DIG, **{n_: "00" * 32})))), "validate-check", "inputs_sha256")
+            c.refused_with("check-validate: a server digest for %s that is missing is refused" % n_,
+                           lambda n_=n_: run_validate(reply_text(sub(inputs_sha256={k: v for k, v in S_DIG.items() if k != n_}))), "validate-check", "inputs_sha256")
+        c.refused_with("check-validate: an extra shift.jsonl digest is refused",
+                       lambda: run_validate(reply_text(sub(inputs_sha256=dict(S_DIG, **{"shift.jsonl": "00" * 32})))), "validate-check", "inputs_sha256")
+        c.refused_with("check-validate: only the LAST JSON line counts (a good line followed by a bad one is refused)",
+                       lambda: run_validate(reply_text(V_SUM, lines_after=[json.dumps({"ok": False, "error": {"x": 1}})])), "validate-check", "reply")
+        c.refused_with("check-validate: a REFUSED line names the server's rule only",
+                       lambda: run_validate("\n".join(NOISE + ["REFUSED label-set: the labels differ at bucket " + FAKE[1]]) + "\n"), "validate-check", "server refused rule label-set")
+        c.check("check-validate: the rule name alone reaches the reason (no message tail)",
+                lambda: (lambda r: r == "server refused rule label-set")(
+                    _reason_of(lambda: run_validate("\n".join(NOISE + ["REFUSED label-set: the labels differ at bucket " + FAKE[1]]) + "\n"))))
+        c.refused_with("check-validate: a REFUSED rule inside an isError content text is named, never its message",
+                       lambda: run_validate("\n".join(NOISE + [json.dumps({"ok": False, "result": {"isError": True, "content": [{"type": "text", "text": "REFUSED row-cap: " + FAKE[0]}]}})]) + "\n"),
+                       "validate-check", "server refused rule row-cap")
+        c.refused_with("check-validate: a duplicate JSON key in the answer is refused", lambda: run_validate("\n".join(NOISE + ['{"ok": true, "ok": true}']) + "\n"),
+                       "validate-check", "reply")
+        c.refused_with("check-validate: a non-finite number in the answer is refused", lambda: run_validate("\n".join(NOISE + ['{"ok": true, "x": NaN}']) + "\n"),
+                       "validate-check", "reply")
+        c.check("check-validate: deferred_rules is reported as a count", lambda: run_validate(reply_text(sub(deferred_rules=["a", "b"]))).endswith("deferred_rules=2 prefix=goldstandard-2024"))
+        # --- the --prefix binding to the recorded V and to staging.prefix_used
+        VB = ("Vb", V_BANG % ("goldstandard-2024-b", " --prefix goldstandard-2024-b"))
+        ev_b = ev_obj(extra_cmds=[VB])
+        c.check("check-validate: the default prefix is accepted when the evidence's V names datasets/goldstandard-2024/",
+                lambda: run_validate(reply_text(V_SUM), "goldstandard-2024") == V_OK)
+        c.refused_with("check-validate: --prefix goldstandard-2024-b without a recorded Vb is refused by the prefix rule",
+                       lambda: run_validate(reply_text(V_SUM), "goldstandard-2024-b"), "validate-check", "prefix")
+        c.check("check-validate: --prefix goldstandard-2024-b with a recorded Vb that carries --prefix is accepted",
+                lambda: run_validate(reply_text(V_SUM), "goldstandard-2024-b", ev_b) == V_OK.replace("prefix=goldstandard-2024", "prefix=goldstandard-2024-b"))
+        c.refused_with("check-validate: a Vb that does not carry --prefix is refused",
+                       lambda: run_validate(reply_text(V_SUM), "goldstandard-2024-b", ev_obj(extra_cmds=[("Vb", V_BANG % ("goldstandard-2024-b", ""))])),
+                       "validate-check", "prefix")
+        c.refused_with("check-validate: a recorded V without the bang prefix is refused",
+                       lambda: run_validate(reply_text(V_SUM), None, ev_obj(v=V_BANG[2:] % ("goldstandard-2024", ""))), "validate-check", "prefix")
+        c.refused_with("check-validate: a V that names another dataset is refused",
+                       lambda: run_validate(reply_text(V_SUM), None, ev_obj(v=V_BANG % ("motivation-v1", ""))), "validate-check", "prefix")
+        for bad_p in ("goldstandard-2024-B", "goldstandard-2024-bb", "../x", "other", "goldstandard-2024-a"):
+            c.refused_with("check-validate: the prefix name %r is outside the rule" % bad_p,
+                           lambda bad_p=bad_p: run_validate(reply_text(V_SUM), bad_p, ev_b), "validate-check", "prefix")
+        c.refused_with("check-validate: a staging block whose prefix_used differs from NAME is refused",
+                       lambda: run_validate(reply_text(V_SUM), None, ev_obj(staging={"prefix_used": "goldstandard-2024-b"})), "validate-check", "prefix")
+        c.check("check-validate: a staging block whose prefix_used equals NAME is accepted",
+                lambda: run_validate(reply_text(V_SUM), None, ev_obj(staging={"prefix_used": "goldstandard-2024"})) == V_OK)
+        c.refused_with("check-validate: the prefix rule fires before the reply is read (an unreadable reply with a bad prefix names the prefix rule)",
+                       lambda: check_validate(fresh("missing"), S_DPATH, (lambda p: (_write(p, _dumps(ev_obj())), p)[1])(fresh("evid")), "goldstandard-2024-B"),
+                       "validate-check", "prefix")
+        o_, e_ = [], []
+        rp_, ep_ = fresh("reply"), fresh("evid")
+        _write(rp_, reply_text(sub(rows={"train": 1, "eval": 1, "shift": None})))
+        _write(ep_, _dumps(ev_obj()))
+        rc_ = main(["check-validate", "--reply", rp_, "--declaration", S_DPATH, "--evidence", ep_], out=o_.append, err=e_.append)
+        c.check("check-validate: a refusal prints one REFUSED line and no line of the input (fake identifiers never reach stdout or stderr)",
+                lambda: (rc_ == 2 and not o_ and len(e_) == 1 and e_[0].startswith("REFUSED validate-check: ") and not any(f in e_[0] for f in FAKE), str(e_)[:120]))
+        o_, e_ = [], []
+        _write(rp_, reply_text(V_SUM, "text"))
+        rc_ = main(["check-validate", "--reply", rp_, "--declaration", S_DPATH, "--evidence", ep_], out=o_.append, err=e_.append)
+        c.check("check-validate: an acceptance prints exactly one line and no line of the input",
+                lambda: (rc_ == 0 and not e_ and o_ == [V_OK] and not any(f in o_[0] for f in FAKE), str(o_)[:120]))
+
         # --- the tracer: main() end to end over a temp directory ------------------------------------------------
         def drive(argv):
             o, e = [], []
@@ -1010,6 +1464,8 @@ COMMANDS = {
     "check-reference": (cmd_check_reference, {"--fixture": True, "--evidence": True, "--draft": False}),
     "rehearse": (cmd_rehearse, {"--declaration": True, "--reference": True, "--json": "flag"}),
     "paired-report": (cmd_paired_report, {"--reference": True, "--run-dir": True}),
+    "check-stage": (cmd_check_stage, {"--stage-out": True, "--state": True, "--declaration": True, "--prefix": False}),
+    "check-validate": (cmd_check_validate, {"--reply": True, "--declaration": True, "--evidence": True, "--prefix": False}),
 }
 
 
