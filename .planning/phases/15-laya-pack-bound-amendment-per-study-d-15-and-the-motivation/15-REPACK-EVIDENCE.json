@@ -41,7 +41,22 @@
     "D0": "python3 -I scripts/laya_deploy/laya_drift.py aws-plan --source motivation:a2cbacae-529c-4703-a796-b6eda6742446 --script models/laya-trainer/p15-repack-graviton.sh --results models/laya-trainer/p15-repack-graviton",
     "D1": "! assume ze-kasher-dev && LAYA_DRIFT_APPROVED=graviton bash models/laya-trainer/p15-repack-graviton.sh motivation:1"
   },
-  "owner_replies": [],
+  "owner_replies": [
+    {
+      "step": "C1 infra diff",
+      "recorded_by": "orchestrator",
+      "recorded_at": "2026-11-01T04:24:44Z",
+      "reply_verbatim": "INFRA OK diff (diff saved to models/laya-trainer/p15-infra-diff.txt)",
+      "orchestrator_comparison": "PackTaskDefinition replace: image 504084d0->dd38865c only; Machine DefinitionString LAYA_PACK_IMAGE_DIGEST only; Finalizer Code.S3Key only; PLUS unpredicted MachineRoleDefaultPolicy ecs:RunTask Resource -> KNOWN_AFTER_APPLY. Template check: that statement is identical in pre-roll and new synth (Ref-derived family wildcard); the unknown is caused by task-definition replacement."
+    },
+    {
+      "step": "C1 go/stop decision",
+      "recorded_by": "orchestrator",
+      "recorded_at": "2026-11-01T04:24:44Z",
+      "reply_verbatim": "Go: run C2 (selected via AskUserQuestion after 'Stop and investigate' showed the RunTask line is derived)",
+      "deviation": "plan STOP-on-IAM rule overridden on the owner's decision; IAM line judged a derived artifact of the task-definition replacement"
+    }
+  ],
   "rehearsal": {
     "results_dir": "/tmp/p15-06-rehearsal/results",
     "calls": 25,
