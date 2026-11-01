@@ -1,0 +1,95 @@
+{
+  "schema": "laya-gate-run-evidence-v3",
+  "phase": "16",
+  "plan": "16-02",
+  "kind": "pipeline-equivalence-control",
+  "status": "awaiting-owner-stage",
+  "next_trusted": false,
+  "sets_next_trusted": false,
+  "declaration_path": ".planning/phases/16-laya-pipeline-equivalence-control-antisemitism-v1-on-sagemak/16-CONTROL-DECLARATION.json",
+  "declaration_sha256": "600b64947ab8c058e5b52cf4f3227aca2eeb2a887d3d1dbaae2a41932fb5f096",
+  "declaration_commit": {
+    "sha": "a3d4d2baa59af8b48399409e1b36ae3fdd14da2c",
+    "committed_at": 1793563321
+  },
+  "reference_fixture": {
+    "path": ".planning/phases/16-laya-pipeline-equivalence-control-antisemitism-v1-on-sagemak/16-REFERENCE-MPS.json",
+    "sha256": "d7f19f52d1dcf1dd41e8ae613b3a72fb5a2bcda17c0777163d6b5ec17afd967d"
+  },
+  "run": {
+    "name": "antisemitism-v1-cuda-ctl",
+    "dataset_prefix": "datasets/goldstandard-2024/",
+    "epochs": 4,
+    "note": "the evaluator reads inputs by sha256 and never the prefix, so the prefix is informational"
+  },
+  "recipe_id_declared": "d70c3f3da0daae129f3ee1ce928eb21a0ef71a83a6f09dc18e0621f3cc8adcbc",
+  "attempt_cap": 1,
+  "retry_classes": [],
+  "claim_scope": "pipeline equivalence on THIS task only: it asks whether the SageMaker CUDA pipeline reproduces the Mac (mps:0) Phase 10 antisemitism-v1 three-seed mean margin within the band [0.209, 0.269] on identical inputs and recipe, with the gate passing unwaived; it does not reproduce motivation-v1; it does not set next_trusted for the Phase 14 training server; it does not change Phase 14's trust bar (P14-D-16) or Phase 15's SC4 outcome; whether a pass redefines trust is a separate owner ruling; per-seed CUDA-minus-MPS differences are reported descriptively and never judged; bytes differ by design and no determinism claim is made.",
+  "preflight": {
+    "class_counts": {
+      "antisemitic": 1494,
+      "not_antisemitic": 7016
+    },
+    "epochs": 4,
+    "inputs_sha256": {
+      "eval_jsonl": "f4a0cf7c2ea6d2ebce8580a82287410daa4106688d3e224e081a04fe141b38a8",
+      "task_json": "33fd8d7cd51b1b2864033ee313d30ae445e76120cc2b26e3849369c0602248e3",
+      "train_jsonl": "81a923d4b1b05bfd809e1c04534f714c2bc57c3d3a5e11e33c79fa44f7a79a9e"
+    },
+    "labels": [
+      "not_antisemitic",
+      "antisemitic"
+    ],
+    "pilot_waivers_declared": 1,
+    "recipe_id": "d70c3f3da0daae129f3ee1ce928eb21a0ef71a83a6f09dc18e0621f3cc8adcbc",
+    "rows": {
+      "eval": 2129,
+      "train": 8510
+    },
+    "seed": 13,
+    "selection": {
+      "policy": "median_ece",
+      "rank_scale": 10000,
+      "seeds": [
+        13,
+        17,
+        23
+      ],
+      "tie_break": "smaller_seed"
+    },
+    "shots_per_class": 7016,
+    "stopping": "early_stopping",
+    "thresholds": {
+      "ece_bins": 15,
+      "max_ece": 0.1,
+      "min_macro_f1_margin": 0.05
+    },
+    "waiver_match": false,
+    "line": "PREFLIGHT OK recipe_id=d70c3f3da0daae129f3ee1ce928eb21a0ef71a83a6f09dc18e0621f3cc8adcbc shots_per_class=7016 epochs=4 seed=13 stopping=early_stopping rows=8510/2129 inputs=match waiver=none thresholds=match"
+  },
+  "expected": {
+    "pack_image_digest": "sha256:dd38865c43aba2f3819e50addcf6db5e9da94ef84e762d93cf6b2c132f1d17e2",
+    "parity_contract_sha256": "466891faa5e3e1e092a5483bafcdf2ba8c5c835c9cdda5aaff896d2e893584e9",
+    "train_image_commit": "ba35837e9b00fecb172d8456c0758d2348c1a558",
+    "train_image_digest": "sha256:b49b3fe902c49801e1d3eea8e4be37a73d3e59c483bbb42735180a35c2e6f11f"
+  },
+  "tool_pins": {
+    "laya_control_py": {
+      "commit": "97a13be149b50ffc4d66140be5decd49073a2d50",
+      "sha256": "d35f9b12c226144c691411204a9a2ab4074febf766c74e7c2c3460b8a2194ded",
+      "note": "plan 16-03 compares the working file to this commit, not to the declaration's commit"
+    }
+  },
+  "staging": null,
+  "owner_commands": {
+    "P0": "T() { python3 -I -c \"import json,sys;print(json.load(open('models/laya-trainer/outputs-dev.json'))['trainer'][sys.argv[1]])\" \"$1\"; }; BUCKET=$(T BucketName); URL=$(python3 -I -c \"import json;print(json.load(open('models/laya-trainer/deploy-dev.json'))['endpoint'])\"); URL=\"${URL%/mcp}/mcp\"; export LAYA_M2M_FILE=$(cat models/laya-trainer/m2m-file-path); export SSL_CERT_FILE=\"${SSL_CERT_FILE:-/etc/ssl/cert.pem}\"; unset APRENDER_DECIDE_PROBE_TOKEN",
+    "S0": "! assume ze-kasher-dev && just laya-trainer-stage dataset data/decide/goldstandard-2024 goldstandard-2024 dev ze-kasher-dev --expect antisemitism-v1 > models/laya-trainer/ctl-stage.out 2>&1; echo \"rc=$?\"; python3 -I scripts/laya_deploy/laya_control.py check-stage --stage-out models/laya-trainer/ctl-stage.out --state models/laya-trainer/datasets-dev.json --declaration .planning/phases/16-laya-pipeline-equivalence-control-antisemitism-v1-on-sagemak/16-CONTROL-DECLARATION.json",
+    "V": "! T() { python3 -I -c \"import json,sys;print(json.load(open('models/laya-trainer/outputs-dev.json'))['trainer'][sys.argv[1]])\" \"$1\"; }; BUCKET=$(T BucketName); URL=$(python3 -I -c \"import json;print(json.load(open('models/laya-trainer/deploy-dev.json'))['endpoint'])\"); URL=\"${URL%/mcp}/mcp\"; export LAYA_M2M_FILE=$(cat models/laya-trainer/m2m-file-path); export SSL_CERT_FILE=\"${SSL_CERT_FILE:-/etc/ssl/cert.pem}\"; unset APRENDER_DECIDE_PROBE_TOKEN && assume ze-kasher-dev && just laya-trainer-call ze-kasher-dev \"$URL\" validate \"s3://$BUCKET/datasets/goldstandard-2024/\" > models/laya-trainer/ctl-validate.out 2>&1; echo \"rc=$?\"; python3 -I scripts/laya_deploy/laya_control.py check-validate --reply models/laya-trainer/ctl-validate.out --declaration .planning/phases/16-laya-pipeline-equivalence-control-antisemitism-v1-on-sagemak/16-CONTROL-DECLARATION.json --evidence .planning/phases/16-laya-pipeline-equivalence-control-antisemitism-v1-on-sagemak/16-CONTROL-RUN-EVIDENCE.json"
+  },
+  "owner_replies": [],
+  "deviations": [],
+  "evidence_incomplete": [
+    "awaiting the owner stage and validate"
+  ]
+}
