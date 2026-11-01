@@ -1,0 +1,12 @@
+{
+  "schema": "laya-run-go-v1",
+  "recorded_by": "orchestrator",
+  "recorded_at": "2026-11-01T04:51:58Z",
+  "owner_reply_verbatim": "go",
+  "interpreted_as": "run-go",
+  "in_answer_to": "Say \"go\" when you want plan 15-08 to run. Say \"stop\" to leave the phase at 7/8.",
+  "declaration_path": "15-REPRODUCTION-DECLARATION.json",
+  "declaration_commit": "c078910ba3bdccd65246019f797574e237b3cef5",
+  "declaration_sha256": "1471c10638e78e924229f0038d50536b813190b89b81807a9b499452cd0e5f86",
+  "note": "The owner's literal reply is 'go'; the plan's verify tests for the substring 'run-go' in owner_reply_verbatim, which the literal reply does not contain. Recorded truthfully rather than padded."
+}
