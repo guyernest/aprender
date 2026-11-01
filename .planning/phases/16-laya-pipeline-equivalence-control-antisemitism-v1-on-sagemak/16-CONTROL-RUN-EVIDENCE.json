@@ -87,7 +87,20 @@
     "S0": "! assume ze-kasher-dev && just laya-trainer-stage dataset data/decide/goldstandard-2024 goldstandard-2024 dev ze-kasher-dev --expect antisemitism-v1 > models/laya-trainer/ctl-stage.out 2>&1; echo \"rc=$?\"; python3 -I scripts/laya_deploy/laya_control.py check-stage --stage-out models/laya-trainer/ctl-stage.out --state models/laya-trainer/datasets-dev.json --declaration .planning/phases/16-laya-pipeline-equivalence-control-antisemitism-v1-on-sagemak/16-CONTROL-DECLARATION.json",
     "V": "! T() { python3 -I -c \"import json,sys;print(json.load(open('models/laya-trainer/outputs-dev.json'))['trainer'][sys.argv[1]])\" \"$1\"; }; BUCKET=$(T BucketName); URL=$(python3 -I -c \"import json;print(json.load(open('models/laya-trainer/deploy-dev.json'))['endpoint'])\"); URL=\"${URL%/mcp}/mcp\"; export LAYA_M2M_FILE=$(cat models/laya-trainer/m2m-file-path); export SSL_CERT_FILE=\"${SSL_CERT_FILE:-/etc/ssl/cert.pem}\"; unset APRENDER_DECIDE_PROBE_TOKEN && assume ze-kasher-dev && just laya-trainer-call ze-kasher-dev \"$URL\" validate \"s3://$BUCKET/datasets/goldstandard-2024/\" > models/laya-trainer/ctl-validate.out 2>&1; echo \"rc=$?\"; python3 -I scripts/laya_deploy/laya_control.py check-validate --reply models/laya-trainer/ctl-validate.out --declaration .planning/phases/16-laya-pipeline-equivalence-control-antisemitism-v1-on-sagemak/16-CONTROL-DECLARATION.json --evidence .planning/phases/16-laya-pipeline-equivalence-control-antisemitism-v1-on-sagemak/16-CONTROL-RUN-EVIDENCE.json"
   },
-  "owner_replies": [],
+  "owner_replies": [
+    {
+      "recorded_by": "orchestrator",
+      "recorded_at": "2026-11-01T20:40:05Z",
+      "step": "S0",
+      "verbatim": "rc=0 | STAGE CHECK OK prefix=goldstandard-2024 task=33fd8d7c train=81a923d4 eval=f4a0cf7c  (session-credentials line elided)"
+    },
+    {
+      "recorded_by": "orchestrator",
+      "recorded_at": "2026-11-01T20:40:05Z",
+      "step": "V",
+      "verbatim": "rc=0 | VALIDATE CHECK OK rows=8510/2129 shots_per_class=7016 labels=not_antisemitic,antisemitic epochs_range=4-12 inputs=match deferred_rules=0 prefix=goldstandard-2024  (session-credentials line elided)"
+    }
+  ],
   "deviations": [],
   "evidence_incomplete": [
     "awaiting the owner stage and validate"
