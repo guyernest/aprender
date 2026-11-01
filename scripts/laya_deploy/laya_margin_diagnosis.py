@@ -3,6 +3,8 @@
 
     python3 -I scripts/laya_deploy/laya_margin_diagnosis.py snapshot --out FILE [--local-root DIR]
     python3 -I scripts/laya_deploy/laya_margin_diagnosis.py verify-inputs --inputs FILE
+    python3 -I scripts/laya_deploy/laya_margin_diagnosis.py scan-identifiers FILE...     (plan 15-11)
+    python3 -I scripts/laya_deploy/laya_margin_diagnosis.py classify-run --run-dir DIR   (plan 15-11)
     python3 -I scripts/laya_deploy/laya_margin_diagnosis.py --selftest
 
 `snapshot` is the ONLY step that reads gitignored files (the fetched run directories and the data directory, both
@@ -24,6 +26,7 @@ import json
 import math
 import os
 import random
+import re
 import subprocess
 import sys
 import unicodedata
@@ -1168,6 +1171,97 @@ def cmd_check_disposition(opts):
     return 0
 
 
+# ---- scan-identifiers and classify-run (plan 15-11, Task 3) ---------------------------------------------------------
+
+_ID_PATTERNS = (
+    ("account-id", re.compile(r"(?<![A-Za-z0-9_])[0-9]{12}(?![A-Za-z0-9_])")),
+    ("arn", re.compile(r"arn:aws", re.I)),
+    ("aws-host", re.compile(r"amazonaws\.com", re.I)),
+    ("presigned", re.compile(r"X-Amz-", re.I)),
+    ("execute-api", re.compile(r"execute-api", re.I)),
+)
+
+
+def scan_line(line):
+    """The identifier kinds one line holds, in table order (a twelve-digit run delimited by non-word characters, arn:aws,
+    amazonaws.com, X-Amz-, execute-api). A 64-hex digest or a 10-digit timestamp holds none."""
+    return [kind for kind, rx in _ID_PATTERNS if rx.search(line)]
+
+
+def scan_text(text):
+    """[(line_number, kind)] for every identifier kind on every line, 1-based."""
+    out = []
+    for n, line in enumerate(text.split("\n"), 1):
+        for kind in scan_line(line):
+            out.append((n, kind))
+    return out
+
+
+def scan_files(paths):
+    """The number of files scanned, or Refused identifiers naming the first file:line:kind."""
+    if not paths:
+        raise Refused("usage", "scan-identifiers needs at least one file")
+    for path in paths:
+        try:
+            text = read_bytes(path, "identifiers").decode("utf-8")
+        except UnicodeDecodeError:
+            raise Refused("identifiers", "%s is not UTF-8 text" % path)
+        hits = scan_text(text)
+        if hits:
+            raise Refused("identifiers", "%s:%d:%s" % (path, hits[0][0], hits[0][1]))
+    return len(paths)
+
+
+def cmd_scan_identifiers(args):
+    n = scan_files(args)
+    print("NO IDENTIFIERS files=%d" % n)
+    return 0
+
+
+def _plain_file(path):
+    return os.path.isfile(path) and not os.path.islink(path)
+
+
+def classify_run(run_dir):
+    """The CONSUMPTION RULE of 15-GATE-RUN-EVIDENCE.json, in its order: {class, reason}. A missing file alone is never
+    'not consumed'.
+
+    1. manifest.json absent, or logs/outcome.json absent or without a string exit_class -> unresolved.
+    2. exit_class pass or gate_fail, or run/gate-report.json exists, or logs/train.log has a line equal to GATE PASS or
+       GATE FAIL -> consumed.
+    3. exit_class refused or crash with none of that evidence -> pre-verdict.
+    4. anything else -> unresolved."""
+    if not _plain_file(os.path.join(run_dir, "manifest.json")):
+        return {"class": "unresolved", "reason": "manifest.json is absent (the fetch failed or never ran)"}
+    exit_class = None
+    try:
+        outcome = read_json(os.path.join(run_dir, "logs", "outcome.json"), "classify-run")
+        if isinstance(outcome, dict) and isinstance(outcome.get("exit_class"), str):
+            exit_class = outcome["exit_class"]
+    except Refused:
+        pass
+    if exit_class is None:
+        return {"class": "unresolved", "reason": "logs/outcome.json is absent or has no string exit_class"}
+    if exit_class in ("pass", "gate_fail"):
+        return {"class": "consumed", "reason": "exit_class is %s: the gate executed" % exit_class}
+    if _plain_file(os.path.join(run_dir, "run", "gate-report.json")):
+        return {"class": "consumed", "reason": "run/gate-report.json exists: the gate executed"}
+    try:
+        log = read_bytes(os.path.join(run_dir, "logs", "train.log"), "classify-run").decode("utf-8", "replace")
+    except Refused:
+        log = ""
+    if any(ln.rstrip("\r") in ("GATE PASS", "GATE FAIL") for ln in log.split("\n")):
+        return {"class": "consumed", "reason": "logs/train.log holds a GATE PASS or GATE FAIL line: the gate executed"}
+    if exit_class in ("refused", "crash"):
+        return {"class": "pre-verdict", "reason": "exit_class is %s with no gate report and no GATE line" % exit_class}
+    return {"class": "unresolved", "reason": "exit_class %r with no gate evidence" % exit_class}
+
+
+def cmd_classify_run(opts):
+    print(json.dumps(classify_run(opts["--run-dir"]), sort_keys=True, separators=(",", ":")))
+    return 0
+
+
 # ---- the selftest ------------------------------------------------------------------------------------------------
 
 class Cases:
@@ -1582,7 +1676,77 @@ def selftest_decision(c):
               lambda: check_disposition_obj(disp_with(lambda m: m.update({"run_go": True})), r0, diag), "RUN-GO")
 
 
-SELFTEST_SECTIONS = [selftest_inputs, selftest_rule, selftest_analyze, selftest_decision]
+def selftest_gap_tools(c):
+    """Plan 15-11 cases: scan-identifiers and classify-run, fixed BEFORE the functions were written."""
+    import shutil
+    import tempfile
+    # scan-identifiers: the red side (each kind refused) and the green side (a digest and a timestamp pass).
+    twelve = "1" * 12
+    for kind, line in (("account-id", "account " + twelve + " here"),
+                       ("account-id", '"' + twelve + '"'),
+                       ("arn", "role arn:aws:iam::x:role/y"),
+                       ("aws-host", "https://bucket.s3.amazonaws.com/key"),
+                       ("presigned", "?X-Amz-Signature=abc"),
+                       ("execute-api", "https://abc.execute-api.region.invalid/mcp")):
+        c.check("scan-identifiers: %s is flagged (%s)" % (kind, line[:30]), scan_line(line) == [kind], repr(scan_line(line)))
+    c.check("scan-identifiers: a 64-hex digest and a 10-digit timestamp are accepted",
+            scan_line("sha256:" + "ab" * 32 + " at 1761999999") == [] and scan_line("d" + twelve + "e") == [])
+    c.check("scan-identifiers: 11 and 13 digit runs are accepted", scan_line("1" * 11) == [] and scan_line("1" * 13) == [])
+    c.check("scan-identifiers: a file with a clean line and a bad line names the bad line",
+            scan_text("ok\nx " + twelve + "\n") == [(2, "account-id")])
+    d = tempfile.mkdtemp(prefix="margin-gap-selftest-")
+    try:
+        good = os.path.join(d, "good.json")
+        bad = os.path.join(d, "bad.json")
+        write_text(good, '{"a": "sha256:' + "ab" * 32 + '"}\n')
+        write_text(bad, "line one\narn:aws:s3:::b\n")
+        c.check("scan-identifiers: NO IDENTIFIERS files=1 on a clean file", scan_files([good]) == 1)
+        c.refused("scan-identifiers: a bad file is refused with file:line:kind", lambda: scan_files([good, bad]), "bad.json:2:arn")
+        c.refused("scan-identifiers: a missing file is refused", lambda: scan_files([os.path.join(d, "none.json")]), "identifiers")
+        c.refused("scan-identifiers: no file at all is refused", lambda: scan_files([]), "usage")
+
+        # classify-run: the four failure paths of the CONSUMPTION RULE.
+        def run(name, outcome="pass", report=True, train_log="GATE PASS\n", manifest=True):
+            r = os.path.join(d, name)
+            os.makedirs(os.path.join(r, "logs"))
+            os.makedirs(os.path.join(r, "run"))
+            if manifest:
+                write_text(os.path.join(r, "manifest.json"), "{}\n")
+            if outcome is not None:
+                write_text(os.path.join(r, "logs", "outcome.json"),
+                           outcome if isinstance(outcome, str) and outcome.startswith("{") or outcome == "garbage"
+                           else json.dumps({"exit_class": outcome}))
+            if report:
+                write_text(os.path.join(r, "run", "gate-report.json"), "{}\n")
+            write_text(os.path.join(r, "logs", "train.log"), train_log)
+            return r
+
+        def cls(r):
+            return classify_run(r)["class"]
+
+        c.check("classify-run: exit_class pass -> consumed", cls(run("a1")) == "consumed")
+        c.check("classify-run: a GATE FAIL line only (exit_class crash, no report) -> consumed",
+                cls(run("a2", outcome="crash", report=False, train_log="x\nGATE FAIL\n")) == "consumed")
+        c.check("classify-run: exit_class gate_fail -> consumed", cls(run("a3", outcome="gate_fail", report=False, train_log="")) == "consumed")
+        c.check("classify-run: a gate report beside exit_class crash -> consumed", cls(run("a4", outcome="crash", report=True, train_log="")) == "consumed")
+        c.check("classify-run: crash with no gate evidence -> pre-verdict",
+                cls(run("b1", outcome="crash", report=False, train_log="Traceback\n")) == "pre-verdict")
+        c.check("classify-run: refused with no gate evidence -> pre-verdict",
+                cls(run("b2", outcome="refused", report=False, train_log="")) == "pre-verdict")
+        c.check("classify-run: no manifest (the fetch failed) -> unresolved", cls(run("u1", manifest=False)) == "unresolved")
+        c.check("classify-run: no outcome.json -> unresolved, never not-consumed", cls(run("u2", outcome=None)) == "unresolved")
+        c.check("classify-run: an outcome.json that is not JSON -> unresolved", cls(run("u3", outcome="garbage")) == "unresolved")
+        c.check("classify-run: an unknown exit_class with no gate evidence -> unresolved",
+                cls(run("u4", outcome="weird", report=False, train_log="")) == "unresolved")
+        c.check("classify-run: a GATE PASS substring inside a longer line is not a GATE line",
+                cls(run("u5", outcome="weird", report=False, train_log="not a GATE PASS line\n")) == "unresolved")
+        c.check("classify-run: a run directory that does not exist -> unresolved", cls(os.path.join(d, "no-such")) == "unresolved")
+        c.check("classify-run: the reason is a non-empty string", all(classify_run(os.path.join(d, n))["reason"] for n in ("a1", "b1", "u1")))
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+SELFTEST_SECTIONS = [selftest_inputs, selftest_rule, selftest_analyze, selftest_decision, selftest_gap_tools]
 
 
 def selftest():
@@ -1607,6 +1771,8 @@ COMMANDS = {
     "check-reply": (cmd_check_reply, {"--reply": True, "--brief": True, "--diagnosis": True}),
     "write-disposition": (cmd_write_disposition, {"--reply": True, "--diagnosis": True, "--out": True}),
     "check-disposition": (cmd_check_disposition, {"--disposition": True, "--reply": True, "--diagnosis": True}),
+    "scan-identifiers": (cmd_scan_identifiers, None),
+    "classify-run": (cmd_classify_run, {"--run-dir": True}),
 }
 
 
@@ -1636,6 +1802,8 @@ def main(argv):
         if not argv or argv[0] not in COMMANDS:
             raise Refused("usage", "expected --selftest or one of %s" % ", ".join(sorted(COMMANDS)))
         fn, spec = COMMANDS[argv[0]]
+        if spec is None:  # positional arguments (scan-identifiers FILE...)
+            return fn(argv[1:])
         return fn(parse_opts(argv[1:], spec))
     except Refused as ex:
         print("REFUSED %s: %s" % (ex.rule, ex.reason))
