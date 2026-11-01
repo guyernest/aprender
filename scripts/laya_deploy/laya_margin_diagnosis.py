@@ -18,9 +18,11 @@ stdlib only. This file grows across plan 15-09 tasks; each section says which ta
 """
 
 import hashlib
+import itertools
 import json
 import math
 import os
+import random
 import subprocess
 import sys
 import unicodedata
@@ -158,6 +160,205 @@ def ece_top_label(y, pred, conf, bins=ECE_BINS):
 
 def margin_of(y, pred, zs_pred):
     return macro_f1(y, pred) - macro_f1(y, zs_pred)
+
+
+# ---- the pre-registered class rule and its statistics (plan 15-09 task 2) --------------------------------------------
+#
+# RULE_SPEC is committed BEFORE `analyze` is ever run on the real fixture and is never edited after the result is seen.
+# Its canonical JSON (sort_keys, compact separators) is hashed into rule_sha256, which the diagnosis carries and
+# check-diagnosis re-derives, so a changed constant is a changed hash.
+
+RULE_SPEC = {
+    "version": 1,
+    "floor": 0.30,
+    "ceiling": 0.45,
+    "ece_band": [0.07, 0.12],
+    "gate": {"min_margin": 0.05, "max_ece": 0.10},
+    "bootstrap": {
+        "B": 2000,
+        "seed": 20261031,
+        "design": "paired row bootstrap: B resamples of 100 row indices drawn with replacement by random.Random(seed).randrange(100), "
+                  "the SAME indices for the fine-tuned and the zero-shot macro-F1 of one resample; the same index sets serve every seed-run",
+        "percentiles": "p05 = sorted[int(0.05 * B)], p95 = sorted[int(0.95 * B)]",
+    },
+    "z_one_sided_90": 1.2815515655446004,
+    "rank_scale": 10000,
+    "floor_rule": "the CUDA seed-run mean minus 2 sd (ddof 1), rounded DOWN to hundredths",
+    "device_anchoring": "supported iff the three paired MPS-minus-CUDA differences share a sign and the df 2 two-sided p "
+                        "(1 - |t| / sqrt(t^2 + 2)) is below 0.05, else unproven; informational, never selects the class",
+    "lever": {"detectable_abs_z": 2.0, "mde_multiplier": 2.8},
+    "class_rule": "deficiency is supported iff cuda_mean + z * sem < floor, refuted iff cuda_mean - z * sem >= floor, else "
+                  "undetermined (z = z_one_sided_90, sem = sd / sqrt(n), sd with ddof 1); single_draw_acceptance holds iff "
+                  "(shortfall <= cuda_sd) AND (shortfall <= median row-resampling se) AND (declared-criterion pass "
+                  "probability < 0.5) AND (deficiency is not supported on the full set nor on any leave-one-out set); "
+                  "class = recipe-deficiency if deficiency is supported on the full set, else single-draw-acceptance if "
+                  "that predicate holds, else undetermined",
+}
+
+CLASS_NAMES = ("recipe-deficiency", "single-draw-acceptance", "undetermined")
+GATE_MAX_ECE = RULE_SPEC["gate"]["max_ece"]
+GATE_MIN_MARGIN = RULE_SPEC["gate"]["min_margin"]
+FLOOR = RULE_SPEC["floor"]
+CEILING = RULE_SPEC["ceiling"]
+ECE_LO, ECE_HI = RULE_SPEC["ece_band"]
+Z90 = RULE_SPEC["z_one_sided_90"]
+RANK_SCALE = RULE_SPEC["rank_scale"]
+
+
+def rule_sha256(spec=None):
+    spec = RULE_SPEC if spec is None else spec
+    return sha256_hex(json.dumps(spec, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+
+
+def mean_of(xs):
+    return math.fsum(xs) / len(xs)
+
+
+def sd_of(xs):
+    """Sample standard deviation, ddof 1."""
+    m = mean_of(xs)
+    return math.sqrt(math.fsum((x - m) ** 2 for x in xs) / (len(xs) - 1))
+
+
+def pearson(xs, ys):
+    mx, my = mean_of(xs), mean_of(ys)
+    sxy = math.fsum((a - mx) * (b - my) for a, b in zip(xs, ys))
+    sxx = math.fsum((a - mx) ** 2 for a in xs)
+    syy = math.fsum((b - my) ** 2 for b in ys)
+    return sxy / math.sqrt(sxx * syy)
+
+
+def deficiency_status(mean, sd, n):
+    """supported / refuted / undetermined, from the one-sided 90 percent bounds of the mean against the floor."""
+    sem = sd / math.sqrt(n)
+    if mean + Z90 * sem < FLOOR:
+        return "supported"
+    if mean - Z90 * sem >= FLOOR:
+        return "refuted"
+    return "undetermined"
+
+
+def class_rule(full_status, loo_statuses, shortfall, cuda_sd, median_se, p_declared):
+    """(name, predicates). The rule text is RULE_SPEC['class_rule']."""
+    no_loo_support = "supported" not in loo_statuses
+    preds = {"shortfall_le_cuda_sd": shortfall <= cuda_sd,
+             "shortfall_le_median_se": shortfall <= median_se,
+             "declared_p_pass_lt_half": p_declared < 0.5,
+             "deficiency_not_supported_full": full_status != "supported",
+             "deficiency_not_supported_any_loo": no_loo_support}
+    holds = all(preds.values())
+    if full_status == "supported":
+        return "recipe-deficiency", dict(preds, single_draw_acceptance=holds)
+    return ("single-draw-acceptance" if holds else "undetermined"), dict(preds, single_draw_acceptance=holds)
+
+
+def floor_rule_value(mean, sd):
+    return math.floor((mean - 2.0 * sd) * 100.0) / 100.0
+
+
+def paired_t_df2(diffs):
+    """(mean, sd, t, p) of three paired differences; p is the df 2 two-sided p, 1 - |t| / sqrt(t^2 + 2)."""
+    m, s = mean_of(diffs), sd_of(diffs)
+    if s == 0.0:
+        return m, s, None, (1.0 if m == 0.0 else 0.0)
+    t = m / (s / math.sqrt(len(diffs)))
+    return m, s, t, p_df2(t)
+
+
+def p_df2(t):
+    return 1.0 - abs(t) / math.sqrt(t * t + 2.0)
+
+
+def device_status(diffs):
+    m, s, t, p = paired_t_df2(diffs)
+    same_sign = all(d > 0 for d in diffs) or all(d < 0 for d in diffs)
+    return ("supported" if (same_sign and p < 0.05) else "unproven"), same_sign
+
+
+def rank_key(ece):
+    return int(math.floor(float(ece) * RANK_SCALE))
+
+
+def ship(units):
+    """The median-ECE seed of three units: rank key floor(ece x rank_scale), ties to the smaller seed, then to the
+    earlier unit. units are dicts with seed, margin, ece."""
+    ranked = sorted(enumerate(units), key=lambda iu: (rank_key(iu[1]["ece"]), iu[1]["seed"], iu[0]))
+    return ranked[1][1]
+
+
+def judge_triple(triple, mode, lo):
+    """(class, gate_pass) of one triple of drawn seed-runs. mode: shipped (the shipped seed's margin) or mean (the mean of
+    the three drawn margins). The ECE clause and the gate are on the shipped seed in both modes."""
+    shipped = ship(triple)
+    judged = shipped["margin"] if mode == "shipped" else mean_of([u["margin"] for u in triple])
+    gate = shipped["ece"] <= GATE_MAX_ECE and shipped["margin"] >= GATE_MIN_MARGIN
+    in_band = lo <= judged <= CEILING and ECE_LO <= shipped["ece"] <= ECE_HI
+    if not in_band:
+        return "defect", gate
+    return ("pass" if gate else "in-band-gate-fail"), gate
+
+
+def resample_rule(units, mode, lo):
+    """Every ordered triple with replacement of the given seed-runs (len(units) ** 3), judged by `mode` with the margin
+    band [lo, ceiling]. Exact fractions of the triples, as floats."""
+    n = 0
+    tally = {"pass": 0, "in-band-gate-fail": 0, "defect": 0, "gate": 0}
+    for idx in itertools.product(range(len(units)), repeat=3):
+        cls, gate = judge_triple([units[i] for i in idx], mode, lo)
+        tally[cls] += 1
+        tally["gate"] += 1 if gate else 0
+        n += 1
+    p_pass, p_ibgf = tally["pass"] / n, tally["in-band-gate-fail"] / n
+    return {"p_gate": tally["gate"] / n, "p_pass": p_pass, "p_in_band_gate_fail": p_ibgf,
+            "p_defect": tally["defect"] / n, "within_cap2": p_pass + p_ibgf * p_pass, "triples": n}
+
+
+def resample_with_loo(units, mode, lo):
+    """resample_rule plus the leave-one-out list (each unit dropped in turn, 125 triples of the other five)."""
+    out = resample_rule(units, mode, lo)
+    loo = []
+    for d in range(len(units)):
+        r = resample_rule(units[:d] + units[d + 1:], mode, lo)
+        loo.append({"dropped": "%s:%s" % (units[d]["run"], units[d]["seed"]) if "run" in units[d] else str(d),
+                    "p_pass": r["p_pass"], "within_cap2": r["within_cap2"]})
+    out["loo"] = loo
+    out["loo_min"] = min(e["p_pass"] for e in loo)
+    out["loo_max"] = max(e["p_pass"] for e in loo)
+    out["loo_within_cap2_min"] = min(e["within_cap2"] for e in loo)
+    out["loo_within_cap2_max"] = max(e["within_cap2"] for e in loo)
+    return out
+
+
+def _counts_f1(y, pred):
+    """macro-F1 from one pass over the rows; identical to macro_f1 (same label set, same fsum order)."""
+    tp, fp, fn, seen = [0, 0, 0], [0, 0, 0], [0, 0, 0], [False] * 3
+    for t, p in zip(y, pred):
+        seen[t] = seen[p] = True
+        if t == p:
+            tp[t] += 1
+        else:
+            fp[p] += 1
+            fn[t] += 1
+    f1s = []
+    for c in range(3):
+        if seen[c]:
+            den = 2 * tp[c] + fp[c] + fn[c]
+            f1s.append(0.0 if den == 0 else 2.0 * tp[c] / den)
+    return math.fsum(f1s) / len(f1s)
+
+
+def bootstrap_index_sets(n, B, seed):
+    rng = random.Random(seed)
+    return [[rng.randrange(n) for _ in range(n)] for _ in range(B)]
+
+
+def bootstrap_margins(y, pred, zs_pred, index_sets):
+    """The paired row-bootstrap margins of one seed-run: macro-F1(pred) - macro-F1(zs_pred) on each resample."""
+    out = []
+    for idx in index_sets:
+        ys = [y[i] for i in idx]
+        out.append(_counts_f1(ys, [pred[i] for i in idx]) - _counts_f1(ys, [zs_pred[i] for i in idx]))
+    return out
 
 
 # ---- the fixture -------------------------------------------------------------------------------------------------
@@ -549,7 +750,94 @@ def selftest_inputs(c):
     c.refused("red: a wrong schema is refused", lambda: _verify(mutated(lambda m: m.update({"schema": "x"})), evidence), "SCHEMA")
 
 
-SELFTEST_SECTIONS = [selftest_inputs]
+def _unit(seed, margin, ece, run=None):
+    u = {"seed": seed, "margin": margin, "ece": ece}
+    if run:
+        u["run"] = run
+    return u
+
+
+def selftest_rule(c):
+    """Task 2 cases fixed BEFORE analyze runs on the real fixture: the class rule and its statistics."""
+    # The three class outcomes, each label naming the class it returns.
+    def run_class(mean, sd, shortfall, median_se, p_declared, n=6):
+        full = deficiency_status(mean, sd, n)
+        loo = [deficiency_status(mean, sd, n - 1)] * n
+        return class_rule(full, loo, shortfall, sd, median_se, p_declared)[0]
+
+    c.check("class rule: recipe-deficiency on a CUDA set with mean 0.20 and sd 0.01 (upper 90 percent bound below the floor)",
+            run_class(0.20, 0.01, 0.10, 0.065, 0.0) == "recipe-deficiency")
+    c.check("class rule: single-draw-acceptance on a set shaped like the real one (mean 0.328, sd 0.044, shortfall 0.0205)",
+            run_class(0.328, 0.044, 0.0205, 0.065, 0.259) == "single-draw-acceptance")
+    c.check("class rule: undetermined when the shortfall exceeds the between-seed sd (mean 0.35, sd 0.002, shortfall 0.03)",
+            run_class(0.35, 0.002, 0.03, 0.065, 0.259) == "undetermined")
+    c.check("class rule: undetermined when the declared pass probability is at least 0.5",
+            run_class(0.328, 0.044, 0.0205, 0.065, 0.5) == "undetermined")
+    c.check("class rule: a leave-one-out set that supports deficiency blocks single-draw-acceptance",
+            class_rule("refuted", ["refuted", "supported"], 0.0205, 0.044, 0.065, 0.259)[0] == "undetermined")
+    c.check("deficiency: the three statuses at the bounds (supported, undetermined, refuted)",
+            [deficiency_status(0.20, 0.01, 6), deficiency_status(0.30, 0.044, 6), deficiency_status(0.40, 0.01, 6)]
+            == ["supported", "undetermined", "refuted"])
+    # The pass probability of a hand-built three-unit set equals a hand enumeration of the 27 ordered triples.
+    # A (ece 0.08, margin 0.35) < B (0.09, 0.28) < C (0.11, 0.40) by ECE. The median is C iff at least two draws are C
+    # (7 of 27), likewise A (7) and B (13). A passes, B is a defect (margin below the floor), C is an in-band gate fail.
+    units = [_unit(13, 0.35, 0.08), _unit(17, 0.28, 0.09), _unit(23, 0.40, 0.11)]
+    r = resample_rule(units, "shipped", FLOOR)
+    c.check("resample: p_gate 20/27, p_pass 7/27, p_in_band_gate_fail 7/27, p_defect 13/27 equal the hand enumeration",
+            r["triples"] == 27 and abs(r["p_gate"] - 20 / 27) < 1e-15 and abs(r["p_pass"] - 7 / 27) < 1e-15
+            and abs(r["p_in_band_gate_fail"] - 7 / 27) < 1e-15 and abs(r["p_defect"] - 13 / 27) < 1e-15, repr(r))
+    c.check("resample: within_cap2 is p_pass + p_in_band_gate_fail x p_pass",
+            abs(r["within_cap2"] - (7 / 27 + 7 / 27 * 7 / 27)) < 1e-15)
+    rm = resample_rule(units, "mean", FLOOR)
+    # Mean rule by multiset (a, b, c draws of A, B, C): pass 1 AAA + 3 AAB + 3 AAC + 3 ABB + 6 ABC + 3 BBC = 19; in-band
+    # gate fail 3 ACC + 3 BCC + 1 CCC = 7; defect 1 BBB (mean 0.28 is below the floor).
+    c.check("resample: the mean rule judges the mean of the three drawn margins (hand count 19, 7 and 1 of 27)",
+            abs(rm["p_pass"] - 19 / 27) < 1e-15 and abs(rm["p_in_band_gate_fail"] - 7 / 27) < 1e-15
+            and abs(rm["p_defect"] - 1 / 27) < 1e-15 and abs(rm["p_gate"] - 20 / 27) < 1e-15, repr(rm))
+    a = resample_with_loo(units, "shipped", FLOOR)
+    c.check("resample: the leave-one-out list has one entry per unit and its min/max bracket every entry",
+            len(a["loo"]) == 3 and a["loo_min"] == min(e["p_pass"] for e in a["loo"])
+            and a["loo_max"] == max(e["p_pass"] for e in a["loo"]) and a["loo_min"] <= a["loo_max"])
+    lo_only = resample_rule([units[0], units[2]], "shipped", FLOOR)
+    c.check("resample: two units give 8 triples", lo_only["triples"] == 8)
+    # The rank-key tie-break ships the smaller seed.
+    k1, k2, low = _unit(17, 0.3, 0.08015), _unit(13, 0.3, 0.08018), _unit(23, 0.3, 0.05)
+    c.check("ship: equal rank keys (floor(ece x 10000) = 801) ship the smaller seed 13",
+            rank_key(0.08015) == rank_key(0.08018) == 801 and ship([low, k1, k2])["seed"] == 13 and ship([k1, k2, low])["seed"] == 13)
+    c.check("ship: the median by ECE, not by margin", ship([_unit(13, 0.9, 0.05), _unit(17, 0.1, 0.07), _unit(23, 0.5, 0.09)])["seed"] == 17)
+    # df 2 two-sided p.
+    c.check("p_df2: t = 2.899 gives 0.1012 and t = 0 gives 1.0", abs(p_df2(2.899) - 0.1012) < 5e-5 and p_df2(0.0) == 1.0, repr(p_df2(2.899)))
+    m, sd, t, p = paired_t_df2([0.0380, 0.0641, 0.0168])
+    c.check("paired t: three differences give mean 0.0396 and p near 0.101", abs(m - 0.0396333) < 1e-6 and 0.100 < p < 0.103, repr((m, t, p)))
+    c.check("device anchoring: same sign with p above 0.05 is unproven; a tight same-sign set is supported",
+            device_status([0.0380, 0.0641, 0.0168])[0] == "unproven" and device_status([0.10, 0.11, 0.12])[0] == "supported"
+            and device_status([0.10, -0.11, 0.12])[0] == "unproven")
+    c.check("floor rule value: mean minus 2 sd rounded DOWN to hundredths (0.2396 -> 0.23, 0.25 -> 0.25)",
+            floor_rule_value(0.32788, 0.04412) == 0.23 and floor_rule_value(0.30, 0.025) == 0.25)
+    c.check("statistics anchors: mean, sd (ddof 1) and Pearson", mean_of([1.0, 2.0, 3.0]) == 2.0 and abs(sd_of([1.0, 2.0, 3.0]) - 1.0) < 1e-15
+            and abs(pearson([1.0, 2.0, 3.0], [2.0, 4.0, 6.0]) - 1.0) < 1e-12 and abs(pearson([1.0, 2.0, 3.0], [3.0, 2.0, 1.0]) + 1.0) < 1e-12)
+    # The one-pass bootstrap F1 equals macro_f1, and the bootstrap is deterministic for its seed.
+    rng = random.Random(3)
+    yy = [rng.randrange(3) for _ in range(100)]
+    pp = [rng.randrange(3) for _ in range(100)]
+    c.check("bootstrap: the one-pass macro-F1 equals macro_f1 bit for bit on 200 random draws",
+            all(_counts_f1(a, b) == macro_f1(a, b) for a, b in
+                [([rng.randrange(3) for _ in range(30)], [rng.randrange(3) for _ in range(30)]) for _ in range(200)]))
+    s1, s2 = bootstrap_index_sets(100, 5, 11), bootstrap_index_sets(100, 5, 11)
+    c.check("bootstrap: the same seed gives the same index sets, another seed another", s1 == s2 and s1 != bootstrap_index_sets(100, 5, 12))
+    bm = bootstrap_margins(yy, pp, pp, s1)
+    c.check("bootstrap: identical fine-tuned and zero-shot predictions give margin 0.0 on every resample", all(x == 0.0 for x in bm))
+    # RULE_SPEC: the constants asserted against the plan and the hash sensitive to every change.
+    c.check("RULE_SPEC carries the plan's constants (floor 0.30, B 2000, seed 20261031, z, rank_scale)",
+            RULE_SPEC["floor"] == 0.30 and RULE_SPEC["ceiling"] == 0.45 and RULE_SPEC["ece_band"] == [0.07, 0.12]
+            and RULE_SPEC["bootstrap"]["B"] == 2000 and RULE_SPEC["bootstrap"]["seed"] == 20261031
+            and RULE_SPEC["z_one_sided_90"] == 1.2815515655446004 and RULE_SPEC["rank_scale"] == 10000)
+    changed = _clone(RULE_SPEC)
+    changed["floor"] = 0.29
+    c.check("RULE_SPEC: a changed constant changes rule_sha256", rule_sha256(changed) != rule_sha256() and rule_sha256() == rule_sha256(_clone(RULE_SPEC)))
+
+
+SELFTEST_SECTIONS = [selftest_inputs, selftest_rule]
 
 
 def selftest():
