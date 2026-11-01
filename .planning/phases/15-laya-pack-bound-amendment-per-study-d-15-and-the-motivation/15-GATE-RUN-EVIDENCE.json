@@ -2,7 +2,7 @@
   "schema": "laya-gate-run-evidence-v3",
   "phase": "15",
   "plan": "15-08",
-  "status": "awaiting-owner-run",
+  "status": "complete",
   "attempt_cap": 1,
   "epochs": 4,
   "recipe_id_declared": "a9f1c4a7176655664f391e3237a3205d1c9989155160edb2d78ef46808ba5087",
@@ -151,5 +151,217 @@
     "S": "! T() { python3 -I -c \"import json,sys;print(json.load(open('models/laya-trainer/outputs-dev.json'))['trainer'][sys.argv[1]])\" \"$1\"; }; BUCKET=$(T BucketName); URL=$(python3 -I -c \"import json;print(json.load(open('models/laya-trainer/deploy-dev.json'))['endpoint'])\"); URL=\"${URL%/mcp}/mcp\"; export LAYA_M2M_FILE=$(cat models/laya-trainer/m2m-file-path); export SSL_CERT_FILE=\"${SSL_CERT_FILE:-/etc/ssl/cert.pem}\"; unset APRENDER_DECIDE_PROBE_TOKEN && assume ze-kasher-dev && TASK_ID=$(cat models/laya-trainer/p15-08-task-id) && i=0 && PH= && while [ \"$i\" -le 615 ]; do LINE=$(just laya-trainer-call ze-kasher-dev \"$URL\" status \"$TASK_ID\" 2>&1); echo \"$(date -u +%FT%TZ) $LINE\" | cut -c1-400 >> models/laya-trainer/p15-08-poll.log; PH=$(printf '%s' \"$LINE\" | grep -oE 'phase[^a-z_]{1,6}(completed|gate_failed|failed|cancelled)' | head -n 1 | grep -oE '(completed|gate_failed|failed|cancelled)$'); if [ -n \"$PH\" ]; then echo \"POLL DONE $PH\"; break; fi; i=$((i+1)); sleep 60; done; [ -n \"$PH\" ] || echo \"POLL CAP $(tail -n 1 models/laya-trainer/p15-08-poll.log | cut -c1-160)\"",
     "F": "! T() { python3 -I -c \"import json,sys;print(json.load(open('models/laya-trainer/outputs-dev.json'))['trainer'][sys.argv[1]])\" \"$1\"; }; BUCKET=$(T BucketName); URL=$(python3 -I -c \"import json;print(json.load(open('models/laya-trainer/deploy-dev.json'))['endpoint'])\"); URL=\"${URL%/mcp}/mcp\"; export LAYA_M2M_FILE=$(cat models/laya-trainer/m2m-file-path); export SSL_CERT_FILE=\"${SSL_CERT_FILE:-/etc/ssl/cert.pem}\"; unset APRENDER_DECIDE_PROBE_TOKEN && assume ze-kasher-dev && just laya-fetch motivation-v1-p15 \"$(cat models/laya-trainer/p15-08-task-id)\" \"$BUCKET\"",
     "H": "! T() { python3 -I -c \"import json,sys;print(json.load(open('models/laya-trainer/outputs-dev.json'))['trainer'][sys.argv[1]])\" \"$1\"; }; BUCKET=$(T BucketName); URL=$(python3 -I -c \"import json;print(json.load(open('models/laya-trainer/deploy-dev.json'))['endpoint'])\"); URL=\"${URL%/mcp}/mcp\"; export LAYA_M2M_FILE=$(cat models/laya-trainer/m2m-file-path); export SSL_CERT_FILE=\"${SSL_CERT_FILE:-/etc/ssl/cert.pem}\"; unset APRENDER_DECIDE_PROBE_TOKEN && assume ze-kasher-dev && echo \"training_jobs_inprogress $(aws sagemaker list-training-jobs --profile ze-kasher-dev --status-equals InProgress --query 'length(TrainingJobSummaries)' --output text)\" && echo \"ecs_tasks_running $(aws ecs list-tasks --profile ze-kasher-dev --cluster \"$(T ClusterArn)\" --desired-status RUNNING --query 'length(taskArns)' --output text)\" && echo \"state_machine_execution $(aws stepfunctions list-executions --profile ze-kasher-dev --state-machine-arn \"$(T StateMachineArn)\" --max-results 1 --query 'executions[0].status' --output text)\" && echo \"lock $(aws dynamodb get-item --profile ze-kasher-dev --table-name \"$(T TableName)\" --key '{\"owner\":{\"S\":\"laya-train#single-flight\"},\"task_id\":{\"S\":\"lock\"}}' --output json | tr -d '\\n ' | cut -c1-300)\""
-  }
+  },
+  "attempts": [
+    {
+      "attempt": 1,
+      "task_id": "604c5a87-83a1-4321-977c-c6ec624d4331",
+      "run_dir": "models/decide/motivation-v1-p15",
+      "outcome": "completed_out_of_band",
+      "failure_kind": "margin below the declared band floor (gate and pack accepted)"
+    }
+  ],
+  "attempt_consumption": {
+    "class": "consumed",
+    "fetched": true,
+    "exit_class": "pass",
+    "gate_report_present": true,
+    "gate_line_present": true
+  },
+  "recipe_id_written": "a9f1c4a7176655664f391e3237a3205d1c9989155160edb2d78ef46808ba5087",
+  "inputs_sha256": {
+    "task_json": "f74a3ad3cfc00c160cc2959d95beb219aec859b394b883e87577a56dc14e7ea3",
+    "train_jsonl": "f1d84f19ec38ed85356bcbcd1eae6ef8ad07fb97e014f61a17d37adc0d68d378",
+    "eval_jsonl": "ee95d71fcb5d90d515b9fc6741e5df51087e763fa7f251ace83d9f11d5ccd575"
+  },
+  "report_inputs_sha256_extra": {
+    "base_model": "891102d372688fc2a094dac56a384bc537b87c63f21f9f3dac0be2b7cbc8d86c",
+    "tokenizer_json": "6c8aaa9a542084f2457eab775d4eeb51f92a70c0fd9de28d5edb0ddec3c08d30"
+  },
+  "outcome": "completed",
+  "device_used": "cuda:0",
+  "torch_version": "2.14.0+cu130",
+  "started_at": "2026-11-01T05:01:45Z",
+  "finished_at": "2026-11-01T05:21:05Z",
+  "train_seconds": 1159.0,
+  "seeds": {
+    "policy": "median_ece",
+    "shipped": 13,
+    "per_seed": [
+      {
+        "seed": 13,
+        "macro_f1": 0.6490996857686265,
+        "ece_post": 0.09729856818914415,
+        "margin": 0.27953446837732215,
+        "pass": true,
+        "t_applied": 1.653320849992885
+      },
+      {
+        "seed": 17,
+        "macro_f1": 0.6817223412968093,
+        "ece_post": 0.09227829813957215,
+        "margin": 0.31215712390550493,
+        "pass": true,
+        "t_applied": 1.2997205298903585
+      },
+      {
+        "seed": 23,
+        "macro_f1": 0.765018315018315,
+        "ece_post": 0.10959439009428028,
+        "margin": 0.3954530976270106,
+        "pass": false,
+        "t_applied": 5.0
+      }
+    ]
+  },
+  "gate": {
+    "pass": true,
+    "zero_shot_macro_f1": 0.3695652173913044,
+    "ft_macro_f1": 0.6490996857686265,
+    "margin": 0.27953446837732215,
+    "ece_post": 0.09729856818914415,
+    "thresholds": {
+      "min_macro_f1_margin": 0.05,
+      "max_ece": 0.1,
+      "ece_bins": 15
+    },
+    "t_applied": 1.653320849992885,
+    "clamp_hit": false
+  },
+  "pilot_waiver": null,
+  "waived": null,
+  "noise": {
+    "fine_tuned": {
+      "max_abs": 2.59509574834782e-06,
+      "argmax_agree": 100,
+      "t_applied": 1.653320849992885
+    },
+    "zero_shot": {
+      "max_abs": 1.7265105816122173e-06,
+      "argmax_agree": 100,
+      "t_applied": 1.7601518630981445
+    }
+  },
+  "pack": {
+    "ran": true,
+    "accepted": true,
+    "deploy_eligible": true,
+    "apr_sha256": "42efa308c305d3618fa0a7d69a8cd4b1dd03a354875bbe29568f3faa0b94feab",
+    "pack_image_digest": "sha256:dd38865c43aba2f3819e50addcf6db5e9da94ef84e762d93cf6b2c132f1d17e2",
+    "parity_contract_sha256": "466891faa5e3e1e092a5483bafcdf2ba8c5c835c9cdda5aaff896d2e893584e9",
+    "gate_contract_sha256": "4f6ba791b5c4a2f3f380de8f967e2263543285b01f71d4708509da528f5fe474",
+    "shipped_seed": 13,
+    "packed_line": "PACKED /work/out/motivation-v1-p15.apr sha256=42efa308c305d3618fa0a7d69a8cd4b1dd03a354875bbe29568f3faa0b94feab rescore_max_abs=0.0000058710575103759766 zs_rescore_max_abs=0.00001728534698486328 rescore_bound=0.00005 zs_rescore_bound=0.00003 noise=0.00000259509574834782 zs_noise=0.0000017265105816122173 shipped_seed=13 argmax=100/100 waived=none",
+    "verify_line": "{\"argmax\":\"100/100\",\"artifact_sha256\":\"42efa308c305d3618fa0a7d69a8cd4b1dd03a354875bbe29568f3faa0b94feab\",\"deploy_eligible\":true,\"noise\":2.59509574834782e-6,\"recomputed\":{\"ece_post\":0.09729856818914415,\"ft_macro_f1\":0.6490996857686265,\"margin\":0.27953446837732215,\"zs_macro_f1\":0.3695652173913044},\"rescore_bound\":0.00005,\"rescore_max_abs\":5.8710575103759766e-6,\"shipped_seed\":13,\"waived\":null,\"zs_noise\":1.7265105816122173e-6,\"zs_rescore_bound\":0.00003,\"zs_rescore_max_abs\":0.00001728534698486328}",
+    "pack_seconds": 149.31,
+    "verify_seconds": 143.75
+  },
+  "verify_line": "{\"argmax\":\"100/100\",\"artifact_sha256\":\"42efa308c305d3618fa0a7d69a8cd4b1dd03a354875bbe29568f3faa0b94feab\",\"deploy_eligible\":true,\"noise\":2.59509574834782e-6,\"recomputed\":{\"ece_post\":0.09729856818914415,\"ft_macro_f1\":0.6490996857686265,\"margin\":0.27953446837732215,\"zs_macro_f1\":0.3695652173913044},\"rescore_bound\":0.00005,\"rescore_max_abs\":5.8710575103759766e-6,\"shipped_seed\":13,\"waived\":null,\"zs_noise\":1.7265105816122173e-6,\"zs_rescore_bound\":0.00003,\"zs_rescore_max_abs\":0.00001728534698486328}",
+  "artifact": {
+    "path": "models/decide/motivation-v1-p15/motivation-v1-p15.apr",
+    "sha256": "42efa308c305d3618fa0a7d69a8cd4b1dd03a354875bbe29568f3faa0b94feab",
+    "bytes": 846196484,
+    "eligible": true
+  },
+  "deploy_eligible": true,
+  "local_verify": {
+    "ran": true,
+    "role": "dry-run laya-upload, server aprender-mcp-decide-motivation, DRY_RUN=1",
+    "deploy_eligible": true,
+    "eligible_line": "ELIGIBLE pack-record sha256 42efa308c305d3618fa0a7d69a8cd4b1dd03a354875bbe29568f3faa0b94feab (local verify accepted)",
+    "dry_run_line": "DRY-RUN: would upload models/decide/motivation-v1-p15/motivation-v1-p15.apr (846196484 bytes) to s3://aprender-decide-weights-<account>-dev/decide/aprender-mcp-decide-motivation/<sha256>.apr",
+    "aws_calls": 0,
+    "finding": null,
+    "note": "the local Mac laya-verify accepted the file (no cross-CPU finding was logged); nothing was uploaded or deployed"
+  },
+  "platform": {
+    "host": "sagemaker ml.g5.xlarge",
+    "arch_train": "x86_64",
+    "arch_pack": "arm64 (Fargate)",
+    "arch_local_verify": "arm64 (this Mac)"
+  },
+  "billable_seconds": null,
+  "billable_seconds_note": "not obtained: the owner reply carried no describe-training-job read-back; train_seconds and pack_seconds are from the fetched outcome records",
+  "pack_task_seconds": 149.31,
+  "evidence_incomplete": [],
+  "evaluation": [
+    {
+      "attempt": 1,
+      "band": {
+        "ece_post": true,
+        "margin": false
+      },
+      "class": "defect",
+      "defect_reasons": [
+        "out-of-band: margin 0.27953446837732215 is outside [0.3, 0.45]"
+      ],
+      "metrics": {
+        "ece_post": 0.09729856818914415,
+        "gate_pass": true,
+        "margin": 0.27953446837732215
+      },
+      "must": {
+        "deploy_eligible": true,
+        "device_prefix": true,
+        "inputs_sha256": true,
+        "recipe_id": true,
+        "seeds": true
+      },
+      "recorded": {
+        "device_used": "cuda:0",
+        "inputs_sha256": {
+          "base_model": "891102d372688fc2a094dac56a384bc537b87c63f21f9f3dac0be2b7cbc8d86c",
+          "eval_jsonl": "ee95d71fcb5d90d515b9fc6741e5df51087e763fa7f251ace83d9f11d5ccd575",
+          "task_json": "f74a3ad3cfc00c160cc2959d95beb219aec859b394b883e87577a56dc14e7ea3",
+          "tokenizer_json": "6c8aaa9a542084f2457eab775d4eeb51f92a70c0fd9de28d5edb0ddec3c08d30",
+          "train_jsonl": "f1d84f19ec38ed85356bcbcd1eae6ef8ad07fb97e014f61a17d37adc0d68d378"
+        },
+        "recipe_id": "a9f1c4a7176655664f391e3237a3205d1c9989155160edb2d78ef46808ba5087",
+        "seeds": [
+          13,
+          17,
+          23
+        ],
+        "shipped_seed": 13
+      },
+      "retry_allowed": false,
+      "verdict_if_final": "not-reproduced",
+      "waived": null
+    }
+  ],
+  "verdict": "not-reproduced",
+  "verdict_reason": "class defect (out-of-band): the gate passed and the pack accepted a deploy-eligible artifact on the amended image, with the declared recipe, inputs, seeds and cuda device, and ece_post 0.0973 is inside [0.07, 0.12], but the shipped-seed margin 0.2795 is below the declared band floor 0.30; nothing is waived and the declaration allows no retry",
+  "outcome_meaning": "not-reproduced under the declared band: the pack-bound refusal of attempt 1 is gone (SC1 to SC3 stand on their own evidence), but the trust bar (SC4) is not met and the Phase 14 training server stays untrusted (next_trusted false). A further attempt is the owner's decision; nothing is pre-authorized",
+  "claim_scope": "gate outcome and band only; not an identical reproduction of attempt 1 or of Phase 12: max epochs 12 -> 4 (cosine schedule over 112 steps instead of 336; learning-rate factor at the end of epoch 2 about 0.50 instead of 0.93); pack image sha256:504084d0c254af66e01b40f9f4679ba48fc09c4bf80386cc458a9388ae3090f3 -> sha256:dd38865c43aba2f3819e50addcf6db5e9da94ef84e762d93cf6b2c132f1d17e2 (laya-parity-v1 A2 bound; Graviton re-pack of attempt 1 accepted, plan 15-06); bytes differ by design; no determinism claim",
+  "next_trusted": false,
+  "comparison": {
+    "phase12": {
+      "margin": 0.3780294827021587,
+      "ece_post": 0.09355141013860704
+    },
+    "attempt1": {
+      "margin": 0.2860488947445468,
+      "ece_post": 0.09636022716760634,
+      "shipped_seed": 17,
+      "pack": "REFUSED RescoreDrift (zero_shot)"
+    },
+    "this": {
+      "margin": 0.27953446837732215,
+      "ece_post": 0.09729856818914415,
+      "shipped_seed": 13,
+      "train_seconds": 1159.0,
+      "pack": "accepted"
+    }
+  },
+  "hygiene": {
+    "training_jobs_inprogress": 0,
+    "ecs_tasks_running": 0,
+    "state_machine_execution": "SUCCEEDED",
+    "lock": "task.status completed (terminal, released=true per crates/aprender-mcp-laya-train/src/lock.rs); the retained envelope holder is by design"
+  },
+  "findings": [
+    "Under epochs 4 the median-ECE rule shipped seed 13 (ece_post 0.0973, margin 0.2795); seed 17 (margin 0.3122, ece 0.0923) and seed 23 (margin 0.3955, ece 0.1096, failed the 0.10 ECE bar) were not shipped. The shipped margin is below the 0.30 floor by 0.0205.",
+    "The amended pack bound did its job: the Graviton pack task accepted the artifact (rescore_max_abs 5.87e-06 against 5.0e-05 fine-tuned, 1.73e-05 against 3.0e-05 zero-shot) on the rolled image and the committed amended contract, and the local Mac laya-verify also accepted it.",
+    "Deviation recorded: the owner_commands H lock read-back used attribute names owner/task_id, but the table partition key is owner_id (deploy-extensions/lib/laya-trainer-stack.ts:151); the first get-item failed with ValidationException and the orchestrator recorded a corrected read-back (task.status completed). owner_commands.H above is the text that was run."
+  ]
 }
