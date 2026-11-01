@@ -55,6 +55,31 @@
       "recorded_at": "2026-11-01T04:24:44Z",
       "reply_verbatim": "Go: run C2 (selected via AskUserQuestion after 'Stop and investigate' showed the RunTask line is derived)",
       "deviation": "plan STOP-on-IAM rule overridden on the owner's decision; IAM line judged a derived artifact of the task-definition replacement"
+    },
+    {
+      "step": "C2 infra deploy",
+      "recorded_by": "orchestrator",
+      "recorded_at": "2026-11-01T04:33:48Z",
+      "reply_verbatim": "INFRA OK deploy"
+    },
+    {
+      "step": "C3 infra outputs",
+      "recorded_by": "orchestrator",
+      "recorded_at": "2026-11-01T04:33:48Z",
+      "reply_verbatim": "wrote outputs-dev.json (12 trainer outputs, 5 images outputs) / INFRA OK outputs"
+    },
+    {
+      "step": "D0 aws-plan (run by orchestrator, offline, no aws call)",
+      "recorded_by": "orchestrator",
+      "recorded_at": "2026-11-01T04:33:48Z",
+      "reply_verbatim": "AWS PLAN OK script models/laya-trainer/p15-repack-graviton.sh legs motivation (no aws call was made; bashrs-gate PASS, static policy table clean)",
+      "note": "script now pins aprender-laya-pack-dev:2"
+    },
+    {
+      "step": "D1 re-pack",
+      "recorded_by": "orchestrator",
+      "recorded_at": "2026-11-01T04:33:48Z",
+      "reply_verbatim": "TAGS OK motivation-1: 21 keys under runs/drift-motivation/a4d2519e-7eee-4552-8cd6-71980533792d/ read back laya-retention=expire\nLEG DONE motivation-1 prefix runs/drift-motivation/a4d2519e-7eee-4552-8cd6-71980533792d/ container_exit 0 results models/laya-trainer/p15-repack-graviton/motivation-1\nDRIFT GRAVITON DONE motivation:1"
     }
   ],
   "rehearsal": {
