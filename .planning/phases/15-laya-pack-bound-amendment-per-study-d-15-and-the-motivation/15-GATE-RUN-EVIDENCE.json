@@ -1,0 +1,113 @@
+{
+  "schema": "laya-gate-run-evidence-v3",
+  "phase": "15",
+  "plan": "15-08",
+  "status": "awaiting-owner-run",
+  "attempt_cap": 1,
+  "epochs": 4,
+  "recipe_id_declared": "a9f1c4a7176655664f391e3237a3205d1c9989155160edb2d78ef46808ba5087",
+  "run": {
+    "name": "motivation-v1-p15",
+    "dataset_prefix": "datasets/motivation-v1/",
+    "epochs": 4
+  },
+  "declaration_sha256": "1471c10638e78e924229f0038d50536b813190b89b81807a9b499452cd0e5f86",
+  "declaration_commit": {
+    "sha": "c078910ba3bdccd65246019f797574e237b3cef5",
+    "committed_at": 1793508028
+  },
+  "authorization": {
+    "source": "15-RUN-GO.json",
+    "commit": "a2f22a639094c38dcbf490eaa785c8bc7d1a41d9",
+    "declaration_sha256": "1471c10638e78e924229f0038d50536b813190b89b81807a9b499452cd0e5f86"
+  },
+  "control_evaluation": {
+    "attempt": 1,
+    "band": {
+      "ece_post": true,
+      "margin": false
+    },
+    "class": "defect",
+    "defect_reasons": [
+      "out-of-band: margin 0.2860488947445468 is outside [0.3, 0.45]",
+      "recipe-mismatch: recipe_id 'f88f5b71ef925fdabb30d26a15c2eb5195a151dadfe0882c858b73ca7bf54d7e' is not the declared one",
+      "phase: verdict.json phase is 'failed', expected completed or gate_failed",
+      "pack-refused: the gate passed but the pack was not accepted and deploy-eligible"
+    ],
+    "metrics": {
+      "ece_post": 0.09636022716760634,
+      "gate_pass": true,
+      "margin": 0.2860488947445468
+    },
+    "must": {
+      "deploy_eligible": false,
+      "device_prefix": true,
+      "inputs_sha256": true,
+      "recipe_id": false,
+      "seeds": true
+    },
+    "recorded": {
+      "device_used": "cuda:0",
+      "inputs_sha256": {
+        "base_model": "891102d372688fc2a094dac56a384bc537b87c63f21f9f3dac0be2b7cbc8d86c",
+        "eval_jsonl": "ee95d71fcb5d90d515b9fc6741e5df51087e763fa7f251ace83d9f11d5ccd575",
+        "task_json": "f74a3ad3cfc00c160cc2959d95beb219aec859b394b883e87577a56dc14e7ea3",
+        "tokenizer_json": "6c8aaa9a542084f2457eab775d4eeb51f92a70c0fd9de28d5edb0ddec3c08d30",
+        "train_jsonl": "f1d84f19ec38ed85356bcbcd1eae6ef8ad07fb97e014f61a17d37adc0d68d378"
+      },
+      "recipe_id": "f88f5b71ef925fdabb30d26a15c2eb5195a151dadfe0882c858b73ca7bf54d7e",
+      "seeds": [
+        13,
+        17,
+        23
+      ],
+      "shipped_seed": 17
+    },
+    "retry_allowed": false,
+    "verdict_if_final": "not-reproduced",
+    "waived": null
+  },
+  "failure_path_controls": {
+    "no-report": {
+      "rule": "consumed",
+      "evaluator_class": "defect",
+      "missing_file_reason": "missing-file: /tmp/p15-08-fail/no-report/run/gate-report.json"
+    },
+    "no-pack": {
+      "rule": "consumed",
+      "evaluator_class": "defect",
+      "missing_file_reason": "missing-file: /tmp/p15-08-fail/no-pack/logs/pack-outcome.json"
+    },
+    "crash": {
+      "rule": "pre-verdict",
+      "evaluator_class": null,
+      "missing_file_reason": null
+    },
+    "no-fetch": {
+      "rule": "unresolved",
+      "evaluator_class": null,
+      "missing_file_reason": null
+    }
+  },
+  "consumption_rule": [
+    "R = models/decide/<run.name>, evaluated in this order:",
+    "1. R/manifest.json absent (the fetch failed or never ran), or R/logs/outcome.json absent or not JSON with a string exit_class -> unresolved.",
+    "2. exit_class in {pass, gate_fail}, or R/run/gate-report.json exists, or R/logs/train.log has a line equal to `GATE PASS` or `GATE FAIL` -> consumed (the gate executed; the evaluator judges whatever evidence was fetched, and a missing report or pack record is its `missing-file` defect, final under cap 1).",
+    "3. exit_class in {refused, crash} with none of the gate evidence of step 2 -> pre-verdict (not consumed, D-12).",
+    "4. Anything else -> unresolved (never counted as not consumed; the plan stops at CHECKPOINT REACHED and the owner decides; nothing is re-run)."
+  ],
+  "expected": {
+    "pack_image_digest": "sha256:dd38865c43aba2f3819e50addcf6db5e9da94ef84e762d93cf6b2c132f1d17e2",
+    "parity_contract_sha256": "466891faa5e3e1e092a5483bafcdf2ba8c5c835c9cdda5aaff896d2e893584e9"
+  },
+  "pre_verdict_failures": [],
+  "owner_replies": [],
+  "owner_commands": {
+    "P0": "T() { python3 -I -c \"import json,sys;print(json.load(open('models/laya-trainer/outputs-dev.json'))['trainer'][sys.argv[1]])\" \"$1\"; }; BUCKET=$(T BucketName); URL=$(python3 -I -c \"import json;print(json.load(open('models/laya-trainer/deploy-dev.json'))['endpoint'])\"); URL=\"${URL%/mcp}/mcp\"; export LAYA_M2M_FILE=$(cat models/laya-trainer/m2m-file-path); export SSL_CERT_FILE=\"${SSL_CERT_FILE:-/etc/ssl/cert.pem}\"; unset APRENDER_DECIDE_PROBE_TOKEN",
+    "V": "! T() { python3 -I -c \"import json,sys;print(json.load(open('models/laya-trainer/outputs-dev.json'))['trainer'][sys.argv[1]])\" \"$1\"; }; BUCKET=$(T BucketName); URL=$(python3 -I -c \"import json;print(json.load(open('models/laya-trainer/deploy-dev.json'))['endpoint'])\"); URL=\"${URL%/mcp}/mcp\"; export LAYA_M2M_FILE=$(cat models/laya-trainer/m2m-file-path); export SSL_CERT_FILE=\"${SSL_CERT_FILE:-/etc/ssl/cert.pem}\"; unset APRENDER_DECIDE_PROBE_TOKEN && assume ze-kasher-dev && just laya-trainer-call ze-kasher-dev \"$URL\" validate \"s3://$BUCKET/datasets/motivation-v1/\"",
+    "R": "! T() { python3 -I -c \"import json,sys;print(json.load(open('models/laya-trainer/outputs-dev.json'))['trainer'][sys.argv[1]])\" \"$1\"; }; BUCKET=$(T BucketName); URL=$(python3 -I -c \"import json;print(json.load(open('models/laya-trainer/deploy-dev.json'))['endpoint'])\"); URL=\"${URL%/mcp}/mcp\"; export LAYA_M2M_FILE=$(cat models/laya-trainer/m2m-file-path); export SSL_CERT_FILE=\"${SSL_CERT_FILE:-/etc/ssl/cert.pem}\"; unset APRENDER_DECIDE_PROBE_TOKEN && assume ze-kasher-dev && just laya-trainer-call ze-kasher-dev \"$URL\" train \"s3://$BUCKET/datasets/motivation-v1/\" motivation-v1-p15 4 > models/laya-trainer/p15-08-train.out; echo \"rc=$?\"; cat models/laya-trainer/p15-08-train.out | cut -c1-600; grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' models/laya-trainer/p15-08-train.out | head -1 > models/laya-trainer/p15-08-task-id; echo \"TASK_ID $(cat models/laya-trainer/p15-08-task-id)\"",
+    "S": "! T() { python3 -I -c \"import json,sys;print(json.load(open('models/laya-trainer/outputs-dev.json'))['trainer'][sys.argv[1]])\" \"$1\"; }; BUCKET=$(T BucketName); URL=$(python3 -I -c \"import json;print(json.load(open('models/laya-trainer/deploy-dev.json'))['endpoint'])\"); URL=\"${URL%/mcp}/mcp\"; export LAYA_M2M_FILE=$(cat models/laya-trainer/m2m-file-path); export SSL_CERT_FILE=\"${SSL_CERT_FILE:-/etc/ssl/cert.pem}\"; unset APRENDER_DECIDE_PROBE_TOKEN && assume ze-kasher-dev && TASK_ID=$(cat models/laya-trainer/p15-08-task-id) && i=0 && PH= && while [ \"$i\" -le 615 ]; do LINE=$(just laya-trainer-call ze-kasher-dev \"$URL\" status \"$TASK_ID\" 2>&1); echo \"$(date -u +%FT%TZ) $LINE\" | cut -c1-400 >> models/laya-trainer/p15-08-poll.log; PH=$(printf '%s' \"$LINE\" | grep -oE 'phase[^a-z_]{1,6}(completed|gate_failed|failed|cancelled)' | head -n 1 | grep -oE '(completed|gate_failed|failed|cancelled)$'); if [ -n \"$PH\" ]; then echo \"POLL DONE $PH\"; break; fi; i=$((i+1)); sleep 60; done; [ -n \"$PH\" ] || echo \"POLL CAP $(tail -n 1 models/laya-trainer/p15-08-poll.log | cut -c1-160)\"",
+    "F": "! T() { python3 -I -c \"import json,sys;print(json.load(open('models/laya-trainer/outputs-dev.json'))['trainer'][sys.argv[1]])\" \"$1\"; }; BUCKET=$(T BucketName); URL=$(python3 -I -c \"import json;print(json.load(open('models/laya-trainer/deploy-dev.json'))['endpoint'])\"); URL=\"${URL%/mcp}/mcp\"; export LAYA_M2M_FILE=$(cat models/laya-trainer/m2m-file-path); export SSL_CERT_FILE=\"${SSL_CERT_FILE:-/etc/ssl/cert.pem}\"; unset APRENDER_DECIDE_PROBE_TOKEN && assume ze-kasher-dev && just laya-fetch motivation-v1-p15 \"$(cat models/laya-trainer/p15-08-task-id)\" \"$BUCKET\"",
+    "H": "! T() { python3 -I -c \"import json,sys;print(json.load(open('models/laya-trainer/outputs-dev.json'))['trainer'][sys.argv[1]])\" \"$1\"; }; BUCKET=$(T BucketName); URL=$(python3 -I -c \"import json;print(json.load(open('models/laya-trainer/deploy-dev.json'))['endpoint'])\"); URL=\"${URL%/mcp}/mcp\"; export LAYA_M2M_FILE=$(cat models/laya-trainer/m2m-file-path); export SSL_CERT_FILE=\"${SSL_CERT_FILE:-/etc/ssl/cert.pem}\"; unset APRENDER_DECIDE_PROBE_TOKEN && assume ze-kasher-dev && echo \"training_jobs_inprogress $(aws sagemaker list-training-jobs --profile ze-kasher-dev --status-equals InProgress --query 'length(TrainingJobSummaries)' --output text)\" && echo \"ecs_tasks_running $(aws ecs list-tasks --profile ze-kasher-dev --cluster \"$(T ClusterArn)\" --desired-status RUNNING --query 'length(taskArns)' --output text)\" && echo \"state_machine_execution $(aws stepfunctions list-executions --profile ze-kasher-dev --state-machine-arn \"$(T StateMachineArn)\" --max-results 1 --query 'executions[0].status' --output text)\" && echo \"lock $(aws dynamodb get-item --profile ze-kasher-dev --table-name \"$(T TableName)\" --key '{\"owner\":{\"S\":\"laya-train#single-flight\"},\"task_id\":{\"S\":\"lock\"}}' --output json | tr -d '\\n ' | cut -c1-300)\""
+  }
+}
