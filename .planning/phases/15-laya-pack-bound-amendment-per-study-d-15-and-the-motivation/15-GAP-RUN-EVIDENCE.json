@@ -2,7 +2,7 @@
   "schema": "laya-gate-run-evidence-v3",
   "phase": "15",
   "plan": "15-11",
-  "status": "awaiting-owner-run",
+  "status": "ready-for-owner-run",
   "option": "mean-rule",
   "declaration_path": ".planning/phases/15-laya-pack-bound-amendment-per-study-d-15-and-the-motivation/15-GAP-REPRODUCTION-DECLARATION.json",
   "rule": "mean-rule: the margin clause is judged on the mean of the three seed margins (seeds 13, 17, 23) in [0.30, 0.45]; the ECE clause (0.07 to 0.12), the gate and the pack stay on the shipped seed; cap 1, no retry class; supersedes D-11; run_go true recorded in 15-GAP-OWNER-REPLY.json",
@@ -23,7 +23,14 @@
     "sha": "e06b59adea966c1d4fedc01f659a3fdcd9ba97e6",
     "committed_at": 1793547746
   },
-  "authorization": null,
+  "authorization": {
+    "source": "declaration",
+    "run_authorized": true,
+    "declaration_commit": "e06b59adea966c1d4fedc01f659a3fdcd9ba97e6",
+    "declaration_sha256": "a57165fc867e2f54e7c92697f4257a1fe1fb04f6a32d7f3d2bb232e768e383c2",
+    "owner_reply_record": "15-GAP-OWNER-REPLY.json",
+    "note": "the committed declaration carries run_authorized true (owner reply: mean-rule, run-go); no 15-GAP-RUN-GO.json is needed. The materialized first-add blob equals the working file, has exactly one commit and its sha256 equals declaration_sha256; attempt_cap is 1."
+  },
   "control_evaluation": {
     "attempt": 1,
     "band": {
@@ -122,7 +129,8 @@
   },
   "attempts": [],
   "evidence_incomplete": [
-    "awaiting the owner run"
+    "awaiting the owner run (readiness gate passed; nothing spent, no AWS call, no owner command run)"
   ],
-  "next_trusted": false
+  "next_trusted": false,
+  "attempt_number": 1
 }

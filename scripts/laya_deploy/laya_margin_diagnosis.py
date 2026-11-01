@@ -5,6 +5,7 @@
     python3 -I scripts/laya_deploy/laya_margin_diagnosis.py verify-inputs --inputs FILE
     python3 -I scripts/laya_deploy/laya_margin_diagnosis.py scan-identifiers FILE...     (plan 15-11)
     python3 -I scripts/laya_deploy/laya_margin_diagnosis.py classify-run --run-dir DIR   (plan 15-11)
+    python3 -I scripts/laya_deploy/laya_margin_diagnosis.py check-run-go --run-go FILE --blob FILE --commit SHA   (plan 15-12)
     python3 -I scripts/laya_deploy/laya_margin_diagnosis.py --selftest
 
 `snapshot` is the ONLY step that reads gitignored files (the fetched run directories and the data directory, both
@@ -1262,6 +1263,34 @@ def cmd_classify_run(opts):
     return 0
 
 
+def check_run_go(run_go_path, blob_path, commit):
+    """Plan 15-12 (D-03): is this orchestrator-recorded go bound to the exact committed declaration? It judges FIELDS only:
+    schema laya-run-go-v1, recorded_by orchestrator, interpreted_as run-go, declaration_commit equal to the given commit and
+    declaration_sha256 equal to the sha256 of the materialized blob. It never inspects owner_reply_verbatim (the lesson of
+    15-RUN-GO.json, whose literal reply 'go' holds no 'run-go' substring)."""
+    rec = read_json(run_go_path, "run-go")
+    if not isinstance(rec, dict):
+        raise Refused("run-go", "the record is not a JSON object")
+    if rec.get("schema") != "laya-run-go-v1":
+        raise Refused("run-go", "schema is not laya-run-go-v1")
+    if rec.get("recorded_by") != "orchestrator":
+        raise Refused("run-go", "recorded_by is not orchestrator")
+    if rec.get("interpreted_as") != "run-go":
+        raise Refused("run-go", "interpreted_as is not run-go")
+    if not isinstance(commit, str) or not commit or rec.get("declaration_commit") != commit:
+        raise Refused("run-go", "declaration_commit differs from the committed declaration's commit")
+    digest = sha256_hex(read_bytes(blob_path, "run-go"))
+    if rec.get("declaration_sha256") != digest:
+        raise Refused("run-go", "declaration_sha256 differs from the sha256 of the committed declaration blob")
+    return True
+
+
+def cmd_check_run_go(opts):
+    check_run_go(opts["--run-go"], opts["--blob"], opts["--commit"])
+    print("RUN-GO OK")
+    return 0
+
+
 # ---- the selftest ------------------------------------------------------------------------------------------------
 
 class Cases:
@@ -1746,7 +1775,48 @@ def selftest_gap_tools(c):
         shutil.rmtree(d, ignore_errors=True)
 
 
-SELFTEST_SECTIONS = [selftest_inputs, selftest_rule, selftest_analyze, selftest_decision, selftest_gap_tools]
+def selftest_run_go(c):
+    """Plan 15-12 cases for check-run-go, fixed BEFORE the function was written."""
+    import shutil
+    import tempfile
+    d = tempfile.mkdtemp(prefix="margin-rungo-selftest-")
+    try:
+        blob = os.path.join(d, "decl.json")
+        write_text(blob, '{"declaration": "bytes"}\n')
+        digest = sha256_hex(read_bytes(blob, "selftest"))
+        commit = "ab" * 20
+
+        def rec(name, **over):
+            r = {"schema": "laya-run-go-v1", "recorded_by": "orchestrator", "recorded_at": "2026-11-01T00:00:00Z",
+                 "owner_reply_verbatim": "go", "interpreted_as": "run-go", "declaration_path": "x.json",
+                 "declaration_commit": commit, "declaration_sha256": digest}
+            r.update(over)
+            path = os.path.join(d, name)
+            write_text(path, dumps(r))
+            return path
+
+        def ok(path, cm=commit):
+            return check_run_go(path, blob, cm) is True
+
+        c.check("check-run-go: accepts a good record", ok(rec("g1.json")))
+        c.check("check-run-go: accepts a record whose verbatim reply is the literal 'go'", ok(rec("g2.json", owner_reply_verbatim="go")))
+        c.check("check-run-go: judges fields, so a verbatim reply with no run-go substring still passes",
+                ok(rec("g3.json", owner_reply_verbatim="yes, go ahead")))
+        c.refused("check-run-go: refuses a wrong declaration digest", lambda: ok(rec("b1.json", declaration_sha256="0" * 64)), "declaration_sha256")
+        c.refused("check-run-go: refuses a wrong commit", lambda: ok(rec("b2.json"), "cd" * 20), "declaration_commit")
+        c.refused("check-run-go: refuses recorded_by not orchestrator", lambda: ok(rec("b3.json", recorded_by="executor")), "recorded_by")
+        c.refused("check-run-go: refuses interpreted_as other", lambda: ok(rec("b4.json", interpreted_as="run-hold")), "interpreted_as")
+        c.refused("check-run-go: refuses interpreted_as other even when the verbatim reply says run-go",
+                  lambda: ok(rec("b5.json", interpreted_as="run-hold", owner_reply_verbatim="run-go")), "interpreted_as")
+        c.refused("check-run-go: refuses a wrong schema", lambda: ok(rec("b6.json", schema="laya-run-go-v0")), "schema")
+        c.refused("check-run-go: refuses a missing file", lambda: ok(os.path.join(d, "none.json")), "run-go")
+        c.refused("check-run-go: refuses a missing blob", lambda: check_run_go(rec("b7.json"), os.path.join(d, "no-blob.json"), commit), "run-go")
+        c.refused("check-run-go: refuses an empty commit", lambda: ok(rec("b8.json"), ""), "declaration_commit")
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+SELFTEST_SECTIONS = [selftest_inputs, selftest_rule, selftest_analyze, selftest_decision, selftest_gap_tools, selftest_run_go]
 
 
 def selftest():
@@ -1773,6 +1843,7 @@ COMMANDS = {
     "check-disposition": (cmd_check_disposition, {"--disposition": True, "--reply": True, "--diagnosis": True}),
     "scan-identifiers": (cmd_scan_identifiers, None),
     "classify-run": (cmd_classify_run, {"--run-dir": True}),
+    "check-run-go": (cmd_check_run_go, {"--run-go": True, "--blob": True, "--commit": True}),
 }
 
 
