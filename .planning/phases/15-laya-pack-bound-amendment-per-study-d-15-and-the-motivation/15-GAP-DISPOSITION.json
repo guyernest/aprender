@@ -1,0 +1,71 @@
+{
+  "band_before": {
+    "ece_post": [
+      0.07,
+      0.12
+    ],
+    "margin": [
+      0.3,
+      0.45
+    ]
+  },
+  "class": "single-draw-acceptance",
+  "consumed_attempts": [
+    {
+      "attempt": 1,
+      "phase": "14",
+      "rejudged_for_trust": false,
+      "run": "p14",
+      "shipped_margin": 0.2860488947445468,
+      "shipped_seed": 17
+    },
+    {
+      "attempt": 1,
+      "phase": "15",
+      "rejudged_for_trust": false,
+      "run": "p15",
+      "shipped_margin": 0.27953446837732215,
+      "shipped_seed": 13
+    }
+  ],
+  "declaration_pending": true,
+  "gap": "SC4",
+  "next_trusted": false,
+  "option": "mean-rule",
+  "paid_run_planned": true,
+  "phase_state": "SC4 stays unmet until a NEW run under a declaration committed before it meets its declared band; the training server stays untrusted; no waiver and no override applies",
+  "reply_brief_sha256": "3cba575347e3b08a5bac192e7227b56f14c0b2715bf8de5fcf607f0ef1ccf863",
+  "rule": {
+    "attempt_cap": 1,
+    "claim_scope": "gate outcome and band only; not an identical reproduction of attempt 1 or of Phase 12: the margin clause is judged on the mean of the three seed margins in [0.3000, 0.4500] instead of the shipped seed's margin (D-11 superseded); the ECE clause and the gate stay on the shipped seed",
+    "cost_report_only": "report-only: about 1346 s of ml.g5.xlarge billed on attempt 1 plus about 150 s of Fargate pack",
+    "dataset_prefix": "datasets/motivation-v1/",
+    "ece_band": [
+      0.07,
+      0.12
+    ],
+    "epochs": 12,
+    "judging": "seed_mean",
+    "loo_max": 0.736,
+    "loo_min": 0.464,
+    "margin_band": [
+      0.3,
+      0.45
+    ],
+    "p_pass": 0.6342592592592593,
+    "paid_run": true,
+    "recipe_id": "f88f5b71ef925fdabb30d26a15c2eb5195a151dadfe0882c858b73ca7bf54d7e",
+    "retry_classes": [],
+    "run_name": "motivation-v1-p15b",
+    "supersedes": [
+      "D-11"
+    ],
+    "within_cap": 0.6342592592592593
+  },
+  "run_go": true,
+  "schema": "laya-gap-disposition-v1",
+  "supersedes": [
+    "D-11"
+  ],
+  "trust_basis": "none"
+}
