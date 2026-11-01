@@ -2,7 +2,7 @@
   "schema": "laya-gate-run-evidence-v3",
   "phase": "15",
   "plan": "15-11",
-  "status": "ready-for-owner-run",
+  "status": "complete",
   "option": "mean-rule",
   "declaration_path": ".planning/phases/15-laya-pack-bound-amendment-per-study-d-15-and-the-motivation/15-GAP-REPRODUCTION-DECLARATION.json",
   "rule": "mean-rule: the margin clause is judged on the mean of the three seed margins (seeds 13, 17, 23) in [0.30, 0.45]; the ECE clause (0.07 to 0.12), the gate and the pack stay on the shipped seed; cap 1, no retry class; supersedes D-11; run_go true recorded in 15-GAP-OWNER-REPLY.json",
@@ -158,10 +158,273 @@
     "F": "! T() { python3 -I -c \"import json,sys;print(json.load(open('models/laya-trainer/outputs-dev.json'))['trainer'][sys.argv[1]])\" \"$1\"; }; BUCKET=$(T BucketName); URL=$(python3 -I -c \"import json;print(json.load(open('models/laya-trainer/deploy-dev.json'))['endpoint'])\"); URL=\"${URL%/mcp}/mcp\"; export LAYA_M2M_FILE=$(cat models/laya-trainer/m2m-file-path); export SSL_CERT_FILE=\"${SSL_CERT_FILE:-/etc/ssl/cert.pem}\"; unset APRENDER_DECIDE_PROBE_TOKEN && assume ze-kasher-dev && just laya-fetch motivation-v1-p15b \"$(cat models/laya-trainer/p15b-task-id)\" \"$BUCKET\"",
     "H": "! T() { python3 -I -c \"import json,sys;print(json.load(open('models/laya-trainer/outputs-dev.json'))['trainer'][sys.argv[1]])\" \"$1\"; }; BUCKET=$(T BucketName); URL=$(python3 -I -c \"import json;print(json.load(open('models/laya-trainer/deploy-dev.json'))['endpoint'])\"); URL=\"${URL%/mcp}/mcp\"; export LAYA_M2M_FILE=$(cat models/laya-trainer/m2m-file-path); export SSL_CERT_FILE=\"${SSL_CERT_FILE:-/etc/ssl/cert.pem}\"; unset APRENDER_DECIDE_PROBE_TOKEN && assume ze-kasher-dev && echo \"training_jobs_inprogress $(aws sagemaker list-training-jobs --profile ze-kasher-dev --status-equals InProgress --query 'length(TrainingJobSummaries)' --output text)\" && echo \"ecs_tasks_running $(aws ecs list-tasks --profile ze-kasher-dev --cluster \"$(T ClusterArn)\" --desired-status RUNNING --query 'length(taskArns)' --output text)\" && echo \"state_machine_execution $(aws stepfunctions list-executions --profile ze-kasher-dev --state-machine-arn \"$(T StateMachineArn)\" --max-results 1 --query 'executions[0].status' --output text)\" && echo \"lock $(aws dynamodb get-item --profile ze-kasher-dev --table-name \"$(T TableName)\" --key '{\"owner_id\":{\"S\":\"laya-train#single-flight\"},\"task_id\":{\"S\":\"lock\"}}' --output json | tr -d '\\n ' | cut -c1-300)\""
   },
-  "attempts": [],
-  "evidence_incomplete": [
-    "awaiting the owner run (readiness gate passed; nothing spent, no AWS call, no owner command run)"
+  "attempts": [
+    {
+      "attempt": 1,
+      "task_id": "42d8eb1e-ee3b-43ca-b6d9-0235a66e1f7f",
+      "run_dir": "models/decide/motivation-v1-p15b",
+      "outcome": "gate_failed_waived",
+      "failure_kind": "the gate FAILED on the shipped seed (seed 23 ece_post 0.1150 above the gate's 0.10 bar); the trainer applied the Phase 12 pilot waiver motivation-v1-pilot-ece and the pack accepted under it; judged inconclusive by the declared waiver_rule"
+    }
   ],
+  "evidence_incomplete": [],
   "next_trusted": false,
-  "attempt_number": 1
+  "attempt_number": 1,
+  "completed_by_plan": "15-12",
+  "attempt_consumption": {
+    "class": "consumed",
+    "fetched": true,
+    "exit_class": "gate_fail",
+    "gate_report_present": true,
+    "gate_line_present": true,
+    "reason": "exit_class is gate_fail: the gate executed"
+  },
+  "recipe_id_written": "f88f5b71ef925fdabb30d26a15c2eb5195a151dadfe0882c858b73ca7bf54d7e",
+  "inputs_sha256": {
+    "task_json": "f74a3ad3cfc00c160cc2959d95beb219aec859b394b883e87577a56dc14e7ea3",
+    "train_jsonl": "f1d84f19ec38ed85356bcbcd1eae6ef8ad07fb97e014f61a17d37adc0d68d378",
+    "eval_jsonl": "ee95d71fcb5d90d515b9fc6741e5df51087e763fa7f251ace83d9f11d5ccd575"
+  },
+  "report_inputs_sha256_extra": {
+    "base_model": "891102d372688fc2a094dac56a384bc537b87c63f21f9f3dac0be2b7cbc8d86c",
+    "tokenizer_json": "6c8aaa9a542084f2457eab775d4eeb51f92a70c0fd9de28d5edb0ddec3c08d30"
+  },
+  "outcome": "gate_fail_waived (verdict.json phase completed, outcome.json exit_class gate_fail, train_rc 3)",
+  "device_used": "cuda:0",
+  "torch_version": "2.14.0+cu130",
+  "started_at": "2026-11-01T16:28:52Z",
+  "finished_at": "2026-11-01T16:48:57Z",
+  "train_seconds": 1203.0,
+  "run_env": {
+    "schema": "laya-train-run-env-v1",
+    "python": "3.13.7",
+    "hf_hub_offline": true,
+    "peak_gpu_memory_mib": 13729,
+    "driver": "595.91.07",
+    "compat_used": false,
+    "compat_ld_library_path": null
+  },
+  "seeds": {
+    "policy": "median_ece",
+    "shipped": 23,
+    "per_seed": [
+      {
+        "seed": 13,
+        "macro_f1": 0.6978733031674208,
+        "ece_post": 0.1205675214529037,
+        "margin": 0.3283080857761164,
+        "pass": false,
+        "t_applied": 4.33707932298008,
+        "clamp_hit": false
+      },
+      {
+        "seed": 17,
+        "macro_f1": 0.6556141121358512,
+        "ece_post": 0.09636022716760634,
+        "margin": 0.2860488947445468,
+        "pass": true,
+        "t_applied": 3.539444402314119,
+        "clamp_hit": false
+      },
+      {
+        "seed": 23,
+        "macro_f1": 0.7730414746543778,
+        "ece_post": 0.1150366187095642,
+        "margin": 0.4034762572630734,
+        "pass": false,
+        "t_applied": 5.0,
+        "clamp_hit": true
+      }
+    ],
+    "mean_margin": 0.3392777459279122
+  },
+  "gate": {
+    "pass": false,
+    "zero_shot_macro_f1": 0.3695652173913044,
+    "ft_macro_f1": 0.7730414746543778,
+    "margin": 0.4034762572630734,
+    "ece_post": 0.1150366187095642,
+    "thresholds": {
+      "min_macro_f1_margin": 0.05,
+      "max_ece": 0.1,
+      "ece_bins": 15
+    },
+    "t_applied": 5.0,
+    "clamp_hit": true
+  },
+  "pilot_waiver": {
+    "id": "motivation-v1-pilot-ece",
+    "waives": [
+      "ece_post"
+    ]
+  },
+  "waived": "motivation-v1-pilot-ece",
+  "noise": {
+    "fine_tuned": {
+      "max_abs": 4.093511261071825e-06,
+      "argmax_agree": 100,
+      "t_applied": 5.0
+    },
+    "zero_shot": {
+      "max_abs": 1.7265105816122173e-06,
+      "argmax_agree": 100,
+      "t_applied": 1.7601518630981445
+    }
+  },
+  "pack": {
+    "ran": true,
+    "accepted": true,
+    "deploy_eligible": true,
+    "apr_sha256": "dcc123ae0ea54af11969561f7c0fafbd5d4a589135ee69d9e9d8c7a36210afac",
+    "pack_image_digest": "sha256:dd38865c43aba2f3819e50addcf6db5e9da94ef84e762d93cf6b2c132f1d17e2",
+    "parity_contract_sha256": "466891faa5e3e1e092a5483bafcdf2ba8c5c835c9cdda5aaff896d2e893584e9",
+    "gate_contract_sha256": "4f6ba791b5c4a2f3f380de8f967e2263543285b01f71d4708509da528f5fe474",
+    "shipped_seed": 23,
+    "waived": "motivation-v1-pilot-ece",
+    "packed_line": "PACKED /work/out/motivation-v1-p15b.apr sha256=dcc123ae0ea54af11969561f7c0fafbd5d4a589135ee69d9e9d8c7a36210afac rescore_max_abs=0.0000095367431640625 zs_rescore_max_abs=0.00001728534698486328 rescore_bound=0.00005 zs_rescore_bound=0.00003 noise=0.000004093511261071825 zs_noise=0.0000017265105816122173 shipped_seed=23 argmax=100/100 waived=motivation-v1-pilot-ece",
+    "verify_line": "{\"argmax\":\"100/100\",\"artifact_sha256\":\"dcc123ae0ea54af11969561f7c0fafbd5d4a589135ee69d9e9d8c7a36210afac\",\"deploy_eligible\":true,\"noise\":4.093511261071825e-6,\"recomputed\":{\"ece_post\":0.1150366187095642,\"ft_macro_f1\":0.7730414746543778,\"margin\":0.4034762572630734,\"zs_macro_f1\":0.3695652173913044},\"rescore_bound\":0.00005,\"rescore_max_abs\":9.5367431640625e-6,\"shipped_seed\":23,\"waived\":\"motivation-v1-pilot-ece\",\"zs_noise\":1.7265105816122173e-6,\"zs_rescore_bound\":0.00003,\"zs_rescore_max_abs\":0.00001728534698486328}",
+    "pack_seconds": 130.69,
+    "verify_seconds": 125.43
+  },
+  "verify_line": "{\"argmax\":\"100/100\",\"artifact_sha256\":\"dcc123ae0ea54af11969561f7c0fafbd5d4a589135ee69d9e9d8c7a36210afac\",\"deploy_eligible\":true,\"noise\":4.093511261071825e-6,\"recomputed\":{\"ece_post\":0.1150366187095642,\"ft_macro_f1\":0.7730414746543778,\"margin\":0.4034762572630734,\"zs_macro_f1\":0.3695652173913044},\"rescore_bound\":0.00005,\"rescore_max_abs\":9.5367431640625e-6,\"shipped_seed\":23,\"waived\":\"motivation-v1-pilot-ece\",\"zs_noise\":1.7265105816122173e-6,\"zs_rescore_bound\":0.00003,\"zs_rescore_max_abs\":0.00001728534698486328}",
+  "artifact": {
+    "path": "models/decide/motivation-v1-p15b/motivation-v1-p15b.apr",
+    "sha256": "dcc123ae0ea54af11969561f7c0fafbd5d4a589135ee69d9e9d8c7a36210afac",
+    "bytes": 846196868,
+    "eligible": true,
+    "eligible_basis": "the pack task's recorded verify, which was reached only through the Phase 12 pilot waiver"
+  },
+  "deploy_eligible": true,
+  "local_verify": {
+    "ran": true,
+    "role": "offline laya_eligibility.py check-record over the fetched logs/pack-outcome.json; laya-verify and laya-deploy were NOT run (owner-run); nothing uploaded or deployed",
+    "real_sha_line": "PACK RECORD OK sha256 dcc123ae0ea54af11969561f7c0fafbd5d4a589135ee69d9e9d8c7a36210afac pack_image sha256:dd38865c43aba2f3819e50addcf6db5e9da94ef84e762d93cf6b2c132f1d17e2 parity_contract 466891faa5e3e1e092a5483bafcdf2ba8c5c835c9cdda5aaff896d2e893584e9",
+    "zero_sha_line": "REFUSED eligibility: pack record apr_sha256 dcc123ae0ea54af11969561f7c0fafbd5d4a589135ee69d9e9d8c7a36210afac differs from the local file's sha256 0000000000000000000000000000000000000000000000000000000000000000",
+    "aws_calls": 0,
+    "finding": null
+  },
+  "billable_seconds": null,
+  "billable_seconds_note": "not obtained: the owner replies carried no describe-training-job read-back; train_seconds and pack_seconds come from the fetched outcome records. train_seconds 1203.0 is under the report-only ceiling 2256 and near Phase 14 attempt 1's 1176.4",
+  "pack_task_seconds": 130.69,
+  "hygiene": {
+    "training_jobs_inprogress": 0,
+    "ecs_tasks_running": 0,
+    "state_machine_execution": "SUCCEEDED",
+    "lock": "status completed (owner-run read-back; the holder owner id is elided from this file)"
+  },
+  "evaluation": [
+    {
+      "attempt": 1,
+      "band": {
+        "ece_post": true,
+        "margin": true
+      },
+      "class": "waived",
+      "defect_reasons": [],
+      "metrics": {
+        "ece_post": 0.1150366187095642,
+        "gate_pass": false,
+        "margin": 0.3392777459279122,
+        "margin_statistic": "seed_mean",
+        "shipped_seed_margin": 0.4034762572630734
+      },
+      "must": {
+        "deploy_eligible": true,
+        "device_prefix": true,
+        "inputs_sha256": true,
+        "recipe_id": true,
+        "seeds": true
+      },
+      "recorded": {
+        "device_used": "cuda:0",
+        "inputs_sha256": {
+          "base_model": "891102d372688fc2a094dac56a384bc537b87c63f21f9f3dac0be2b7cbc8d86c",
+          "eval_jsonl": "ee95d71fcb5d90d515b9fc6741e5df51087e763fa7f251ace83d9f11d5ccd575",
+          "task_json": "f74a3ad3cfc00c160cc2959d95beb219aec859b394b883e87577a56dc14e7ea3",
+          "tokenizer_json": "6c8aaa9a542084f2457eab775d4eeb51f92a70c0fd9de28d5edb0ddec3c08d30",
+          "train_jsonl": "f1d84f19ec38ed85356bcbcd1eae6ef8ad07fb97e014f61a17d37adc0d68d378"
+        },
+        "recipe_id": "f88f5b71ef925fdabb30d26a15c2eb5195a151dadfe0882c858b73ca7bf54d7e",
+        "seeds": [
+          13,
+          17,
+          23
+        ],
+        "shipped_seed": 23
+      },
+      "retry_allowed": false,
+      "verdict_if_final": "inconclusive",
+      "waived": "motivation-v1-pilot-ece"
+    }
+  ],
+  "verdict": "inconclusive",
+  "claim_scope": "gate outcome and band only; not an identical reproduction of attempt 1 or of Phase 12: pack image sha256:504084d0c254af66e01b40f9f4679ba48fc09c4bf80386cc458a9388ae3090f3 -> sha256:dd38865c43aba2f3819e50addcf6db5e9da94ef84e762d93cf6b2c132f1d17e2 (laya-parity-v1 A2 bound; Graviton re-pack of attempt 1 accepted, plan 15-06); the margin clause is judged on the mean of the three seed margins, a statistic chosen after the shipped-seed misses of Phase 14 attempt 1 and Phase 15; it is not comparable with their shipped-seed margins; the ECE clause and the gate stay on the shipped seed; max epochs 12 with recipe f88f5b71ef925fdabb30d26a15c2eb5195a151dadfe0882c858b73ca7bf54d7e as in Phase 14 attempt 1 (Phase 15 ran max epochs 4); bytes differ by design; no determinism claim",
+  "comparison": {
+    "phase12": {
+      "per_seed_margin": {
+        "13": 0.3780294827021587,
+        "17": 0.35017561525275404,
+        "23": 0.37091097308488613
+      },
+      "shipped_seed": 13,
+      "shipped_seed_margin": 0.3780294827021587,
+      "three_seed_mean_margin": 0.366372023679933,
+      "shipped_ece_post": 0.09355141013860704,
+      "gate": "pass",
+      "pack": "n/a (local pack, 12-GATE-RUN-EVIDENCE.json)"
+    },
+    "attempt1": {
+      "per_seed_margin": {
+        "13": 0.3400236527815074,
+        "17": 0.2860488947445468,
+        "23": 0.3540824086953462
+      },
+      "shipped_seed": 17,
+      "shipped_seed_margin": 0.2860488947445468,
+      "three_seed_mean_margin": 0.3267183187404668,
+      "shipped_ece_post": 0.09636022716760634,
+      "gate": "pass",
+      "pack": "REFUSED RescoreDrift (zero_shot) on the old pack image"
+    },
+    "phase15": {
+      "per_seed_margin": {
+        "13": 0.27953446837732215,
+        "17": 0.31215712390550493,
+        "23": 0.3954530976270106
+      },
+      "shipped_seed": 13,
+      "shipped_seed_margin": 0.27953446837732215,
+      "three_seed_mean_margin": 0.3290482299699459,
+      "shipped_ece_post": 0.09729856818914415,
+      "gate": "pass",
+      "pack": "accepted",
+      "recipe_epochs": 4
+    },
+    "this": {
+      "per_seed_margin": {
+        "13": 0.3283080857761164,
+        "17": 0.2860488947445468,
+        "23": 0.4034762572630734
+      },
+      "shipped_seed": 23,
+      "shipped_seed_margin": 0.4034762572630734,
+      "three_seed_mean_margin": 0.3392777459279122,
+      "shipped_ece_post": 0.1150366187095642,
+      "gate": "FAIL (ece_post above 0.10 on the shipped seed)",
+      "pack": "accepted under the Phase 12 pilot waiver motivation-v1-pilot-ece",
+      "recipe_epochs": 12
+    },
+    "note": "the three-seed mean margin is the statistic judged here; the shipped-seed margin is what Phase 14 attempt 1 and Phase 15 were judged on, so the two columns are different instruments and must not be compared as one series"
+  },
+  "verdict_reason": "class waived (inconclusive): the margin clause (mean of the three seed margins 0.3393, inside [0.30, 0.45]) and the ECE band clause (shipped-seed ece_post 0.1150, inside the declared band [0.07, 0.12]) are true and every must clause is true, but the gate itself FAILED on the shipped seed (ece_post 0.1150 is above the gate's 0.10 bar, effective window [0.07, 0.10]); the trainer applied the Phase 12 pilot waiver motivation-v1-pilot-ece, the pack accepted under it and deploy_eligible is true only by that route. The declaration's waiver_rule is inconclusive: a waived acceptance counts as inconclusive, never as reproduced. Nothing is re-judged and no near miss is converted to a pass.",
+  "outcome_meaning": "inconclusive under the declared mean-rule: the pack-bound refusal is gone (the amended image accepted the artifact, rescore_max_abs 9.54e-06 against 5.0e-05 and 1.73e-05 against 3.0e-05), and the declared judged margin is in band, but the gate did not pass on the shipped seed, so the trust bar (SC4) is not met and the Phase 14 training server stays untrusted (next_trusted false). The cap is 1 and there is no retry class: nothing after this is pre-authorized, and a further attempt, a waiver ruling or a new declaration is the owner's decision",
+  "trust_basis": "not trusted. The declared judging statistic is seed_mean: the margin clause is judged on the mean of the three seed margins (seeds 13, 17, 23) in [0.30, 0.45], the ECE clause (0.07 to 0.12), the gate and the pack stay on the shipped seed, attempt cap 1, no retry class, supersedes D-11. The judged mean margin is 0.3393 (in band), but the gate FAILED on the shipped seed and the run was accepted only through the Phase 12 pilot waiver, which the declaration counts as inconclusive, so trust is withheld. Phase 14 attempt 1 and Phase 15 attempt 1 are not re-judged.",
+  "findings": [
+    "Shipped-seed margin is 0.4035 (seed 23, median-ECE rule); the judged margin, the mean of the three seed margins, is 0.3393. Both are inside [0.30, 0.45]. A pass on the seed_mean statistic is a mean-rule pass, not an identical reproduction of the shipped-seed instrument Phase 14 attempt 1 and Phase 15 were judged on; here the margin clause is not what failed.",
+    "The gate FAILED on the shipped seed: ece_post 0.1150 is above the 0.10 bar (gate report pass false, outcome exit_class gate_fail, train_rc 3, train.log GATE FAIL). Seed 23 hit the calibration clamp (t_applied 5.0, clamp_hit true); seed 13 also exceeded the bar (ece_post 0.1206), only seed 17 (0.0964) passed it. The median-ECE rule therefore shipped a failing seed. Phase 14 attempt 1 on the same recipe shipped seed 17 (ece 0.0964) and passed; the cause of the difference between the two runs was not investigated here.",
+    "Seed 17 is identical to Phase 14 attempt 1 to the last digit (macro_f1 0.6556141121358512, ece_post 0.09636022716760634, margin 0.2860488947445468) while seeds 13 and 23 differ from that run (seed 13 margin 0.3400 -> 0.3283, seed 23 0.3541 -> 0.4035). Observation only; the mechanism was not investigated.",
+    "The trainer applied the Phase 12 pilot waiver motivation-v1-pilot-ece to this run (train.log: PILOT WAIVER ... ece_post failed alone; pack and verify decide). The declaration anticipated this: its waiver_note and waiver_rule inconclusive count a waived acceptance as inconclusive. The pack record is deploy_eligible true with waived motivation-v1-pilot-ece, so it is eligible only through the waiver; it does not show the unwaived gate passing.",
+    "The amended pack bound did its job on a second artifact: the Graviton pack task accepted it on the expected image and parity contract (rescore_max_abs 9.54e-06 against 5.0e-05 fine-tuned, 1.73e-05 against 3.0e-05 zero-shot); the offline check-record accepted the real sha256 and refused the all-zero one (aws_calls 0). laya-verify and laya-deploy were not run (owner-run).",
+    "The recorded owner replies carry no billable-seconds read-back (billable_seconds null). The hygiene read-backs are clean: no training job or ECS task running, the state machine execution SUCCEEDED, the lock status completed."
+  ]
 }
