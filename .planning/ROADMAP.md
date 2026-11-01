@@ -1124,7 +1124,7 @@ Round 2 disposition (owner answers in 14-GAP-ROUND-2-OWNER-DECISIONS.md): Deferr
   4. Per truth 12 (D-16): after criterion 1 lands, a fresh owner-run SageMaker reproduction of motivation-v1 under a new committed declaration passes the gate and lands in the owner-approved band (Phase 14's declaration: margin [0.30, 0.45], post-calibration ECE [0.07, 0.12]; any band change is the owner's, decided at the new declaration's checkpoint and committed before the paid run) with an accepted, deploy-eligible `.apr` from the Graviton pack task; the Phase 15 gate-run evidence records next_trusted true; no waiver and no override entry stands in for it, and the Phase 14 training server is trusted only after it.
   5. Every AWS command is owner-run with the bang prefix and each paid run is approved by the owner (the CLAUDE.md check-in for compute above 1 hr on a non-lambda-vector host; approved in principle on 2026-10-30; Phase 14's attempt 1 billed 1346 s of ml.g5.xlarge plus a 124 s Fargate pack).
 
-**Plans:** 8/8 plans executed in 8 waves (sequential: owner checkpoints and the D-17 order gate every step)
+**Plans:** 8/12 plans executed in 12 waves (sequential: owner checkpoints and the D-17 order gate every step; 15-09..15-12 are the SC4 gap-closure round, 15-11 and 15-12 conditional on the owner's choice)
 
 Plans:
 **Wave 1**
@@ -1150,3 +1150,17 @@ Plans:
 
 **Wave 8** *(blocked on Wave 7 completion)*
 - [x] 15-08-PLAN.md — The single owner-run SageMaker attempt, evaluated; 15-GATE-RUN-EVIDENCE.json next_trusted (SC4) (wave 8)
+
+**Gap closure (SC4 / D-16, from 15-VERIFICATION.md, `--gaps`; the class is named from on-disk evidence before any paid run is proposed)**
+
+**Wave 9** *(blocked on Wave 8 completion)*
+- [ ] 15-09-PLAN.md — Class diagnosis of the SC4 miss from the nine recorded seed-runs (bit-exact tracked fixture, pre-registered class rule, resampled pass probabilities) and the owner's decision brief with five options (wave 9)
+
+**Wave 10** *(blocked on Wave 9 completion)*
+- [ ] 15-10-PLAN.md — The owner's recorded choice (checkpoint:decision) and the machine-derived disposition of the gap; next_trusted stays false (wave 10)
+
+**Wave 11** *(conditional on a paid option; skipped by stop-accept)*
+- [ ] 15-11-PLAN.md — Evaluator learns the declared margin statistic without moving any verdict; owner-signed declaration committed first; owner command pack and controls (wave 11)
+
+**Wave 12** *(conditional; blocked on Wave 11 and the owner's go)*
+- [ ] 15-12-PLAN.md — The owner-run attempt under the new declaration, evaluated; 15-GAP-RUN-EVIDENCE.json next_trusted (SC4) (wave 12)
