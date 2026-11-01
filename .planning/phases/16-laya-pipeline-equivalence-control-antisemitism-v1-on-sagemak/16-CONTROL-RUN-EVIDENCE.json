@@ -3,7 +3,7 @@
   "phase": "16",
   "plan": "16-02",
   "kind": "pipeline-equivalence-control",
-  "status": "awaiting-owner-stage",
+  "status": "staged-validated",
   "next_trusted": false,
   "sets_next_trusted": false,
   "declaration_path": ".planning/phases/16-laya-pipeline-equivalence-control-antisemitism-v1-on-sagemak/16-CONTROL-DECLARATION.json",
@@ -81,7 +81,34 @@
       "note": "plan 16-03 compares the working file to this commit, not to the declaration's commit"
     }
   },
-  "staging": null,
+  "staging": {
+    "prefix_used": "goldstandard-2024",
+    "staged_at": "2026-11-01T20:38:58Z",
+    "files": {
+      "task_json": "33fd8d7cd51b1b2864033ee313d30ae445e76120cc2b26e3849369c0602248e3",
+      "train_jsonl": "81a923d4b1b05bfd809e1c04534f714c2bc57c3d3a5e11e33c79fa44f7a79a9e",
+      "eval_jsonl": "f4a0cf7c2ea6d2ebce8580a82287410daa4106688d3e224e081a04fe141b38a8"
+    },
+    "validate": {
+      "rows": {
+        "train": 8510,
+        "eval": 2129
+      },
+      "class_counts": {
+        "antisemitic": 1494,
+        "not_antisemitic": 7016
+      },
+      "shots_per_class": 7016,
+      "epochs_range": [
+        4,
+        12
+      ],
+      "deferred_rules": 0
+    },
+    "stage_check_line": "STAGE CHECK OK prefix=goldstandard-2024 task=33fd8d7c train=81a923d4 eval=f4a0cf7c",
+    "validate_check_line": "VALIDATE CHECK OK rows=8510/2129 shots_per_class=7016 labels=not_antisemitic,antisemitic epochs_range=4-12 inputs=match deferred_rules=0 prefix=goldstandard-2024",
+    "rechecked_by": "executor re-ran check-stage and check-validate over the local ctl-stage.out, datasets-dev.json and ctl-validate.out (both exit 0) before recording"
+  },
   "owner_commands": {
     "P0": "T() { python3 -I -c \"import json,sys;print(json.load(open('models/laya-trainer/outputs-dev.json'))['trainer'][sys.argv[1]])\" \"$1\"; }; BUCKET=$(T BucketName); URL=$(python3 -I -c \"import json;print(json.load(open('models/laya-trainer/deploy-dev.json'))['endpoint'])\"); URL=\"${URL%/mcp}/mcp\"; export LAYA_M2M_FILE=$(cat models/laya-trainer/m2m-file-path); export SSL_CERT_FILE=\"${SSL_CERT_FILE:-/etc/ssl/cert.pem}\"; unset APRENDER_DECIDE_PROBE_TOKEN",
     "S0": "! assume ze-kasher-dev && just laya-trainer-stage dataset data/decide/goldstandard-2024 goldstandard-2024 dev ze-kasher-dev --expect antisemitism-v1 > models/laya-trainer/ctl-stage.out 2>&1; echo \"rc=$?\"; python3 -I scripts/laya_deploy/laya_control.py check-stage --stage-out models/laya-trainer/ctl-stage.out --state models/laya-trainer/datasets-dev.json --declaration .planning/phases/16-laya-pipeline-equivalence-control-antisemitism-v1-on-sagemak/16-CONTROL-DECLARATION.json",
@@ -102,7 +129,5 @@
     }
   ],
   "deviations": [],
-  "evidence_incomplete": [
-    "awaiting the owner stage and validate"
-  ]
+  "evidence_incomplete": []
 }
