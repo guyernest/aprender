@@ -1,0 +1,102 @@
+{
+  "schema": "laya-reproduction-declaration-v1",
+  "plan": "16-01",
+  "declared_on": "2026-11-01",
+  "purpose": "Pipeline-equivalence control (D-01): does the SageMaker CUDA pipeline reproduce the Mac (mps:0) Phase 10 antisemitism-v1 three-seed mean margin within the owner-approved band, on identical inputs, recipe, epochs and seeds, with the gate passing unwaived?",
+  "reference_fixture": {
+    "path": ".planning/phases/16-laya-pipeline-equivalence-control-antisemitism-v1-on-sagemak/16-REFERENCE-MPS.json",
+    "sha256": "d7f19f52d1dcf1dd41e8ae613b3a72fb5a2bcda17c0777163d6b5ec17afd967d",
+    "source_evidence_sha256": "c9ea039a302ec12e17357f392a162cf0fce77c6172734ea48c14f8d51305c120"
+  },
+  "reference": {
+    "source": ".planning/phases/10-antisemitism-v1-decide-server-for-experiment-coach/10-GATE-RUN-EVIDENCE.json",
+    "device": "mps:0",
+    "epochs": 4,
+    "recipe_id": "d70c3f3da0daae129f3ee1ce928eb21a0ef71a83a6f09dc18e0621f3cc8adcbc",
+    "per_seed_margin": {
+      "13": 0.23577475716083562,
+      "17": 0.24581950308743183,
+      "23": 0.23603720989749355
+    },
+    "three_seed_mean_margin": 0.2392,
+    "per_seed_ece_post": {
+      "13": 0.011745857430937867,
+      "17": 0.045630826195286335,
+      "23": 0.04236402879471284
+    },
+    "shipped_seed": 23,
+    "shipped_ece_post": 0.04236402879471284,
+    "clamp_hit_seeds": [
+      17
+    ]
+  },
+  "must": {
+    "deploy_eligible": true,
+    "device_prefix": "cuda",
+    "recipe_id": "d70c3f3da0daae129f3ee1ce928eb21a0ef71a83a6f09dc18e0621f3cc8adcbc",
+    "inputs_sha256": {
+      "task_json": "33fd8d7cd51b1b2864033ee313d30ae445e76120cc2b26e3849369c0602248e3",
+      "train_jsonl": "81a923d4b1b05bfd809e1c04534f714c2bc57c3d3a5e11e33c79fa44f7a79a9e",
+      "eval_jsonl": "f4a0cf7c2ea6d2ebce8580a82287410daa4106688d3e224e081a04fe141b38a8"
+    },
+    "seeds": [
+      13,
+      17,
+      23
+    ]
+  },
+  "must_note": "The owner-accepted draft's must.gate_pass_unwaived is NOT carried in this declaration, because laya_repro_eval.py check_declaration_obj refuses an unknown must clause (it would never be evaluated). Its job is carried by class pass (the gate passed and the pack carries waived null) plus the ece_post ceiling 0.10, which is the gate's own bar (max_ece). This is a deviation from the owner-accepted draft: the owner was told of it on 2026-11-01 and did not object, which is not an approval and is not claimed as one. deploy_eligible is the pack task's recorded verify (logs/pack-outcome.json), which the evaluator reads, on the amended pack image sha256:dd38865c43aba2f3819e50addcf6db5e9da94ef84e762d93cf6b2c132f1d17e2 under laya-parity-v1 A2; a local laya-verify refusal on this Mac is a recorded cross-CPU finding, never a gate.",
+  "band": {
+    "margin": [
+      0.209,
+      0.269
+    ],
+    "ece_post": [
+      0.0,
+      0.1
+    ]
+  },
+  "band_note": "margin: the Mac reference three-seed mean 0.2392 plus or minus 0.030, as the owner accepted it on 2026-11-01 ('Acceptable.'). ece_post: the ceiling 0.10 is the gate's max_ece; the floor 0.0 excludes nothing because ECE is never negative, the owner asked for the gate bar only (D-03).",
+  "judging": {
+    "margin_statistic": "seed_mean",
+    "note": "The margin clause is the mean of the three seed margins, the statistic the Mac reference is summarised by, so per-seed device noise does not decide the verdict; the ece clause, the gate and the pack stay on the shipped seed."
+  },
+  "retry": {
+    "attempt_cap": 1,
+    "retry_classes": [],
+    "rule": "attempt_cap is 1 and retry_classes is empty: there is no second attempt. A run that ends before any gate verdict (crash, quota, timeout: the fetched logs/outcome.json exit_class is refused or crash, with no run/gate-report.json and no GATE PASS or GATE FAIL line in logs/train.log) is not an attempt; it is recorded under pre_verdict_failures and any re-run needs the owner's new approval. A run whose gate executed (exit_class pass or gate_fail, a gate report, or a GATE line) is the attempt even when a file failed to upload. A run whose evidence is missing or inconclusive (no fetch, no outcome.json) is unresolved and is decided by the owner, never counted as not an attempt. A miss is recorded not-reproduced with next_trusted false; nothing after a miss is pre-authorized. A run stopped by the training server's 21,600 s runtime cap ends before any gate verdict, so it is a timeout and is not an attempt (D-06); re-running it needs the owner's new approval."
+  },
+  "waiver_rule": "inconclusive",
+  "waiver_note": "No waiver and no overrides entry exists for these inputs (D-09): the contract's only pilot waiver, motivation-v1-pilot-ece, binds the motivation-v1 input hashes, and the offline preflight proves none applies to these. Were one ever to apply it would count as inconclusive under waiver_rule, never as reproduced.",
+  "run": {
+    "name": "antisemitism-v1-cuda-ctl",
+    "dataset_prefix": "datasets/goldstandard-2024/",
+    "epochs": 4,
+    "note": "the evaluator reads inputs by sha256 and never the prefix, so the prefix is informational"
+  },
+  "compute": {
+    "mps_reference": "wall 16,822 s; ~4,900 s per seed; 4.13 h three-seed training (s_per_step 1.47 on MPS)",
+    "cuda_estimate": "UNMEASURED. Scaling the motivation-v1 CUDA run (295 rows x 12 epochs = 3,540 row-epochs in 1,203 s) to 8,510 x 4 = 34,040 row-epochs gives ~3.2 h, but sequence lengths differ, so treat it as 2-6 h.",
+    "server_runtime_cap_s": 21600,
+    "risk": "a run over the 6 h cap ends as a timeout (pre-verdict, not an attempt) after the money is spent. The first step is a cheaper measurement, see next_steps."
+  },
+  "paired_report_only": "per-seed CUDA minus MPS margin and ECE, descriptive, never pass/fail (same seed gives different numbers across devices).",
+  "claim_scope": "pipeline equivalence on THIS task only: it asks whether the SageMaker CUDA pipeline reproduces the Mac (mps:0) Phase 10 antisemitism-v1 three-seed mean margin within the band [0.209, 0.269] on identical inputs and recipe, with the gate passing unwaived; it does not reproduce motivation-v1; it does not set next_trusted for the Phase 14 training server; it does not change Phase 14's trust bar (P14-D-16) or Phase 15's SC4 outcome; whether a pass redefines trust is a separate owner ruling; per-seed CUDA-minus-MPS differences are reported descriptively and never judged; bytes differ by design and no determinism claim is made.",
+  "changes_from_reference": [
+    "device: mps:0 (this Mac) -> cuda:0 on the SageMaker ml.g5.xlarge instance",
+    "driver: the local script (just laya-train) -> the Phase 14 training server, packed by the Graviton pack task on the amended image sha256:dd38865c43aba2f3819e50addcf6db5e9da94ef84e762d93cf6b2c132f1d17e2",
+    "the torch build: the Mac run used torch 2.14.0; the container carries its own build",
+    "unchanged: the inputs (the three digests), the recipe id, 4 epochs, seeds 13, 17 and 23"
+  ],
+  "sets_next_trusted": false,
+  "run_authorized": false,
+  "run_authorization_rule": "Per D-07 the paid run needs a per-run owner go, recorded by the orchestrator as 16-RUN-GO.json (schema laya-run-go-v1), bound to this declaration's first-add commit and sha256 and checked by check-run-go; this file never changes, so run_authorized stays false here.",
+  "owner_decisions": {
+    "recorded_by": "orchestrator",
+    "recorded_on": "2026-11-01",
+    "margin_band": "[0.209, 0.269] accepted: 'Acceptable.'",
+    "cuda_time_estimate_2_to_6h_vs_6h_cap": "accepted: 'Acceptable.'",
+    "plan_request": "'Make it so.' (plan the phase; declaration committed alone before any paid run)"
+  },
+  "decisions_source": "16-CONTEXT.md D-01 to D-09"
+}
