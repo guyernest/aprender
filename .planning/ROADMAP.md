@@ -1124,7 +1124,7 @@ Round 2 disposition (owner answers in 14-GAP-ROUND-2-OWNER-DECISIONS.md): Deferr
   4. Per truth 12 (D-16): after criterion 1 lands, a fresh owner-run SageMaker reproduction of motivation-v1 under a new committed declaration passes the gate and lands in the owner-approved band (Phase 14's declaration: margin [0.30, 0.45], post-calibration ECE [0.07, 0.12]; any band change is the owner's, decided at the new declaration's checkpoint and committed before the paid run) with an accepted, deploy-eligible `.apr` from the Graviton pack task; the Phase 15 gate-run evidence records next_trusted true; no waiver and no override entry stands in for it, and the Phase 14 training server is trusted only after it.
   5. Every AWS command is owner-run with the bang prefix and each paid run is approved by the owner (the CLAUDE.md check-in for compute above 1 hr on a non-lambda-vector host; approved in principle on 2026-10-30; Phase 14's attempt 1 billed 1346 s of ml.g5.xlarge plus a 124 s Fargate pack).
 
-**Plans:** 6/8 plans executed in 8 waves (sequential: owner checkpoints and the D-17 order gate every step)
+**Plans:** 7/8 plans executed in 8 waves (sequential: owner checkpoints and the D-17 order gate every step)
 
 Plans:
 **Wave 1**
@@ -1146,7 +1146,7 @@ Plans:
 - [x] 15-06-PLAN.md — Owner deploys the stack and re-packs motivation-v1-sm on Graviton: accepted, deploy-eligible .apr (SC3, D-15) (wave 6)
 
 **Wave 7** *(blocked on Wave 6 completion)*
-- [ ] 15-07-PLAN.md — New trust-bar declaration: D-14 levers computed offline, owner choice and compute go, committed before the run (wave 7)
+- [x] 15-07-PLAN.md — New trust-bar declaration: D-14 levers computed offline, owner choice and compute go, committed before the run (wave 7)
 
 **Wave 8** *(blocked on Wave 7 completion)*
 - [ ] 15-08-PLAN.md — The single owner-run SageMaker attempt, evaluated; 15-GATE-RUN-EVIDENCE.json next_trusted (SC4) (wave 8)
