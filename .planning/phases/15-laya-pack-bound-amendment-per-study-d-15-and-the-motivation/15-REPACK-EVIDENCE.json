@@ -1,7 +1,7 @@
 {
   "schema": "laya-repack-evidence-v1",
   "plan": "15-06",
-  "status": "awaiting-owner-run",
+  "status": "measured",
   "source": {
     "name": "motivation-v1-sm",
     "task_id": "a2cbacae-529c-4703-a796-b6eda6742446",
@@ -95,5 +95,92 @@
     "bashrs_gate": "BASHRS GATE PASS on models/laya-trainer/p15-repack-graviton.sh",
     "dry_run_infra_diff": "not run: the executor was told not to run any `just ... infra diff|deploy` recipe, and the auto-mode classifier denied it; the owner's real C1 is the diff of record"
   },
-  "claim_scope": "This run does NOT close the trust bar: the motivation-v1-sm margin 0.2860488947445468 is below the 0.30 band floor, so no reproduction claim is made. What it shows, once measured: the amended pack image and contract accept a gate-passing CUDA-trained checkpoint on Graviton. The re-pack ran the production pack image and task definition via the drift measurement prefix, not the state machine (RESEARCH assumption A6: a re-pack through the drift path counts as the Graviton pack task for SC3). The copy lives under runs/drift-motivation/<uuid>/ with laya-retention=expire; the real run's objects are only read. The Graviton fine_tuned figure for motivation-v1-sm is first produced here and is a post-sign-off observation, not an input to the signed bound."
+  "claim_scope": "This run does NOT close the trust bar: the motivation-v1-sm margin 0.2860488947445468 is below the 0.30 band floor, so no reproduction claim is made. What it shows, once measured: the amended pack image and contract accept a gate-passing CUDA-trained checkpoint on Graviton. The re-pack ran the production pack image and task definition via the drift measurement prefix, not the state machine (RESEARCH assumption A6: a re-pack through the drift path counts as the Graviton pack task for SC3). The copy lives under runs/drift-motivation/<uuid>/ with laya-retention=expire; the real run's objects are only read. The Graviton fine_tuned figure for motivation-v1-sm is first produced here and is a post-sign-off observation, not an input to the signed bound.",
+  "drift_task": {
+    "results_dir": "models/laya-trainer/p15-repack-graviton/motivation-1",
+    "leg_n": 1,
+    "uuid": "a4d2519e-7eee-4552-8cd6-71980533792d",
+    "prefix": "runs/drift-motivation/a4d2519e-7eee-4552-8cd6-71980533792d/",
+    "tags_ok_keys": 21,
+    "tags_ok_note": "the owner-reported TAGS OK line counted 21 keys under the drift prefix; the fake-aws rehearsal printed 6 because its fixture source holds fewer objects. The plan pins no key count (the check is the uuid, the leg number and the expire read-back), so this is recorded, not a discrepancy."
+  },
+  "deploy": {
+    "last_line": "INFRA OK deploy",
+    "taskdef_revision": "aprender-laya-pack-dev:2",
+    "pre_roll_taskdef_revision": "aprender-laya-pack-dev:1",
+    "outputs_last_line": "INFRA OK outputs",
+    "re_pack_script_pin": "aprender-laya-pack-dev:2"
+  },
+  "pack_outcome": {
+    "schema": "laya-train-pack-outcome-v1",
+    "task_id": "a4d2519e-7eee-4552-8cd6-71980533792d",
+    "accepted": true,
+    "deploy_eligible": true,
+    "apr_sha256": "dd7b1aafa3ed1284f7d9e46a4b78b840daea605a2e2b226762a9bd6260e5a292",
+    "pack_image_digest": "sha256:dd38865c43aba2f3819e50addcf6db5e9da94ef84e762d93cf6b2c132f1d17e2",
+    "parity_contract_sha256": "466891faa5e3e1e092a5483bafcdf2ba8c5c835c9cdda5aaff896d2e893584e9",
+    "gate_contract_sha256": "4f6ba791b5c4a2f3f380de8f967e2263543285b01f71d4708509da528f5fe474",
+    "ran": true,
+    "exit_code": 0,
+    "shipped_seed": 17,
+    "waived": null,
+    "packed_line": "PACKED /work/out/drift-motivation.apr sha256=dd7b1aafa3ed1284f7d9e46a4b78b840daea605a2e2b226762a9bd6260e5a292 rescore_max_abs=0.000006973743438720703 zs_rescore_max_abs=0.00001728534698486328 rescore_bound=0.00005 zs_rescore_bound=0.00003 noise=0.000003255285573489086 zs_noise=0.0000017265105816122173 shipped_seed=17 argmax=100/100 waived=none",
+    "verify_line": "{\"argmax\":\"100/100\",\"artifact_sha256\":\"dd7b1aafa3ed1284f7d9e46a4b78b840daea605a2e2b226762a9bd6260e5a292\",\"deploy_eligible\":true,\"noise\":3.255285573489086e-6,\"recomputed\":{\"ece_post\":0.09636022716760634,\"ft_macro_f1\":0.6556141121358512,\"margin\":0.2860488947445468,\"zs_macro_f1\":0.3695652173913044},\"rescore_bound\":0.00005,\"rescore_max_abs\":6.973743438720703e-6,\"shipped_seed\":17,\"waived\":null,\"zs_noise\":1.7265105816122173e-6,\"zs_rescore_bound\":0.00003,\"zs_rescore_max_abs\":0.00001728534698486328}",
+    "pack_seconds": 127.91,
+    "verify_seconds": 122.75
+  },
+  "bound_check": {
+    "fine_tuned": {
+      "noise": 3.255285573489086e-06,
+      "printed_bound": 5e-05,
+      "expected_bound": 5e-05,
+      "formula": "max(5e-05, 4 x noise)",
+      "equal": true
+    },
+    "zero_shot": {
+      "noise": 1.7265105816122173e-06,
+      "printed_bound": 3e-05,
+      "expected_bound": 3e-05,
+      "formula": "max(3e-05, 4 x zs_noise)",
+      "equal": true
+    }
+  },
+  "graviton_values": {
+    "fine_tuned": {
+      "rescore_max_abs": 6.973743438720703e-06,
+      "bound": 5e-05,
+      "ratio_to_bound": 0.13947486877441406,
+      "note": "first Graviton fine_tuned figure for motivation-v1-sm; a post-sign-off observation, not an input to the bound"
+    },
+    "zero_shot": {
+      "rescore_max_abs": 1.728534698486328e-05,
+      "bound": 3e-05,
+      "ratio_to_bound": 0.576178232828776,
+      "attempt_1_refusal_value": 1.728534698486328e-05,
+      "note": "same value as the attempt-1 refusal; accepted now because the amended zero_shot floor is 3e-05"
+    },
+    "argmax": "100/100",
+    "recomputed": {
+      "ece_post": 0.09636022716760634,
+      "ft_macro_f1": 0.6556141121358512,
+      "margin": 0.2860488947445468,
+      "zs_macro_f1": 0.3695652173913044
+    }
+  },
+  "task_summary": {
+    "stop_code": "EssentialContainerExited",
+    "container_exit_code": 0
+  },
+  "deviations": [
+    {
+      "id": "D1",
+      "rule": "owner decision",
+      "text": "C1 showed one unpredicted line, MachineRoleDefaultPolicy ecs:RunTask Resource -> KNOWN_AFTER_APPLY. The orchestrator verified the statement expression is identical in the pre-roll template and the new synth (Ref-derived family wildcard; unknown only because the task definition is replaced, revision 1 to 2). The owner chose Go, overriding the runbook STOP-on-IAM rule. The deployed change set otherwise matched expected_change_set."
+    },
+    {
+      "id": "D2",
+      "rule": "verify strictness",
+      "text": "The plan verify requires a recorded reply containing the lowercase word done; the owner pasted the script output (it ends DRIFT GRAVITON DONE motivation:1) instead. The check was applied case-insensitively. No reply was invented."
+    }
+  ]
 }
