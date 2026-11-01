@@ -101,7 +101,49 @@
     "parity_contract_sha256": "466891faa5e3e1e092a5483bafcdf2ba8c5c835c9cdda5aaff896d2e893584e9"
   },
   "pre_verdict_failures": [],
-  "owner_replies": [],
+  "owner_replies": [
+    {
+      "step": "V validate",
+      "recorded_by": "orchestrator",
+      "recorded_at": "2026-11-01T05:36:02Z",
+      "reply_verbatim": "{\"tool\":\"validate_dataset\",\"ok\":true} valid=true labels=[social_affiliative,conspiratorial,other] class_counts={conspiratorial:41,other:188,social_affiliative:66} rows={train:295,eval:100,shift:null} epochs_required=true epochs_range=[4,12] inputs_sha256={eval.jsonl:ee95d71fcb5d90d515b9fc6741e5df51087e763fa7f251ace83d9f11d5ccd575,task.json:f74a3ad3cfc00c160cc2959d95beb219aec859b394b883e87577a56dc14e7ea3,train.jsonl:f1d84f19ec38ed85356bcbcd1eae6ef8ad07fb97e014f61a17d37adc0d68d378}",
+      "note": "lines containing the account id, bucket name and run_prefix host are elided (the file must hold no account id or bucket)"
+    },
+    {
+      "step": "R train (the one paid call)",
+      "recorded_by": "orchestrator",
+      "recorded_at": "2026-11-01T05:36:02Z",
+      "reply_verbatim": "rc=0 / {\"tool\":\"train\",\"ok\":true,\"result\":{\"task\":{\"taskId\":\"604c5a87-83a1-4321-977c-c6ec624d4331\",\"status\":\"working\",\"createdAt\":\"2026-11-01T04:58:20Z\"}}} / TASK_ID 604c5a87-83a1-4321-977c-c6ec624d4331",
+      "note": "lines containing the account id, bucket name and run_prefix host are elided (the file must hold no account id or bucket)"
+    },
+    {
+      "step": "S poll",
+      "recorded_by": "orchestrator",
+      "recorded_at": "2026-11-01T05:36:02Z",
+      "reply_verbatim": "POLL DONE completed",
+      "note": "120 poll lines in models/laya-trainer/p15-08-poll.log (gitignored); the last status line reports phase completed"
+    },
+    {
+      "step": "F fetch",
+      "recorded_by": "orchestrator",
+      "recorded_at": "2026-11-01T05:36:02Z",
+      "reply_verbatim": "FETCH OK phase completed apr 42efa308c305d3618fa0a7d69a8cd4b1dd03a354875bbe29568f3faa0b94feab"
+    },
+    {
+      "step": "H hygiene",
+      "recorded_by": "orchestrator",
+      "recorded_at": "2026-11-01T05:36:02Z",
+      "reply_verbatim": "training_jobs_inprogress 0\necs_tasks_running 0\nstate_machine_execution SUCCEEDED\nlock (see next entry)"
+    },
+    {
+      "step": "H lock read-back (corrected key)",
+      "recorded_by": "orchestrator",
+      "recorded_at": "2026-11-01T05:36:02Z",
+      "reply_verbatim": "get-item owner_id=laya-train#single-flight task_id=lock -> version 10, task.status \"completed\", envelope holder 604c5a87-83a1-4321-977c-c6ec624d4331 (lease_expires_at_secs 1793548700)",
+      "orchestrator_reading": "released: crates/aprender-mcp-laya-train/src/lock.rs sets released = record.task.status.is_terminal(); status completed is terminal; the retained holder field is by design",
+      "deviation": "the plan's lock key used attribute names owner/task_id; the table's partition key is owner_id (deploy-extensions/lib/laya-trainer-stack.ts:151). The first get-item failed ValidationException; a scan then a corrected get-item gave the reading above"
+    }
+  ],
   "owner_commands": {
     "P0": "T() { python3 -I -c \"import json,sys;print(json.load(open('models/laya-trainer/outputs-dev.json'))['trainer'][sys.argv[1]])\" \"$1\"; }; BUCKET=$(T BucketName); URL=$(python3 -I -c \"import json;print(json.load(open('models/laya-trainer/deploy-dev.json'))['endpoint'])\"); URL=\"${URL%/mcp}/mcp\"; export LAYA_M2M_FILE=$(cat models/laya-trainer/m2m-file-path); export SSL_CERT_FILE=\"${SSL_CERT_FILE:-/etc/ssl/cert.pem}\"; unset APRENDER_DECIDE_PROBE_TOKEN",
     "V": "! T() { python3 -I -c \"import json,sys;print(json.load(open('models/laya-trainer/outputs-dev.json'))['trainer'][sys.argv[1]])\" \"$1\"; }; BUCKET=$(T BucketName); URL=$(python3 -I -c \"import json;print(json.load(open('models/laya-trainer/deploy-dev.json'))['endpoint'])\"); URL=\"${URL%/mcp}/mcp\"; export LAYA_M2M_FILE=$(cat models/laya-trainer/m2m-file-path); export SSL_CERT_FILE=\"${SSL_CERT_FILE:-/etc/ssl/cert.pem}\"; unset APRENDER_DECIDE_PROBE_TOKEN && assume ze-kasher-dev && just laya-trainer-call ze-kasher-dev \"$URL\" validate \"s3://$BUCKET/datasets/motivation-v1/\"",
