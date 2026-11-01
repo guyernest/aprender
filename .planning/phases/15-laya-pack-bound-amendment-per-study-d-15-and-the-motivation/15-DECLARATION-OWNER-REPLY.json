@@ -1,0 +1,9 @@
+{
+  "schema": "laya-declaration-reply-v1",
+  "recorded_by": "orchestrator",
+  "recorded_at": "2026-11-01T04:40:11Z",
+  "owner_reply_verbatim": "epochs-4 run-hold",
+  "option": "epochs-4",
+  "run_go": false,
+  "brief_sha256": "eb6628fdeed47de371de9b5b23695ade96e79306ba4c4e90872640213592ef0d"
+}
