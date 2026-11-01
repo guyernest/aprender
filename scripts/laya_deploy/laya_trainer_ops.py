@@ -4,7 +4,7 @@
     python3 -I scripts/laya_deploy/laya_trainer_ops.py [--state-dir DIR] image  WHICH ENV PROFILE [--list-files]
     python3 -I scripts/laya_deploy/laya_trainer_ops.py [--state-dir DIR] infra  ACTION ENV PROFILE
     python3 -I scripts/laya_deploy/laya_trainer_ops.py [--state-dir DIR] stage  base ENV PROFILE [--tar FILE]
-    python3 -I scripts/laya_deploy/laya_trainer_ops.py [--state-dir DIR] stage  dataset DIR PREFIX ENV PROFILE [--expect motivation-v1]
+    python3 -I scripts/laya_deploy/laya_trainer_ops.py [--state-dir DIR] stage  dataset DIR PREFIX ENV PROFILE [--expect motivation-v1|antisemitism-v1]
     python3 -I scripts/laya_deploy/laya_trainer_ops.py [--state-dir DIR] probe  cuda|sigterm ENV PROFILE
     python3 -I scripts/laya_deploy/laya_trainer_ops.py [--state-dir DIR] config ENV PROFILE [--template FILE   (DRY_RUN=1 only)]
     python3 -I scripts/laya_deploy/laya_trainer_ops.py [--state-dir DIR] deploy ENV PROFILE
@@ -1005,13 +1005,22 @@ DATASET_FILES = ("task.json", "train.jsonl", "eval.jsonl", "shift.jsonl")
 DATASET_REQUIRED = ("task.json", "train.jsonl", "eval.jsonl")
 SEGMENT_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 # Phase 12's inputs (12-GATE-RUN-EVIDENCE.json inputs_sha256): --expect motivation-v1 binds a staged dataset to them.
+# Phase 10's inputs (10-GATE-RUN-EVIDENCE.json data_sha256, equal to 16-CONTROL-DECLARATION.json must.inputs_sha256):
+# --expect antisemitism-v1 binds the Phase 16 control's dataset to them.
 EXPECT = {
     "motivation-v1": {
         "task.json": "f74a3ad3cfc00c160cc2959d95beb219aec859b394b883e87577a56dc14e7ea3",
         "train.jsonl": "f1d84f19ec38ed85356bcbcd1eae6ef8ad07fb97e014f61a17d37adc0d68d378",
         "eval.jsonl": "ee95d71fcb5d90d515b9fc6741e5df51087e763fa7f251ace83d9f11d5ccd575",
     },
+    "antisemitism-v1": {
+        "task.json": "33fd8d7cd51b1b2864033ee313d30ae445e76120cc2b26e3849369c0602248e3",
+        "train.jsonl": "81a923d4b1b05bfd809e1c04534f714c2bc57c3d3a5e11e33c79fa44f7a79a9e",
+        "eval.jsonl": "f4a0cf7c2ea6d2ebce8580a82287410daa4106688d3e224e081a04fe141b38a8",
+    },
 }
+# The possessive the refusal uses: which phase's inputs the pin is.
+EXPECT_PHASE = {"motivation-v1": "Phase 12's", "antisemitism-v1": "Phase 10's"}
 
 
 def read_outputs(ctx, env, profile, keys):
@@ -1100,14 +1109,14 @@ def stage_base(ctx, rest, opts):
 
 def stage_dataset(ctx, rest, opts):
     if len(rest) != 4:
-        refuse("usage", "stage dataset DIR PREFIX ENV PROFILE [--expect motivation-v1]")
+        refuse("usage", "stage dataset DIR PREFIX ENV PROFILE [--expect motivation-v1|antisemitism-v1]")
     src, prefix, env, profile = rest
     check_profile_env(profile, env)
     if opts.get("tar") or opts.get("stage_json"):
         refuse("usage", "--tar and --stage-json are for `stage base`")
     expect = opts.get("expect")
     if expect is not None and expect not in EXPECT:
-        refuse("usage", "--expect names %r; the only pin is %s" % (expect[:40], ", ".join(EXPECT)))
+        refuse("usage", "--expect names %r; the pins are %s" % (expect[:40], ", ".join(EXPECT)))
     parts = check_dataset_prefix(prefix)
     norm = "/".join(parts)
     d = Path(src)
@@ -1127,8 +1136,8 @@ def stage_dataset(ctx, rest, opts):
     if expect:
         for n, want in EXPECT[expect].items():
             if hashes.get(n) != want:
-                refuse("stage", "%s is not Phase 12's (sha256 %s... instead of %s...); --expect %s binds the three files to the "
-                                "inputs the gate run passed on" % (n, hashes.get(n, "?")[:12], want[:12], expect))
+                refuse("stage", "%s is not %s (sha256 %s... instead of %s...); --expect %s binds the three files to the "
+                                "inputs the gate run passed on" % (n, EXPECT_PHASE[expect], hashes.get(n, "?")[:12], want[:12], expect))
     state_dir(ctx, opts.get("state_dir"), create=not ctx.dry)
     bucket = read_outputs(ctx, env, profile, ("BucketName",))["BucketName"]
     region = connect(ctx, profile)
@@ -2718,6 +2727,29 @@ cc v1.2.0
          and r_none["rc"] == 2 and "is not Phase 12's" in r_none["err"] and r_ok["rc"] == 0 and saved["train.jsonl"].startswith("f1d84f19")
          and saved["task.json"].startswith("f74a3ad3") and saved["eval.jsonl"].startswith("ee95d71f") and not [c for c in sim.calls if c[:3] == ["aws", "s3", "cp"]][3:],
          "--expect motivation-v1 refuses a train.jsonl that is not Phase 12's before any call, and passes the files that are (pins f74a3ad3, f1d84f19, ee95d71f)")
+
+    # ---- stage-expect-antisemitism
+    sim, sdir = world()
+    saved = EXPECT["antisemitism-v1"]
+    try:
+        # task.json and eval.jsonl are the pinned ones, train.jsonl is not: the refusal must name train.jsonl and Phase 10
+        EXPECT["antisemitism-v1"] = dict(saved, **{"task.json": pins["task.json"], "eval.jsonl": pins["eval.jsonl"]})
+        a_bad = go(sim, sdir, stage_cmd(d1, "goldstandard-2024", ("--expect", "antisemitism-v1")))
+    finally:
+        EXPECT["antisemitism-v1"] = saved
+    a_unk = go(sim, sdir, stage_cmd(d1, "goldstandard-2024", ("--expect", "nope")))
+    a_none = go(sim, sdir, stage_cmd(d1, "goldstandard-2024", ("--expect", "antisemitism-v1")))
+    try:
+        EXPECT["antisemitism-v1"] = pins
+        a_ok = go(sim, sdir, stage_cmd(d1, "goldstandard-2024", ("--expect", "antisemitism-v1")))
+    finally:
+        EXPECT["antisemitism-v1"] = saved
+    case("stage-expect-antisemitism", a_bad["rc"] == 2 and "REFUSED stage: train.jsonl is not Phase 10's" in a_bad["err"] and a_unk["rc"] == 2
+         and "REFUSED usage" in a_unk["err"] and "antisemitism-v1" in a_unk["err"] and a_none["rc"] == 2 and "is not Phase 10's" in a_none["err"]
+         and "Phase 12" not in a_none["err"] and a_ok["rc"] == 0 and "STAGE OK dataset goldstandard-2024" in a_ok["out"]
+         and saved["task.json"].startswith("33fd8d7c") and saved["train.jsonl"].startswith("81a923d4") and saved["eval.jsonl"].startswith("f4a0cf7c")
+         and EXPECT["motivation-v1"]["train.jsonl"].startswith("f1d84f19") and not [c for c in sim.calls if c[:3] == ["aws", "s3", "cp"]][3:],
+         "--expect antisemitism-v1 refuses a train.jsonl that is not Phase 10's before any call, and passes the files that are (pins 33fd8d7c, 81a923d4, f4a0cf7c)")
 
     # ---- stage-immutable
     sim, sdir = world()

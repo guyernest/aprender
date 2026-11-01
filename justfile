@@ -1469,10 +1469,11 @@ laya-trainer-infra *args:
 
 # `just laya-trainer-stage base ENV PROFILE [--tar FILE]` uploads the locally built laya-base.tar (default <state-dir>/laya-base.tar) to
 # base/laya-55cf4c4e/ only when its size and sha256 equal scripts/laya_train/container/base-stage.json, then verifies the uploaded
-# object's size. `just laya-trainer-stage dataset DIR PREFIX ENV PROFILE [--expect motivation-v1]` uploads exactly task.json,
+# object's size. `just laya-trainer-stage dataset DIR PREFIX ENV PROFILE [--expect motivation-v1|antisemitism-v1]` uploads exactly task.json,
 # train.jsonl, eval.jsonl and an optional shift.jsonl to datasets/<PREFIX>/ (the trainer's prefix grammar), records each file's sha256 in
 # datasets-<env>.json, and refuses a prefix that already holds any object (dataset prefixes are immutable; a corrected dataset gets a
-# new prefix). `--expect motivation-v1` binds the three files to Phase 12's inputs_sha256. Row trainer-stage.
+# new prefix). `--expect` binds the three files to Phase 12's inputs_sha256 for motivation-v1 or to Phase 10's for antisemitism-v1
+# (the Phase 16 control's dataset). Row trainer-stage.
 [positional-arguments]
 laya-trainer-stage *args:
     #!/usr/bin/env bash
