@@ -1,0 +1,145 @@
+{
+  "schema": "laya-reproduction-amendment-draft-v1",
+  "status": "owner-approved-pending-deploy",
+  "plan": "16-03",
+  "drafted_on": "2026-11-02",
+  "amends": {
+    "declaration": "16-CONTROL-DECLARATION.json",
+    "first_add_commit": "a3d4d2baa",
+    "note": "The declaration file is never edited (its run_authorization_rule). This record sits beside it. The evaluator keeps reading the declaration's first-add blob, so the band, inputs, recipe, epochs, seeds, judging statistic and claim scope are all unchanged."
+  },
+  "attempt_1": {
+    "task_id": "10ea131b-c2ed-418c-af35-4341e1234cfb",
+    "started_at": "2026-11-01T20:53:51Z",
+    "finished_at": "2026-11-02T02:54:30Z",
+    "outcome_json": {
+      "exit_class": "timeout",
+      "train_rc": null,
+      "device_used": "cuda:0",
+      "device_ok": true,
+      "train_seconds": 21637.8
+    },
+    "status_error": "the training job hit its runtime cap and was stopped; stage error: States.TaskFailed: Stopped; MaxRuntimeExceeded",
+    "gate_evidence": "none: no run/gate-report.json, no GATE PASS or GATE FAIL line in train.log, verdict null",
+    "partial_evidence_not_a_verdict": {
+      "source": "run/variance-report.json (S3, not yet fetched locally)",
+      "per_seed_margin": {
+        "13": 0.2522,
+        "17": 0.2519,
+        "23": 0.2403
+      },
+      "per_seed_ece_post": {
+        "13": 0.0258,
+        "17": 0.0385,
+        "23": 0.0138
+      },
+      "three_seed_mean_margin": 0.2481,
+      "median_ece_seed": 13,
+      "note": "Recorded for the owner's information only. The run ended before the gate, the re-score noise record, the pack and the verify, so none of it is a result under the declaration."
+    },
+    "classification": {
+      "declaration_text": "retry.rule says a run stopped by the 21,600 s runtime cap ends before any gate verdict, is a timeout, is not an attempt (D-06), and re-running needs the owner's new approval.",
+      "tool_behavior": "laya_margin_diagnosis.py classify-run maps only exit_class refused or crash to pre-verdict. exit_class timeout with no gate evidence returns unresolved ('exit_class timeout with no gate evidence'). The declaration's parenthetical names timeout but describes the exit_class as refused or crash, which the server never writes for a cap stop.",
+      "effect": "By the tool this attempt is UNRESOLVED, which the declaration reserves to the owner. By the declaration's prose it is not an attempt. The two agree on the outcome (owner decides) and disagree on the label.",
+      "owner_ruling": "not-an-attempt (pre-verdict, per the declaration's D-06 prose): recorded as pre_verdict_failures in 16-CONTROL-RUN-EVIDENCE.json",
+      "owner_ruling_options": [
+        "not-an-attempt (pre-verdict, per the declaration's D-06 prose)",
+        "an attempt (consumed): close Phase 16 inconclusive on the partial evidence"
+      ],
+      "tool_change": "none proposed: changing the classifier after seeing this result is the wrong order. The owner's ruling is recorded instead, and the mismatch is reported as a finding."
+    }
+  },
+  "measured_timing": {
+    "source": "S3 gpu-samples.json (30 s samples) and file mtimes, run 10ea131b",
+    "per_seed": "about 20 min GPU training plus about 75 min CPU scoring (GPU idle at 0 percent; the scoring agent is reloaded on cpu in fp32 by design, train.py step 6)",
+    "three_seeds": "about 4.75 h",
+    "zero_shot_scoring_and_variance_report": "about 40 min, finished at 5 h 28 min",
+    "after_that": "train.py steps 8-11 (gate, float64 re-score noise record, gate-report) were still running at the 6 h cap; they are unmeasured",
+    "estimate_of_full_run": "On ml.g5.xlarge: 7 to 8.5 h (estimate). On ml.g5.4xlarge: UNMEASURED; if CPU scoring scales with 4x the cores, about 3 to 4 h; if it does not, the 10 h cap still holds the xlarge estimate.",
+    "superseded_estimate": "the declaration's compute.cuda_estimate '2-6 h' was wrong; the owner accepted it, and it is replaced here by the measured figures above"
+  },
+  "proposed_change": {
+    "kind": "training-server infrastructure (cap, machine timeout, lock lease, instance size), no image change",
+    "MAX_RUNTIME_SECS": {
+      "from": 21600,
+      "to": 36000,
+      "files": [
+        "crates/aprender-mcp-laya-train/src/layout.rs",
+        "deploy-extensions/lib/laya-trainer-stack.ts"
+      ]
+    },
+    "MACHINE_TIMEOUT_SECS": {
+      "from": 36000,
+      "to": 50400,
+      "why": "train 10 h + pack and verify 3 h (unchanged) + 1 h slack"
+    },
+    "LOCK_LEASE_SECS": {
+      "from": 39600,
+      "to": 54000,
+      "why": "must exceed the machine timeout; was the 10 h timeout plus margin, now 14 h plus 1 h"
+    },
+    "unchanged": [
+      "instance count 1",
+      "pack task 8 vCPU / 16 GiB / 10,800 s",
+      "TASK_TTL 72 h",
+      "epochs range [4,12]",
+      "the training and pack images",
+      "GPU model (one A10G) and the CUDA path"
+    ],
+    "also_updated_to_stay_bound": [
+      "scripts/laya_deploy/laya_trainer_stack_check.py (literals and the 50401 mutation)",
+      "crates/aprender-mcp-laya-train-lambda/fixtures/failure-surface-v1.json",
+      "14-FAILURE-SURFACE.md rows FS-SM-07 and the prose",
+      "deploy-extensions/README.md"
+    ],
+    "verified_offline": [
+      "just laya-failure-surface --check: FAILURE SURFACE OK",
+      "cargo test -p aprender-mcp-laya-train --lib: 113 passed",
+      "just laya-trainer-synth: TRAINER STACK CHECK OK, TRAINER SYNTH OK env=dev (with ml.g5.4xlarge, 50,400 s, 36,000 s)"
+    ],
+    "not_yet_done": [
+      "commit (done by the orchestrator when this status is set)",
+      "re-synth on the clean commit",
+      "cdk deploy of the dev stack (owner-run)"
+    ],
+    "spend": "worst case 10 h on ml.g5.4xlarge, about 20 USD (about 2.03 USD per hour, the orchestrator's figure, not checked against the bill); the expected run is shorter if CPU scoring scales with the 4x CPU count, which is NOT measured. The cap is a spend limit for every caller of the server.",
+    "INSTANCE_TYPE": {
+      "from": "ml.g5.xlarge (4 vCPU, 16 GiB, one A10G)",
+      "to": "ml.g5.4xlarge (16 vCPU, 64 GiB, the same single A10G)",
+      "why": "attempt 1 spent about 4.75 h of 5.5 h in CPU scoring with the GPU idle; the GPU, the torch build and the image are unchanged, only the CPU count differs. SageMaker quota for ml.g5.4xlarge training is 1 (checked), enough for the single-flight lock.",
+      "files": [
+        "crates/aprender-mcp-laya-train/src/layout.rs",
+        "deploy-extensions/lib/laya-trainer-stack.ts",
+        "scripts/laya_deploy/laya_trainer_stack_check.py",
+        "deploy-extensions/README.md"
+      ]
+    },
+    "limitation": "A different CPU count can change the order of CPU fp32 reductions, so tiny numeric differences from attempt 1's scoring are possible. The comparison is by the declaration's band, which is wide against that; it is not a bit-identity claim."
+  },
+  "what_this_does_not_change": [
+    "attempt_cap stays 1 and retry_classes stays empty: no automatic retry is created",
+    "the margin band [0.209, 0.269], the ece ceiling 0.10, the inputs' sha256, the recipe id, 4 epochs, seeds 13/17/23, seed_mean judging",
+    "sets_next_trusted false, next_trusted false, P14-D-16 and Phase 15 SC4",
+    "no waiver exists or is claimed"
+  ],
+  "required_before_a_second_paid_run": [
+    "F and H of attempt 1, run by the owner (the timeout evidence preserved)",
+    "commit, re-synth on the clean commit, and the owner-run deploy",
+    "16-RUN-GO-2.json (written), bound to this amendment's commit and sha256 and to the declaration's first-add commit",
+    "the owner-run commands P0, S0, V, R, S, F, H for the new attempt (the run name stays antisemitism-v1-cuda-ctl; after F of attempt 1 the owner renames models/decide/antisemitism-v1-cuda-ctl to models/decide/antisemitism-v1-cuda-ctl-attempt1 so attempt 2's fetch does not collide)"
+  ],
+  "owner_decisions": {
+    "recorded_by": "orchestrator",
+    "recorded_on": "2026-11-02",
+    "owner_reply_verbatim": "1. Attempt 1 can be considered as not an attempt and phase 16 can re-run. 2. Let's increase the cap to 10 hours, and we can also increase the size of the instance to make it faster. 3. You have my go.",
+    "interpreted_as": {
+      "1": "attempt 1 is not an attempt (pre-verdict timeout); Phase 16 may re-run",
+      "2": "cap 36,000 s approved; a larger instance approved, with the choice left to the orchestrator",
+      "3": "a new per-run go; recorded in 16-RUN-GO-2.json"
+    }
+  },
+  "changes_from_reference_added": [
+    "instance: ml.g5.xlarge -> ml.g5.4xlarge (same A10G GPU; CPU 4 -> 16 vCPU)",
+    "runtime cap 21,600 s -> 36,000 s"
+  ]
+}

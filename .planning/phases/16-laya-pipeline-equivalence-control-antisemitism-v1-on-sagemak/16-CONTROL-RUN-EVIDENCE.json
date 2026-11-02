@@ -3,7 +3,7 @@
   "phase": "16",
   "plan": "16-02",
   "kind": "pipeline-equivalence-control",
-  "status": "ready-for-owner-run",
+  "status": "attempt-1-pre-verdict-timeout-rerun-authorized-pending-deploy",
   "next_trusted": false,
   "sets_next_trusted": false,
   "declaration_path": ".planning/phases/16-laya-pipeline-equivalence-control-antisemitism-v1-on-sagemak/16-CONTROL-DECLARATION.json",
@@ -130,6 +130,18 @@
       "recorded_at": "2026-11-01T20:40:05Z",
       "step": "V",
       "verbatim": "rc=0 | VALIDATE CHECK OK rows=8510/2129 shots_per_class=7016 labels=not_antisemitic,antisemitic epochs_range=4-12 inputs=match deferred_rules=0 prefix=goldstandard-2024  (session-credentials line elided)"
+    },
+    {
+      "recorded_by": "orchestrator",
+      "recorded_at": "2026-11-01T20:46:30Z",
+      "step": "R",
+      "verbatim": "rc=0 | TASK_ID 10ea131b-c2ed-418c-af35-4341e1234cfb | status working, createdAt 2026-11-01T20:46:30Z  (account id elided)"
+    },
+    {
+      "recorded_by": "orchestrator",
+      "recorded_at": "2026-11-02T02:55:39Z",
+      "step": "S",
+      "verbatim": "POLL DONE failed (three S calls; the last status was phase failed; the error read: the training job hit its runtime cap and was stopped; stage error: States.TaskFailed: Stopped; MaxRuntimeExceeded)"
     }
   ],
   "deviations": [
@@ -139,10 +151,11 @@
     }
   ],
   "evidence_incomplete": [
-    "awaiting the owner run"
+    "awaiting the owner-run deploy of the amended server and the owner-run commands for attempt 2",
+    "F and H of attempt 1"
   ],
   "readiness_completed_by_plan": "16-03",
-  "attempt_number": 1,
+  "attempt_number": 2,
   "authorization": {
     "source": "16-RUN-GO.json",
     "go_commit": "946df1793661b82110aa18a3d8d2634c5dd20efb",
@@ -594,7 +607,19 @@
     "3. exit_class in {refused, crash} with none of the gate evidence of step 2 -> pre-verdict (not consumed, D-12).",
     "4. Anything else -> unresolved (never counted as not consumed; the plan stops at CHECKPOINT REACHED and the owner decides; nothing is re-run)."
   ],
-  "pre_verdict_failures": [],
+  "pre_verdict_failures": [
+    {
+      "attempt": 1,
+      "task_id": "10ea131b-c2ed-418c-af35-4341e1234cfb",
+      "exit_class": "timeout",
+      "finished_at": "2026-11-02T02:54:30Z",
+      "train_seconds": 21637.8,
+      "gate_evidence": "none",
+      "ruling": "not-an-attempt: owner, 2026-11-02, see 16-CONTROL-AMENDMENT-1.json owner_decisions",
+      "classify_run_label": "unresolved (the tool maps only refused and crash to pre-verdict); settled by the owner's ruling, the classifier is unchanged",
+      "fetch": "F and H of attempt 1 not yet run by the owner when this was recorded"
+    }
+  ],
   "attempts": [],
   "consumption_rule_subject": "R = models/decide/<run.name>, evaluated in this order:"
 }
