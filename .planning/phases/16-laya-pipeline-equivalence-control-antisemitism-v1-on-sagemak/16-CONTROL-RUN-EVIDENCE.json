@@ -3,7 +3,7 @@
   "phase": "16",
   "plan": "16-02",
   "kind": "pipeline-equivalence-control",
-  "status": "attempt-2-in-flight",
+  "status": "attempt-2-fetched-pending-classification",
   "next_trusted": false,
   "sets_next_trusted": false,
   "declaration_path": ".planning/phases/16-laya-pipeline-equivalence-control-antisemitism-v1-on-sagemak/16-CONTROL-DECLARATION.json",
@@ -166,6 +166,24 @@
       "recorded_at": "2026-11-02T03:33:50Z",
       "step": "R-attempt2",
       "verbatim": "rc=0 | TASK_ID 6ae93191-46fb-47f8-921e-ec0ce74f0da8 | status working, createdAt 2026-11-02T03:33:50Z  (account id elided; the owner skipped H, the train call was accepted so the lock was free)"
+    },
+    {
+      "recorded_by": "orchestrator",
+      "recorded_at": "2026-11-02T00:00:00Z",
+      "step": "S-attempt2",
+      "verbatim": "POLL DONE completed (two polls; first ended POLL CAP, second ended POLL DONE completed; recorded_at is the orchestrator's approximation)"
+    },
+    {
+      "recorded_by": "orchestrator",
+      "recorded_at": "2026-11-02T00:00:00Z",
+      "step": "F-attempt2",
+      "verbatim": "FETCH OK phase completed apr 22796ff94a0839f47c4308f0b88c73b43aaff1f21b760d78e434dac332909eed (laya-verify and laya-deploy lines were 'owner-run, not executed' notices; destination models/decide/antisemitism-v1-cuda-ctl)"
+    },
+    {
+      "recorded_by": "orchestrator",
+      "recorded_at": "2026-11-02T00:00:00Z",
+      "step": "H-attempt2",
+      "verbatim": "training_jobs_inprogress 0 | ecs_tasks_running 0 | state_machine_execution SUCCEEDED | lock status completed, holder = attempt 2 task id (lock output cut at 300 chars by the command; account id elided)"
     }
   ],
   "deviations": [
@@ -178,7 +196,7 @@
     "timestamps of the owner_replies recorded on 2026-11-02 before R are the orchestrator's approximations of the sequence, only R-attempt2 and the attempt-1 S/R entries carry the server's own times"
   ],
   "evidence_incomplete": [
-    "attempt 2 poll, fetch and classification pending"
+    "attempt 2 classification, evaluation against the declaration blob, paired report and summary pending (16-03 Task 3)"
   ],
   "readiness_completed_by_plan": "16-03",
   "attempt_number": 2,
