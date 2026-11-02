@@ -142,7 +142,7 @@ Catch.
 
 State machine (D-a; since 14-19 also bound both ways to the synthesized template by `laya_trainer_stack_check.py::check_surface_binding`): `Train -> PackVerify -> Finalize -> CatchFinalize`, start `Train`; `Train` and `PackVerify` each `Catch States.ALL -> CatchFinalize`,
 `ResultPath $.error`; `Finalize` and `CatchFinalize` have no Catch (only the CDK Lambda service-exception Retry, which
-does not retry a finalizer `Err`); machine `TimeoutSeconds 36000`; status rule `FAILED/TIMED_OUT/ABORTED`; reconcile `rate(10 minutes)`.
+does not retry a finalizer `Err`); machine `TimeoutSeconds 50400`; status rule `FAILED/TIMED_OUT/ABORTED`; reconcile `rate(10 minutes)`.
 
 ### Corrections to the plan's seed
 
@@ -176,7 +176,7 @@ covers the row (the checker proves it exists).
 | FS-SM-04 | PackVerify fails (PackError exit 1 with no pack-outcome.json, env/contracts refusal exit 2, an upload failure exit 1, the 3 h task timeout) -> Catch States.ALL -> CatchFinalize, resultPath $.error; closed by 14-17: a missing pack record under a stage error fails 'pack-outcome.json is missing; stage error: ...' and decides as the event and reconcile deliveries do | closed | WR-01 | 14-17 | `finalizer.rs::failure_surface_sweep_clean` | I3, I8 |
 | FS-SM-05 | Finalize has no Catch (only the CDK Lambda service-exception Retry, 6 attempts): a finalizer Err ends the execution FAILED, which falls to the status rule and the 10-minute reconcile (both deliver stage_error None) | ok |  |  | `finalizer.rs::fin_reconcile_lost_event` | I2, I8 |
 | FS-SM-06 | CatchFinalize has no Catch (same Retry): its Err ends the execution FAILED; the status event and the reconcile then re-drive it WITHOUT the stage error | ok |  |  | `finalizer.rs::fin_reconcile_lost_event` | I2, I8 |
-| FS-SM-07 | machine TimeoutSeconds 36000 (MACHINE_TIMEOUT_SECS) -> TIMED_OUT -> status rule (and reconcile) | ok |  |  | `finalizer.rs::fin_timeout_event` | I1, I8 |
+| FS-SM-07 | machine TimeoutSeconds 50400 (MACHINE_TIMEOUT_SECS) -> TIMED_OUT -> status rule (and reconcile) | ok |  |  | `finalizer.rs::fin_timeout_event` | I1, I8 |
 | FS-SM-08 | a client cancel -> StopExecution (cancel sink) -> ABORTED -> status rule; the finalizer cancels the record and finalizes cancelled | ok |  |  | `finalizer.rs::fin_abort_event` | I6 |
 | FS-SM-09 | a lost status-rule delivery (best effort, retryAttempts 4, DLQ) -> the 10-minute reconcile sweep is the floor | ok |  |  | `finalizer.rs::fin_reconcile_lost_event` | I2 |
 | FS-SM-10 | StartExecution rejected or ambiguous at dispatch (request side): rejected compensates and releases; ambiguous + unconfirmed leaves the lock for the reconcile's dispatch-unconfirmed path | ok |  |  | `lib.rs::submit_dispatch_unconfirmed` | I2 |

@@ -230,8 +230,8 @@ python3 -I scripts/laya_deploy/laya_trainer_stack_check.py --selftest   # every 
 
 With no digests the synth uses all-zero placeholders and says so (`PLACEHOLDER DIGESTS (synth
 only)`); the trainer stack refuses anything that is not `sha256:<64 hex>`, so a floating tag can never
-be deployed. Every spend limit is a literal in the template and is asserted from it: `ml.g5.xlarge`,
-count 1, `MaxRuntimeInSeconds` 21600, the 36,000 s machine timeout, the 8 vCPU / 16 GiB ARM64 pack task,
+be deployed. Every spend limit is a literal in the template and is asserted from it: `ml.g5.4xlarge`,
+count 1, `MaxRuntimeInSeconds` 36000, the 50,400 s machine timeout, the 8 vCPU / 16 GiB ARM64 pack task,
 the exact `data` and `base` SageMaker channels, and digest-pinned images. None is read from the
 execution input.
 

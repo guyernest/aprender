@@ -43,12 +43,12 @@ export interface LayaTrainerStackProps extends cdk.StackProps {
 }
 
 /** The training instance. A literal: a caller can never choose a bigger machine. */
-export const TRAIN_INSTANCE_TYPE = 'ml.g5.xlarge';
+export const TRAIN_INSTANCE_TYPE = 'ml.g5.4xlarge';
 export const TRAIN_INSTANCE_COUNT = 1;
 /** MaxRuntimeInSeconds of the training job (layout::MAX_RUNTIME_SECS). */
-export const TRAIN_MAX_RUNTIME_SECS = 21_600;
-/** The whole machine's ceiling: train (6 h) + pack and verify (3 h) + slack. */
-export const MACHINE_TIMEOUT_SECS = 36_000;
+export const TRAIN_MAX_RUNTIME_SECS = 36_000;
+/** The whole machine's ceiling: train (10 h) + pack and verify (3 h) + slack (1 h). */
+export const MACHINE_TIMEOUT_SECS = 50_400;
 /** The pinned base-model snapshot's key prefix (layout::BASE_KEY's directory). */
 export const BASE_PREFIX = 'base/laya-55cf4c4e/';
 /** The retention tag every run_step upload carries (layout::RETENTION_TAG_KEY). */
@@ -443,7 +443,7 @@ export class LayaTrainerStack extends cdk.Stack {
       resourceConfig: {
         instanceCount: TRAIN_INSTANCE_COUNT,
         // The CDK renders "ml." + this, so the prefix is dropped here and the template says
-        // exactly ml.g5.xlarge (the check script asserts the rendered literal).
+        // exactly ml.g5.4xlarge (the check script asserts the rendered literal).
         instanceType: new ec2.InstanceType(TRAIN_INSTANCE_TYPE.replace(/^ml\./, '')),
         volumeSize: cdk.Size.gibibytes(100),
       },

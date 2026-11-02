@@ -26,13 +26,14 @@ pub const TOOL_STATUS: &str = "train_status";
 /// TTL requested for a minted task: 72 h = a 6 h job, pack and verify, and a
 /// retrieval window (Pitfall 14: an expired task discards a finished verdict).
 pub const TASK_TTL_MS: u64 = 259_200_000;
-/// Single-flight lease: the 10 h state-machine timeout plus margin. Read by
+/// Single-flight lease: the 14 h state-machine timeout plus margin. Read by
 /// `lock::acquire`; the finalizer's reconcile sweep (14-05) frees an expired one.
-pub const LOCK_LEASE_SECS: u64 = 39_600;
-/// Hard runtime cap of one training job (D-12). Read by the state machine (14-08).
-pub const MAX_RUNTIME_SECS: u64 = 21_600;
+pub const LOCK_LEASE_SECS: u64 = 54_000;
+/// Hard runtime cap of one training job (D-12; 6 h -> 10 h by the Phase 16 amendment: a measured
+/// 4-epoch antisemitism-v1 run needs more than 6 h because scoring is CPU-bound). Read by the state machine (14-08).
+pub const MAX_RUNTIME_SECS: u64 = 36_000;
 /// The SageMaker instance type (D-13). Read by the state machine (14-08).
-pub const INSTANCE_TYPE: &str = "ml.g5.xlarge";
+pub const INSTANCE_TYPE: &str = "ml.g5.4xlarge";
 /// Lifetime of a presigned download link minted by `train_status`.
 pub const DOWNLOAD_URL_TTL_SECS: u64 = 3_600;
 /// Largest request body the server accepts (HTTP 413 above it).

@@ -298,7 +298,7 @@ def check_machine(t, rep):
     rep.check("machine-name", m["Properties"].get("StateMachineName") in ("aprender-laya-train-dev", "aprender-laya-train-prod"),
               "StateMachineName %r" % m["Properties"].get("StateMachineName"))
     rep.check("machine-type", m["Properties"].get("StateMachineType") == "STANDARD", "not a STANDARD machine (.sync needs it)")
-    rep.check("machine-timeout", asl.get("TimeoutSeconds") == 36000, "TimeoutSeconds is %r, not 36000" % asl.get("TimeoutSeconds"))
+    rep.check("machine-timeout", asl.get("TimeoutSeconds") == 50400, "TimeoutSeconds is %r, not 50400" % asl.get("TimeoutSeconds"))
     states = asl.get("States", {})
     rep.check("machine-shape",
               set(states) == {"Train", "PackVerify", "Finalize", "CatchFinalize"} and asl.get("StartAt") == "Train"
@@ -309,11 +309,11 @@ def check_machine(t, rep):
     tp, pp = train.get("Parameters", {}), pack.get("Parameters", {})
     rep.check("train-resource", flat(train.get("Resource", "")).endswith(":states:::sagemaker:createTrainingJob.sync"),
               "Train Resource is %r" % train.get("Resource"))
-    rep.check("train-runtime", tp.get("StoppingCondition", {}).get("MaxRuntimeInSeconds") == 21600,
-              "StoppingCondition is %r (MaxRuntimeInSeconds must be the literal 21600)" % tp.get("StoppingCondition"))
+    rep.check("train-runtime", tp.get("StoppingCondition", {}).get("MaxRuntimeInSeconds") == 36000,
+              "StoppingCondition is %r (MaxRuntimeInSeconds must be the literal 36000)" % tp.get("StoppingCondition"))
     rc = tp.get("ResourceConfig", {})
-    rep.check("train-instance", rc.get("InstanceType") == "ml.g5.xlarge" and rc.get("InstanceCount") == 1 and set(rc) == {"InstanceType", "InstanceCount", "VolumeSizeInGB"},
-              "ResourceConfig is %r (instance and count must be the literals ml.g5.xlarge and 1, never read from the input)" % rc)
+    rep.check("train-instance", rc.get("InstanceType") == "ml.g5.4xlarge" and rc.get("InstanceCount") == 1 and set(rc) == {"InstanceType", "InstanceCount", "VolumeSizeInGB"},
+              "ResourceConfig is %r (instance and count must be the literals ml.g5.4xlarge and 1, never read from the input)" % rc)
     image = tp.get("AlgorithmSpecification", {}).get("TrainingImage", "")
     m_image = re.search(r"/aprender-laya-train-%s@(%s)$" % (re.escape(env), DIGEST_RE), image) if env else None
     rep.check("train-image-pinned", bool(m_image) and "TrainingImage" in tp.get("AlgorithmSpecification", {}),
@@ -815,7 +815,7 @@ CASES = [
     ("the PackVerify LAYA_PACK_IMAGE_DIGEST differing from the task definition's digest",
      asl_edit(lambda a: a["States"]["PackVerify"]["Parameters"]["Overrides"]["ContainerOverrides"][0]["Environment"].__setitem__(4, {"Name": "LAYA_PACK_IMAGE_DIGEST", "Value": "sha256:" + "2" * 64})), True, "pack-digest-literal"),
     ("the Finalize payload without start_time", asl_edit(lambda a: a["States"]["Finalize"]["Parameters"]["Payload"].pop("start_time.$")), True, "finalize-start-time"),
-    ("the machine timeout 36001", asl_edit(lambda a: a.update(TimeoutSeconds=36001)), True, "machine-timeout"),
+    ("the machine timeout 50401", asl_edit(lambda a: a.update(TimeoutSeconds=50401)), True, "machine-timeout"),
     ("the finalizer's S3 right widened to datasets/*", widen_finalizer, True, "finalizer-s3-scope"),
     ("a policy attached to a role outside the stack", lambda t: next(iter(resources(t, "AWS::IAM::Policy").values()))["Properties"].__setitem__("Roles", ["pmcp-request-role"]), True, "no-external-grant"),
 ]

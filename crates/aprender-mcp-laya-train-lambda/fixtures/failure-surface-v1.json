@@ -122,7 +122,7 @@
       "Finalize",
       "CatchFinalize"
     ],
-    "machine_timeout_secs": 36000,
+    "machine_timeout_secs": 50400,
     "event_statuses": [
       "FAILED",
       "TIMED_OUT",
@@ -141,7 +141,7 @@
       "Finalize": "CDK LambdaInvoke default: Lambda.ClientExecutionTimeoutException, ServiceException, AWSLambdaException, SdkClientException; 6 attempts, 2 s, backoff 2 (a finalizer Err is NOT retried)",
       "CatchFinalize": "the same"
     },
-    "train_max_runtime_secs": 21600,
+    "train_max_runtime_secs": 36000,
     "pack_task_timeout_secs": 10800
   },
   "exit_classes": {
@@ -869,7 +869,7 @@
     {
       "id": "FS-SM-07",
       "group": "state-machine",
-      "what": "machine TimeoutSeconds 36000 (MACHINE_TIMEOUT_SECS) -> TIMED_OUT -> status rule (and reconcile)",
+      "what": "machine TimeoutSeconds 50400 (MACHINE_TIMEOUT_SECS) -> TIMED_OUT -> status rule (and reconcile)",
       "status": "ok",
       "ref": null,
       "closes": null,
