@@ -1,0 +1,14 @@
+{
+  "schema": "laya-run-go-v1",
+  "recorded_by": "orchestrator",
+  "recorded_at": "2026-11-02T03:30:00Z",
+  "owner_reply_verbatim": "3. You have my go. (in the same message: '1. Attempt 1 can be considered as not an attempt and phase 16 can re-run. 2. Let's increase the cap to 10 hours, and we can also increase the size of the instance to make it faster.')",
+  "interpreted_as": "run-go",
+  "in_answer_to": "Approve a SECOND paid SageMaker run of the Phase 16 control: antisemitism-v1 on CUDA, run antisemitism-v1-cuda-ctl, 4 epochs, seeds 13/17/23, after amendment 1 (cap 36,000 s, ml.g5.4xlarge chosen by the orchestrator under the owner's delegation, worst case about 20 USD, unmeasured duration), attempt 1 ruled not an attempt. Attempt cap 1 stands. The go is conditional on the owner-run deploy of the amended server.",
+  "declaration_path": "16-CONTROL-DECLARATION.json",
+  "declaration_commit": "a3d4d2baa59af8b48399409e1b36ae3fdd14da2c",
+  "declaration_sha256": "600b64947ab8c058e5b52cf4f3227aca2eeb2a887d3d1dbaae2a41932fb5f096",
+  "amendment_path": "16-CONTROL-AMENDMENT-1.json",
+  "amendment_commit": "73b6d5c94",
+  "amendment_sha256": "7b43aa65757bf0af411027eadf2be9f10e7a3d42ec3b1dfeb7c8a2aefeb9083c"
+}
