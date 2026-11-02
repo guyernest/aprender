@@ -3,7 +3,7 @@
   "phase": "16",
   "plan": "16-02",
   "kind": "pipeline-equivalence-control",
-  "status": "attempt-1-pre-verdict-timeout-rerun-authorized-pending-deploy",
+  "status": "attempt-2-in-flight",
   "next_trusted": false,
   "sets_next_trusted": false,
   "declaration_path": ".planning/phases/16-laya-pipeline-equivalence-control-antisemitism-v1-on-sagemak/16-CONTROL-DECLARATION.json",
@@ -142,17 +142,43 @@
       "recorded_at": "2026-11-02T02:55:39Z",
       "step": "S",
       "verbatim": "POLL DONE failed (three S calls; the last status was phase failed; the error read: the training job hit its runtime cap and was stopped; stage error: States.TaskFailed: Stopped; MaxRuntimeExceeded)"
+    },
+    {
+      "recorded_by": "orchestrator",
+      "recorded_at": "2026-11-02T03:10:00Z",
+      "step": "F-attempt1",
+      "verbatim": "NOTE: 1 object(s) under the run prefix are not in the manifest and were NOT fetched | FETCH OK phase failed apr none  (the unfetched object is outcome.json; saved straight from S3 as outcome.s3-direct.json, sha256 df18527794b577482ba09890c36f1616e14feaed3a28e23ba572142079aeb3c3, beside the fetched run, which the owner renamed to models/decide/antisemitism-v1-cuda-ctl-attempt1)"
+    },
+    {
+      "recorded_by": "orchestrator",
+      "recorded_at": "2026-11-02T03:20:00Z",
+      "step": "infra-diff",
+      "verbatim": "cdk diff: Finalizer code asset replaced; ResourceConfig InstanceType ml.g5.xlarge -> ml.g5.4xlarge; MaxRuntimeInSeconds 21600 -> 36000; machine TimeoutSeconds 36000 -> 50400; no other change | INFRA OK diff"
+    },
+    {
+      "recorded_by": "orchestrator",
+      "recorded_at": "2026-11-02T03:30:00Z",
+      "step": "infra-deploy",
+      "verbatim": "INFRA OK deploy (stack aprender-laya-trainer-dev updated, 34 s; account id elided)"
+    },
+    {
+      "recorded_by": "orchestrator",
+      "recorded_at": "2026-11-02T03:33:50Z",
+      "step": "R-attempt2",
+      "verbatim": "rc=0 | TASK_ID 6ae93191-46fb-47f8-921e-ec0ce74f0da8 | status working, createdAt 2026-11-02T03:33:50Z  (account id elided; the owner skipped H, the train call was accepted so the lock was free)"
     }
   ],
   "deviations": [
     {
       "rule": "Rule 3",
       "note": "Phase 15's consumption_rule list carries a header line plus four steps; the plan's verify requires exactly four entries, so the four numbered steps are copied verbatim into consumption_rule and the header line into consumption_rule_subject"
-    }
+    },
+    "request Lambda not redeployed: it keeps LOCK_LEASE_SECS 39,600 s (repo: 54,000 s); harmless for a single submitter and a run under 11 h; the owner was told",
+    "H (hygiene) was not run between attempts; the accepted train call shows the lock was free",
+    "timestamps of the owner_replies recorded on 2026-11-02 before R are the orchestrator's approximations of the sequence, only R-attempt2 and the attempt-1 S/R entries carry the server's own times"
   ],
   "evidence_incomplete": [
-    "awaiting the owner-run deploy of the amended server and the owner-run commands for attempt 2",
-    "F and H of attempt 1"
+    "attempt 2 poll, fetch and classification pending"
   ],
   "readiness_completed_by_plan": "16-03",
   "attempt_number": 2,
@@ -620,6 +646,16 @@
       "fetch": "F and H of attempt 1 not yet run by the owner when this was recorded"
     }
   ],
-  "attempts": [],
+  "attempts": [
+    {
+      "attempt": 2,
+      "task_id": "6ae93191-46fb-47f8-921e-ec0ce74f0da8",
+      "created_at": "2026-11-02T03:33:50Z",
+      "instance": "ml.g5.4xlarge",
+      "cap_s": 36000,
+      "go": "16-RUN-GO-2.json",
+      "status": "in-flight"
+    }
+  ],
   "consumption_rule_subject": "R = models/decide/<run.name>, evaluated in this order:"
 }
