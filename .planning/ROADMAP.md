@@ -1180,7 +1180,7 @@ Plans:
   4. Per D-06, D-07 and D-09: one owner-run SageMaker CUDA attempt (a per-run go recorded by the orchestrator; compute above 1 h) is fetched, classified by the consumption rule and judged by the committed evaluator over the declaration's first-add blob; the CUDA wall time is measured; a pre-verdict stop is not the attempt.
   5. Per D-05: the evidence states pipeline equivalence on THIS task only, with `next_trusted` false and `sets_next_trusted` false whatever the verdict; it does not reproduce motivation-v1, does not change D-16 and does not lift the Phase 14 server's untrusted state.
 
-**Plans:** 2/3 plans executed in 3 waves (sequential: the declaration is committed first, the owner-run stage and the owner-run attempt each gate the next step; 16-02 and 16-03 carry owner checkpoints)
+**Plans:** 3/3 plans executed in 3 waves (sequential: the declaration is committed first, the owner-run stage and the owner-run attempt each gate the next step; 16-02 and 16-03 carry owner checkpoints)
 
 Plans:
 **Wave 1**
@@ -1190,4 +1190,4 @@ Plans:
 - [x] 16-02-PLAN.md — Stager byte pin for antisemitism-v1, check-stage and check-validate, owner-run stage and validate_dataset checkpoint (wave 2)
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 16-03-PLAN.md — Per-run owner go, the one owner-run SageMaker CUDA attempt, classify-run, evaluation over the first-add blob, descriptive paired report, evidence with next_trusted false (wave 3)
+- [x] 16-03-PLAN.md — Per-run owner go, the one owner-run SageMaker CUDA attempt, classify-run, evaluation over the first-add blob, descriptive paired report, evidence with next_trusted false (wave 3)
