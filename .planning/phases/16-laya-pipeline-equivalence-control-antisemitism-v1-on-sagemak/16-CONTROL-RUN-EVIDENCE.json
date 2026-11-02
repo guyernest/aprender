@@ -1,9 +1,9 @@
 {
   "schema": "laya-gate-run-evidence-v3",
   "phase": "16",
-  "plan": "16-02",
+  "plan": "16-03",
   "kind": "pipeline-equivalence-control",
-  "status": "attempt-2-fetched-pending-classification",
+  "status": "complete",
   "next_trusted": false,
   "sets_next_trusted": false,
   "declaration_path": ".planning/phases/16-laya-pipeline-equivalence-control-antisemitism-v1-on-sagemak/16-CONTROL-DECLARATION.json",
@@ -193,13 +193,23 @@
     },
     "request Lambda not redeployed: it keeps LOCK_LEASE_SECS 39,600 s (repo: 54,000 s); harmless for a single submitter and a run under 11 h; the owner was told",
     "H (hygiene) was not run between attempts; the accepted train call shows the lock was free",
-    "timestamps of the owner_replies recorded on 2026-11-02 before R are the orchestrator's approximations of the sequence, only R-attempt2 and the attempt-1 S/R entries carry the server's own times"
+    "timestamps of the owner_replies recorded on 2026-11-02 before R are the orchestrator's approximations of the sequence, only R-attempt2 and the attempt-1 S/R entries carry the server's own times",
+    {
+      "rule": "Rule 3",
+      "note": "16-CONTROL-RUN-EVIDENCE.json carried attempt_number 2 and attempts[0].attempt 2 (physical run numbering). The plan keeps attempt_number 1 because a pre-verdict stop is not the attempt, so attempt_number is 1 and attempts[0] carries physical_run 2; see attempt_numbering."
+    },
+    {
+      "rule": "scope",
+      "note": "The plan's FINAL SCAN AND SCOPE check requires crates and the Phase 14 records to equal the declaration's first-add commit a3d4d2baa. Both differ, only because of the owner-approved amendment commit b319fc95d (crates/aprender-mcp-laya-train/src/layout.rs, the failure-surface fixture, 14-FAILURE-SURFACE.md, plus deploy-extensions and laya_trainer_stack_check.py): the 36,000 s cap and ml.g5.4xlarge of 16-CONTROL-AMENDMENT-1.json. No other path differs: the evaluator, the diagnosis tool, scripts/laya_train, contracts, .github, the declaration, the fixture, the draft and the Phase 10 and 15 records equal a3d4d2baa, and laya_control.py equals its pin. Recorded here, not hidden; the check was not edited or bypassed."
+    },
+    {
+      "rule": "verify",
+      "note": "The plan's Task 2 owner-run verify asserts owner_replies steps named exactly R, S, F and H. The orchestrator recorded attempt 2's replies as R-attempt2, S-attempt2, F-attempt2 and H-attempt2 (and F-attempt1), so that assertion stops at F. The recorded replies were left unedited; they carry the same content."
+    }
   ],
-  "evidence_incomplete": [
-    "attempt 2 classification, evaluation against the declaration blob, paired report and summary pending (16-03 Task 3)"
-  ],
+  "evidence_incomplete": [],
   "readiness_completed_by_plan": "16-03",
-  "attempt_number": 2,
+  "attempt_number": 1,
   "authorization": {
     "source": "16-RUN-GO.json",
     "go_commit": "946df1793661b82110aa18a3d8d2634c5dd20efb",
@@ -661,19 +671,465 @@
       "gate_evidence": "none",
       "ruling": "not-an-attempt: owner, 2026-11-02, see 16-CONTROL-AMENDMENT-1.json owner_decisions",
       "classify_run_label": "unresolved (the tool maps only refused and crash to pre-verdict); settled by the owner's ruling, the classifier is unchanged",
-      "fetch": "F and H of attempt 1 not yet run by the owner when this was recorded"
+      "fetch": "F-attempt1 recorded in owner_replies (FETCH OK phase failed apr none; outcome.json saved straight from S3); H of attempt 1 was not run (deviations)",
+      "classify_run_on_fetched_dir": {
+        "run_dir": "models/decide/antisemitism-v1-cuda-ctl-attempt1",
+        "output": {
+          "class": "unresolved",
+          "reason": "logs/outcome.json is absent or has no string exit_class"
+        },
+        "note": "re-run by plan 16-03 Task 3 for the record: the fetch left outcome.json unfetched (saved straight from S3 as outcome.s3-direct.json), so by the tool the directory is unresolved; the owner's ruling of 2026-11-02 stands and the classifier was not changed"
+      }
     }
   ],
   "attempts": [
     {
-      "attempt": 2,
+      "attempt": 1,
+      "physical_run": 2,
+      "label_in_earlier_records": "attempt 2",
       "task_id": "6ae93191-46fb-47f8-921e-ec0ce74f0da8",
       "created_at": "2026-11-02T03:33:50Z",
       "instance": "ml.g5.4xlarge",
       "cap_s": 36000,
       "go": "16-RUN-GO-2.json",
-      "status": "in-flight"
+      "run_dir": "models/decide/antisemitism-v1-cuda-ctl",
+      "outcome": "gate_pass",
+      "failure_kind": null
     }
   ],
-  "consumption_rule_subject": "R = models/decide/<run.name>, evaluated in this order:"
+  "consumption_rule_subject": "R = models/decide/<run.name>, evaluated in this order:",
+  "completed_by_plan": "16-03",
+  "attempt_numbering": "The declared attempt is 1 (attempt_cap 1). Physical run 1 (task 10ea131b, ml.g5.xlarge) stopped at its runtime cap before any gate evidence and was ruled by the owner on 2026-11-02 not to be an attempt (16-CONTROL-AMENDMENT-1.json owner_decisions, pre_verdict_failures). Physical run 2 (task 6ae93191, ml.g5.4xlarge, run name unchanged) is therefore the one declared attempt; earlier records call it 'attempt 2'. The evaluator was run with --attempt 1, the declared count against the cap; --attempt 2 prints the same class and verdict.",
+  "recipe_id_written": "d70c3f3da0daae129f3ee1ce928eb21a0ef71a83a6f09dc18e0621f3cc8adcbc",
+  "inputs_sha256": {
+    "task_json": "33fd8d7cd51b1b2864033ee313d30ae445e76120cc2b26e3849369c0602248e3",
+    "train_jsonl": "81a923d4b1b05bfd809e1c04534f714c2bc57c3d3a5e11e33c79fa44f7a79a9e",
+    "eval_jsonl": "f4a0cf7c2ea6d2ebce8580a82287410daa4106688d3e224e081a04fe141b38a8"
+  },
+  "report_inputs_sha256_extra": {
+    "base_model": "891102d372688fc2a094dac56a384bc537b87c63f21f9f3dac0be2b7cbc8d86c",
+    "tokenizer_json": "6c8aaa9a542084f2457eab775d4eeb51f92a70c0fd9de28d5edb0ddec3c08d30"
+  },
+  "outcome": "gate_pass (verdict.json phase completed, outcome.json exit_class pass, train_rc 0, train.log GATE PASS)",
+  "device_used": "cuda:0",
+  "torch_version": "2.14.0+cu130",
+  "started_at": "2026-11-02T03:39:00Z",
+  "finished_at": "2026-11-02T06:50:26Z",
+  "train_seconds": 11485.1,
+  "run_env": {
+    "schema": "laya-train-run-env-v1",
+    "python": "3.13.7",
+    "hf_hub_offline": true,
+    "peak_gpu_memory_mib": 22465,
+    "driver": "595.91.07",
+    "compat_used": false,
+    "compat_ld_library_path": null
+  },
+  "seeds": {
+    "policy": "median_ece",
+    "shipped": 17,
+    "per_seed": [
+      {
+        "seed": 13,
+        "macro_f1": 0.8092419360142045,
+        "ece_post": 0.038020913591962774,
+        "margin": 0.24966623773097785,
+        "t_applied": 5.0,
+        "clamp_hit": true,
+        "best_epoch": 3,
+        "epochs_run": 4,
+        "train_seconds": 1197.2
+      },
+      {
+        "seed": 17,
+        "macro_f1": 0.820901125622294,
+        "ece_post": 0.013291716967574172,
+        "margin": 0.2613254273390674,
+        "t_applied": 5.0,
+        "clamp_hit": true,
+        "best_epoch": 3,
+        "epochs_run": 4,
+        "train_seconds": 1194.3
+      },
+      {
+        "seed": 23,
+        "macro_f1": 0.8177396258132802,
+        "ece_post": 0.011429669404600972,
+        "margin": 0.25816392753005357,
+        "t_applied": 1.8141921712303655,
+        "clamp_hit": false,
+        "best_epoch": 1,
+        "epochs_run": 4,
+        "train_seconds": 1193.8
+      }
+    ],
+    "mean_margin": 0.25638519753336625
+  },
+  "gate": {
+    "pass": true,
+    "zero_shot_macro_f1": 0.5595756982832266,
+    "ft_macro_f1": 0.820901125622294,
+    "margin": 0.2613254273390674,
+    "ece_post": 0.013291716967574172,
+    "thresholds": {
+      "min_macro_f1_margin": 0.05,
+      "max_ece": 0.1,
+      "ece_bins": 15
+    },
+    "t_applied": 5.0,
+    "clamp_hit": true
+  },
+  "pilot_waiver": null,
+  "waived": null,
+  "noise": {
+    "fine_tuned": {
+      "noise": 7.451941990033184e-06,
+      "rescore_max_abs": 3.88026237487793e-05,
+      "bound": 5e-05
+    },
+    "zero_shot": {
+      "noise": 9.820640416768889e-06,
+      "rescore_max_abs": 1.570582389831543e-05,
+      "bound": 3.9282561667075555e-05
+    },
+    "argmax_agree": "2129/2129",
+    "source": "logs/pack-outcome.json packed_line and train.log NOISE lines"
+  },
+  "pack": {
+    "ran": true,
+    "accepted": true,
+    "deploy_eligible": true,
+    "apr_sha256": "22796ff94a0839f47c4308f0b88c73b43aaff1f21b760d78e434dac332909eed",
+    "pack_image_digest": "sha256:dd38865c43aba2f3819e50addcf6db5e9da94ef84e762d93cf6b2c132f1d17e2",
+    "parity_contract_sha256": "466891faa5e3e1e092a5483bafcdf2ba8c5c835c9cdda5aaff896d2e893584e9",
+    "gate_contract_sha256": "4f6ba791b5c4a2f3f380de8f967e2263543285b01f71d4708509da528f5fe474",
+    "shipped_seed": 17,
+    "waived": null,
+    "packed_line": "PACKED /work/out/antisemitism-v1-cuda-ctl.apr sha256=22796ff94a0839f47c4308f0b88c73b43aaff1f21b760d78e434dac332909eed rescore_max_abs=0.0000388026237487793 zs_rescore_max_abs=0.00001570582389831543 rescore_bound=0.00005 zs_rescore_bound=0.000039282561667075555 noise=0.000007451941990033184 zs_noise=0.000009820640416768889 shipped_seed=17 argmax=2129/2129 waived=none",
+    "verify_line": "{\"argmax\":\"2129/2129\",\"artifact_sha256\":\"22796ff94a0839f47c4308f0b88c73b43aaff1f21b760d78e434dac332909eed\",\"deploy_eligible\":true,\"noise\":7.451941990033184e-6,\"recomputed\":{\"ece_post\":0.013291716967574172,\"ft_macro_f1\":0.820901125622294,\"margin\":0.2613254273390674,\"zs_macro_f1\":0.5595756982832266},\"rescore_bound\":0.00005,\"rescore_max_abs\":0.0000388026237487793,\"shipped_seed\":17,\"waived\":null,\"zs_noise\":9.820640416768889e-6,\"zs_rescore_bound\":0.000039282561667075555,\"zs_rescore_max_abs\":0.00001570582389831543}",
+    "pack_seconds": 2557.85,
+    "verify_seconds": 2563.05
+  },
+  "verify_line": "{\"argmax\":\"2129/2129\",\"artifact_sha256\":\"22796ff94a0839f47c4308f0b88c73b43aaff1f21b760d78e434dac332909eed\",\"deploy_eligible\":true,\"noise\":7.451941990033184e-6,\"recomputed\":{\"ece_post\":0.013291716967574172,\"ft_macro_f1\":0.820901125622294,\"margin\":0.2613254273390674,\"zs_macro_f1\":0.5595756982832266},\"rescore_bound\":0.00005,\"rescore_max_abs\":0.0000388026237487793,\"shipped_seed\":17,\"waived\":null,\"zs_noise\":9.820640416768889e-6,\"zs_rescore_bound\":0.000039282561667075555,\"zs_rescore_max_abs\":0.00001570582389831543}",
+  "artifact": {
+    "path": "models/decide/antisemitism-v1-cuda-ctl/antisemitism-v1-cuda-ctl.apr",
+    "sha256": "22796ff94a0839f47c4308f0b88c73b43aaff1f21b760d78e434dac332909eed",
+    "bytes": 846220804,
+    "eligible": true,
+    "eligible_basis": "the pack task's recorded verify (logs/pack-outcome.json), unwaived; gate passed unwaived"
+  },
+  "deploy_eligible": true,
+  "local_verify": {
+    "ran": true,
+    "role": "offline laya_eligibility.py check-record over the fetched logs/pack-outcome.json; laya-verify and laya-deploy were NOT run (owner-run notices only); nothing uploaded or deployed",
+    "real_sha_line": "PACK RECORD OK sha256 22796ff94a0839f47c4308f0b88c73b43aaff1f21b760d78e434dac332909eed pack_image sha256:dd38865c43aba2f3819e50addcf6db5e9da94ef84e762d93cf6b2c132f1d17e2 parity_contract 466891faa5e3e1e092a5483bafcdf2ba8c5c835c9cdda5aaff896d2e893584e9",
+    "zero_sha_line": "REFUSED eligibility: pack record apr_sha256 22796ff94a0839f47c4308f0b88c73b43aaff1f21b760d78e434dac332909eed differs from the local file's sha256 0000000000000000000000000000000000000000000000000000000000000000",
+    "aws_calls": 0,
+    "finding": null
+  },
+  "hygiene": {
+    "training_jobs_inprogress": 0,
+    "ecs_tasks_running": 0,
+    "state_machine_execution": "SUCCEEDED",
+    "lock": "status completed, holder is attempt 2's task id (owner-run read-back, cut at 300 chars by the command; the holder owner id is elided from this file)"
+  },
+  "evaluation": [
+    {
+      "attempt": 1,
+      "band": {
+        "ece_post": true,
+        "margin": true
+      },
+      "class": "pass",
+      "defect_reasons": [],
+      "metrics": {
+        "ece_post": 0.013291716967574172,
+        "gate_pass": true,
+        "margin": 0.25638519753336625,
+        "margin_statistic": "seed_mean",
+        "shipped_seed_margin": 0.2613254273390674
+      },
+      "must": {
+        "deploy_eligible": true,
+        "device_prefix": true,
+        "inputs_sha256": true,
+        "recipe_id": true,
+        "seeds": true
+      },
+      "recorded": {
+        "device_used": "cuda:0",
+        "inputs_sha256": {
+          "base_model": "891102d372688fc2a094dac56a384bc537b87c63f21f9f3dac0be2b7cbc8d86c",
+          "eval_jsonl": "f4a0cf7c2ea6d2ebce8580a82287410daa4106688d3e224e081a04fe141b38a8",
+          "task_json": "33fd8d7cd51b1b2864033ee313d30ae445e76120cc2b26e3849369c0602248e3",
+          "tokenizer_json": "6c8aaa9a542084f2457eab775d4eeb51f92a70c0fd9de28d5edb0ddec3c08d30",
+          "train_jsonl": "81a923d4b1b05bfd809e1c04534f714c2bc57c3d3a5e11e33c79fa44f7a79a9e"
+        },
+        "recipe_id": "d70c3f3da0daae129f3ee1ce928eb21a0ef71a83a6f09dc18e0621f3cc8adcbc",
+        "seeds": [
+          13,
+          17,
+          23
+        ],
+        "shipped_seed": 17
+      },
+      "retry_allowed": false,
+      "verdict_if_final": "reproduced",
+      "waived": null
+    }
+  ],
+  "paired": {
+    "descriptive_only": true,
+    "max_abs_margin_diff": 0.022126717632560022,
+    "mean_abs_margin_diff": 0.017174707484779266,
+    "mean_margin": {
+      "diff": 0.017174707484779256,
+      "reference": 0.239210490048587,
+      "run": 0.25638519753336625
+    },
+    "per_seed": [
+      {
+        "best_epoch": {
+          "diff": null,
+          "reference": 1,
+          "run": null
+        },
+        "clamp_hit": {
+          "reference": false,
+          "run": null
+        },
+        "ece_post": {
+          "diff": 0.026275056161024907,
+          "reference": 0.011745857430937867,
+          "run": 0.038020913591962774
+        },
+        "macro_f1": {
+          "diff": 0.013891480570142223,
+          "reference": 0.7953504554440622,
+          "run": 0.8092419360142045
+        },
+        "margin": {
+          "diff": 0.013891480570142223,
+          "reference": 0.23577475716083562,
+          "run": 0.24966623773097785
+        },
+        "seed": 13,
+        "t_applied": {
+          "diff": 3.589062641616273,
+          "reference": 1.4109373583837268,
+          "run": 5.0
+        },
+        "train_seconds": {
+          "diff": null,
+          "reference": 4944.4,
+          "run": null
+        }
+      },
+      {
+        "best_epoch": {
+          "diff": null,
+          "reference": 3,
+          "run": null
+        },
+        "clamp_hit": {
+          "reference": true,
+          "run": null
+        },
+        "ece_post": {
+          "diff": -0.03233910922771216,
+          "reference": 0.045630826195286335,
+          "run": 0.013291716967574172
+        },
+        "macro_f1": {
+          "diff": 0.01550592425163555,
+          "reference": 0.8053952013706585,
+          "run": 0.820901125622294
+        },
+        "margin": {
+          "diff": 0.01550592425163555,
+          "reference": 0.24581950308743183,
+          "run": 0.2613254273390674
+        },
+        "seed": 17,
+        "t_applied": {
+          "diff": 0.0,
+          "reference": 5.0,
+          "run": 5.0
+        },
+        "train_seconds": {
+          "diff": null,
+          "reference": 4862.3,
+          "run": null
+        }
+      },
+      {
+        "best_epoch": {
+          "diff": null,
+          "reference": 1,
+          "run": null
+        },
+        "clamp_hit": {
+          "reference": false,
+          "run": null
+        },
+        "ece_post": {
+          "diff": -0.030934359390111868,
+          "reference": 0.04236402879471284,
+          "run": 0.011429669404600972
+        },
+        "macro_f1": {
+          "diff": 0.022126717632560022,
+          "reference": 0.7956129081807202,
+          "run": 0.8177396258132802
+        },
+        "margin": {
+          "diff": 0.022126717632560022,
+          "reference": 0.23603720989749355,
+          "run": 0.25816392753005357
+        },
+        "seed": 23,
+        "t_applied": {
+          "diff": 0.3038339999722828,
+          "reference": 1.5103581712580827,
+          "run": 1.8141921712303655
+        },
+        "train_seconds": {
+          "diff": null,
+          "reference": 4864.2,
+          "run": null
+        }
+      }
+    ],
+    "reference_device": "mps:0",
+    "run_device": "cuda:0",
+    "schema": "laya-control-paired-v1",
+    "shipped": {
+      "reference_seed": 23,
+      "run_seed": 17,
+      "same_seed": false
+    }
+  },
+  "paired_supplement": {
+    "descriptive_only": true,
+    "source": "models/decide/antisemitism-v1-cuda-ctl/run/variance-report.json (run side) and 16-REFERENCE-MPS.json (reference side); NOT produced by paired-report, which prints null for the run side of these columns because it reads gate-report per_seed, which carries none of them",
+    "per_seed": [
+      {
+        "seed": 13,
+        "clamp_hit": {
+          "reference": false,
+          "run": true
+        },
+        "best_epoch": {
+          "reference": 1,
+          "run": 3,
+          "diff": 2
+        },
+        "train_seconds": {
+          "reference": 4944.4,
+          "run": 1197.2,
+          "diff": -3747.2
+        }
+      },
+      {
+        "seed": 17,
+        "clamp_hit": {
+          "reference": true,
+          "run": true
+        },
+        "best_epoch": {
+          "reference": 3,
+          "run": 3,
+          "diff": 0
+        },
+        "train_seconds": {
+          "reference": 4862.3,
+          "run": 1194.3,
+          "diff": -3668.0
+        }
+      },
+      {
+        "seed": 23,
+        "clamp_hit": {
+          "reference": false,
+          "run": false
+        },
+        "best_epoch": {
+          "reference": 1,
+          "run": 1,
+          "diff": 0
+        },
+        "train_seconds": {
+          "reference": 4864.2,
+          "run": 1193.8,
+          "diff": -3670.4
+        }
+      }
+    ],
+    "train_seconds_total": {
+      "reference": 14670.9,
+      "run": 3585.3
+    }
+  },
+  "comparison": {
+    "phase10_mps": {
+      "per_seed_margin": {
+        "13": 0.23577475716083562,
+        "17": 0.24581950308743183,
+        "23": 0.23603720989749355
+      },
+      "three_seed_mean_margin": 0.239210490048587,
+      "shipped_seed": 23,
+      "shipped_seed_margin": 0.23603720989749355,
+      "shipped_ece_post": 0.04236402879471284,
+      "train_seconds_per_seed": {
+        "13": 4944.4,
+        "17": 4862.3,
+        "23": 4864.2
+      },
+      "wall_seconds": 16822.3,
+      "device": "mps:0"
+    },
+    "this_cuda": {
+      "per_seed_margin": {
+        "13": 0.24966623773097785,
+        "17": 0.2613254273390674,
+        "23": 0.25816392753005357
+      },
+      "three_seed_mean_margin": 0.25638519753336625,
+      "shipped_seed": 17,
+      "shipped_seed_margin": 0.2613254273390674,
+      "shipped_ece_post": 0.013291716967574172,
+      "train_seconds_per_seed": {
+        "13": 1197.2,
+        "17": 1194.3,
+        "23": 1193.8
+      },
+      "wall_seconds": 11485.1,
+      "device": "cuda:0"
+    },
+    "note": "the differences are the paired block's and are not judged; the shipped seeds differ (17 here, 23 on the Mac) because the median-ECE rule picked different seeds, so the two shipped columns are different seeds; the judged statistic is the three-seed mean"
+  },
+  "verdict": "reproduced",
+  "verdict_reason": "class pass (reproduced) under the declaration committed first (a3d4d2baa, sha256 600b6494...): every clause is true. must.deploy_eligible true (the pack task accepted the artifact, pack-outcome deploy_eligible true, waived null); must.device_prefix true (cuda:0); must.recipe_id true (d70c3f3d...); must.inputs_sha256 true (task, train and eval digests equal the declared ones); must.seeds true ([13, 17, 23]); band.margin true (the judged three-seed mean margin is 0.2564, inside [0.209, 0.269]); band.ece_post true (shipped-seed ece_post 0.0133, inside [0.0, 0.10]). The shipped-seed margin is 0.2613 (seed 17, median-ECE rule), also inside the band but not the judged statistic. The gate passed unwaived (GATE PASS, waived null). Nothing is re-judged and no near miss is converted to a pass: the mean lies 0.0126 below the band ceiling and 0.0474 above its floor.",
+  "outcome_meaning": "equivalent on this task: the SageMaker CUDA pipeline's three-seed mean margin lies in [0.209, 0.269], the gate passed unwaived and an accepted deploy-eligible Graviton-packed .apr exists; this says nothing about motivation-v1 and sets no trust",
+  "trust_note": "a pass is pipeline equivalence on this task only and does not set trust; whether it redefines trust is the owner's separate ruling; next_trusted and sets_next_trusted stay false and the Phase 14 server's untrusted state and every earlier verdict are as they were",
+  "attempt_consumption": {
+    "class": "consumed",
+    "fetched": true,
+    "exit_class": "pass",
+    "gate_report_present": true,
+    "gate_line_present": true,
+    "reason": "exit_class is pass: the gate executed"
+  },
+  "findings": [
+    "Judged versus shipped margin: the judged three-seed mean margin is 0.2564 (inside [0.209, 0.269], 0.0126 below the ceiling) and the shipped-seed margin is 0.2613 (seed 17). Every must and band clause is true, the gate passed unwaived and the pack accepted, so the class is pass and the verdict reproduced, as the early read said. The two margins are different instruments; the verdict rests on the mean.",
+    "Per-seed CUDA-minus-MPS margin differences as paired-report prints them (descriptive, not tested): seed 13 +0.0139, seed 17 +0.0155, seed 23 +0.0221; mean +0.0172, max +0.0221. All three are positive. ece_post differences: +0.0263, -0.0323, -0.0309. The shipped seed differs (17 here, 23 on the Mac), so the shipped columns compare different seeds: shipped ece_post 0.0133 here against 0.0424 on the Mac.",
+    "The paired-report instrument prints null for the run side of best_epoch, clamp_hit and train_seconds (it reads the gate report's per_seed, which carries none of them; plan 16-02 predicted this). The values come from run/variance-report.json and sit in paired_supplement, outside the instrument's block. CUDA seeds 13 and 17 hit the calibration clamp (T 5.0); the Mac hit it only on seed 17; seed 23 hit it on neither. Seed 13's t_applied is 5.0 on CUDA against 1.4109 on the Mac. best_epoch: CUDA 3, 3, 1 against Mac 1, 3, 1. The shipped seed 17 hit the clamp and still passed the gate (ece_post 0.0133).",
+    "Timing (measures the D-06 estimate): CUDA train seconds per seed 1197.2, 1194.3, 1193.8 (total 3585.3) against the Mac's 4944.4, 4862.3, 4864.2 (total 14670.9). The whole training job ran 11485.1 s (3.19 h) on ml.g5.4xlarge, inside the declaration's 2 to 6 h estimate and the amendment's 3 to 4 h estimate, because per-seed CPU fp32 scoring dominates, not GPU training. Graviton pack 2557.85 s and verify 2563.05 s for 2,129 rows (the Mac measured about 21 and 22 minutes). The Mac's 16,822 s wall against 11,485 s here.",
+    "Pack: accepted, deploy_eligible true, waived null, argmax 2129/2129, on the expected pack image (sha256:dd38865c...) and parity contract (466891fa...); both equal the expected values, so no digest finding. Rescore: fine-tuned rescore_max_abs 3.88e-05 against the 5e-05 bound (noise 7.45e-06), zero-shot 1.57e-05 against 3.93e-05 (noise 9.82e-06). The fine-tuned rescore reaches 78 percent of its bound. check-record printed PACK RECORD OK for the real sha256 and REFUSED for an all-zero one (0 AWS calls).",
+    "No pilot waiver: pack-outcome waived is null, the gate report passed, and train.log holds no PILOT WAIVER line.",
+    "Attempt 1 classification disagreement, recorded not fixed: classify-run maps only exit_class refused or crash to pre-verdict, so a runtime-cap stop (exit_class timeout, no gate evidence) is 'unresolved' by the tool (re-run on models/decide/antisemitism-v1-cuda-ctl-attempt1 again prints unresolved, reason 'logs/outcome.json is absent or has no string exit_class'), while the declaration's retry.rule says a cap stop is a timeout and not an attempt. The owner ruled not-an-attempt on 2026-11-02; the classifier was not changed after the result.",
+    "Same-seed spread, observation only: attempt 1's partial variance report (amendment record, ml.g5.xlarge, never a result, not fetched locally) gave margins 0.2522, 0.2519, 0.2403 for seeds 13, 17, 23; this run gave 0.2497, 0.2613, 0.2582 for the same seeds on the same recipe and A10G on a different instance size. The mechanism was not investigated; the declaration makes no determinism claim. Nothing earlier is re-judged.",
+    "Infrastructure differs from the declaration's changes_from_reference as amended: ml.g5.4xlarge (16 vCPU) with a 36,000 s cap instead of ml.g5.xlarge and 21,600 s (16-CONTROL-AMENDMENT-1.json). The band, inputs, recipe, epochs, seeds and judging statistic are unchanged, and the amendment records that a different CPU count can change fp32 reduction order. The torch build is 2.14.0+cu130 against the Mac's 2.14.0."
+  ]
 }
