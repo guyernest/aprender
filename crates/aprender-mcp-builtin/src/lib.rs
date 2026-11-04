@@ -5,6 +5,7 @@
 //! git revision. Design: `docs/superpowers/specs/2026-11-03-aprender-built-in-server-type-design.md`.
 
 pub mod config;
+pub mod load;
 pub mod precheck;
 pub mod store;
 

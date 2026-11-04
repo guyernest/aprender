@@ -2,5 +2,7 @@
 
 mod cases;
 mod config;
+mod fixture;
+mod load;
 mod precheck;
 mod store;
