@@ -2,6 +2,7 @@
 
 mod cases;
 mod config;
+mod dispatch;
 mod fixture;
 mod load;
 mod precheck;
