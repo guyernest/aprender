@@ -2,4 +2,5 @@
 
 mod cases;
 mod config;
+mod precheck;
 mod store;
