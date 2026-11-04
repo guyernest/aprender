@@ -1,0 +1,243 @@
+contract: aprender-builtin
+metadata:
+  version: 1.0.0
+  created: '2026-11-03'
+  author: PAIML Engineering
+  kind: kernel
+  # ONT-7: the grammar, the refusal names and the record schemas hold in the committed tree; the
+  # cold-start and parity numbers they rest on are the decide contracts', not restated here.
+  valid_under:
+    world: committed
+  description: >
+    THE CONTRACT of the pmcp.run `aprender` built-in server type's core crate,
+    `crates/aprender-mcp-builtin` (design docs/superpowers/specs/2026-11-03-aprender-built-in-server-type-design.md).
+    One server serves ONE `.apr` decide model under ONE embedded `config.toml`, through three tools:
+    `classify` (the decide-tool-boundary-v1 door, unchanged), `status` (never loads) and `verify`
+    (the only gated tool). The platform's template is the only caller: it passes the process
+    arguments, the embedded TOML, the server id and a serving closure to `main_with`, and pins the
+    crate by git revision. This file holds what the platform compiles against and does not adapt to:
+    the configuration grammar (`aprender-server/v1`), the binary contract (argv dispatch and exit
+    codes), the `bootstrap precheck` rule table and its output grammar, the `verify` door and the
+    three record schemas (`aprender-status/v1`, `aprender-verification/v1`, the `laya-compare/v1`
+    shape the prod rules read). The Rust constants are asserted EQUAL to this file at test time
+    (`tests::contract`), never duplicated as literals.
+
+    WHY A BUILD-TIME PRECHECK IN THE BINARY. A new model goes live by publishing a configuration
+    naming a new sha; the rules that decide whether that sha may deploy read records that exist only
+    in Rust form (the pack record, the comparison record, the verification record) and must stay
+    identical to what `status` reports at runtime. The buildspec runs the freshly built binary with
+    `precheck` after `cargo lambda build` and before `cargo pmcp deploy`; the binary prints the
+    platform's `ERROR:` anchor itself, because the build-error extractor only sees lines matching a
+    CloudWatch filter and a bare `REFUSED …` line is dropped before the handler runs (platform
+    spike 036). No output line ever carries a record's contents.
+
+    WHY THE DOOR READS pmcp's auth_context. The proxy stamps the verified identity as
+    `x-pmcp-user-*` headers; pmcp 2.19's stateless server turns them into `AuthContext` and leaves
+    `RequestHandlerExtra.metadata` empty (platform spike 035). A machine (client-credentials) token
+    carries no groups, so the allow-list of app client ids is a second door, tested by exact equality.
+    The `admin` group lives in the server's own dedicated Cognito pool (platform requirement R9-3),
+    never the management pool.
+  references:
+    - 'docs/superpowers/specs/2026-11-03-aprender-built-in-server-type-design.md — the type design: §3 configuration, §4 runtime, §5 precheck, §6 crates and the entry point.'
+    - 'docs/superpowers/plans/2026-11-03-aprender-mcp-builtin.md — the implementation plan and its Review Focus (the four input classes pinned as tests).'
+    - '~/Development/mcp/sdk/pmcp-run/.claude/skills/spike-findings-pmcp-aprender-builtin-type/ — the platform side''s spikes 033–037: the lazy-load harness, the M2M identity cells, the 45-case precheck prototype and the extractor proof.'
+    - '~/Development/mcp/sdk/pmcp-run/.planning/notes/aprender-team-reply-core-crate-rev-2026-11-03.md §2 — the contract the platform compiles against, item by item.'
+    - 'contracts/decide-tool-boundary-v1.yaml — the classify door this type serves unchanged (bounds, isError refusals, the 10 240 MB tier).'
+    - 'contracts/laya-parity-v1.yaml — the A2 fine-tuned floor (5.0e-5) and the 1.0e-3 ceiling the verify tolerance inherits; the NaN-visible idiom.'
+    - 'contracts/decide-apr-v1.yaml — the artifact cap and the served identity (artifact_sha256).'
+
+constants:
+  # The artifact cap, decide-apr-v1's (`precheck::ARTIFACT_CAP`).
+  artifact_cap_bytes: 1342177280
+  # The pack, comparison and verification records' cap (`precheck::RECORD_CAP`,
+  # laya_eligibility MAX_RECORD_BYTES).
+  record_cap_bytes: 1048576
+  # `eval.jsonl` and `eval-probs.json`, each (`precheck::EVAL_CAP`, the trainer's per-file cap).
+  eval_cap_bytes: 33554432
+  # Exit codes of `bootstrap precheck` and of a usage error (`precheck::EXIT_*`, `EXIT_USAGE`).
+  exit_eligible: 0
+  exit_refused: 2
+  exit_config_invalid: 3
+  exit_store_unreachable: 4
+  exit_usage: 64
+  # `[verify]` defaults (`config::DEFAULT_TOLERANCE_ABS`, `config::DEFAULT_ROWS`): the A2
+  # fine-tuned floor of laya-parity-v1, and the classify door's `classify_max_texts`.
+  verify_default_tolerance_abs: 5.0e-5
+  verify_default_rows: 8
+  # The ceiling `[verify].tolerance_abs` may be set to (laya-parity-v1's rescore ceiling).
+  verify_tolerance_abs_max: 1.0e-3
+
+equations:
+
+  config_grammar:
+    formula: 'parse(toml, expected_id) = Ok(Config) iff every rule of aprender-server/v1 holds; else Err(ConfigError{key, detail}) naming the FIRST offending key'
+    domain: 'the embedded config.toml bytes and the template''s SERVER_ID'
+    codomain: 'a Config, or one named refusal rendered `config-invalid: <key> <detail>`'
+    invariants:
+      - 'deny_unknown_fields on every section: a mis-keyed field (memory_mb under [model], a [bounds] section) refuses, naming the field'
+      - 'id matches ^[a-z][a-z0-9-]{0,62}$ and equals expected_id; schema is exactly "aprender-server/v1"; environment is staging or prod'
+      - '[model].kind is "decide"; artifact_uri is s3://bucket/key.apr; artifact_sha256 is 64 lowercase hex; description <= 500 chars'
+      - 'every [records] uri is s3://bucket/key; verification_prefix ends with "/"'
+      - '[publish].kind is promote (default) or rollback; reason <= 1000 chars; baseline_sha256 is 64 hex or "first_model" and is REQUIRED when environment = prod'
+      - '[verify].tolerance_abs in (0, verify_tolerance_abs_max]; [verify].default_rows in 1..=verify_default_rows'
+      - 'a serde failure names the key the error''s span points at, in the same [section].key spelling'
+
+  binary_contract:
+    formula: 'dispatch(argv) = Serve if argv = [_]; ServeLocal if argv = [_, "--serve-local"]; Precheck if argv = [_, "precheck"]; Usage otherwise'
+    domain: 'the process arguments the platform''s template forwards to main_with'
+    codomain: 'serve through the template''s closure; or print the precheck and exit with its status; or exit exit_usage'
+    invariants:
+      - 'Serve and ServeLocal are the SAME server; only the closure differs, and the crate never depends on the platform proxy'
+      - 'Precheck never serves; Usage prints one line to stderr and exits exit_usage'
+      - 'the three environment inputs APRENDER_PREVIOUS_ARTIFACT_SHA256, APRENDER_PUBLISHED_SHA256_HISTORY (comma-joined, oldest first), APRENDER_BUILD_ID are optional and an EMPTY string is absent (the buildspec exports empty strings on a first build)'
+
+  precheck_rules:
+    formula: 'run(toml, id, env, store) = the FIRST refusal of: config-invalid(3) | artifact-missing | artifact-too-large | pack-record-missing | pack-record-schema | pack-record-not-eligible | pack-record-sha-mismatch | eval-missing | reason-missing | hold-active | baseline-mismatch[prod] | comparison-missing | comparison-sha-mismatch[prod,promote,not first_model] | staging-verification-missing | staging-verification-failed[prod,promote] | rollback-first-publish | rollback-unknown-sha[prod,rollback]; s3-unreachable(4) on any store error other than a clean 404; else ELIGIBLE(0)'
+    domain: 'the configuration, the platform''s three environment inputs, and HEAD/bounded-GET over the records the configuration names'
+    codomain: 'an Outcome: exit in {0, 2, 3, 4}, zero or more WARN lines, exactly one verdict line'
+    invariants:
+      - 'the rules run in the order written and the first refusal wins; every code fires from exactly one edit of a positive configuration (the 45-case table)'
+      - 'hold-active and baseline-mismatch WARN-skip when no previous sha is known (a first build is never blocked by a rule about its predecessor); rollback-unknown-sha WARN-skips only when no history is passed; rollback-first-publish REFUSES, never skips'
+      - 'the comparison verdict is SHOWN in the ELIGIBLE json, never enforced (umbrella §5.6)'
+      - 'a record is read with HEAD then a bounded GET; absent-or-over-cap is the -missing rule, never a read past the cap'
+      - 'a HEAD 403 is s3-unreachable with both causes named (the object is missing, or the builder role cannot read it); a 404 is the -missing rule'
+
+  precheck_output_grammar:
+    formula: 'render(outcome) = ("WARN " ++ rule ++ " skipped: " ++ why ++ "\n")* ++ verdict ++ "\n", verdict in {"ERROR: REFUSED " ++ code ++ ": " ++ detail, "ERROR: REFUSED s3-unreachable: " ++ op ++ " " ++ uri ++ ": " ++ cause, "ELIGIBLE " ++ json}'
+    domain: 'every Outcome'
+    codomain: 'stdout, the only channel the platform''s extractor reads'
+    invariants:
+      - 'the binary prints the ERROR: anchor itself; the buildspec never re-echoes (a re-echo produced "ERROR: ERROR")'
+      - 'config-invalid renders as "ERROR: REFUSED config-invalid: <key> <detail>", exit 3'
+      - 'NO line ever contains a record body: the ELIGIBLE json carries the config sha, ids, sizes, record shas, the pack facts and the comparison/verification SUMMARIES only'
+
+  verify_door:
+    formula: 'allowed(ctx, role, principals) = ctx != None and (role in ctx.groups or ctx.subject in principals)'
+    domain: 'pmcp''s AuthContext (filled from the proxy''s x-pmcp-user-id/-email/-groups headers; None on an open server or --serve-local), [tools].verify_required_role (default "admin"), [tools].verify_allowed_principals (Cognito app client ids)'
+    codomain: 'admit, or the JSON-RPC error "Permission denied: verify requires ''<role>'' role" (pmcp::Error::internal, code -32603)'
+    invariants:
+      - 'the refusal is a JSON-RPC error, never an isError tool result, and its code is never -32602 (the platform''s smoke distinguishes the door from a malformed request)'
+      - 'principals match by exact equality on the subject (the client id); never contains()'
+      - 'a denied verify never loads the model'
+      - 'status applies the same door only when [tools].status_required_role is set; it is open by default'
+
+  verify_record:
+    formula: 'verify(rows, seed) scores rows = select_rows(|eval|, rows, seed) through the SAME ClassifyService as classify and writes {schema: "aprender-verification/v1", …, max_abs_diff = max_r max_k |p_served(r, k) - p_stored(r, k)|, pass = max_abs_diff <= tolerance_abs} at <verification_prefix><YYYYMMDDTHHMMSSZ>-<sha12>.json, create-only'
+    domain: 'eval.jsonl and eval-probs.json (each <= eval_cap_bytes, read BEFORE the load), rows in 1..=verify_default_rows and <= |eval|, seed, write_record'
+    codomain: 'the record, written: bool, record_uri, reason'
+    invariants:
+      - 'select_rows is a ChaCha8 shuffle seeded by seed, the first rows, sorted ascending: reproducible from its seed'
+      - 'eval-probs.json goes through the fork''s own reader (aprender_decide::verify::validate_probs): labels equal the artifact''s, every row''s text_sha256 equals its eval row''s, probabilities finite in [0, 1] summing to 1'
+      - 'max_abs_diff is NaN-visible: a NaN on either side, or a length mismatch, fails pass'
+      - 'the selected texts go through parse_args, so the classify door''s bounds apply and their refusal surfaces in-band'
+      - 'rows over the eval set refuses in-band naming both numbers, before the load'
+      - 'the record is written with If-None-Match: * (PutOutcome::AlreadyExists is reported, never overwritten); verified_by is the caller''s email, else its subject'
+
+proof_obligations:
+
+  - type: soundness
+    property: 'A configuration the precheck refused is never served'
+    formal: 'exit(precheck(toml)) != 0 ⇒ the build fails before deploy; serve(toml) runs only on bytes precheck accepted (the same parser, the same expected_id)'
+    applies_to: all
+
+  - type: soundness
+    property: 'The first publish of a server is never blocked by a rule about its predecessor, and a rollback with nothing to roll back from is always blocked'
+    formal: 'previous = None ⇒ hold-active, baseline-mismatch skipped with WARN ∧ (kind = rollback ∧ prod ⇒ rollback-first-publish)'
+    applies_to: all
+
+  - type: bound
+    property: 'No record is ever read past its cap'
+    formal: '∀ get(uri, cap): HEAD first; ContentLength > cap ⇒ Ok(None) without a GET'
+    applies_to: all
+
+  - type: equivalence
+    property: 'verify scores through the served path'
+    formal: '∀ selected row r: p_served(r) = ClassifyService::call([text_r]).results[0].probabilities, the same service classify uses'
+    applies_to: all
+
+  - type: soundness
+    property: 'The door admits exactly the role''s group members and the allow-listed client ids'
+    formal: '∀ ctx: allowed(ctx) == ((ctx is Some) ∧ ((role in groups(ctx)) or (subject(ctx) in principals)))'
+    applies_to: all
+
+falsification_tests:
+
+  - id: FALSIFY-BUILTIN-001
+    rule: 'The 45-case table holds: every §5.2 code fires from exactly one edit, with the exit and the verdict line it names'
+    prediction: 'P1–P8 exit 0 with an ELIGIBLE line; N01–N09 exit 3; N10–N35 exit 2 with "ERROR: REFUSED <code>: "; N36–N37 exit 4 with "ERROR: REFUSED s3-unreachable: "; no line contains "ERROR: ERROR"'
+    implemented_by: 'crates/aprender-mcp-builtin/src/tests/cases.rs (ported from the platform''s spike 036) and tests/precheck.rs'
+    test: 'cargo test -p aprender-mcp-builtin --lib tests::precheck::the_case_table_holds'
+    if_fails: 'Read the case name in the panic: the rule order moved, a detail changed, or a cap moved without this file.'
+
+  - id: FALSIFY-BUILTIN-002
+    rule: 'An empty environment string is absent'
+    prediction: 'APRENDER_PREVIOUS_ARTIFACT_SHA256="" and APRENDER_PUBLISHED_SHA256_HISTORY=" " read as None; "b,a" reads as [b, a]'
+    implemented_by: 'precheck::Env::from_lookup'
+    test: 'cargo test -p aprender-mcp-builtin --lib tests::precheck::env_from_lookup_treats_empty_as_absent'
+    if_fails: 'Every first prod publish would refuse baseline-mismatch and "" would be a one-entry history.'
+
+  - id: FALSIFY-BUILTIN-003
+    rule: 'The verify door: no identity denied; the role''s group admitted; an allow-listed subject admitted without groups; exact equality only; the text names the configured role'
+    prediction: 'the four door tests pass'
+    implemented_by: 'tools::verify_allowed, tools::permission_denied'
+    test: 'cargo test -p aprender-mcp-builtin --lib tests::verify::door'
+    if_fails: 'The GraphRAG guard this was copied from denies on empty groups first; a machine caller would never pass.'
+
+  - id: FALSIFY-BUILTIN-004
+    rule: 'The output grammar: a mis-keyed configuration prints exactly one line, "ERROR: REFUSED config-invalid: " naming the key, and exits 3'
+    prediction: 'run_precheck writes one line starting with the anchor and containing memory_mb; returns 3'
+    implemented_by: 'run_precheck, precheck::Outcome::render'
+    test: 'cargo test -p aprender-mcp-builtin --lib tests::dispatch::run_precheck_writes_the_grammar_and_returns_the_exit'
+    if_fails: 'The platform''s extractor anchors on "ERROR:"; without it the admin reads "No error text was found".'
+
+  - id: FALSIFY-BUILTIN-005
+    rule: 'verify passes on the tiny fixture through the loopback and writes the record once, create-only, at the prefix with the stamp and sha12'
+    prediction: 'pass true, rows_scored 3, tolerance_abs 5.0e-5, verified_by the proxy email, written true, the stored record reads back with environment staging'
+    implemented_by: 'tools::verify_tool over MemStore and the packed laya_tiny fixture'
+    test: 'cargo test -p aprender-mcp-builtin --lib tests::server::verify_passes_on_the_tiny_fixture_and_writes_a_record_once'
+    if_fails: 'The served path or the probs reader diverged from the training run''s probabilities, or the key grammar moved.'
+
+  - id: FALSIFY-BUILTIN-006
+    rule: 'The argv dispatch table and the usage exit'
+    prediction: '["bootstrap"] serves; ["bootstrap", "--serve-local"] serves locally; ["bootstrap", "precheck"] checks; anything else is Usage; EXIT_USAGE = exit_usage'
+    implemented_by: 'dispatch, EXIT_USAGE'
+    test: 'cargo test -p aprender-mcp-builtin --lib tests::dispatch::dispatch_table'
+    if_fails: 'The platform''s buildspec runs the bare "bootstrap precheck" and the template serves on ["bootstrap"]; a dispatch change breaks both.'
+
+  - id: FALSIFY-BUILTIN-007
+    rule: 'The Rust constants equal this file'
+    prediction: 'ARTIFACT_CAP, RECORD_CAP, EVAL_CAP, the four exit codes, EXIT_USAGE, the verify defaults and ceiling equal the constants above'
+    implemented_by: 'crates/aprender-mcp-builtin/src/tests/contract.rs'
+    test: 'cargo test -p aprender-mcp-builtin --lib tests::contract'
+    if_fails: 'A constant moved in one place only; move it in both or neither.'
+
+kani_harnesses:
+
+  # DECLARED, NOT EXECUTED. cargo-kani is not installed in this repository.
+  - id: KANI-BUILTIN-001
+    obligation: 'max_abs_diff is NaN-visible'
+    property: 'max_abs_diff(a, b) is NaN whenever a component of a or b is NaN, or the lengths differ'
+    bound: 8
+    strategy: stub_float
+    harness: 'NOT EXECUTED — the evidence is `cargo test -p aprender-mcp-builtin --lib tests::verify::max_abs_diff_is_nan_visible`'
+
+qa_gate:
+  id: F-BUILTIN-001
+  name: 'aprender built-in type: the contract the platform compiles against'
+  description: >
+    The grammar, the binary contract, the precheck rule table and output grammar, the verify door
+    and the record schemas of `crates/aprender-mcp-builtin`, each pinned by a test that was observed
+    RED before its implementation existed, plus the offline smoke (`just builtin-smoke`) that
+    drives the real binary the way the platform's `aprender-local-smoke` does.
+  checks:
+    - 'contract schema validity (pv validate, zero errors)'
+    - 'the 45-case precheck table and the output grammar (FALSIFY-BUILTIN-001, -004)'
+    - 'the empty-environment rule (FALSIFY-BUILTIN-002)'
+    - 'the verify door and the verify record (FALSIFY-BUILTIN-003, -005)'
+    - 'the argv dispatch (FALSIFY-BUILTIN-006) and the constants (FALSIFY-BUILTIN-007)'
+    - '`just builtin-check` and `just builtin-smoke` PASS'
+  pass_criteria: 'FALSIFY-BUILTIN-001..007 pass and both just recipes print their PASS line.'
+  falsification: >
+    Remove the `ERROR: ` prefix from `Outcome::refused`: FALSIFY-BUILTIN-001 and -004 must go red.
+    Swap the door's two tests so the groups test runs before the None check: -003 must go red. If
+    either stays green, the test has stopped being evidence for the contract.

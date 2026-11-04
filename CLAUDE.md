@@ -296,8 +296,10 @@ above is NOT widened: safetensors is read only by the back-office packer (`apren
 driven by `crates/aprender-decide/examples/pack_laya.rs`), never by a server. The thin servers
 (`crates/aprender-mcp-decide` and `crates/aprender-mcp-decide-lambda` are transport only, as are the
 per-server crates `crates/aprender-mcp-decide-antisemite-lambda` and
-`crates/aprender-mcp-decide-motivation-lambda`) own transport and the boundary
-in `contracts/decide-tool-boundary-v1.yaml`, exactly as the
+`crates/aprender-mcp-decide-motivation-lambda`, and `crates/aprender-mcp-builtin`, the core crate
+of the pmcp.run `aprender` built-in server type: the embedded `config.toml`, the lazy load,
+`status`/`verify` and `bootstrap precheck`, `contracts/aprender-builtin-v1.yaml`) own transport
+and the boundary in `contracts/decide-tool-boundary-v1.yaml`, exactly as the
 forecast servers do. Training stays in Python (`scripts/laya_train`, gated by
 `contracts/laya-finetune-gate-v1.yaml`), and Rust re-derives that gate from the packed bytes
 before anything is deployable.

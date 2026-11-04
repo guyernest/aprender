@@ -1,15 +1,15 @@
 {
   "schema": "ont.paiml.dev/census/v1alpha1",
   "git_sha": null,
-  "n_files": 1852,
-  "n_parsed": 1852,
+  "n_files": 1853,
+  "n_parsed": 1853,
   "n_parse_errors": 0,
   "parse_errors": [],
   "quarantined_n": 0,
   "by_kind": {
     "beat-benchmark": 24,
     "corpus-assembly": 1,
-    "kernel": 400,
+    "kernel": 401,
     "model-family": 28,
     "model-family-variant": 1,
     "pattern": 95,
@@ -27,11 +27,11 @@
     "release-evidence": 1
   },
   "by_anchoring": {
-    "unanchored": 1844,
+    "unanchored": 1845,
     "class": 5,
     "instance": 3
   },
-  "id_set_sha256": "13678a9ab81fb3a7375d06ffc566c6b1055c34abafb676d7fae04d1831f58b34",
+  "id_set_sha256": "e57be086822396c19b43c1c9e667a976a2c698a7916667fec2cdbf3789d4f03e",
   "declared_external": [
     {
       "name": "provable-contracts",

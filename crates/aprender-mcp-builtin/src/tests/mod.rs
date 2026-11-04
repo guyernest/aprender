@@ -2,6 +2,7 @@
 
 mod cases;
 mod config;
+mod contract;
 mod dispatch;
 mod fixture;
 mod load;

@@ -8,5 +8,7 @@ the process arguments and a serving closure, and pins this crate by git revision
 - `bootstrap --serve-local` serves the same server on localhost through the closure the template passes.
 - `bootstrap precheck` refuses an ineligible model at build time (exit 0 eligible, 2 refused, 3 config invalid, 4 store unreachable).
 
-Design: `docs/superpowers/specs/2026-11-03-aprender-built-in-server-type-design.md`. Not published:
-the `aprender-*` names on crates.io belong to upstream.
+Design: `docs/superpowers/specs/2026-11-03-aprender-built-in-server-type-design.md`; contract:
+`contracts/aprender-builtin-v1.yaml`. Part of the [aprender monorepo](https://github.com/paiml/aprender)
+(this crate lives in the `guyernest/aprender` fork, which the platform pins by git revision). Not
+published: the `aprender-*` names on crates.io belong to upstream.
