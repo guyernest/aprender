@@ -87,7 +87,10 @@ impl Outcome {
             exit: EXIT_REFUSED,
             code: Some(code.to_string()),
             warns,
-            last_line: format!("ERROR: REFUSED {code}: {}", detail.as_ref()),
+            last_line: format!(
+                "ERROR: REFUSED {code}: {}",
+                config::one_line(detail.as_ref())
+            ),
         }
     }
 
@@ -96,7 +99,10 @@ impl Outcome {
             exit: EXIT_STORE_UNREACHABLE,
             code: Some("s3-unreachable".into()),
             warns,
-            last_line: format!("ERROR: REFUSED s3-unreachable: {e}"),
+            last_line: format!(
+                "ERROR: REFUSED s3-unreachable: {}",
+                config::one_line(&e.to_string())
+            ),
         }
     }
 

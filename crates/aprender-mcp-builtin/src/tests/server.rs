@@ -341,12 +341,11 @@ async fn verify_surfaces_classify_bound_refusal() {
         rpc::serve(server::build_with(rt, "antisemitism-staging", "0.0.0").expect("server")).await;
     let r = rpc::tool(&url, "verify", json!({"rows": 1, "seed": 0}), &ADMIN).await;
     assert_eq!(r["isError"], true, "{r}");
+    let msg = r["content"][0]["text"].as_str().expect("text");
+    assert!(msg.contains("classify_max_text_bytes"), "{r}");
     assert!(
-        r["content"][0]["text"]
-            .as_str()
-            .expect("text")
-            .contains("classify_max_text_bytes"),
-        "{r}"
+        msg.starts_with("verify: ") && msg.contains("choose another seed or fewer rows"),
+        "the refusal is worded for a verify caller, who sent no texts: {msg}"
     );
 }
 

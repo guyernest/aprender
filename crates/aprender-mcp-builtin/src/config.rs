@@ -168,10 +168,26 @@ impl std::error::Error for ConfigError {}
 /// The key a serde failure points at, spelled as the named rules spell theirs
 /// (`[section].key`, or `key` at the top level): the line holding the error's span, its
 /// text before `=`, and the last `[section]` header above it. `toml` when there is no span.
-fn span_key(text: &str, span: Option<std::ops::Range<usize>>) -> String {
+fn span_key(text: &str, span: Option<std::ops::Range<usize>>, message: &str) -> String {
     let Some(span) = span else {
         return "toml".to_string();
     };
+    // A missing field: serde spans the TABLE that lacks it (the root, or a `[section]`
+    // header) and names the field in the message; the key is that field, in that table.
+    if let Some(field) = message
+        .strip_prefix("missing field `")
+        .and_then(|rest| rest.split('`').next())
+    {
+        let spanned = text.get(span.clone()).unwrap_or("").trim_start();
+        let section = spanned
+            .strip_prefix('[')
+            .and_then(|s| s.split(']').next())
+            .map(str::trim);
+        return match section {
+            Some(s) if !s.is_empty() => format!("[{s}].{field}"),
+            _ => field.to_string(),
+        };
+    }
     let start = span.start.min(text.len());
     let line_start = text[..start].rfind('\n').map_or(0, |i| i + 1);
     let line = text[line_start..].lines().next().unwrap_or("").trim();
@@ -198,6 +214,13 @@ fn span_key(text: &str, span: Option<std::ops::Range<usize>>) -> String {
         Some(s) => format!("[{s}].{key}"),
         None => key.to_string(),
     }
+}
+
+/// Collapse every run of whitespace, including newlines, to one space: a detail must never
+/// add a line to the precheck's one-verdict-line grammar (toml's messages can span two).
+#[must_use]
+pub fn one_line(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// 64 lowercase hex characters.
@@ -245,8 +268,12 @@ fn is_s3_uri(s: &str) -> bool {
 ///
 /// A [`ConfigError`] naming the first offending key.
 pub fn parse(toml_text: &str, expected_id: &str) -> Result<Config, ConfigError> {
-    let c: Config = toml::from_str(toml_text)
-        .map_err(|e| ConfigError::new(&span_key(toml_text, e.span()), e.message()))?;
+    let c: Config = toml::from_str(toml_text).map_err(|e| {
+        ConfigError::new(
+            &span_key(toml_text, e.span(), e.message()),
+            one_line(e.message()),
+        )
+    })?;
     if !is_server_id(&c.id) {
         return Err(ConfigError::new(
             "id",
@@ -300,7 +327,6 @@ pub fn parse(toml_text: &str, expected_id: &str) -> Result<Config, ConfigError> 
         ("pack_outcome_uri", Some(&c.records.pack_outcome_uri)),
         ("eval_jsonl_uri", Some(&c.records.eval_jsonl_uri)),
         ("eval_probs_uri", Some(&c.records.eval_probs_uri)),
-        ("rescore_noise_uri", c.records.rescore_noise_uri.as_ref()),
         ("comparison_uri", c.records.comparison_uri.as_ref()),
         (
             "staging_verification_uri",
@@ -315,6 +341,14 @@ pub fn parse(toml_text: &str, expected_id: &str) -> Result<Config, ConfigError> 
                 ));
             }
         }
+    }
+    if c.records.rescore_noise_uri.is_some() {
+        // Accepted-and-ignored would be the silent no-op the strict parser exists to refuse:
+        // v1's verify uses [verify].tolerance_abs only (the A2 noise bound is the pack task's).
+        return Err(ConfigError::new(
+            "[records].rescore_noise_uri",
+            "is not read in v1 (verify uses [verify].tolerance_abs; the noise-referenced bound is the pack task's); remove the key",
+        ));
     }
     if let Some(p) = &c.records.verification_prefix {
         if !is_s3_uri(p) || !p.ends_with('/') {

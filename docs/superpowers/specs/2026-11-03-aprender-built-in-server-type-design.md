@@ -171,7 +171,7 @@ become a no-op.
 | `[records].pack_outcome_uri` | yes | the Graviton pack task's `pack-outcome.json` for this artifact (§5) |
 | `[records].eval_jsonl_uri` | yes | the frozen eval rows the run was gated on (`data/eval.jsonl` under the run prefix) |
 | `[records].eval_probs_uri` | yes | the run's stored fine-tuned probabilities (`run/eval-probs.json`) |
-| `[records].rescore_noise_uri` | no | the run's `rescore-noise.json`; when present, `verify`'s tolerance is `max(floor, 4 × noise)` as in `R/contracts/laya-parity-v1.yaml:138-157` |
+| `[records].rescore_noise_uri` | no | **refused in v1** (`config-invalid`): the strict parser never accepts a key it would ignore. The intent stands for a later version: when read, `verify`'s tolerance becomes `max(floor, 4 × noise)` as in `R/contracts/laya-parity-v1.yaml:138-157`; until then the noise-referenced bound is the pack task's and `verify` uses `[verify].tolerance_abs` (final review, 2026-11-03) |
 | `[records].comparison_uri` | prod: yes unless `baseline_sha256 = "first_model"` | the trainer's comparison record (§5.2) |
 | `[records].staging_verification_uri` | prod: yes | a verification record (§4.4) written by a staging server for the same sha |
 | `[records].verification_prefix` | no | `s3://bucket/prefix/`; where this server writes verification records. Without it, `verify` scores and reports but writes nothing |
@@ -303,8 +303,11 @@ measured; `load` is that harness's measured shape too).
 
 Behaviour: read `eval_jsonl_uri` and `eval_probs_uri` (each capped at 32 MiB, the
 trainer's per-file cap); choose `rows` row indices deterministically from `seed`
-(a seeded shuffle of the row indices, taking the first `rows` whose built tokens fit
-the 800-token door, so a sample is reproducible from its seed); score them through the
+(a seeded shuffle of the row indices, the first `rows` of it, sorted, so a sample is
+reproducible from its seed; a selected row the classify door refuses, by bytes or by the
+800-token budget, is reported in-band as a verify refusal naming the door's bound, and
+the caller picks another seed or fewer rows: pre-filtering by built tokens would need a
+tokenizer door the classify crate does not expose; final review, 2026-11-03); score them through the
 same `ClassifyService` as `classify`; compare each probability vector with the stored
 one for that row (the `eval-probs.json` reader is the one in `aprender_decide::verify`,
 made public for this crate); `max_abs_diff ≤ tolerance_abs` is `pass`. With

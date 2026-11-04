@@ -136,3 +136,48 @@ fn config_sha256_is_the_sha_of_the_bytes() {
         aprender_mcp_decide_lambda::sha256_hex(b"x")
     );
 }
+
+// ---------------------------------------------------------------------------
+// Final-review fixes (Important #1–#3): the key a missing field or section names, a
+// one-line detail for a multi-line serde message, and the v1-unsupported noise record.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn missing_top_level_field_or_section_names_it() {
+    let no_id = staging_config().replace("id = \"antisemitism-staging\"\n", "");
+    let e = parse(&no_id, SERVER_ID).expect_err("refused");
+    assert_eq!(e.key, "id", "{e}");
+    let start = staging_config().find("[model]").expect("model section");
+    let end = staging_config().find("[records]").expect("records section");
+    let no_model = format!("{}{}", &staging_config()[..start], &staging_config()[end..]);
+    let e = parse(&no_model, SERVER_ID).expect_err("refused");
+    assert_eq!(e.key, "model", "{e}");
+    let no_reason = staging_config().replace(
+        "reason = \"Phase 16 SageMaker control model; staging for the next experiment.\"\n",
+        "",
+    );
+    let e = parse(&no_reason, SERVER_ID).expect_err("refused");
+    assert_eq!(e.key, "[publish].reason", "{e}");
+}
+
+#[test]
+fn serde_detail_is_always_one_line() {
+    let broken = staging_config().replace(
+        "reason = \"Phase 16 SageMaker control model; staging for the next experiment.\"",
+        "reason = r",
+    );
+    let e = parse(&broken, SERVER_ID).expect_err("refused");
+    assert!(!e.to_string().contains('\n'), "{e:?}");
+    assert!(e.to_string().starts_with("config-invalid: "), "{e}");
+}
+
+#[test]
+fn rescore_noise_uri_is_refused_in_v1() {
+    let with_noise = staging_config().replace(
+        "[records]\n",
+        "[records]\nrescore_noise_uri = \"s3://b/rescore-noise.json\"\n",
+    );
+    let e = parse(&with_noise, SERVER_ID).expect_err("refused");
+    assert_eq!(e.key, "[records].rescore_noise_uri", "{e}");
+    assert!(e.detail.contains("v1"), "{e}");
+}

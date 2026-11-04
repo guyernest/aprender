@@ -134,3 +134,21 @@ fn config_invalid_line_names_the_key() {
         out.last_line
     );
 }
+
+#[test]
+fn a_multi_line_serde_message_still_renders_one_verdict_line() {
+    let broken = cases::staging_config().replace(
+        "reason = \"Phase 16 SageMaker control model; staging for the next experiment.\"",
+        "reason = r",
+    );
+    let out = futures::executor::block_on(precheck::run(
+        &broken,
+        cases::SERVER_ID,
+        &Env::default(),
+        &MemStore::default(),
+    ));
+    assert_eq!(out.exit, 3);
+    let r = out.render();
+    assert_eq!(r.lines().count(), 1, "{r}");
+    assert!(r.starts_with("ERROR: REFUSED config-invalid: "), "{r}");
+}

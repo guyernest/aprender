@@ -431,8 +431,25 @@ pub fn verify_tool(rt: Runtime) -> impl ToolHandler + 'static {
 
                 let selected = select_rows(eval.len(), rows, seed);
                 let texts: Vec<&str> = selected.iter().map(|&i| eval[i].text.as_str()).collect();
-                let classify_args = parse_args(serde_json::json!({ "texts": texts }))?;
-                let response = loaded.service.call(classify_args).await?;
+                // The classify door's bounds apply to the selected rows; its refusal is
+                // re-worded for a verify caller, who sent no texts, and stays in-band.
+                let for_verify = |e: pmcp::Error| match e {
+                    pmcp::Error::ToolRejected { message, .. } => pmcp::Error::tool_rejected(
+                        format!(
+                            "verify: a selected eval row cannot be scored through the classify \
+                             door ({message}); choose another seed or fewer rows"
+                        ),
+                        None,
+                    ),
+                    other => other,
+                };
+                let classify_args =
+                    parse_args(serde_json::json!({ "texts": texts })).map_err(for_verify)?;
+                let response = loaded
+                    .service
+                    .call(classify_args)
+                    .await
+                    .map_err(for_verify)?;
                 let max_abs = selected
                     .iter()
                     .zip(&response.results)
