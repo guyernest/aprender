@@ -75,6 +75,8 @@ members = [
     "crates/aprender-decide",
     "crates/aprender-mcp-decide",
     "crates/aprender-mcp-decide-lambda",
+    # --- the pmcp.run `aprender` built-in server type, model side (config, lazy load, precheck) ---
+    "crates/aprender-mcp-builtin",
     # D-19 (plan 10-12): one thin crate per served decide server id; the bootstrap bin lives here, not in the shared crate above
     "crates/aprender-mcp-decide-antisemite-lambda",
     # Phase 12 D-02: the second served decide model's thin crate (motivation-v1 pilot)

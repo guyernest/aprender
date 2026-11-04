@@ -1,0 +1,61 @@
+[package]
+name = "aprender-mcp-builtin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "The pmcp.run aprender built-in server type, model side: config, lazy load, classify/status/verify, bootstrap precheck"
+readme = "README.md"
+# The core crate of the pmcp.run `aprender` built-in server type
+# (docs/superpowers/specs/2026-11-03-aprender-built-in-server-type-design.md §6). The
+# platform's generated server crate is its only caller and pins it by git revision; it is
+# never published (the `aprender-*` names on crates.io belong to upstream).
+publish = false
+
+[lib]
+name = "aprender_mcp_builtin"
+path = "src/lib.rs"
+
+[dependencies]
+# The verified decision path and its records (OPS-03: one implementation per operation).
+aprender-decide = { path = "../aprender-decide" }
+# The tool surface, bounds and door of `classify`.
+aprender-mcp-decide = { path = "../aprender-mcp-decide" }
+# The model source, the S3 streaming download, the once-per-process load, the loopback.
+aprender-mcp-decide-lambda = { path = "../aprender-mcp-decide-lambda" }
+pmcp = { version = "2.19", features = ["streamable-http", "schema-generation"] }
+lambda_http = "0.13"
+
+# The record store and the artifact download. `= "1"` resolves to the ALREADY-LOCKED
+# 1.8.18 / 1.137.0 the decide Lambda crate uses. Never `cargo update` these: newer
+# aws-sdk-s3 needs rustc 1.94.1 and rust-toolchain.toml pins 1.93.0.
+aws-config = "1"
+aws-sdk-s3 = "1"
+
+# The JsonSchema derive on the tool arguments — the same major pmcp's schema-generation uses.
+schemars = "1.0"
+tracing = "0.1"
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+sha2 = { workspace = true }
+chrono = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+
+[dev-dependencies]
+# The tests drive the server over the loopback the way the platform's smoke does.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tempfile = { workspace = true }
+# pmcp's `CancellationToken` (already in the closure) for building a RequestHandlerExtra.
+tokio-util = "0.7"
+# The contract constants test reads contracts/aprender-builtin-v1.yaml.
+serde_yaml = { workspace = true }
+
+[lints]
+workspace = true

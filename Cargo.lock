@@ -887,6 +887,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "aprender-mcp-builtin"
+version = "0.69.3"
+dependencies = [
+ "aprender-decide",
+ "aprender-mcp-decide",
+ "aprender-mcp-decide-lambda",
+ "aws-config",
+ "aws-sdk-s3",
+ "chrono",
+ "futures",
+ "lambda_http",
+ "pmcp",
+ "rand 0.9.4",
+ "rand_chacha 0.9.0",
+ "reqwest 0.12.28",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "toml 0.8.23",
+ "tracing",
+]
+
+[[package]]
 name = "aprender-mcp-chronos"
 version = "0.69.3"
 dependencies = [
