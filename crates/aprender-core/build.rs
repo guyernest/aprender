@@ -152,8 +152,14 @@ fn emit_provable_contract_bindings() {
         .join("aprender")
         .join("binding.yaml");
 
-    // Always tell Cargo to re-run if the file appears or changes
-    println!("cargo:rerun-if-changed={}", binding_path.display());
+    // Re-run when the file changes, only when it exists: cargo treats a MISSING
+    // rerun-if-changed path as always changed, so every build of a crate depending on this
+    // one by path re-ran this script and recompiled everything downstream (measured by the
+    // pmcp.run platform, spike 033: 56 s no-op rebuild). A binding that APPEARS later in a
+    // sibling checkout is picked up on the next rebuild of this script, not automatically.
+    if binding_path.exists() {
+        println!("cargo:rerun-if-changed={}", binding_path.display());
+    }
 
     if !binding_path.exists() {
         // Graceful fallback: CI/crates.io builds won't have the sibling repo.

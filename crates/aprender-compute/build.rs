@@ -64,7 +64,13 @@ fn main() {
         .join("trueno")
         .join("binding.yaml");
 
-    println!("cargo:rerun-if-changed={}", binding_path.display());
+    // Only when the file exists: cargo treats a MISSING rerun-if-changed path as always
+    // changed, so every build of a crate depending on this one by path re-ran this script
+    // and recompiled everything downstream (measured by the pmcp.run platform, spike 033:
+    // 56 s no-op rebuild). Outside the sibling checkout the binding is absent by design.
+    if binding_path.exists() {
+        println!("cargo:rerun-if-changed={}", binding_path.display());
+    }
 
     // Ensure generated_contracts.rs exists (empty stub for crates.io builds)
     let gen_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("generated_contracts.rs");
