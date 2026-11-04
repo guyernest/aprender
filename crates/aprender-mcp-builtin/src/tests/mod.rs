@@ -8,3 +8,4 @@ mod precheck;
 mod rpc;
 mod server;
 mod store;
+mod verify;

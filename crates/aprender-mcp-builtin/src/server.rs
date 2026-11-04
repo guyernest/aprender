@@ -66,7 +66,8 @@ pub fn build_with(rt: Runtime, server_name: &str, version: &str) -> pmcp::Result
         .version(version)
         .capabilities(ServerCapabilities::tools_only())
         .tool(TOOL_NAME, tools::classify_tool(rt.clone()))
-        .tool("status", tools::status_tool(rt))
+        .tool("status", tools::status_tool(rt.clone()))
+        .tool("verify", tools::verify_tool(rt))
         .build()
 }
 
