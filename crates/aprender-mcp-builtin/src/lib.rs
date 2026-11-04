@@ -7,7 +7,10 @@
 pub mod config;
 pub mod load;
 pub mod precheck;
+pub mod server;
 pub mod store;
+pub mod tools;
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)] // serde_json::json! / schema_for! expand to .unwrap()
 mod tests;

@@ -5,4 +5,6 @@ mod config;
 mod fixture;
 mod load;
 mod precheck;
+mod rpc;
+mod server;
 mod store;
