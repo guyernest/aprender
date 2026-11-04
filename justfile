@@ -9356,3 +9356,74 @@ embed-gate-selftest:
     : > "$EMBED_GATE_RECORDER"
     echo "  negative control: the recorder fired once on a deliberate call, then was reset"
     echo "GATE SELFTEST OK ($CASES refusal and dry-run cases, plus the scanner, package and normalizer selftests)"
+
+# ---------------------------------------------------------------------------
+# aprender-mcp-builtin: the core crate of the pmcp.run `aprender` built-in server type
+# (docs/superpowers/specs/2026-11-03-aprender-built-in-server-type-design.md). The two
+# recipes below are the kill-first local proof the platform's own `aprender-local-smoke`
+# repeats against the pushed crate: fmt, strict clippy and the lib tests; then the real
+# binary contract (the precheck grammar and exit 3, `--serve-local`, the verify door) with
+# no AWS, no deploy and no network. The fixtures' objects do not exist; nothing reads them.
+# ---------------------------------------------------------------------------
+builtin-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo fmt --all -- --check
+    cargo clippy -p aprender-mcp-builtin --lib --tests --examples -- -D warnings
+    cargo test -p aprender-mcp-builtin --lib
+    echo "PASS builtin-check"
+
+builtin-smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build --release -p aprender-mcp-builtin --example local_server
+    target="$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
+    bin="$target/release/examples/local_server"
+    fixtures=crates/aprender-mcp-builtin/fixtures
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+
+    # (1) The precheck grammar on a mis-keyed configuration: exit 3, one line, the anchor
+    # form, naming the key. The status is captured directly, never through a pipe.
+    out="$(APRENDER_SMOKE_CONFIG="$fixtures/smoke-invalid.toml" "$bin" precheck 2>"$tmp/precheck.err")" && rc=0 || rc=$?
+    if [ "$rc" != 3 ]; then echo "FAIL builtin-smoke: precheck exit $rc (want 3): $out" >&2; cat "$tmp/precheck.err" >&2; exit 1; fi
+    case "$out" in
+        "ERROR: REFUSED config-invalid: "*memory_mb*) ;;
+        *) echo "FAIL builtin-smoke: precheck line is not the anchor form naming memory_mb: $out" >&2; exit 1 ;;
+    esac
+    lines="$(printf '%s\n' "$out" | wc -l | tr -d ' ')"
+    if [ "$lines" != 1 ]; then echo "FAIL builtin-smoke: precheck printed $lines lines" >&2; exit 1; fi
+    echo "precheck: exit 3, $out"
+
+    # (2) Serve locally with the valid configuration and drive the handshake, the tool list,
+    # status (never loads) and a VALID verify without an identity (the documented JSON-RPC error).
+    APRENDER_SMOKE_CONFIG="$fixtures/smoke-valid.toml" "$bin" --serve-local >/dev/null 2>"$tmp/serve.err" &
+    pid=$!
+    trap 'kill "$pid" 2>/dev/null || true; rm -rf "$tmp"' EXIT
+    for _ in $(seq 1 50); do
+        if curl -s -o /dev/null http://127.0.0.1:8081/; then break; fi
+        sleep 0.2
+    done
+    post() { curl -s -X POST http://127.0.0.1:8081/ -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' --data "$1"; }
+    post '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"builtin-smoke","version":"0.0.0"}}}' > "$tmp/init.json"
+    post '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' > "$tmp/list.json"
+    post '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"status","arguments":{}}}' > "$tmp/status.json"
+    post '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"verify","arguments":{"rows":8,"seed":0}}}' > "$tmp/verify.json"
+    python3 - "$tmp" <<'PY'
+    import json, os, sys
+    d = sys.argv[1]
+    def j(n):
+        with open(os.path.join(d, n)) as f:
+            return json.load(f)
+    assert "result" in j("init.json"), j("init.json")
+    names = sorted(t["name"] for t in j("list.json")["result"]["tools"])
+    assert names == ["classify", "status", "verify"], names
+    st = json.loads(j("status.json")["result"]["content"][0]["text"])
+    assert st["schema"] == "aprender-status/v1" and st["loaded"] is False, st
+    err = j("verify.json").get("error")
+    assert err, j("verify.json")
+    assert err["code"] != -32602, err
+    assert "Permission denied: verify requires 'admin' role" in err["message"], err
+    print("tools:", names, "| status.loaded:", st["loaded"], "| verify:", err["code"], err["message"])
+    PY
+    echo "PASS builtin-smoke"

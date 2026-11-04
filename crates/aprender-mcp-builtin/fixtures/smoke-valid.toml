@@ -1,0 +1,24 @@
+# A fixture for compile and offline serving only (`just builtin-smoke`, and the platform's
+# `aprender-local-smoke`): the staging example of design §3.1 with the bucket names the
+# platform's smoke uses. The objects named here do NOT exist, and nothing reads them unless
+# classify, verify or precheck is called.
+id = "aprender-seed"
+schema = "aprender-server/v1"
+environment = "staging"
+
+[model]
+kind = "decide"
+model_id = "antisemitism-v2"
+artifact_uri = "s3://aprender-decide-weights-000000000000-dev/decide/aprender-seed/antisemitism-v2.apr"
+artifact_sha256 = "22796ff94a0839f47c4308f0b88c73b43aaff1f21b760d78e434dac332909eed"
+labels = ["not_antisemitic", "antisemitic"]
+description = "Antisemitism decider, GoldStandard2024 plus reviewer feedback through 2026-11."
+
+[records]
+pack_outcome_uri = "s3://aprender-laya-train-dev-000000000000/runs/antisemitism-v2/task-01jbx/pack-outcome.json"
+eval_jsonl_uri   = "s3://aprender-laya-train-dev-000000000000/runs/antisemitism-v2/task-01jbx/data/eval.jsonl"
+eval_probs_uri   = "s3://aprender-laya-train-dev-000000000000/runs/antisemitism-v2/task-01jbx/run/eval-probs.json"
+verification_prefix = "s3://aprender-laya-train-dev-000000000000/runs/antisemitism-v2/task-01jbx/verifications/"
+
+[publish]
+reason = "Phase 16 SageMaker control model; staging for the next experiment."
